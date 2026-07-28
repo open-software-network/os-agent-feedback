@@ -8,6 +8,13 @@ let selectedInteraction = null;
 let selectedSession = null;
 let showingLegacy = false;
 let apiSecret = "";
+let setupSurface = "mcp";
+let setupStack = "node-mcp";
+let setupConnectionId = null;
+let setupConnectionName = "";
+let setupEnvironment = "production";
+let setupRoute = "/search";
+let setupMonitor = null;
 
 const esc = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
 const date = (value) => value ? new Date(value).toLocaleString() : "—";
@@ -105,31 +112,152 @@ function sessionsView() {
   return `${header("SESSIONS", "Optional proven continuity", `${dashboard.sessions.length} sessions`)}<p class="muted">Sessions exist only when your product supplies a session reference or MCP provides protocol continuity. We never guess that two interactions came from the same agent.</p>${rows ? `<div class="list">${rows}</div>` : empty("No proven sessions", "This is normal. Every interaction and review works without a session.", "interactions")}`;
 }
 
-function setupView() {
+const setupSurfaceCopy = {
+  mcp: {
+    name: "MCP server",
+    summary: "Reliable, protocol-backed feedback",
+    detail: "We register an explicit feedback tool. A tool call is a confirmed agent interaction.",
+  },
+  api: {
+    name: "HTTP API",
+    summary: "Add feedback instructions to selected responses",
+    detail: "Each response begins as an opportunity. It becomes confirmed when its receipt returns with feedback.",
+  },
+  website: {
+    name: "Agent-readable website",
+    summary: "Instrument HTML pages agents use",
+    detail: "Eligible pages receive machine-readable feedback instructions without changing what people see.",
+  },
+};
+
+const setupStackOptions = {
+  mcp: [
+    ["node-mcp", "Node MCP", "Registers and handles the outcome tool automatically."],
+    ["manual-mcp", "Another MCP stack", "Implement the small public protocol in any language."],
+  ],
+  api: [
+    ["node-express", "Node · Express", "One global middleware."],
+    ["node-fastify", "Node · Fastify", "One registered plugin."],
+    ["python-asgi", "Python · ASGI", "FastAPI, Starlette, Quart, or Django ASGI."],
+    ["python-wsgi", "Python · WSGI", "Flask, Django WSGI, Bottle, or Pyramid."],
+    ["go", "Go", "Standard net/http middleware."],
+    ["rust", "Rust", "Axum and Tower layer."],
+    ["manual-http", "Another stack", "Use the language-neutral HTTP protocol."],
+  ],
+  website: [
+    ["node-express", "Node · Express", "Injects instructions into eligible HTML."],
+    ["node-fastify", "Node · Fastify", "Injects instructions into eligible HTML."],
+    ["python-asgi", "Python · ASGI", "FastAPI, Starlette, Quart, or Django ASGI."],
+    ["python-wsgi", "Python · WSGI", "Flask, Django WSGI, Bottle, or Pyramid."],
+    ["go", "Go", "Standard net/http middleware."],
+    ["rust", "Rust", "Axum and Tower layer."],
+    ["manual-http", "Another stack", "Use the language-neutral HTML protocol."],
+  ],
+};
+
+function setupInstructions() {
   const artifacts = `${location.origin}/static`;
+  const route = setupRoute.trim() || (setupSurface === "website" ? "/docs/*" : "/search");
   const nodeInstall = `npm install ${artifacts}/agent-feedback-node-0.1.0.tgz`;
-  const pythonInstall = `pip install ${artifacts}/agent_feedback-0.1.0-py3-none-any.whl`;
-  const goInstall = `go get github.com/open-software-network/os-agent-feedback/sdk/go@latest`;
-  const rustInstall = `mkdir -p vendor/agent-feedback-rust\ncurl -fsSL ${artifacts}/agent-feedback-rust-0.1.0.tar.gz | tar -xz -C vendor/agent-feedback-rust`;
-  const expressCode = `import { agentFeedback } from "@agent-feedback/node/express";\n\napp.use(agentFeedback({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  include: ["/search", "/docs/*"],\n  customerRef: req => req.user?.accountId, // optional\n}));`;
-  const fastifyCode = `import { agentFeedback } from "@agent-feedback/node/fastify";\n\nawait app.register(agentFeedback({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  include: ["/search", "/docs/*"],\n}));`;
-  const pythonCode = `from agent_feedback import AgentFeedbackASGI\n\napp = AgentFeedbackASGI(\n    app,\n    api_key=os.environ["AGENT_FEEDBACK_KEY"],\n    include=("/search", "/docs/*"),\n)`;
-  const goCode = `feedback, _ := agentfeedback.New(agentfeedback.Options{\n    APIKey: os.Getenv("AGENT_FEEDBACK_KEY"),\n    Include: []string{"/search", "/docs/**"},\n})\nhandler := feedback.Middleware(router)`;
-  const rustCode = `// Cargo.toml: agent-feedback = { path = "vendor/agent-feedback-rust" }\nlet feedback = AgentFeedbackLayer::new(\n    Options::new(std::env::var("AGENT_FEEDBACK_KEY")?)\n        .include(["/search", "/docs/**"]),\n)?;\nlet app = router.layer(feedback);`;
-  const mcpCode = `import { instrumentMcp } from "@agent-feedback/node/mcp";\n\ninstrumentMcp(server, {\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n});`;
-  const protocolCode = `GET ${location.origin}/.well-known/agent-feedback-v1.json\n\n# Language-neutral schemas and signing vector:\ncurl -O ${artifacts}/agent-feedback-protocol-v1.zip`;
-  const doctor = `npx agent-feedback-doctor https://your-product.example/search?q=test`;
-  const keys = dashboard.apiKeys.map((key) => `<div class="list-row"><b>${esc(key.label)}</b><span><code>${esc(key.prefix)}…</code><small>Last used: ${date(key.lastUsedAt)} · Expires: ${date(key.expiresAt)}</small></span><time>${date(key.createdAt)} <button class="link-button" data-revoke-key="${esc(key.id)}">Revoke</button></time></div>`).join("") || "<p>No product keys.</p>";
-  const adapter = (name, install, code) => `<article><h3>${esc(name)}</h3><pre><code>${esc(install)}</code></pre><button class="button" data-copy="${esc(install)}">Copy install</button><pre><code>${esc(code)}</code></pre><button class="button" data-copy="${esc(code)}">Copy setup</button></article>`;
-  return `${header("SETUP", "Instrument your product once")}
-    <section class="identity-guide"><h2>One protocol—not one programming language</h2><p>Node, Python, Go, Rust, MCP, and manual HTTP adapters all create the same two-hour, write-only receipt locally. Your response never waits for Agent Feedback.</p><div class="identity-cards"><article><b>HTTP</b><p>Best-effort for generic agents; deterministic with a feedback-aware runtime.</p></article><article><b>MCP</b><p>Protocol-backed through an explicit outcome tool.</p></article><article><b>Identity</b><p>Never required or claimed.</p></article></div></section>
-    <ol class="steps">
-      <li><div><h2>1. Create a private v2 product key</h2><p>Every language signs the same receipt locally. The key stays on your server and is shown only once.</p><label><span>Key label</span><input id="api-key-label" value="Production product" maxlength="80"></label><label><span>Expiration</span><select id="api-key-expiration"><option value="2592000">30 days</option><option value="7776000" selected>90 days</option><option value="31536000">365 days</option></select></label></div><button class="button primary" data-create-key>Create product key</button></li>
-      ${apiSecret ? `<li class="secret"><div><h2>Copy this key now</h2><code>${esc(apiSecret)}</code></div><button class="button" data-copy="${esc(apiSecret)}">Copy</button></li>` : ""}
-      <li><div><h2>2. Pick your stack</h2><p>Use a framework adapter or implement the public protocol directly. Route handlers do not change.</p><div class="setup-tabs">${adapter("Node · Express", nodeInstall, expressCode)}${adapter("Node · Fastify", nodeInstall, fastifyCode)}${adapter("Python · ASGI/WSGI", pythonInstall, pythonCode)}${adapter("Go · net/http", goInstall, goCode)}${adapter("Rust · Axum/Tower", rustInstall, rustCode)}${adapter("MCP", nodeInstall, mcpCode)}${adapter("Any language · protocol", "No SDK required", protocolCode)}</div></div></li>
-      <li><div><h2>3. Verify a real response</h2><p>The doctor checks response injection and submits a real synthetic review with only the scoped receipt.</p><pre><code>${esc(doctor)}</code></pre></div><button class="button" data-copy="${esc(doctor)}">Copy doctor command</button></li>
-      <li><div><h2>4. Verify this workspace backend</h2><p>This browser test independently signs a v2 receipt, sends non-blocking telemetry, and submits the compact synthetic review.</p></div><button class="button primary" data-run-test ${apiSecret ? "" : "disabled"}>Run backend contract test</button></li>
-    </ol><h2>Product keys</h2><div class="list">${keys}</div>`;
+  const environment = `AGENT_FEEDBACK_KEY=${apiSecret || "paste_product_key_here"}`;
+  const instructions = {
+    "node-mcp": {
+      name: "Node MCP",
+      install: nodeInstall,
+      code: `import { instrumentMcp } from "@agent-feedback/node/mcp";\n\ninstrumentMcp(server, {\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n});`,
+      verify: "Call one of your MCP server's normal tools from an agent client.",
+    },
+    "manual-mcp": {
+      name: "Language-neutral MCP protocol",
+      install: `curl -O ${artifacts}/agent-feedback-protocol-v1.zip`,
+      code: `1. Emit confirmed telemetry for each business tool call.\n2. Add _agentFeedback to the business tool result.\n3. Register report_product_outcome.\n4. Submit only outcome + note with the scoped capability.`,
+      verify: "Call a normal tool and confirm the registered outcome tool is visible to the agent.",
+    },
+    "node-express": {
+      name: "Node · Express",
+      install: nodeInstall,
+      code: `import { agentFeedback } from "@agent-feedback/node/express";\n\napp.use(agentFeedback({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  include: ["${route}"],\n}));`,
+      advanced: `customerRef: req => req.user?.accountId // optional opaque ID`,
+      verify: `npx agent-feedback-doctor https://your-product.example${route.replaceAll("*", "test")}`,
+    },
+    "node-fastify": {
+      name: "Node · Fastify",
+      install: nodeInstall,
+      code: `import { agentFeedback } from "@agent-feedback/node/fastify";\n\nawait app.register(agentFeedback({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  include: ["${route}"],\n}));`,
+      advanced: `customerRef: req => req.user?.accountId // optional opaque ID`,
+      verify: `npx agent-feedback-doctor https://your-product.example${route.replaceAll("*", "test")}`,
+    },
+    "python-asgi": {
+      name: "Python · ASGI",
+      install: `pip install ${artifacts}/agent_feedback-0.1.0-py3-none-any.whl`,
+      code: `from agent_feedback import AgentFeedbackASGI\n\napp = AgentFeedbackASGI(\n    app,\n    api_key=os.environ["AGENT_FEEDBACK_KEY"],\n    include=("${route}",),\n)`,
+      advanced: `customer_ref=lambda scope: scope.get("account_id") # optional opaque ID`,
+      verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
+    },
+    "python-wsgi": {
+      name: "Python · WSGI",
+      install: `pip install ${artifacts}/agent_feedback-0.1.0-py3-none-any.whl`,
+      code: `from agent_feedback import AgentFeedbackWSGI\n\napp.wsgi_app = AgentFeedbackWSGI(\n    app.wsgi_app,\n    api_key=os.environ["AGENT_FEEDBACK_KEY"],\n    include=("${route}",),\n)`,
+      advanced: `customer_ref=lambda environ: environ.get("account_id") # optional opaque ID`,
+      verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
+    },
+    go: {
+      name: "Go · net/http",
+      install: `go get github.com/open-software-network/os-agent-feedback/sdk/go@latest`,
+      code: `feedback, err := agentfeedback.New(agentfeedback.Options{\n    APIKey: os.Getenv("AGENT_FEEDBACK_KEY"),\n    Include: []string{"${route}"},\n})\nif err != nil { log.Fatal(err) }\ndefer feedback.Shutdown(context.Background())\n\nhandler := feedback.Middleware(router)`,
+      advanced: `CustomerRef: func(r *http.Request) string { return accountID(r.Context()) }`,
+      verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
+    },
+    rust: {
+      name: "Rust · Axum/Tower",
+      install: `mkdir -p vendor/agent-feedback-rust\ncurl -fsSL ${artifacts}/agent-feedback-rust-0.1.0.tar.gz | tar -xz -C vendor/agent-feedback-rust`,
+      code: `// Cargo.toml: agent-feedback = { path = "vendor/agent-feedback-rust" }\nlet feedback = AgentFeedbackLayer::new(\n    Options::new(std::env::var("AGENT_FEEDBACK_KEY")?)\n        .include(["${route}"]),\n)?;\n\nlet app = router.layer(feedback);`,
+      advanced: `.customer_ref(|request| authenticated_account_id(request)) // optional opaque ID`,
+      verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
+    },
+    "manual-http": {
+      name: "Language-neutral HTTP protocol",
+      install: `curl -O ${artifacts}/agent-feedback-protocol-v1.zip`,
+      code: `GET ${location.origin}/.well-known/agent-feedback-v1.json\n\n1. Sign a two-hour capability locally.\n2. Add the feedback envelope to eligible 2xx responses.\n3. Queue opportunity telemetry without blocking the response.`,
+      verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")} and inspect _agentFeedback or the Agent-Feedback header.`,
+    },
+  };
+  return { ...instructions[setupStack], environment };
+}
+
+function setupConnectionStatus(apiKeyId) {
+  const interactions = dashboard.interactions.filter((entry) => entry.apiKeyId === apiKeyId);
+  const interactionIds = new Set(interactions.map((entry) => entry.id));
+  const outcomes = dashboard.outcomes.filter((entry) => interactionIds.has(entry.interactionId));
+  return { interactions, outcomes, firstInteraction: interactions.at(-1) || interactions[0] };
+}
+
+function setupView() {
+  const surface = setupSurfaceCopy[setupSurface];
+  const integration = setupInstructions();
+  const status = setupConnectionId ? setupConnectionStatus(setupConnectionId) : { interactions: [], outcomes: [] };
+  const connected = status.interactions.length > 0;
+  const reviewed = status.outcomes.length > 0;
+  const stacks = setupStackOptions[setupSurface].map(([id, name, copy]) => `<button class="choice-card" data-setup-stack="${esc(id)}" aria-pressed="${setupStack === id}"><strong>${esc(name)}</strong><span>${esc(copy)}</span></button>`).join("");
+  const surfaces = Object.entries(setupSurfaceCopy).map(([id, item]) => `<button class="choice-card surface-card" data-setup-surface="${esc(id)}" aria-pressed="${setupSurface === id}" ${setupConnectionId ? "disabled" : ""}><strong>${esc(item.name)}</strong><span>${esc(item.summary)}</span></button>`).join("");
+  const routeField = setupSurface === "mcp" ? "" : `<label><span>Routes agents use</span><input id="setup-route" value="${esc(setupRoute)}" placeholder="/search or /docs/*"><small>Only successful responses on these routes receive feedback instructions.</small></label>`;
+  const connectionForm = setupConnectionId ? `<div class="connection-created"><b>${esc(setupConnectionName)} · ${esc(title(setupEnvironment))}</b><span>Connection created</span></div>` : `<div class="connection-form"><label><span>Connection name</span><input id="setup-connection-name" value="${esc(setupConnectionName)}" placeholder="Search API" maxlength="40"></label><label><span>Environment</span><select id="setup-environment"><option value="production" ${setupEnvironment === "production" ? "selected" : ""}>Production</option><option value="staging" ${setupEnvironment === "staging" ? "selected" : ""}>Staging</option><option value="development" ${setupEnvironment === "development" ? "selected" : ""}>Development</option></select></label>${routeField}<label><span>Key expiration</span><select id="api-key-expiration"><option value="2592000">30 days</option><option value="7776000" selected>90 days</option><option value="31536000">365 days</option></select></label><button class="button primary" data-create-key>Create connection</button></div>`;
+  const secret = apiSecret ? `<div class="secret-callout"><div><b>Save this server-side key now</b><code>${esc(apiSecret)}</code><small>It is shown once. Customer agents never receive this key.</small></div><button class="button" data-copy="${esc(apiSecret)}">Copy key</button></div>` : "";
+  const installStep = setupConnectionId ? `<section class="setup-step"><div class="step-number">4</div><div class="step-body"><p class="eyebrow">INSTALL</p><h2>Add ${esc(integration.name)} to your product</h2><p>This instruments the selected surface and sends telemetry in the background. Your product response never waits for Agent Feedback.</p>${secret}<h3>Set the server environment variable</h3><div class="copy-block"><pre><code>${esc(integration.environment)}</code></pre><button class="button" data-copy="${esc(integration.environment)}">Copy</button></div><h3>Install</h3><div class="copy-block"><pre><code>${esc(integration.install)}</code></pre><button class="button" data-copy="${esc(integration.install)}">Copy</button></div><h3>Configure once</h3><div class="copy-block"><pre><code>${esc(integration.code)}</code></pre><button class="button" data-copy="${esc(integration.code)}">Copy</button></div>${integration.advanced ? `<details><summary>Optional customer grouping</summary><p>Use an opaque account ID from authentication your product already has. Do not send names or emails.</p><pre><code>${esc(integration.advanced)}</code></pre></details>` : ""}<a class="text-link" href="/.well-known/agent-feedback-v1.json" target="_blank" rel="noreferrer">Read the protocol contract →</a></div></section>` : `<section class="setup-step locked"><div class="step-number">4</div><div class="step-body"><h2>Install</h2><p>Create the connection first. Then this page will show one install command and one setup snippet for your stack.</p></div></section>`;
+  const surfaceResult = setupSurface === "mcp" ? "A normal MCP tool call will appear as a confirmed interaction." : "A successful response will appear as an opportunity. It becomes confirmed if the agent submits feedback.";
+  const verifyStep = setupConnectionId ? `<section class="setup-step"><div class="step-number">5</div><div class="step-body"><p class="eyebrow">VERIFY</p><h2>Send one real request to your product</h2><p>${esc(integration.verify)}</p><p>${esc(surfaceResult)}</p><div class="verification"><div class="verification-row ${connected ? "complete" : "waiting"}"><b>${connected ? "✓" : "○"}</b><span><strong>${connected ? (setupSurface === "mcp" ? "Confirmed interaction received" : "Product connection works") : "Waiting for the first interaction"}</strong><small>${connected ? `${status.interactions.length} interaction${status.interactions.length === 1 ? "" : "s"} received for this connection.` : "This page checks automatically every few seconds."}</small></span></div><div class="verification-row ${reviewed ? "complete" : "waiting"}"><b>${reviewed ? "✓" : "○"}</b><span><strong>${reviewed ? "Agent feedback received" : "Waiting for agent feedback"}</strong><small>${reviewed ? `${status.outcomes.length} compact review${status.outcomes.length === 1 ? "" : "s"} received.` : "The product connection can work even before an agent chooses to review it."}</small></span></div></div><div class="setup-actions"><button class="button" data-refresh-setup>Check now</button>${connected ? `<button class="button primary" data-view="interactions">View interaction</button>` : ""}${reviewed ? `<button class="button primary" data-view="feedback">View feedback</button>` : ""}</div></div></section>` : `<section class="setup-step locked"><div class="step-number">5</div><div class="step-body"><h2>Verify</h2><p>The finish line is a real interaction from this connection—not a synthetic test inside Agent Feedback.</p></div></section>`;
+  const connections = dashboard.apiKeys.map((key) => {
+    const keyStatus = setupConnectionStatus(key.id);
+    const state = keyStatus.outcomes.length ? "Feedback received" : keyStatus.interactions.length ? "Connected" : "Never seen";
+    return `<div class="connection-row"><span><strong>${esc(key.label)}</strong><small>${esc(key.prefix)}… · expires ${date(key.expiresAt)}</small></span><b class="${keyStatus.interactions.length ? "positive" : "neutral"}">${esc(state)}</b><button class="link-button" data-revoke-key="${esc(key.id)}">Revoke</button></div>`;
+  }).join("") || `<p class="muted">No connections yet.</p>`;
+  return `${header("SETUP", "Connect a product", "")}
+    <p class="setup-lede">Choose what your customers' agents use. We will show only the integration they need, then wait for the first real interaction.</p>
+    <section class="setup-step"><div class="step-number">1</div><div class="step-body"><p class="eyebrow">PRODUCT SURFACE</p><h2>What are your customers' agents using?</h2><div class="choice-grid surfaces">${surfaces}</div><p class="selection-explanation"><strong>${esc(surface.name)}:</strong> ${esc(surface.detail)}</p></div></section>
+    <section class="setup-step"><div class="step-number">2</div><div class="step-body"><p class="eyebrow">STACK</p><h2>What is it built with?</h2><div class="choice-grid stacks">${stacks}</div></div></section>
+    <section class="setup-step"><div class="step-number">3</div><div class="step-body"><p class="eyebrow">CONNECTION</p><h2>Name this connection</h2><p>This name is for your dashboard. The private key stays on your server.</p>${connectionForm}</div></section>
+    ${installStep}${verifyStep}
+    <details class="existing-connections"><summary>Existing connections (${dashboard.apiKeys.length})</summary><div>${connections}</div></details>`;
 }
 
 function policyView() {
@@ -141,35 +269,20 @@ function render() {
   if (!dashboard) return;
   document.querySelectorAll("[data-view]").forEach((button) => button.setAttribute("aria-current", button.dataset.view === currentView ? "page" : "false"));
   page.innerHTML = ({ feedback: feedbackView, insights: insightsView, interactions: interactionsView, sessions: sessionsView, setup: setupView, policy: policyView }[currentView] || feedbackView)();
-}
-
-const base64url = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-
-async function signedCapability(secret, interactionId) {
-  const match = /^af_live_([0-9a-f]{32})_(.{20,})$/i.exec(secret);
-  if (!match) throw new Error("Create a new v2 product key first.");
-  const now = Math.floor(Date.now() / 1000);
-  const nonce = base64url(crypto.getRandomValues(new Uint8Array(18)));
-  const claims = { v: 1, i: interactionId, iat: now, exp: now + 7200, n: nonce };
-  const payload = base64url(new TextEncoder().encode(JSON.stringify(claims)));
-  const input = `afr2_${match[1].toLowerCase()}.${payload}`;
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));
-  const key = await crypto.subtle.importKey("raw", digest, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(input));
-  return `${input}.${base64url(signature)}`;
-}
-
-async function runTest() {
-  if (!apiSecret) return;
-  setNotice("Running the v2 backend contract test…");
-  const interactionId = crypto.randomUUID();
-  const receipt = await signedCapability(apiSecret, interactionId);
-  const companyHeaders = { "content-type": "application/json", authorization: `Bearer ${apiSecret}` };
-  await request("/api/v2/telemetry/batches", { method: "POST", headers: companyHeaders, body: JSON.stringify({ events: [{ interactionId, surface: "http_json", operation: "/doctor", statusCode: 200, durationMs: 12, classification: "unclassified", customerRef: "demo_account_123", occurredAt: new Date().toISOString() }] }) });
-  await request("/api/v2/outcomes", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${receipt}` }, body: JSON.stringify({ outcome: "success", note: "The workspace backend accepted the v2 receipt and compact review." }) });
-  await refresh();
-  navigate("feedback");
-  setNotice("V2 contract test passed. The review and confirmed interaction are now visible.");
+  if (currentView !== "setup" || !setupConnectionId || setupConnectionStatus(setupConnectionId).outcomes.length) {
+    clearInterval(setupMonitor);
+    setupMonitor = null;
+  } else if (!setupMonitor) {
+    setupMonitor = setInterval(async () => {
+      try {
+        dashboard = await request("/api/dashboard");
+        render();
+      } catch (error) {
+        clearInterval(setupMonitor);
+        setupMonitor = null;
+      }
+    }, 5000);
+  }
 }
 
 document.addEventListener("click", async (event) => {
@@ -177,6 +290,16 @@ document.addEventListener("click", async (event) => {
   if (!target) return;
   try {
     if (target.dataset.view) navigate(target.dataset.view);
+    if (target.dataset.setupSurface) {
+      setupSurface = target.dataset.setupSurface;
+      setupStack = setupStackOptions[setupSurface][0][0];
+      setupRoute = setupSurface === "website" ? "/docs/*" : "/search";
+      render();
+    }
+    if (target.dataset.setupStack) {
+      setupStack = target.dataset.setupStack;
+      render();
+    }
     if (target.dataset.outcome) { selectedOutcome = target.dataset.outcome; render(); }
     if (target.dataset.interaction) { selectedInteraction = target.dataset.interaction; currentView = "interactions"; render(); }
     if (target.dataset.session) { selectedSession = target.dataset.session; render(); }
@@ -185,23 +308,41 @@ document.addEventListener("click", async (event) => {
     if (target.hasAttribute("data-toggle-legacy")) { showingLegacy = !showingLegacy; selectedOutcome = null; render(); }
     if (target.dataset.copy) { await navigator.clipboard.writeText(target.dataset.copy); setNotice("Copied."); }
     if (target.hasAttribute("data-create-key")) {
-      const label = document.querySelector("#api-key-label")?.value.trim() || "Production";
+      setupConnectionName = document.querySelector("#setup-connection-name")?.value.trim() || "";
+      setupEnvironment = document.querySelector("#setup-environment")?.value || "production";
+      setupRoute = document.querySelector("#setup-route")?.value.trim() || setupRoute;
+      if (!setupConnectionName) throw new Error("Name this connection before creating it.");
+      const label = `${setupConnectionName} · ${title(setupEnvironment)}`;
       const expiresInSeconds = Number(document.querySelector("#api-key-expiration")?.value || 7776000);
       const body = await request("/api/settings/api-keys", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label, expiresInSeconds }) });
       apiSecret = body.secret;
+      setupConnectionId = body.apiKey.id;
       await refresh();
-      setNotice("V2 product key created. Copy it now; it will not be shown again.");
+      setNotice("Connection created. Save the server-side key, then install the integration below.");
+    }
+    if (target.hasAttribute("data-refresh-setup")) {
+      await refresh();
+      setNotice("Connection status refreshed.");
     }
     if (target.dataset.revokeKey) {
       await request(`/api/settings/api-keys/${target.dataset.revokeKey}`, { method: "DELETE" });
-      apiSecret = "";
+      if (target.dataset.revokeKey === setupConnectionId) {
+        apiSecret = "";
+        setupConnectionId = null;
+        setupConnectionName = "";
+      }
       await refresh();
-      setNotice("Product key revoked.");
+      setNotice("Connection key revoked.");
     }
-    if (target.hasAttribute("data-run-test")) await runTest();
   } catch (error) {
     setNotice(error.message || "Request failed");
   }
+});
+
+document.addEventListener("input", (event) => {
+  if (event.target.id === "setup-connection-name") setupConnectionName = event.target.value;
+  if (event.target.id === "setup-environment") setupEnvironment = event.target.value;
+  if (event.target.id === "setup-route") setupRoute = event.target.value;
 });
 
 document.addEventListener("submit", async (event) => {
