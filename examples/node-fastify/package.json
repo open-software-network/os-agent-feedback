@@ -1,0 +1,14 @@
+{
+  "name": "agent-feedback-example-fastify",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@agent-feedback/node": "file:../../sdk/node",
+    "fastify": "^5.10.0"
+  },
+  "engines": { "node": ">=20" }
+}

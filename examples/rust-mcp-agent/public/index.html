@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Example Company MCP Server</title>
+  <style>
+    body { max-width: 760px; margin: 64px auto; padding: 0 24px; font: 16px/1.5 system-ui, sans-serif; color: #161616; }
+    main { border: 2px solid #161616; padding: 28px; }
+    code, pre { background: #f4f4f4; }
+    code { padding: 2px 5px; }
+    pre { padding: 16px; overflow: auto; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <main>
+    <p>EXAMPLE COMPANY PRODUCT</p>
+    <h1>Status MCP with agent feedback</h1>
+    <p>Connect a customer agent to <code>/mcp</code>. The normal <code>check_status</code> tool returns a scoped feedback handle. After the agent knows whether the product helped, it calls <code>report_product_outcome</code> autonomously.</p>
+    <pre>https://example-mcp-agent-production.up.railway.app/mcp</pre>
+    <p>The company's private Agent Feedback key remains inside this server and is never given to the customer agent.</p>
+  </main>
+</body>
+</html>

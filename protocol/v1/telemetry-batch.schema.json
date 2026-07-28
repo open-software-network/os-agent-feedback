@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-feedback.example/protocol/v1/telemetry-batch.schema.json",
+  "title": "Agent Feedback telemetry batch",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["events"],
+  "properties": {
+    "events": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["interactionId", "surface", "operation", "classification", "occurredAt"],
+        "properties": {
+          "interactionId": { "type": "string", "format": "uuid" },
+          "surface": { "enum": ["http_json", "http_html", "http_headers", "mcp"] },
+          "operation": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "statusCode": { "type": "integer", "minimum": 100, "maximum": 599 },
+          "durationMs": { "type": "integer", "minimum": 0 },
+          "customerRef": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "classification": { "enum": ["unclassified", "confirmed"] },
+          "confirmationMethod": { "enum": ["mcp"] },
+          "runtimeHint": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "runtimeHintSource": { "enum": ["http", "mcp"] },
+          "sessionRef": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "sessionSource": { "enum": ["customer", "mcp", "continuation"] },
+          "occurredAt": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  }
+}

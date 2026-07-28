@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "capability": {
+    "apiKey": "af_live_0123456789abcdef0123456789abcdef_conformance_secret_0123456789abcdef",
+    "keyId": "0123456789abcdef0123456789abcdef",
+    "claims": {
+      "v": 1,
+      "i": "018f1f2e-7b4a-7c12-9c8d-123456789abc",
+      "iat": 1715000000,
+      "exp": 1715007200,
+      "n": "AQIDBAUGBwgJCgsMDQ4PEBES"
+    },
+    "token": "afr2_0123456789abcdef0123456789abcdef.eyJ2IjoxLCJpIjoiMDE4ZjFmMmUtN2I0YS03YzEyLTljOGQtMTIzNDU2Nzg5YWJjIiwiaWF0IjoxNzE1MDAwMDAwLCJleHAiOjE3MTUwMDcyMDAsIm4iOiJBUUlEQkFVR0J3Z0pDZ3NNRFE0UEVCRVMifQ.wxJ0YGS21x9eW-Cn33t9V1INhyGNj1_U3qoQns3vdWA"
+  },
+  "normalization": [
+    { "input": "/orders/123", "output": "/orders/:id" },
+    { "input": "/runs/018f1f2e-7b4a-7c12-9c8d-123456789abc", "output": "/runs/:id" },
+    { "input": "/search?q=checkout", "output": "/search" }
+  ]
+}

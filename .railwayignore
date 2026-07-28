@@ -1,0 +1,13 @@
+.git
+.next
+.vinext
+.wrangler
+dist
+node_modules
+**/node_modules
+**/target
+**/.DS_Store
+coverage
+outputs
+work
+*.log

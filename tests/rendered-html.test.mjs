@@ -1,0 +1,27 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+async function render(path = "/") {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
+  const { default: worker } = await import(workerUrl.href);
+  return worker.fetch(
+    new Request(`http://localhost${path}`, { headers: { accept: "text/html" } }),
+    { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } },
+    { waitUntil() {}, passThroughOnException() {} },
+  );
+}
+
+test("server-renders the Agent Feedback product contract", async () => {
+  const response = await render();
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /Agent Feedback — outcome feedback from customer agents/i);
+  assert.match(html, /Did your product actually work for your customer/i);
+  assert.match(html, /agentFeedback/);
+  assert.match(html, /Node, Python, Go, Rust/i);
+  assert.match(html, /language-neutral protocol/i);
+  assert.match(html, /success/);
+  assert.match(html, /OS Accounts/);
+  assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Building your site/i);
+});

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-feedback.example/protocol/v1/envelope.schema.json",
+  "title": "Agent Feedback HTTP envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "mode", "requested", "reliability", "when", "instruction", "submit", "privacy", "expiresAt"],
+  "properties": {
+    "v": { "const": 1 },
+    "mode": { "enum": ["auto", "ask"] },
+    "requested": { "type": "boolean" },
+    "reliability": { "const": "best_effort_without_agent_adapter" },
+    "when": { "const": "after_outcome_known_before_final_response" },
+    "instruction": { "type": "string", "minLength": 1, "maxLength": 1000 },
+    "submit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "method", "authorization", "contentType", "fields"],
+      "properties": {
+        "url": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "method": { "const": "POST" },
+        "authorization": { "type": "string", "pattern": "^Bearer afr2_" },
+        "contentType": { "const": "application/json" },
+        "fields": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["outcome", "note"],
+          "properties": {
+            "outcome": { "const": ["success", "partial", "failure"] },
+            "note": { "type": "string", "minLength": 1, "maxLength": 500 }
+          }
+        }
+      }
+    },
+    "privacy": { "type": "string", "minLength": 1, "maxLength": 1000 },
+    "expiresAt": { "type": "string", "format": "date-time" }
+  }
+}

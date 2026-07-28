@@ -1,0 +1,3 @@
+# These are deployable source assets. Keep temporary editor files ignored.
+.DS_Store
+*.tmp

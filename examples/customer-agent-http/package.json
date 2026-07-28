@@ -1,0 +1,15 @@
+{
+  "name": "agent-feedback-example-customer-http-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@agent-feedback/node": "file:../../sdk/node"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,29 @@
+[package]
+name = "agent-feedback"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Protocol-first Agent Feedback middleware for Rust web products"
+license = "MIT"
+repository = "https://github.com/open-software-network/os-agent-feedback"
+homepage = "https://github.com/open-software-network/os-agent-feedback/tree/main/sdk/rust"
+
+[dependencies]
+axum = "0.8"
+base64 = "0.22"
+futures-util = "0.3"
+getrandom = "0.3"
+hmac = "0.12"
+http = "1"
+http-body = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+tower = "0.5"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.5", features = ["util"] }

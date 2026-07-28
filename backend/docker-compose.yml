@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: agent_feedback
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "54329:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d agent_feedback"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - agent_feedback_pg:/var/lib/postgresql/data
+
+volumes:
+  agent_feedback_pg:

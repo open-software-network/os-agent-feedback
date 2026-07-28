@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-feedback.example/protocol/v1/outcome.schema.json",
+  "title": "Agent Feedback compact outcome",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["outcome", "note"],
+  "properties": {
+    "outcome": { "enum": ["success", "partial", "failure"] },
+    "note": { "type": "string", "minLength": 8, "maxLength": 500 }
+  }
+}
