@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Agent Feedback Dashboard</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260728-simple-invites">
-  <script src="/static/app.js?v=20260728-root-app" defer></script>
+  <link rel="stylesheet" href="/static/styles.css?v=20260728-observability">
+  <script src="/static/app.js?v=20260728-observability" defer></script>
 </head>
 <body>
   <div class="app-shell">
@@ -14,11 +14,11 @@
       <div id="product-scope" class="product-scope"></div>
       <nav>
         <p>FEEDBACK</p>
-        <button data-view="feedback">Feedback</button>
+        <button data-view="feedback"><span>Feedback</span><b data-nav-count="feedback">0</b></button>
         <button data-view="insights">Insights</button>
         <p>PRODUCT USE</p>
-        <button data-view="interactions">Interactions</button>
-        <button data-view="sessions">Sessions</button>
+        <button data-view="interactions"><span>Interactions</span><b data-nav-count="interactions">0</b></button>
+        <button data-view="sessions"><span>Sessions</span><b data-nav-count="sessions">0</b></button>
         <p>CONFIGURATION</p>
         <button data-view="setup" data-editor-only>Setup</button>
         <button data-view="policy" data-editor-only>Collection policy</button>

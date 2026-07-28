@@ -1,14 +1,19 @@
+const initialUrl = new URL(location.href);
 const page = document.querySelector("#page");
 const notice = document.querySelector("#notice");
 const account = document.querySelector("#account");
 const productScope = document.querySelector("#product-scope");
 let dashboard;
-let currentView = new URL(location.href).searchParams.get("view") || "feedback";
-let selectedWorkspaceId = new URL(location.href).searchParams.get("team") || "";
-let selectedProductId = new URL(location.href).searchParams.get("product") || "";
-let selectedOutcome = null;
-let selectedInteraction = null;
-let selectedSession = null;
+let currentView = initialUrl.searchParams.get("view") || "feedback";
+let selectedWorkspaceId = initialUrl.searchParams.get("team") || "";
+let selectedProductId = initialUrl.searchParams.get("product") || "";
+let selectedOutcome = initialUrl.searchParams.get("outcome");
+let selectedInteraction = initialUrl.searchParams.get("interaction");
+let selectedSession = initialUrl.searchParams.get("session");
+let explorerQuery = initialUrl.searchParams.get("q") || "";
+let explorerPrimary = initialUrl.searchParams.get("filter") || "all";
+let explorerSecondary = initialUrl.searchParams.get("surface") || "all";
+let explorerRange = initialUrl.searchParams.get("range") || "30d";
 let showingLegacy = false;
 let apiSecret = "";
 let setupSurface = "mcp";
@@ -17,6 +22,7 @@ let setupConnectionId = null;
 let setupInstallMode = "agent";
 let setupMonitor = null;
 let noticeTimer = null;
+let explorerTimer = null;
 
 function setupSecretKey(environmentId) {
   return `agent-feedback:product-key:${environmentId}`;
@@ -61,6 +67,56 @@ const setNotice = (message, timeoutMs = 0) => {
 };
 const outcomeClass = (value) => value === "success" ? "positive" : value === "failure" ? "negative" : "neutral";
 const customer = (value) => value ? `Customer ${value}` : "Customer not linked";
+const relativeDate = (value) => {
+  if (!value) return "—";
+  const seconds = Math.round((new Date(value).getTime() - Date.now()) / 1000);
+  const ranges = [[60, "second"], [60, "minute"], [24, "hour"], [7, "day"], [4.345, "week"], [12, "month"], [Infinity, "year"]];
+  let amount = seconds;
+  for (const [boundary, unit] of ranges) {
+    if (Math.abs(amount) < boundary) return new Intl.RelativeTimeFormat(undefined, { numeric: "auto" }).format(Math.round(amount), unit);
+    amount /= boundary;
+  }
+  return date(value);
+};
+const duration = (milliseconds) => {
+  if (milliseconds == null) return "—";
+  if (milliseconds < 1000) return `${milliseconds}ms`;
+  if (milliseconds < 60_000) return `${(milliseconds / 1000).toFixed(milliseconds < 10_000 ? 1 : 0)}s`;
+  return `${Math.round(milliseconds / 60_000)}m`;
+};
+const sessionDuration = (session) => duration(Math.max(0, new Date(session.lastSeenAt) - new Date(session.startedAt)));
+const badge = (value) => `<span class="status-pill status-${esc(value)}">${esc(title(value))}</span>`;
+const rangeMs = { "24h": 86_400_000, "7d": 604_800_000, "30d": 2_592_000_000, all: null };
+const inTimeRange = (value) => !rangeMs[explorerRange] || Date.now() - new Date(value).getTime() <= rangeMs[explorerRange];
+const matchesQuery = (...values) => !explorerQuery || values.some((value) => String(value || "").toLowerCase().includes(explorerQuery.toLowerCase()));
+
+function syncUrl(mode = "replace") {
+  const url = new URL(location.href);
+  const values = {
+    view: currentView,
+    team: selectedWorkspaceId,
+    product: selectedProductId,
+    outcome: selectedOutcome,
+    interaction: selectedInteraction,
+    session: selectedSession,
+    q: explorerQuery,
+    filter: explorerPrimary === "all" ? "" : explorerPrimary,
+    surface: explorerSecondary === "all" ? "" : explorerSecondary,
+    range: explorerRange === "30d" ? "" : explorerRange,
+    environment: "",
+  };
+  for (const [key, value] of Object.entries(values)) {
+    if (value) url.searchParams.set(key, value);
+    else url.searchParams.delete(key);
+  }
+  history[`${mode}State`]({}, "", url);
+}
+
+function resetExplorer() {
+  explorerQuery = "";
+  explorerPrimary = "all";
+  explorerSecondary = "all";
+}
 
 async function request(path, options = {}) {
   const headers = new Headers(options.headers || {});
@@ -108,15 +164,16 @@ async function refresh() {
   }
   account.innerHTML = `<strong>${esc(dashboard.user.displayName)}</strong>${dashboard.user.email ? `<small>${esc(dashboard.user.email)}</small>` : ""}<small>${esc(title(dashboard.currentRole))} · ${esc(dashboard.workspace.name)}</small>`;
   renderProductScope();
+  const navigationCounts = { feedback: dashboard.outcomes.length, interactions: dashboard.interactions.length, sessions: dashboard.sessions.length };
+  for (const [view, count] of Object.entries(navigationCounts)) {
+    const element = document.querySelector(`[data-nav-count="${view}"]`);
+    if (element) element.textContent = String(count);
+  }
   document.querySelectorAll("[data-editor-only]").forEach((element) => {
     element.hidden = dashboard.currentRole === "member";
   });
+  syncUrl("replace");
   const url = new URL(location.href);
-  url.searchParams.set("team", selectedWorkspaceId);
-  if (selectedProductId) url.searchParams.set("product", selectedProductId);
-  else url.searchParams.delete("product");
-  url.searchParams.delete("environment");
-  history.replaceState({}, "", url);
   if (url.searchParams.get("invite") === "invalid") {
     url.searchParams.delete("invite");
     history.replaceState({}, "", url);
@@ -135,7 +192,8 @@ function renderProductScope() {
   }
   const product = dashboard.currentProduct;
   const productOptions = dashboard.products.map((entry) => `<option value="${esc(entry.id)}" ${entry.id === product?.id ? "selected" : ""}>${esc(entry.name)}</option>`).join("");
-  productScope.innerHTML = `${teamSelect}<label><span>Product</span><select id="product-select">${productOptions}</select></label>${canEdit ? `<button class="link-button" data-new-product>+ New product</button>` : ""}`;
+  const connectionState = dashboard.interactions.length ? `<span class="scope-state connected"><i></i>Receiving data</span>` : `<span class="scope-state"><i></i>No data yet</span>`;
+  productScope.innerHTML = `${teamSelect}<label><span>Product</span><select id="product-select">${productOptions}</select></label><div>${connectionState}${canEdit ? `<button class="link-button" data-new-product>+ New product</button>` : ""}</div>`;
 }
 
 function navigate(view) {
@@ -143,9 +201,8 @@ function navigate(view) {
   selectedOutcome = null;
   selectedInteraction = null;
   selectedSession = null;
-  const url = new URL(location.href);
-  url.searchParams.set("view", view);
-  history.pushState({}, "", url);
+  resetExplorer();
+  syncUrl("push");
   render();
 }
 
@@ -157,19 +214,50 @@ function empty(heading, copy, view = "setup") {
   return `<div class="empty"><h2>${esc(heading)}</h2><p>${esc(copy)}</p><button class="button primary" data-view="${esc(view)}">Go to ${esc(view)}</button></div>`;
 }
 
+function metricStrip(items) {
+  return `<div class="metric-strip">${items.map(([value, label, tone = ""]) => `<article class="${esc(tone)}"><strong>${esc(value)}</strong><span>${esc(label)}</span></article>`).join("")}</div>`;
+}
+
+function explorerToolbar({ placeholder, primaryLabel, primaryOptions, secondaryLabel = "Surface", secondaryOptions = [] }) {
+  const options = (values) => values.map(([value, label]) => `<option value="${esc(value)}" ${explorerPrimary === value ? "selected" : ""}>${esc(label)}</option>`).join("");
+  const secondary = secondaryOptions.length ? `<label><span>${esc(secondaryLabel)}</span><select id="explorer-secondary"><option value="all">All ${esc(secondaryLabel.toLowerCase())}</option>${secondaryOptions.map(([value, label]) => `<option value="${esc(value)}" ${explorerSecondary === value ? "selected" : ""}>${esc(label)}</option>`).join("")}</select></label>` : "";
+  return `<div class="explorer-toolbar" role="search"><label class="explorer-search"><span>Search</span><input id="explorer-search" type="search" value="${esc(explorerQuery)}" placeholder="${esc(placeholder)}" autocomplete="off"></label><label><span>${esc(primaryLabel)}</span><select id="explorer-primary">${options(primaryOptions)}</select></label>${secondary}<label><span>Time range</span><select id="explorer-range"><option value="24h" ${explorerRange === "24h" ? "selected" : ""}>Last 24 hours</option><option value="7d" ${explorerRange === "7d" ? "selected" : ""}>Last 7 days</option><option value="30d" ${explorerRange === "30d" ? "selected" : ""}>Last 30 days</option><option value="all" ${explorerRange === "all" ? "selected" : ""}>All loaded data</option></select></label>${explorerQuery || explorerPrimary !== "all" || explorerSecondary !== "all" || explorerRange !== "30d" ? `<button class="link-button filter-reset" data-clear-filters>Reset</button>` : ""}</div>`;
+}
+
+function detailActions() {
+  return `<button class="button" data-copy-page-link>Copy link</button>`;
+}
+
+function propertyList(items) {
+  return `<dl class="property-list">${items.map(([term, value]) => `<div><dt>${esc(term)}</dt><dd>${value}</dd></div>`).join("")}</dl>`;
+}
+
+function breakdown(rows, total, fallback) {
+  if (!rows.length) return `<p class="muted">${esc(fallback)}</p>`;
+  const max = Math.max(...rows.map((row) => row.count), 1);
+  return `<div class="breakdown">${rows.map((row) => `<div><span><b>${esc(title(row.name))}</b><small>${row.count} · ${total ? Math.round(row.count / total * 100) : 0}%</small></span><i><em style="width:${Math.round(row.count / max * 100)}%"></em></i></div>`).join("")}</div>`;
+}
+
 function feedbackView() {
   if (showingLegacy) return legacyFeedbackView();
   const item = dashboard.outcomes.find((entry) => entry.id === selectedOutcome);
-  const toggle = `<button class="button" data-toggle-legacy>View legacy prototype data</button>`;
   if (item) {
-    return `${header("FEEDBACK DETAIL", title(item.outcome), date(item.createdAt))}<button class="back" data-back="feedback">← All feedback</button><div class="detail-grid">
-      <article><h2>Agent review</h2><p class="quote">“${esc(item.note)}”</p></article>
-      <article><h2>Product interaction</h2><p><strong>${esc(item.operation)}</strong></p><small>${esc(title(item.surface))} · ${esc(customer(item.customerRef))}</small></article>
-      <article><h2>What we know</h2><dl><dt>Classification</dt><dd>${esc(title(item.classification))}</dd><dt>Confirmation</dt><dd>${esc(title(item.confirmationMethod || "none"))}</dd><dt>Runtime hint</dt><dd>${esc(item.runtimeHint || "Not provided")}</dd><dt>Agent identity</dt><dd>Not collected</dd></dl></article>
-      <button class="linked" data-open-interaction="${esc(item.interactionId)}">Open linked interaction →</button></div>`;
+    const interaction = dashboard.interactions.find((entry) => entry.id === item.interactionId);
+    const session = item.sessionId ? dashboard.sessions.find((entry) => entry.id === item.sessionId) : null;
+    const contextActions = `<div class="detail-links"><button class="linked" data-open-interaction="${esc(item.interactionId)}">Open interaction →</button>${session ? `<button class="linked" data-open-session="${esc(session.id)}">Open session →</button>` : ""}</div>`;
+    return `${header("FEEDBACK", title(item.outcome), date(item.createdAt), detailActions())}<button class="back" data-back="feedback">← All feedback</button><div class="detail-layout"><div class="detail-main"><article class="review-card ${outcomeClass(item.outcome)}"><div>${badge(item.outcome)}<small>Submitted by the customer’s agent</small></div><p class="quote">“${esc(item.note)}”</p></article><section class="detail-section"><h2>Linked product context</h2><div class="context-row"><span><small>Operation</small><strong>${esc(item.operation)}</strong></span><span><small>Surface</small><strong>${esc(title(item.surface))}</strong></span><span><small>Duration</small><strong>${duration(item.durationMs)}</strong></span><span><small>Status</small><strong>${esc(item.statusCode || "—")}</strong></span></div>${contextActions}</section></div><aside class="detail-sidebar"><section><h2>Properties</h2>${propertyList([["Received", esc(date(item.createdAt))], ["Review source", esc(title(item.source))], ["Customer", esc(customer(item.customerRef))], ["Classification", esc(title(item.classification))], ["Confirmation", esc(title(item.confirmationMethod || "none"))], ["Runtime hint", esc(item.runtimeHint || "Not provided")], ["Runtime provenance", esc(item.runtimeHintSource || "Not provided")]])}</section><p class="privacy-note"><b>Agent identity is not collected.</b> Runtime values are unverified hints, not identities.</p>${interaction ? `<code class="object-id">${esc(interaction.id)}</code>` : ""}</aside></div>`;
   }
-  const rows = dashboard.outcomes.map((entry) => `<button class="list-row" data-outcome="${esc(entry.id)}"><b class="${outcomeClass(entry.outcome)}">${esc(entry.outcome.toUpperCase())}</b><span><strong>${esc(entry.note)}</strong><small>${esc(entry.operation)} · ${esc(title(entry.surface))} · ${esc(customer(entry.customerRef))}</small></span><time>${date(entry.createdAt)}</time></button>`).join("");
-  return `${header("FEEDBACK", "Product outcomes", `${dashboard.outcomes.length} reviews`, toggle)}${rows ? `<div class="list">${rows}</div>` : empty("No feedback yet", "Install the SDK on an agent-usable product route, then run the integration doctor.")}`;
+  if (!dashboard.outcomes.length) return `${header("FEEDBACK", "Agent feedback", "0 reviews", `<button class="button" data-refresh-data>Refresh</button>`)}${empty("No feedback yet", "Install Epode on an agent-usable product route, then send one real interaction.")}`;
+  const ranged = dashboard.outcomes.filter((entry) => inTimeRange(entry.createdAt));
+  const surfaces = [...new Set(dashboard.outcomes.map((entry) => entry.surface))].sort().map((value) => [value, title(value)]);
+  const filtered = ranged.filter((entry) => (explorerPrimary === "all" || entry.outcome === explorerPrimary) && (explorerSecondary === "all" || entry.surface === explorerSecondary) && matchesQuery(entry.note, entry.operation, entry.surface, entry.customerRef, entry.runtimeHint));
+  const successes = filtered.filter((entry) => entry.outcome === "success").length;
+  const failures = filtered.filter((entry) => entry.outcome === "failure").length;
+  const partial = filtered.filter((entry) => entry.outcome === "partial").length;
+  const rows = filtered.map((entry) => `<button class="table-row feedback-columns" data-outcome="${esc(entry.id)}" aria-label="Open ${esc(entry.outcome)} feedback for ${esc(entry.operation)}"><span>${badge(entry.outcome)}</span><span class="primary-cell"><strong>${esc(entry.note)}</strong><small>${esc(title(entry.source))}</small></span><span><strong>${esc(entry.operation)}</strong><small>${esc(title(entry.surface))}</small></span><span>${esc(entry.customerRef || "Not linked")}</span><time title="${esc(date(entry.createdAt))}">${esc(relativeDate(entry.createdAt))}</time></button>`).join("");
+  const toolbar = explorerToolbar({ placeholder: "Search feedback, operation, or customer", primaryLabel: "Outcome", primaryOptions: [["all", "All outcomes"], ["success", "Success"], ["partial", "Partial"], ["failure", "Failure"]], secondaryOptions: surfaces });
+  const table = rows ? `<div class="explorer-table"><div class="table-head feedback-columns"><span>Outcome</span><span>Feedback</span><span>Operation</span><span>Customer</span><span>Received</span></div>${rows}</div>` : `<div class="filtered-empty"><h2>No matching feedback</h2><p>Try a wider time range or clear the filters.</p><button class="button" data-clear-filters>Clear filters</button></div>`;
+  return `${header("FEEDBACK", "Agent feedback", `${filtered.length} of ${ranged.length} reviews`, `<button class="link-button" data-toggle-legacy>Legacy data</button><button class="button" data-refresh-data>Refresh</button>`)}${metricStrip([[filtered.length, "Reviews"], [filtered.length ? `${Math.round(successes / filtered.length * 100)}%` : "—", "Success rate", "positive"], [partial, "Partial", "neutral"], [failures, "Failed", failures ? "negative" : ""]])}${toolbar}${table}`;
 }
 
 function legacyFeedbackView() {
@@ -183,30 +271,102 @@ function legacyFeedbackView() {
 }
 
 function insightsView() {
-  const table = (rows, fallback) => rows.length ? `<table><tbody>${rows.map((row) => `<tr><td>${esc(title(row.name))}</td><td>${row.count}</td></tr>`).join("")}</tbody></table>` : `<p>${esc(fallback)}</p>`;
-  const insights = dashboard.insights;
-  return `${header("INSIGHTS", "How agents experience your product")}<div class="metrics five"><article><strong>${insights.opportunities}</strong><span>Opportunities delivered</span></article><article><strong>${insights.confirmedInteractions}</strong><span>Confirmed agent interactions</span></article><article><strong>${insights.confirmationRate}%</strong><span>Confirmation rate</span></article><article><strong>${insights.reviewRate}%</strong><span>Review rate</span></article><article><strong>${insights.outcomeSuccessRate}%</strong><span>Outcome success rate</span></article></div><div class="three-col"><article><h2>Operations</h2>${table(insights.topOperations, "No operations yet.")}</article><article><h2>Product surfaces</h2>${table(insights.surfaces, "No surface data yet.")}</article><article><h2>Outcomes</h2>${table(insights.outcomes, "No reviews yet.")}</article></div><section class="explanation"><h2>How these numbers work</h2><p>HTTP responses begin as opportunities—not assumed agent traffic. A submitted review confirms the interaction. MCP tool calls are confirmed immediately because the protocol proves a tool-capable client used them.</p></section>`;
+  if (!dashboard.interactions.length) return `${header("INSIGHTS", "Product health", "No data", `<button class="button" data-refresh-data>Refresh</button>`)}${empty("No product activity yet", "Finish setup and send one real product request or MCP tool call.")}`;
+  const surfaces = [...new Set(dashboard.interactions.map((entry) => entry.surface))].sort().map((value) => [value, title(value)]);
+  const interactions = dashboard.interactions.filter((entry) => inTimeRange(entry.occurredAt) && (explorerPrimary === "all" || entry.classification === explorerPrimary) && (explorerSecondary === "all" || entry.surface === explorerSecondary) && matchesQuery(entry.operation, entry.surface, entry.customerRef, entry.runtimeHint));
+  const ids = new Set(interactions.map((entry) => entry.id));
+  const outcomes = dashboard.outcomes.filter((entry) => ids.has(entry.interactionId));
+  const confirmed = interactions.filter((entry) => entry.classification === "confirmed").length;
+  const successful = outcomes.filter((entry) => entry.outcome === "success").length;
+  const countBy = (items, field) => [...items.reduce((map, item) => map.set(item[field] || "unknown", (map.get(item[field] || "unknown") || 0) + 1), new Map())].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, 8);
+  const operationRows = countBy(interactions, "operation");
+  const surfaceRows = countBy(interactions, "surface");
+  const outcomeRows = countBy(outcomes, "outcome");
+  const failureRows = countBy(outcomes.filter((entry) => entry.outcome === "failure"), "operation");
+  const durations = interactions.filter((entry) => entry.durationMs != null).reduce((map, entry) => {
+    const value = map.get(entry.operation) || { sum: 0, count: 0 };
+    value.sum += entry.durationMs;
+    value.count += 1;
+    map.set(entry.operation, value);
+    return map;
+  }, new Map());
+  const slowest = [...durations].map(([name, value]) => ({ name, average: Math.round(value.sum / value.count) })).sort((a, b) => b.average - a.average)[0];
+  const gap = Math.max(confirmed - outcomes.length, 0);
+  const toolbar = explorerToolbar({ placeholder: "Filter by operation, customer, or runtime", primaryLabel: "Classification", primaryOptions: [["all", "All interactions"], ["confirmed", "Confirmed"], ["unclassified", "Unclassified"]], secondaryOptions: surfaces });
+  const investigations = `<section class="investigations"><div><p class="eyebrow">INVESTIGATE</p><h2>Where to look next</h2></div><div class="investigation-grid">${failureRows[0] ? `<button data-investigate-view="feedback" data-investigate-filter="failure" data-investigate-query="${esc(failureRows[0].name)}"><span>Most failed operation</span><strong>${esc(failureRows[0].name)}</strong><small>${failureRows[0].count} failed review${failureRows[0].count === 1 ? "" : "s"} →</small></button>` : `<article><span>Failures</span><strong>None found</strong><small>No failed reviews in this view.</small></article>`}${gap ? `<button data-investigate-view="interactions" data-investigate-filter="unreviewed"><span>Feedback gap</span><strong>${gap} confirmed</strong><small>Interactions without feedback →</small></button>` : `<article><span>Feedback gap</span><strong>Fully covered</strong><small>Every confirmed interaction has feedback.</small></article>`}${slowest ? `<button data-investigate-view="interactions" data-investigate-query="${esc(slowest.name)}"><span>Slowest operation</span><strong>${esc(slowest.name)}</strong><small>${duration(slowest.average)} average →</small></button>` : `<article><span>Latency</span><strong>No timing data</strong><small>Duration appears when integrations provide it.</small></article>`}</div></section>`;
+  return `${header("INSIGHTS", "Product health", `${interactions.length} interactions in view`, `<button class="button" data-refresh-data>Refresh</button>`)}${toolbar}${metricStrip([[interactions.length, "Opportunities"], [confirmed, "Confirmed"], [interactions.length ? `${Math.round(confirmed / interactions.length * 100)}%` : "—", "Confirmation rate"], [confirmed ? `${Math.round(outcomes.length / confirmed * 100)}%` : "—", "Review rate"], [outcomes.length ? `${Math.round(successful / outcomes.length * 100)}%` : "—", "Outcome success"]])}<section class="funnel"><div><p class="eyebrow">CONVERSION</p><h2>From product response to outcome</h2></div><div class="funnel-steps"><button data-investigate-view="interactions"><strong>${interactions.length}</strong><span>Opportunities</span></button><i>→</i><button data-investigate-view="interactions" data-investigate-filter="confirmed"><strong>${confirmed}</strong><span>Confirmed</span></button><i>→</i><button data-investigate-view="feedback"><strong>${outcomes.length}</strong><span>Reviewed</span></button></div></section><div class="three-col breakdown-grid"><article><h2>Operations</h2>${breakdown(operationRows, interactions.length, "No operations yet.")}</article><article><h2>Product surfaces</h2>${breakdown(surfaceRows, interactions.length, "No surface data yet.")}</article><article><h2>Outcomes</h2>${breakdown(outcomeRows, outcomes.length, "No reviews yet.")}</article></div>${investigations}<section class="explanation compact"><h2>Evidence model</h2><p>HTTP responses begin as opportunities—not assumed agent traffic. A submitted review confirms the interaction. MCP tool calls are confirmed immediately because the protocol proves a tool-capable client used them.</p></section>`;
 }
 
 function interactionsView() {
   const interaction = dashboard.interactions.find((entry) => entry.id === selectedInteraction);
   if (interaction) {
     const linked = dashboard.outcomes.find((entry) => entry.interactionId === interaction.id);
-    return `${header("INTERACTION DETAIL", interaction.operation, title(interaction.classification))}<button class="back" data-back="interactions">← All interactions</button><dl class="session-meta"><div><dt>Surface</dt><dd>${esc(title(interaction.surface))}</dd></div><div><dt>Status</dt><dd>${esc(interaction.statusCode || "—")}</dd></div><div><dt>Duration</dt><dd>${interaction.durationMs == null ? "—" : `${interaction.durationMs}ms`}</dd></div><div><dt>Customer</dt><dd>${esc(interaction.customerRef || "Not linked")}</dd></div><div><dt>Agent</dt><dd>Not identified</dd></div></dl><div class="detail-grid"><article><h2>Evidence</h2><dl><dt>Classification</dt><dd>${esc(title(interaction.classification))}</dd><dt>Confirmation method</dt><dd>${esc(title(interaction.confirmationMethod || "none"))}</dd><dt>Runtime hint</dt><dd>${esc(interaction.runtimeHint || "Not provided")}</dd><dt>Occurred</dt><dd>${date(interaction.occurredAt)}</dd></dl></article><article><h2>Outcome</h2>${linked ? `<p class="quote">“${esc(linked.note)}”</p><b class="${outcomeClass(linked.outcome)}">${esc(linked.outcome.toUpperCase())}</b>` : "<p>No review was submitted for this opportunity.</p>"}</article></div>`;
+    const session = interaction.sessionId ? dashboard.sessions.find((entry) => entry.id === interaction.sessionId) : null;
+    return `${header("INTERACTION", interaction.operation, date(interaction.occurredAt), detailActions())}<button class="back" data-back="interactions">← All interactions</button>${metricStrip([[title(interaction.classification), "Classification", interaction.classification === "confirmed" ? "positive" : "neutral"], [title(interaction.surface), "Surface"], [interaction.statusCode || "—", "HTTP status"], [duration(interaction.durationMs), "Duration"]])}<div class="detail-layout"><div class="detail-main"><section class="detail-section"><div class="section-heading"><div><p class="eyebrow">EVIDENCE</p><h2>What proves this interaction</h2></div>${badge(interaction.classification)}</div><p>${interaction.classification === "confirmed" ? `Confirmed by ${esc(title(interaction.confirmationMethod || "outcome submission"))}.` : "This response carried feedback instructions, but no agent action has confirmed it yet."}</p></section><section class="detail-section"><div class="section-heading"><h2>Agent feedback</h2>${linked ? badge(linked.outcome) : ""}</div>${linked ? `<p class="quote">“${esc(linked.note)}”</p><button class="linked" data-open-feedback="${esc(linked.id)}">Open feedback →</button>` : `<div class="inline-empty"><p>No feedback was submitted for this interaction.</p><small>This is expected for many HTTP opportunities.</small></div>`}</section>${session ? `<section class="detail-section"><h2>Session context</h2><p>This interaction belongs to a continuity group supplied by ${esc(title(session.source))}.</p><button class="linked" data-open-session="${esc(session.id)}">Open session →</button></section>` : ""}</div><aside class="detail-sidebar"><section><h2>Properties</h2>${propertyList([["Occurred", esc(date(interaction.occurredAt))], ["Operation", esc(interaction.operation)], ["Customer", esc(interaction.customerRef || "Not linked")], ["Confirmation", esc(title(interaction.confirmationMethod || "none"))], ["Runtime hint", esc(interaction.runtimeHint || "Not provided")], ["Hint provenance", esc(interaction.runtimeHintSource || "Not provided")]])}</section><p class="privacy-note"><b>No agent identity.</b> Epode stores only evidence supplied by the product or protocol.</p><code class="object-id">${esc(interaction.id)}</code></aside></div>`;
   }
-  const rows = dashboard.interactions.map((entry) => `<button class="list-row" data-interaction="${esc(entry.id)}"><b class="${entry.classification === "confirmed" ? "positive" : "neutral"}">${esc(entry.classification.toUpperCase())}</b><span><strong>${esc(entry.operation)}</strong><small>${esc(title(entry.surface))} · ${esc(customer(entry.customerRef))}${entry.statusCode ? ` · HTTP ${entry.statusCode}` : ""}</small></span><time>${date(entry.occurredAt)}</time></button>`).join("");
-  return `${header("INTERACTIONS", "Product responses and tool uses", `${dashboard.interactions.length} interactions`)}${rows ? `<div class="list">${rows}</div>` : empty("No interactions yet", "Install the SDK and use one configured product route.")}`;
+  if (!dashboard.interactions.length) return `${header("INTERACTIONS", "Product activity", "0 interactions", `<button class="button" data-refresh-data>Refresh</button>`)}${empty("No interactions yet", "Finish setup and use one configured product route.")}`;
+  const outcomeByInteraction = new Map(dashboard.outcomes.map((entry) => [entry.interactionId, entry]));
+  const ranged = dashboard.interactions.filter((entry) => inTimeRange(entry.occurredAt));
+  const surfaces = [...new Set(dashboard.interactions.map((entry) => entry.surface))].sort().map((value) => [value, title(value)]);
+  const filtered = ranged.filter((entry) => {
+    const reviewed = outcomeByInteraction.has(entry.id);
+    const primaryMatch = explorerPrimary === "all" || explorerPrimary === entry.classification || (explorerPrimary === "reviewed" && reviewed) || (explorerPrimary === "unreviewed" && entry.classification === "confirmed" && !reviewed);
+    return primaryMatch && (explorerSecondary === "all" || entry.surface === explorerSecondary) && matchesQuery(entry.operation, entry.surface, entry.customerRef, entry.runtimeHint, entry.statusCode);
+  });
+  const confirmed = filtered.filter((entry) => entry.classification === "confirmed").length;
+  const reviewed = filtered.filter((entry) => outcomeByInteraction.has(entry.id)).length;
+  const durations = filtered.filter((entry) => entry.durationMs != null);
+  const average = durations.length ? Math.round(durations.reduce((sum, entry) => sum + entry.durationMs, 0) / durations.length) : null;
+  const rows = filtered.map((entry) => {
+    const outcome = outcomeByInteraction.get(entry.id);
+    return `<button class="table-row interaction-columns" data-interaction="${esc(entry.id)}" aria-label="Open ${esc(entry.operation)} interaction"><span>${badge(entry.classification)}</span><span class="primary-cell"><strong>${esc(entry.operation)}</strong><small>${esc(entry.customerRef || "Customer not linked")}</small></span><span>${esc(title(entry.surface))}</span><span>${esc(entry.statusCode || "—")}</span><span>${duration(entry.durationMs)}</span><span>${outcome ? badge(outcome.outcome) : "—"}</span><time title="${esc(date(entry.occurredAt))}">${esc(relativeDate(entry.occurredAt))}</time></button>`;
+  }).join("");
+  const toolbar = explorerToolbar({ placeholder: "Search operation, customer, status, or runtime", primaryLabel: "Evidence", primaryOptions: [["all", "All interactions"], ["confirmed", "Confirmed"], ["unclassified", "Unclassified"], ["reviewed", "Has feedback"], ["unreviewed", "Confirmed without feedback"]], secondaryOptions: surfaces });
+  const table = rows ? `<div class="explorer-table"><div class="table-head interaction-columns"><span>Evidence</span><span>Operation</span><span>Surface</span><span>Status</span><span>Duration</span><span>Feedback</span><span>Occurred</span></div>${rows}</div>` : `<div class="filtered-empty"><h2>No matching interactions</h2><p>Try a wider time range or clear the filters.</p><button class="button" data-clear-filters>Clear filters</button></div>`;
+  return `${header("INTERACTIONS", "Product activity", `${filtered.length} of ${ranged.length} interactions`, `<button class="button" data-refresh-data>Refresh</button>`)}${metricStrip([[filtered.length, "Interactions"], [confirmed, "Confirmed", "positive"], [reviewed, "With feedback"], [duration(average), "Average duration"]])}${toolbar}${table}`;
 }
 
 function sessionsView() {
   const session = dashboard.sessions.find((entry) => entry.id === selectedSession);
   if (session) {
-    const interactions = dashboard.interactions.filter((entry) => entry.sessionId === session.id);
-    const rows = interactions.map((entry) => `<button class="list-row" data-interaction="${esc(entry.id)}"><b>${esc(title(entry.classification))}</b><span><strong>${esc(entry.operation)}</strong><small>${esc(title(entry.surface))}</small></span><time>${date(entry.occurredAt)}</time></button>`).join("");
-    return `${header("SESSION DETAIL", `Session ${session.refHint}…`, `${interactions.length} interactions`)}<button class="back" data-back="sessions">← All sessions</button><dl class="session-meta"><div><dt>Proof source</dt><dd>${esc(title(session.source))}</dd></div><div><dt>Started</dt><dd>${date(session.startedAt)}</dd></div><div><dt>Last seen</dt><dd>${date(session.lastSeenAt)}</dd></div></dl><div class="list">${rows}</div>`;
+    const interactions = dashboard.interactions.filter((entry) => entry.sessionId === session.id).sort((a, b) => new Date(a.occurredAt) - new Date(b.occurredAt));
+    const outcomeByInteraction = new Map(dashboard.outcomes.map((entry) => [entry.interactionId, entry]));
+    const reviewed = interactions.filter((entry) => outcomeByInteraction.has(entry.id));
+    const confirmed = interactions.filter((entry) => entry.classification === "confirmed").length;
+    const customers = [...new Set(interactions.map((entry) => entry.customerRef).filter(Boolean))];
+    const timeline = interactions.map((entry, index) => {
+      const outcome = outcomeByInteraction.get(entry.id);
+      return `<button class="timeline-event" data-interaction="${esc(entry.id)}"><b>${index + 1}</b><span class="timeline-content"><span><strong>${esc(entry.operation)}</strong>${badge(entry.classification)}</span><small>${esc(title(entry.surface))} · ${duration(entry.durationMs)}${entry.statusCode ? ` · HTTP ${esc(entry.statusCode)}` : ""}</small>${outcome ? `<em class="timeline-feedback ${outcomeClass(outcome.outcome)}">${esc(title(outcome.outcome))}: “${esc(outcome.note)}”</em>` : ""}</span><time title="${esc(date(entry.occurredAt))}">${esc(relativeDate(entry.occurredAt))}</time></button>`;
+    }).join("");
+    return `${header("SESSION", `Session ${session.refHint}…`, `${interactions.length} interactions`, detailActions())}<button class="back" data-back="sessions">← All sessions</button>${metricStrip([[interactions.length, "Interactions"], [confirmed, "Confirmed"], [reviewed.length, "Reviews"], [sessionDuration(session), "Duration"]])}<div class="detail-layout session-detail"><div class="detail-main"><section class="detail-section"><div class="section-heading"><div><p class="eyebrow">TIMELINE</p><h2>Interaction journey</h2></div><span>${esc(date(session.startedAt))}</span></div>${timeline ? `<div class="session-timeline">${timeline}</div>` : `<div class="inline-empty"><p>No interactions are currently loaded for this session.</p></div>`}</section></div><aside class="detail-sidebar"><section><h2>Session properties</h2>${propertyList([["Proof source", esc(title(session.source))], ["Started", esc(date(session.startedAt))], ["Last seen", esc(date(session.lastSeenAt))], ["Customer", esc(customers.length === 1 ? customers[0] : customers.length > 1 ? "Multiple customer refs" : "Not linked")]])}</section><p class="privacy-note"><b>Proof-based continuity.</b> This session exists only because the product or MCP protocol supplied a stable reference. Epode never groups by time or inferred identity.</p><code class="object-id">${esc(session.id)}</code></aside></div>`;
   }
-  const rows = dashboard.sessions.map((entry) => `<button class="list-row" data-session="${esc(entry.id)}"><b>${esc(title(entry.source))}</b><span><strong>${esc(entry.refHint)}…</strong><small>Proof-based grouping; never inferred by time or identity</small></span><time>${date(entry.lastSeenAt)}</time></button>`).join("");
-  return `${header("SESSIONS", "Optional proven continuity", `${dashboard.sessions.length} sessions`)}<p class="muted">Sessions exist only when your product supplies a session reference or MCP provides protocol continuity. We never guess that two interactions came from the same agent.</p>${rows ? `<div class="list">${rows}</div>` : empty("No proven sessions", "This is normal. Every interaction and review works without a session.", "interactions")}`;
+  if (!dashboard.sessions.length) return `${header("SESSIONS", "Agent journeys", "0 sessions", `<button class="button" data-refresh-data>Refresh</button>`)}<p class="page-context">Sessions connect interactions only when your product or MCP supplies a stable reference. Epode never guesses continuity from timing or identity.</p>${empty("No proven sessions", "This is normal. Feedback and interactions work without a session.", "interactions")}`;
+  const interactionsBySession = dashboard.interactions.reduce((map, entry) => {
+    if (!entry.sessionId) return map;
+    if (!map.has(entry.sessionId)) map.set(entry.sessionId, []);
+    map.get(entry.sessionId).push(entry);
+    return map;
+  }, new Map());
+  const outcomeByInteraction = new Map(dashboard.outcomes.map((entry) => [entry.interactionId, entry]));
+  const ranged = dashboard.sessions.filter((entry) => inTimeRange(entry.lastSeenAt));
+  const sources = [...new Set(dashboard.sessions.map((entry) => entry.source))].sort().map((value) => [value, title(value)]);
+  const filtered = ranged.filter((entry) => {
+    const interactions = interactionsBySession.get(entry.id) || [];
+    const hasFeedback = interactions.some((interaction) => outcomeByInteraction.has(interaction.id));
+    const primaryMatch = explorerPrimary === "all" || (explorerPrimary === "reviewed" && hasFeedback) || (explorerPrimary === "unreviewed" && !hasFeedback);
+    return primaryMatch && (explorerSecondary === "all" || entry.source === explorerSecondary) && matchesQuery(entry.refHint, entry.source, ...interactions.map((interaction) => interaction.operation));
+  });
+  const totalInteractions = filtered.reduce((sum, entry) => sum + (interactionsBySession.get(entry.id) || []).length, 0);
+  const reviewedSessions = filtered.filter((entry) => (interactionsBySession.get(entry.id) || []).some((interaction) => outcomeByInteraction.has(interaction.id))).length;
+  const rows = filtered.map((entry) => {
+    const interactions = interactionsBySession.get(entry.id) || [];
+    const outcomes = interactions.map((interaction) => outcomeByInteraction.get(interaction.id)).filter(Boolean);
+    const customerRefs = [...new Set(interactions.map((interaction) => interaction.customerRef).filter(Boolean))];
+    return `<button class="table-row session-columns" data-session="${esc(entry.id)}" aria-label="Open session ${esc(entry.refHint)}"><span class="primary-cell"><strong>${esc(entry.refHint)}…</strong><small>${esc(title(entry.source))}</small></span><span>${interactions.length}</span><span>${outcomes.length ? `${outcomes.length} ${badge(outcomes.at(-1).outcome)}` : "—"}</span><span>${esc(customerRefs.length === 1 ? customerRefs[0] : customerRefs.length > 1 ? "Multiple" : "Not linked")}</span><span>${sessionDuration(entry)}</span><time title="${esc(date(entry.lastSeenAt))}">${esc(relativeDate(entry.lastSeenAt))}</time></button>`;
+  }).join("");
+  const toolbar = explorerToolbar({ placeholder: "Search session, operation, or source", primaryLabel: "Feedback", primaryOptions: [["all", "All sessions"], ["reviewed", "Has feedback"], ["unreviewed", "No feedback"]], secondaryLabel: "Proof source", secondaryOptions: sources });
+  const table = rows ? `<div class="explorer-table"><div class="table-head session-columns"><span>Session</span><span>Interactions</span><span>Feedback</span><span>Customer</span><span>Duration</span><span>Last seen</span></div>${rows}</div>` : `<div class="filtered-empty"><h2>No matching sessions</h2><p>Sessions only exist when your product or MCP supplies proof of continuity.</p><button class="button" data-clear-filters>Clear filters</button></div>`;
+  return `${header("SESSIONS", "Agent journeys", `${filtered.length} of ${ranged.length} sessions`, `<button class="button" data-refresh-data>Refresh</button>`)}<p class="page-context">Sessions connect interactions only when your product or MCP supplies a stable reference. Epode never guesses continuity from timing or identity.</p>${metricStrip([[filtered.length, "Sessions"], [totalInteractions, "Interactions"], [reviewedSessions, "With feedback"], [filtered.length ? (totalInteractions / filtered.length).toFixed(1) : "—", "Interactions per session"]])}${toolbar}${table}`;
 }
 
 const setupSurfaceCopy = {
@@ -372,7 +532,7 @@ function setupView() {
     const state = keyStatus.outcomes.length ? "Feedback received" : keyStatus.interactions.length ? "Connected" : "Never seen";
     return `<div class="connection-row"><span><strong>${esc(key.label)}</strong><small>${esc(key.prefix)}… · created ${date(key.createdAt)}</small></span><b class="${keyStatus.interactions.length ? "positive" : "neutral"}">${esc(state)}</b><button class="link-button" data-revoke-key="${esc(key.id)}">Rotate key</button></div>`;
   }).join("") || `<p class="muted">No integrations yet.</p>`;
-  return `${header("SETUP", `Connect ${dashboard.currentProduct.name}`)}<p class="setup-lede">Choose your stack, copy the ready installation, and send the first real interaction.</p><section class="setup-step"><div class="step-number">1</div><div class="step-body"><p class="eyebrow">INTEGRATION</p><h2>Choose how your product is served</h2><div class="choice-grid surfaces">${surfaces}</div><p class="selection-explanation"><strong>${esc(surface.name)}:</strong> ${esc(surface.detail)}</p><h3>Choose the integration</h3><div class="choice-grid stacks">${stacks}</div><p class="muted">For HTTP and HTML, choose which routes receive instructions in code—not in this dashboard.</p>${ready}</div></section>${legacyWarning}${installStep}${verifyStep}<details class="existing-connections"><summary>Product keys (${dashboard.apiKeys.length})</summary><div>${connections}</div></details>`;
+  return `${header("SETUP", `Connect ${dashboard.currentProduct.name}`, connected ? "Receiving data" : "Not connected")}${metricStrip([[setupKey ? "Ready" : "Missing", "Product key", setupKey ? "positive" : "negative"], [connected ? "Connected" : "Waiting", "Telemetry", connected ? "positive" : "neutral"], [reviewed ? "Received" : "Waiting", "Agent feedback", reviewed ? "positive" : "neutral"]])}<p class="setup-lede">Choose your stack, copy the ready installation, and send the first real interaction.</p><section class="setup-step"><div class="step-number">1</div><div class="step-body"><p class="eyebrow">INTEGRATION</p><h2>Choose how your product is served</h2><div class="choice-grid surfaces">${surfaces}</div><p class="selection-explanation"><strong>${esc(surface.name)}:</strong> ${esc(surface.detail)}</p><h3>Choose the integration</h3><div class="choice-grid stacks">${stacks}</div><p class="muted">For HTTP and HTML, choose which routes receive instructions in code—not in this dashboard.</p>${ready}</div></section>${legacyWarning}${installStep}${verifyStep}<details class="existing-connections"><summary>Product keys (${dashboard.apiKeys.length})</summary><div>${connections}</div></details>`;
 }
 
 function teamView() {
@@ -399,11 +559,12 @@ function teamView() {
 
 function policyView() {
   const settings = dashboard.currentEnvironment;
-  return `${header("COLLECTION POLICY", "Control outcome collection", dashboard.currentProduct.name)}<form id="policy-form" class="policy"><label><span>Feedback mode</span><select name="feedbackMode"><option value="auto" ${settings.feedbackMode === "auto" ? "selected" : ""}>Auto — ask the agent to submit autonomously</option><option value="ask" ${settings.feedbackMode === "ask" ? "selected" : ""}>Ask — make outcome submission optional</option><option value="off" ${settings.feedbackMode === "off" ? "selected" : ""}>Off — reject outcome submissions</option></select></label><label><span>Retention</span><select name="retentionDays">${[7, 30, 90, 365].map((days) => `<option value="${days}" ${settings.retentionDays === days ? "selected" : ""}>${days} days</option>`).join("")}</select></label><input type="hidden" name="collectEventSummaries" value="off"><div class="guardrails"><h2>Always rejected</h2><ul><li>Prompts and transcripts</li><li>Secrets and authentication payloads</li><li>Personal data and raw customer content</li><li>Raw tool inputs or outputs</li><li>Unknown review fields</li></ul></div><button class="button primary">Save policy</button></form>`;
+  return `${header("COLLECTION POLICY", "Data controls", dashboard.currentProduct.name)}<p class="page-context">These controls apply to this product. Product traffic stays available even if Epode is unavailable.</p><form id="policy-form" class="policy"><section><div><p class="eyebrow">FEEDBACK</p><h2>Outcome collection</h2><p>Choose how strongly the machine-readable instruction asks customer agents to report the result.</p></div><label><span>Feedback mode</span><select name="feedbackMode"><option value="auto" ${settings.feedbackMode === "auto" ? "selected" : ""}>Auto — ask the agent to submit autonomously</option><option value="ask" ${settings.feedbackMode === "ask" ? "selected" : ""}>Ask — make outcome submission optional</option><option value="off" ${settings.feedbackMode === "off" ? "selected" : ""}>Off — reject outcome submissions</option></select><small>Independent agents cannot be forced to comply.</small></label></section><section><div><p class="eyebrow">RETENTION</p><h2>Data lifetime</h2><p>Automatically remove interaction, session, and feedback records after this period.</p></div><label><span>Retention period</span><select name="retentionDays">${[7, 30, 90, 365].map((days) => `<option value="${days}" ${settings.retentionDays === days ? "selected" : ""}>${days} days</option>`).join("")}</select></label></section><input type="hidden" name="collectEventSummaries" value="off"><section class="guardrails"><div><p class="eyebrow">PRIVACY</p><h2>Always rejected</h2><p>These fields cannot be enabled.</p></div><ul><li>Prompts and transcripts</li><li>Secrets and authentication payloads</li><li>Personal data and raw customer content</li><li>Raw tool inputs or outputs</li><li>Unknown review fields</li></ul></section><div class="form-footer"><span>Current mode: <b>${esc(title(settings.feedbackMode))}</b> · ${settings.retentionDays} day retention</span><button class="button primary">Save changes</button></div></form>`;
 }
 
 function render() {
   if (!dashboard) return;
+  document.title = `${title(currentView)} · ${dashboard.currentProduct?.name || dashboard.workspace.name} · Epode`;
   document.querySelectorAll("[data-view]").forEach((button) => button.setAttribute("aria-current", button.dataset.view === currentView ? "page" : "false"));
   if (!dashboard.products.length && !["team", "new-product"].includes(currentView)) {
     page.innerHTML = dashboard.currentRole === "member" ? empty("No product yet", "An owner or admin needs to create the first product.", "team") : productCreateView(true);
@@ -447,11 +608,26 @@ document.addEventListener("click", async (event) => {
       setupInstallMode = target.dataset.installMode;
       render();
     }
-    if (target.dataset.outcome) { selectedOutcome = target.dataset.outcome; render(); }
-    if (target.dataset.interaction) { selectedInteraction = target.dataset.interaction; currentView = "interactions"; render(); }
-    if (target.dataset.session) { selectedSession = target.dataset.session; render(); }
-    if (target.dataset.back) { selectedOutcome = null; selectedInteraction = null; selectedSession = null; render(); }
-    if (target.dataset.openInteraction) { currentView = "interactions"; selectedInteraction = target.dataset.openInteraction; render(); }
+    if (target.dataset.outcome) { selectedOutcome = target.dataset.outcome; syncUrl("push"); render(); }
+    if (target.dataset.interaction) { selectedInteraction = target.dataset.interaction; selectedSession = null; currentView = "interactions"; syncUrl("push"); render(); }
+    if (target.dataset.session) { selectedSession = target.dataset.session; syncUrl("push"); render(); }
+    if (target.dataset.back) { selectedOutcome = null; selectedInteraction = null; selectedSession = null; syncUrl("push"); render(); }
+    if (target.dataset.openInteraction) { currentView = "interactions"; selectedInteraction = target.dataset.openInteraction; selectedOutcome = null; selectedSession = null; syncUrl("push"); render(); }
+    if (target.dataset.openSession) { currentView = "sessions"; selectedSession = target.dataset.openSession; selectedOutcome = null; selectedInteraction = null; syncUrl("push"); render(); }
+    if (target.dataset.openFeedback) { currentView = "feedback"; selectedOutcome = target.dataset.openFeedback; selectedInteraction = null; selectedSession = null; syncUrl("push"); render(); }
+    if (target.hasAttribute("data-copy-page-link")) { await navigator.clipboard.writeText(location.href); setNotice("Link copied.", 1800); }
+    if (target.hasAttribute("data-clear-filters")) { resetExplorer(); explorerRange = "30d"; syncUrl("replace"); render(); }
+    if (target.dataset.investigateView) {
+      currentView = target.dataset.investigateView;
+      selectedOutcome = null;
+      selectedInteraction = null;
+      selectedSession = null;
+      explorerPrimary = target.dataset.investigateFilter || "all";
+      explorerSecondary = "all";
+      explorerQuery = target.dataset.investigateQuery || "";
+      syncUrl("push");
+      render();
+    }
     if (target.hasAttribute("data-toggle-legacy")) { showingLegacy = !showingLegacy; selectedOutcome = null; render(); }
     if (target.dataset.copy) { await navigator.clipboard.writeText(target.dataset.copy); setNotice("Copied.", 1800); }
     if (target.hasAttribute("data-create-invite-link")) {
@@ -467,6 +643,10 @@ document.addEventListener("click", async (event) => {
     if (target.hasAttribute("data-refresh-setup")) {
       await refresh();
       setNotice("Connection status refreshed.");
+    }
+    if (target.hasAttribute("data-refresh-data")) {
+      await refresh();
+      setNotice("Data refreshed.", 1800);
     }
     if (target.dataset.revokeKey) {
       if (!confirm("Create a new product key? The current key stops working immediately.")) return;
@@ -501,15 +681,38 @@ document.addEventListener("click", async (event) => {
 
 document.addEventListener("change", async (event) => {
   try {
+    if (event.target.id === "explorer-primary") {
+      explorerPrimary = event.target.value;
+      syncUrl("replace");
+      render();
+    }
+    if (event.target.id === "explorer-secondary") {
+      explorerSecondary = event.target.value;
+      syncUrl("replace");
+      render();
+    }
+    if (event.target.id === "explorer-range") {
+      explorerRange = event.target.value;
+      syncUrl("replace");
+      render();
+    }
     if (event.target.id === "workspace-select") {
       selectedWorkspaceId = event.target.value;
       selectedProductId = "";
+      selectedOutcome = null;
+      selectedInteraction = null;
+      selectedSession = null;
+      resetExplorer();
       apiSecret = "";
       setupConnectionId = null;
       await refresh();
     }
     if (event.target.id === "product-select") {
       selectedProductId = event.target.value;
+      selectedOutcome = null;
+      selectedInteraction = null;
+      selectedSession = null;
+      resetExplorer();
       apiSecret = "";
       setupConnectionId = null;
       await refresh();
@@ -526,6 +729,21 @@ document.addEventListener("change", async (event) => {
   } catch (error) {
     setNotice(error.message || "Could not switch product");
   }
+});
+
+document.addEventListener("input", (event) => {
+  if (event.target.id !== "explorer-search") return;
+  explorerQuery = event.target.value;
+  clearTimeout(explorerTimer);
+  explorerTimer = setTimeout(() => {
+    syncUrl("replace");
+    render();
+    const input = document.querySelector("#explorer-search");
+    if (input) {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
+  }, 180);
 });
 
 document.addEventListener("submit", async (event) => {
@@ -577,6 +795,13 @@ window.addEventListener("popstate", () => {
   currentView = url.searchParams.get("view") || "feedback";
   selectedWorkspaceId = url.searchParams.get("team") || "";
   selectedProductId = url.searchParams.get("product") || "";
+  selectedOutcome = url.searchParams.get("outcome");
+  selectedInteraction = url.searchParams.get("interaction");
+  selectedSession = url.searchParams.get("session");
+  explorerQuery = url.searchParams.get("q") || "";
+  explorerPrimary = url.searchParams.get("filter") || "all";
+  explorerSecondary = url.searchParams.get("surface") || "all";
+  explorerRange = url.searchParams.get("range") || "30d";
   refresh().catch(() => location.assign("/"));
 });
 refresh().catch(() => location.assign("/"));
