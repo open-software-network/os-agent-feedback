@@ -33,7 +33,7 @@ const backendModels = await readFile(
 
 test("products exist before integration setup without an environment picker", () => {
   assert.match(dashboardHtml, /id="product-scope"/);
-  assert.match(dashboardHtml, /app\.js\?v=20260728-product-only/);
+  assert.match(dashboardHtml, /app\.js\?v=20260728-teams/);
   assert.match(dashboardScript, /Create your first product/);
   assert.match(dashboardScript, /id="product-select"/);
   assert.match(dashboardScript, /\+ New product/);
@@ -65,7 +65,7 @@ test("setup offers one guided install with a manual fallback", () => {
 test("installation is ready without a setup generation step", () => {
   assert.match(dashboardScript, /Installation ready/);
   assert.match(dashboardScript, /Default product key/);
-  assert.match(dashboardScript, /currentView === "setup" && dashboard\.currentEnvironment && !dashboard\.apiKeys\.length/);
+  assert.match(dashboardScript, /currentView === "setup" && dashboard\.currentRole !== "member" && dashboard\.currentEnvironment && !dashboard\.apiKeys\.length/);
   assert.doesNotMatch(dashboardScript, /Generate installation/);
   assert.doesNotMatch(dashboardScript, /data-create-key/);
   assert.doesNotMatch(dashboardScript, /Choose an integration and generate its installation first/);

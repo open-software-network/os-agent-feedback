@@ -4,6 +4,7 @@ const account = document.querySelector("#account");
 const productScope = document.querySelector("#product-scope");
 let dashboard;
 let currentView = new URL(location.href).searchParams.get("view") || "feedback";
+let selectedWorkspaceId = new URL(location.href).searchParams.get("team") || "";
 let selectedProductId = new URL(location.href).searchParams.get("product") || "";
 let selectedOutcome = null;
 let selectedInteraction = null;
@@ -15,6 +16,7 @@ let setupStack = "node-mcp";
 let setupConnectionId = null;
 let setupInstallMode = "agent";
 let setupMonitor = null;
+let latestInviteLink = "";
 
 function setupSecretKey(environmentId) {
   return `agent-feedback:product-key:${environmentId}`;
@@ -45,8 +47,12 @@ const setNotice = (message) => { notice.textContent = message; notice.hidden = !
 const outcomeClass = (value) => value === "success" ? "positive" : value === "failure" ? "negative" : "neutral";
 const customer = (value) => value ? `Customer ${value}` : "Customer not linked";
 
-async function request(path, options) {
-  const response = await fetch(path, options);
+async function request(path, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (dashboard?.workspace?.id && path.startsWith("/api/")) {
+    headers.set("x-workspace-id", dashboard.workspace.id);
+  }
+  const response = await fetch(path, { ...options, headers });
   const body = await response.json().catch(() => ({}));
   if (response.status === 401) {
     location.assign("/");
@@ -57,10 +63,16 @@ async function request(path, options) {
 }
 
 async function refresh() {
-  const query = selectedProductId ? `?productId=${encodeURIComponent(selectedProductId)}` : "";
-  dashboard = await request(`/api/dashboard${query}`);
+  const query = new URLSearchParams();
+  if (selectedWorkspaceId) query.set("workspaceId", selectedWorkspaceId);
+  if (selectedProductId) query.set("productId", selectedProductId);
+  dashboard = await request(`/api/dashboard${query.size ? `?${query}` : ""}`);
+  selectedWorkspaceId = dashboard.workspace.id;
   selectedProductId = dashboard.currentProduct?.id || "";
-  if (currentView === "setup" && dashboard.currentEnvironment && !dashboard.apiKeys.length) {
+  if (dashboard.currentRole === "member" && ["setup", "policy", "new-product"].includes(currentView)) {
+    currentView = "feedback";
+  }
+  if (currentView === "setup" && dashboard.currentRole !== "member" && dashboard.currentEnvironment && !dashboard.apiKeys.length) {
     const body = await request("/api/settings/api-keys", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -80,24 +92,36 @@ async function refresh() {
     apiSecret = "";
   }
   const identity = `@${dashboard.user.handle}${dashboard.user.email ? ` · ${dashboard.user.email}` : ""}`;
-  account.innerHTML = `<strong>${esc(dashboard.user.displayName)}</strong><small>${esc(identity)}</small>`;
+  account.innerHTML = `<strong>${esc(dashboard.user.displayName)}</strong><small>${esc(identity)}</small><small>${esc(title(dashboard.currentRole))} · ${esc(dashboard.workspace.name)}</small>`;
   renderProductScope();
+  document.querySelectorAll("[data-editor-only]").forEach((element) => {
+    element.hidden = dashboard.currentRole === "member";
+  });
   const url = new URL(location.href);
+  url.searchParams.set("team", selectedWorkspaceId);
   if (selectedProductId) url.searchParams.set("product", selectedProductId);
   else url.searchParams.delete("product");
   url.searchParams.delete("environment");
   history.replaceState({}, "", url);
+  if (url.searchParams.get("invite") === "invalid") {
+    url.searchParams.delete("invite");
+    history.replaceState({}, "", url);
+    setNotice("That invitation is expired, revoked, or belongs to a different OS Account.");
+  }
   render();
 }
 
 function renderProductScope() {
+  const workspaceOptions = dashboard.workspaceMemberships.map((entry) => `<option value="${esc(entry.workspaceId)}" ${entry.workspaceId === dashboard.workspace.id ? "selected" : ""}>${esc(entry.workspaceName)}</option>`).join("");
+  const teamSelect = `<label><span>Team</span><select id="workspace-select">${workspaceOptions}</select></label>`;
+  const canEdit = dashboard.currentRole === "owner" || dashboard.currentRole === "admin";
   if (!dashboard.products.length) {
-    productScope.innerHTML = `<p class="eyebrow">PRODUCT</p><button class="scope-empty" data-new-product>Create your first product</button>`;
+    productScope.innerHTML = `${teamSelect}<p class="eyebrow">PRODUCT</p>${canEdit ? `<button class="scope-empty" data-new-product>Create your first product</button>` : `<small>No product has been created yet.</small>`}`;
     return;
   }
   const product = dashboard.currentProduct;
   const productOptions = dashboard.products.map((entry) => `<option value="${esc(entry.id)}" ${entry.id === product?.id ? "selected" : ""}>${esc(entry.name)}</option>`).join("");
-  productScope.innerHTML = `<label><span>Product</span><select id="product-select">${productOptions}</select></label><button class="link-button" data-new-product>+ New product</button>`;
+  productScope.innerHTML = `${teamSelect}<label><span>Product</span><select id="product-select">${productOptions}</select></label>${canEdit ? `<button class="link-button" data-new-product>+ New product</button>` : ""}`;
 }
 
 function navigate(view) {
@@ -334,6 +358,27 @@ function setupView() {
   return `${header("SETUP", `Connect ${dashboard.currentProduct.name}`)}<p class="setup-lede">Choose your stack, copy the ready installation, and send the first real interaction.</p><section class="setup-step"><div class="step-number">1</div><div class="step-body"><p class="eyebrow">INTEGRATION</p><h2>Choose how your product is served</h2><div class="choice-grid surfaces">${surfaces}</div><p class="selection-explanation"><strong>${esc(surface.name)}:</strong> ${esc(surface.detail)}</p><h3>Choose the integration</h3><div class="choice-grid stacks">${stacks}</div><p class="muted">For HTTP and HTML, choose which routes receive instructions in code—not in this dashboard.</p>${ready}</div></section>${installStep}${verifyStep}<details class="existing-connections"><summary>Product keys (${dashboard.apiKeys.length})</summary><div>${connections}</div></details>`;
 }
 
+function teamView() {
+  const isOwner = dashboard.currentRole === "owner";
+  const isAdmin = dashboard.currentRole === "admin";
+  const canInvite = isOwner || isAdmin;
+  const inviteResult = latestInviteLink ? `<div class="secret-callout"><div><b>Invitation ready to share</b><code>${esc(latestInviteLink)}</code><small>The invitation is limited to the matching OS Account and expires in seven days.</small></div><button class="button" data-copy="${esc(latestInviteLink)}">Copy link</button></div>` : "";
+  const roleOptions = (role) => `<option value="member" ${role === "member" ? "selected" : ""}>Member</option><option value="admin" ${role === "admin" ? "selected" : ""}>Admin</option>`;
+  const memberRows = dashboard.teamMembers.map((member) => {
+    const isSelf = member.osUserId === dashboard.user.id;
+    const canRemove = !isSelf && member.role !== "owner" && (isOwner || (isAdmin && member.role === "member"));
+    const roleControl = isOwner && member.role !== "owner" ? `<select class="compact-select" data-member-role="${esc(member.osUserId)}" aria-label="Role for ${esc(member.displayName)}">${roleOptions(member.role)}</select>` : `<b>${esc(title(member.role))}</b>`;
+    return `<div class="team-row"><span><strong>${esc(member.displayName)}${isSelf ? " (you)" : ""}</strong><small>@${esc(member.handle)}${member.email ? ` · ${esc(member.email)}` : ""}</small></span>${roleControl}<span>${canRemove ? `<button class="link-button danger" data-remove-member="${esc(member.osUserId)}">Remove</button>` : ""}</span></div>`;
+  }).join("");
+  const invitationRows = dashboard.teamInvitations.map((invitation) => {
+    const link = `${location.origin}/join/${invitation.id}`;
+    const canRevoke = isOwner || (isAdmin && invitation.role === "member");
+    return `<div class="team-row"><span><strong>${invitation.inviteeKind === "handle" ? "@" : ""}${esc(invitation.inviteeValue)}</strong><small>Invited as ${esc(invitation.role)} · expires ${date(invitation.expiresAt)}</small></span><button class="link-button" data-copy="${esc(link)}">Copy link</button><span>${canRevoke ? `<button class="link-button danger" data-revoke-invitation="${esc(invitation.id)}">Revoke</button>` : ""}</span></div>`;
+  }).join("");
+  const inviteForm = canInvite ? `<section class="team-invite"><h2>Invite a teammate</h2><p>Enter the email or @handle on their OS Account. Share the generated link; their identity is verified when they sign in.</p><form id="team-invite-form"><label><span>OS Account email or handle</span><input name="invitee" placeholder="teammate@example.com or @teammate" maxlength="160" required></label><label><span>Role</span><select name="role">${isOwner ? `<option value="admin">Admin</option>` : ""}<option value="member" selected>Member</option></select></label><button class="button primary">Create invitation</button></form>${inviteResult}</section>` : `<p class="muted">Your ${esc(dashboard.currentRole)} role can view this team. An owner or admin manages membership.</p>`;
+  return `${header("TEAM", dashboard.workspace.name, `${dashboard.teamMembers.length} member${dashboard.teamMembers.length === 1 ? "" : "s"}`)}<div class="role-guide"><article><h2>Owner</h2><p>Full product, team, and role control.</p></article><article><h2>Admin</h2><p>Manages products and can invite or remove members.</p></article><article><h2>Member</h2><p>Can view feedback, interactions, sessions, and insights.</p></article></div>${inviteForm}<section class="team-section"><h2>Members</h2><div class="team-list">${memberRows}</div></section>${canInvite ? `<section class="team-section"><h2>Pending invitations</h2>${invitationRows ? `<div class="team-list">${invitationRows}</div>` : `<p class="muted">No pending invitations.</p>`}</section>` : ""}`;
+}
+
 function policyView() {
   const settings = dashboard.currentEnvironment;
   return `${header("COLLECTION POLICY", "Control outcome collection", dashboard.currentProduct.name)}<form id="policy-form" class="policy"><label><span>Feedback mode</span><select name="feedbackMode"><option value="auto" ${settings.feedbackMode === "auto" ? "selected" : ""}>Auto — ask the agent to submit autonomously</option><option value="ask" ${settings.feedbackMode === "ask" ? "selected" : ""}>Ask — make outcome submission optional</option><option value="off" ${settings.feedbackMode === "off" ? "selected" : ""}>Off — reject outcome submissions</option></select></label><label><span>Retention</span><select name="retentionDays">${[7, 30, 90, 365].map((days) => `<option value="${days}" ${settings.retentionDays === days ? "selected" : ""}>${days} days</option>`).join("")}</select></label><input type="hidden" name="collectEventSummaries" value="off"><div class="guardrails"><h2>Always rejected</h2><ul><li>Prompts and transcripts</li><li>Secrets and authentication payloads</li><li>Personal data and raw customer content</li><li>Raw tool inputs or outputs</li><li>Unknown review fields</li></ul></div><button class="button primary">Save policy</button></form>`;
@@ -342,10 +387,10 @@ function policyView() {
 function render() {
   if (!dashboard) return;
   document.querySelectorAll("[data-view]").forEach((button) => button.setAttribute("aria-current", button.dataset.view === currentView ? "page" : "false"));
-  if (!dashboard.products.length) {
-    page.innerHTML = productCreateView(true);
+  if (!dashboard.products.length && !["team", "new-product"].includes(currentView)) {
+    page.innerHTML = dashboard.currentRole === "member" ? empty("No product yet", "An owner or admin needs to create the first product.", "team") : productCreateView(true);
   } else {
-    page.innerHTML = ({ feedback: feedbackView, insights: insightsView, interactions: interactionsView, sessions: sessionsView, setup: setupView, policy: policyView, "new-product": productCreateView }[currentView] || feedbackView)();
+    page.innerHTML = ({ feedback: feedbackView, insights: insightsView, interactions: interactionsView, sessions: sessionsView, setup: setupView, policy: policyView, team: teamView, "new-product": productCreateView }[currentView] || feedbackView)();
   }
   if (currentView !== "setup" || !setupConnectionId || setupConnectionStatus(setupConnectionId).outcomes.length) {
     clearInterval(setupMonitor);
@@ -408,6 +453,18 @@ document.addEventListener("click", async (event) => {
       await refresh();
       setNotice("Product key rotated. Save the new server-side key shown above.");
     }
+    if (target.dataset.removeMember) {
+      if (!confirm("Remove this member from the team?")) return;
+      await request(`/api/team/members/${encodeURIComponent(target.dataset.removeMember)}`, { method: "DELETE" });
+      await refresh();
+      setNotice("Team member removed.");
+    }
+    if (target.dataset.revokeInvitation) {
+      if (!confirm("Revoke this invitation?")) return;
+      await request(`/api/team/invitations/${encodeURIComponent(target.dataset.revokeInvitation)}`, { method: "DELETE" });
+      await refresh();
+      setNotice("Invitation revoked.");
+    }
   } catch (error) {
     setNotice(error.message || "Request failed");
   }
@@ -415,11 +472,28 @@ document.addEventListener("click", async (event) => {
 
 document.addEventListener("change", async (event) => {
   try {
+    if (event.target.id === "workspace-select") {
+      selectedWorkspaceId = event.target.value;
+      selectedProductId = "";
+      apiSecret = "";
+      setupConnectionId = null;
+      latestInviteLink = "";
+      await refresh();
+    }
     if (event.target.id === "product-select") {
       selectedProductId = event.target.value;
       apiSecret = "";
       setupConnectionId = null;
       await refresh();
+    }
+    if (event.target.dataset.memberRole) {
+      await request(`/api/team/members/${encodeURIComponent(event.target.dataset.memberRole)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ role: event.target.value }),
+      });
+      await refresh();
+      setNotice("Member role updated.");
     }
   } catch (error) {
     setNotice(error.message || "Could not switch product");
@@ -427,7 +501,7 @@ document.addEventListener("change", async (event) => {
 });
 
 document.addEventListener("submit", async (event) => {
-  if (!["product-form", "policy-form"].includes(event.target.id)) return;
+  if (!["product-form", "policy-form", "team-invite-form"].includes(event.target.id)) return;
   event.preventDefault();
   const form = new FormData(event.target);
   try {
@@ -447,6 +521,17 @@ document.addEventListener("submit", async (event) => {
       await refresh();
       setNotice("Collection policy saved for this product.");
     }
+    if (event.target.id === "team-invite-form") {
+      const body = await request("/api/team/invitations", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ invitee: form.get("invitee"), role: form.get("role") }),
+      });
+      latestInviteLink = `${location.origin}${body.joinPath}`;
+      event.target.reset();
+      await refresh();
+      setNotice("Invitation created. Copy and share the invite link.");
+    }
   } catch (error) {
     setNotice(error.message || "Request failed");
   }
@@ -459,6 +544,7 @@ document.querySelector("#signout").addEventListener("click", async () => {
 window.addEventListener("popstate", () => {
   const url = new URL(location.href);
   currentView = url.searchParams.get("view") || "feedback";
+  selectedWorkspaceId = url.searchParams.get("team") || "";
   selectedProductId = url.searchParams.get("product") || "";
   refresh().catch(() => location.assign("/"));
 });

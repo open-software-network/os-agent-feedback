@@ -15,6 +15,8 @@ Agent Feedback does not identify agents. HTTP responses are unclassified opportu
 
 Dashboard data is organized as workspace → product → integration. Users choose a product once; its keys, interactions, reviews, sessions, insights, and collection policy stay scoped to that product.
 
+Workspaces support OS Account teams. Owners can invite admins or members, change roles, and remove teammates. Admins can manage products and member invitations. Members have read-only access to feedback and observability data. Invitations are bound to the recipient's OS Account email or handle and can be accepted through a seven-day share link.
+
 ## Protocol-first integrations
 
 First-class adapters currently cover:

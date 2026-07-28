@@ -25,6 +25,54 @@ pub struct CurrentUser {
     pub display_name: String,
 }
 
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceMembership {
+    pub workspace_id: Uuid,
+    pub workspace_name: String,
+    pub workspace_slug: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamMember {
+    pub workspace_id: Uuid,
+    pub os_user_id: String,
+    pub handle: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    pub role: String,
+    pub joined_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamInvitation {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub invited_by_os_user_id: String,
+    pub invitee_kind: String,
+    pub invitee_value: String,
+    pub role: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateTeamInvitationInput {
+    pub invitee: String,
+    pub role: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateTeamMemberInput {
+    pub role: String,
+}
+
 #[derive(Debug, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiKeyPublic {
@@ -332,6 +380,10 @@ pub struct Insights {
 pub struct DashboardData {
     pub user: CurrentUser,
     pub workspace: Workspace,
+    pub workspace_memberships: Vec<WorkspaceMembership>,
+    pub current_role: String,
+    pub team_members: Vec<TeamMember>,
+    pub team_invitations: Vec<TeamInvitation>,
     pub products: Vec<Product>,
     pub environments: Vec<ProductEnvironment>,
     pub current_product: Option<Product>,
@@ -357,4 +409,6 @@ pub struct ProductAuth {
 pub struct DashboardContext {
     pub user: CurrentUser,
     pub workspace: Workspace,
+    pub role: String,
+    pub workspace_memberships: Vec<WorkspaceMembership>,
 }

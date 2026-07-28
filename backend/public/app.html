@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Agent Feedback Dashboard</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260728-product-only">
-  <script src="/static/app.js?v=20260728-product-only" defer></script>
+  <link rel="stylesheet" href="/static/styles.css?v=20260728-teams">
+  <script src="/static/app.js?v=20260728-teams" defer></script>
 </head>
 <body>
   <div class="app-shell">
@@ -20,8 +20,9 @@
         <button data-view="interactions">Interactions</button>
         <button data-view="sessions">Sessions</button>
         <p>CONFIGURATION</p>
-        <button data-view="setup">Setup</button>
-        <button data-view="policy">Collection policy</button>
+        <button data-view="setup" data-editor-only>Setup</button>
+        <button data-view="policy" data-editor-only>Collection policy</button>
+        <button data-view="team">Team</button>
       </nav>
       <div id="account" class="account"></div>
       <button id="signout" class="link-button">Sign out</button>

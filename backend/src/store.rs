@@ -73,29 +73,413 @@ pub async fn get_or_create_workspace(
     pool: &PgPool,
     os_user: &OsUser,
 ) -> Result<Workspace, ApiError> {
-    if let Some(workspace) =
+    let workspace = if let Some(workspace) =
         sqlx::query_as::<_, Workspace>("SELECT * FROM workspaces WHERE os_user_id = $1")
             .bind(&os_user.id)
             .fetch_optional(pool)
             .await?
     {
-        return Ok(workspace);
+        workspace
+    } else {
+        let display = os_user.display_name.as_deref().unwrap_or(&os_user.handle);
+        let name = format!("{} workspace", clean(display, 70));
+        sqlx::query_as::<_, Workspace>(
+            r#"INSERT INTO workspaces (id, os_user_id, name, slug)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (os_user_id) DO UPDATE SET updated_at = workspaces.updated_at
+            RETURNING *"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(&os_user.id)
+        .bind(name)
+        .bind(slug(display))
+        .fetch_one(pool)
+        .await?
+    };
+    upsert_workspace_member(pool, workspace.id, os_user, "owner").await?;
+    Ok(workspace)
+}
+
+async fn upsert_workspace_member(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    os_user: &OsUser,
+    role: &str,
+) -> Result<(), ApiError> {
+    let display_name = os_user.display_name.as_deref().unwrap_or(&os_user.handle);
+    sqlx::query(
+        r#"INSERT INTO workspace_members
+        (workspace_id, os_user_id, handle, email, display_name, role)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (workspace_id, os_user_id) DO UPDATE SET
+          handle = EXCLUDED.handle,
+          email = EXCLUDED.email,
+          display_name = EXCLUDED.display_name,
+          updated_at = NOW()"#,
+    )
+    .bind(workspace_id)
+    .bind(&os_user.id)
+    .bind(clean(&os_user.handle, 80))
+    .bind(
+        os_user
+            .email
+            .as_deref()
+            .map(|email| email.trim().to_lowercase()),
+    )
+    .bind(clean(display_name, 100))
+    .bind(role)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+fn invitation_matches(invitation: &TeamInvitation, os_user: &OsUser) -> bool {
+    match invitation.invitee_kind.as_str() {
+        "email" => os_user
+            .email
+            .as_deref()
+            .is_some_and(|email| email.trim().eq_ignore_ascii_case(&invitation.invitee_value)),
+        "handle" => os_user
+            .handle
+            .trim_start_matches('@')
+            .eq_ignore_ascii_case(&invitation.invitee_value),
+        _ => false,
     }
-    let display = os_user.display_name.as_deref().unwrap_or(&os_user.handle);
-    let name = format!("{} workspace", clean(display, 70));
-    sqlx::query_as::<_, Workspace>(
-        r#"INSERT INTO workspaces (id, os_user_id, name, slug)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (os_user_id) DO UPDATE SET updated_at = workspaces.updated_at
-        RETURNING *"#,
+}
+
+async fn accept_invitation(
+    pool: &PgPool,
+    os_user: &OsUser,
+    invitation: &TeamInvitation,
+) -> Result<Uuid, ApiError> {
+    if !invitation_matches(invitation, os_user) {
+        return Err(ApiError::forbidden(
+            "This invitation belongs to a different OS Account",
+        ));
+    }
+    let mut tx = pool.begin().await?;
+    let display_name = os_user.display_name.as_deref().unwrap_or(&os_user.handle);
+    sqlx::query(
+        r#"INSERT INTO workspace_members
+        (workspace_id, os_user_id, handle, email, display_name, role)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (workspace_id, os_user_id) DO UPDATE SET
+          handle = EXCLUDED.handle,
+          email = EXCLUDED.email,
+          display_name = EXCLUDED.display_name,
+          role = CASE WHEN workspace_members.role = 'owner' THEN 'owner' ELSE EXCLUDED.role END,
+          updated_at = NOW()"#,
+    )
+    .bind(invitation.workspace_id)
+    .bind(&os_user.id)
+    .bind(clean(&os_user.handle, 80))
+    .bind(
+        os_user
+            .email
+            .as_deref()
+            .map(|email| email.trim().to_lowercase()),
+    )
+    .bind(clean(display_name, 100))
+    .bind(&invitation.role)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"UPDATE workspace_invitations
+        SET accepted_at = NOW(), accepted_by_os_user_id = $1
+        WHERE id = $2 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()"#,
+    )
+    .bind(&os_user.id)
+    .bind(invitation.id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(invitation.workspace_id)
+}
+
+pub async fn accept_team_invitation(
+    pool: &PgPool,
+    os_user: &OsUser,
+    invitation_id: Uuid,
+) -> Result<Uuid, ApiError> {
+    let invitation = sqlx::query_as::<_, TeamInvitation>(
+        r#"SELECT id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
+        role, created_at, expires_at FROM workspace_invitations
+        WHERE id = $1 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()"#,
+    )
+    .bind(invitation_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| ApiError::gone("This team invitation is no longer available"))?;
+    accept_invitation(pool, os_user, &invitation).await
+}
+
+async fn accept_matching_invitations(pool: &PgPool, os_user: &OsUser) -> Result<(), ApiError> {
+    let email = os_user
+        .email
+        .as_deref()
+        .map(|value| value.trim().to_lowercase());
+    let handle = os_user.handle.trim_start_matches('@').to_lowercase();
+    let invitations = sqlx::query_as::<_, TeamInvitation>(
+        r#"SELECT id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
+        role, created_at, expires_at FROM workspace_invitations
+        WHERE accepted_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()
+          AND ((invitee_kind = 'handle' AND invitee_value = $1)
+            OR (invitee_kind = 'email' AND invitee_value = $2))"#,
+    )
+    .bind(handle)
+    .bind(email)
+    .fetch_all(pool)
+    .await?;
+    for invitation in invitations {
+        accept_invitation(pool, os_user, &invitation).await?;
+    }
+    Ok(())
+}
+
+pub async fn resolve_workspace_access(
+    pool: &PgPool,
+    os_user: &OsUser,
+    requested_workspace_id: Option<Uuid>,
+) -> Result<(Workspace, String, Vec<WorkspaceMembership>), ApiError> {
+    let personal_workspace = get_or_create_workspace(pool, os_user).await?;
+    accept_matching_invitations(pool, os_user).await?;
+    sqlx::query(
+        r#"UPDATE workspace_members SET handle = $1, email = $2, display_name = $3,
+        updated_at = NOW() WHERE os_user_id = $4"#,
+    )
+    .bind(clean(&os_user.handle, 80))
+    .bind(
+        os_user
+            .email
+            .as_deref()
+            .map(|email| email.trim().to_lowercase()),
+    )
+    .bind(clean(
+        os_user.display_name.as_deref().unwrap_or(&os_user.handle),
+        100,
+    ))
+    .bind(&os_user.id)
+    .execute(pool)
+    .await?;
+    let memberships = sqlx::query_as::<_, WorkspaceMembership>(
+        r#"SELECT w.id AS workspace_id, w.name AS workspace_name,
+        w.slug AS workspace_slug, m.role
+        FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id
+        WHERE m.os_user_id = $1
+        ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
+        m.joined_at, w.name"#,
+    )
+    .bind(&os_user.id)
+    .fetch_all(pool)
+    .await?;
+    let selected = if let Some(workspace_id) = requested_workspace_id {
+        memberships
+            .iter()
+            .find(|membership| membership.workspace_id == workspace_id)
+            .ok_or_else(|| ApiError::forbidden("You are not a member of this team"))?
+    } else {
+        memberships
+            .iter()
+            .find(|membership| membership.workspace_id == personal_workspace.id)
+            .or_else(|| memberships.first())
+            .ok_or_else(|| ApiError::forbidden("No team membership is available"))?
+    };
+    let workspace = sqlx::query_as::<_, Workspace>("SELECT * FROM workspaces WHERE id = $1")
+        .bind(selected.workspace_id)
+        .fetch_one(pool)
+        .await?;
+    Ok((workspace, selected.role.clone(), memberships))
+}
+
+fn normalize_invitee(value: &str) -> Result<(&'static str, String), ApiError> {
+    let value = value.trim().to_lowercase();
+    let (kind, value) = if value.starts_with('@') {
+        ("handle", value.trim_start_matches('@').to_string())
+    } else if value.contains('@') {
+        ("email", value)
+    } else {
+        ("handle", value)
+    };
+    let valid = (2..=160).contains(&value.len())
+        && !value.chars().any(char::is_whitespace)
+        && (kind != "email" || value.split('@').count() == 2);
+    if !valid {
+        return Err(ApiError::bad_request(
+            "Enter a valid OS Account email or @handle",
+        ));
+    }
+    Ok((kind, value))
+}
+
+fn validate_team_role(role: &str) -> Result<&str, ApiError> {
+    match role {
+        "admin" | "member" => Ok(role),
+        _ => Err(ApiError::bad_request("Role must be admin or member")),
+    }
+}
+
+pub async fn create_team_invitation(
+    pool: &PgPool,
+    context: &DashboardContext,
+    input: CreateTeamInvitationInput,
+) -> Result<TeamInvitation, ApiError> {
+    if context.role != "owner" && context.role != "admin" {
+        return Err(ApiError::forbidden(
+            "Only owners and admins can invite members",
+        ));
+    }
+    let role = validate_team_role(input.role.trim())?;
+    if context.role == "admin" && role != "member" {
+        return Err(ApiError::forbidden("Admins can only invite members"));
+    }
+    let (invitee_kind, invitee_value) = normalize_invitee(&input.invitee)?;
+    let existing_member: bool = match invitee_kind {
+        "email" => sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND LOWER(email) = $2)",
+        )
+        .bind(context.workspace.id)
+        .bind(&invitee_value)
+        .fetch_one(pool)
+        .await?,
+        _ => sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND LOWER(handle) = $2)",
+        )
+        .bind(context.workspace.id)
+        .bind(&invitee_value)
+        .fetch_one(pool)
+        .await?,
+    };
+    if existing_member {
+        return Err(ApiError::conflict("This person is already a team member"));
+    }
+    sqlx::query(
+        r#"UPDATE workspace_invitations SET revoked_at = NOW()
+        WHERE workspace_id = $1 AND invitee_kind = $2 AND invitee_value = $3
+          AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at <= NOW()"#,
+    )
+    .bind(context.workspace.id)
+    .bind(invitee_kind)
+    .bind(&invitee_value)
+    .execute(pool)
+    .await?;
+    sqlx::query_as::<_, TeamInvitation>(
+        r#"INSERT INTO workspace_invitations
+        (id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value, role, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '7 days')
+        RETURNING id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
+        role, created_at, expires_at"#,
     )
     .bind(Uuid::new_v4())
-    .bind(&os_user.id)
-    .bind(name)
-    .bind(slug(display))
+    .bind(context.workspace.id)
+    .bind(&context.user.id)
+    .bind(invitee_kind)
+    .bind(invitee_value)
+    .bind(role)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| database_conflict(error, "An active invitation already exists"))
+}
+
+pub async fn update_team_member_role(
+    pool: &PgPool,
+    context: &DashboardContext,
+    os_user_id: &str,
+    input: UpdateTeamMemberInput,
+) -> Result<TeamMember, ApiError> {
+    if context.role != "owner" {
+        return Err(ApiError::forbidden(
+            "Only the owner can change member roles",
+        ));
+    }
+    let role = validate_team_role(input.role.trim())?;
+    let target = sqlx::query_as::<_, TeamMember>(
+        "SELECT * FROM workspace_members WHERE workspace_id = $1 AND os_user_id = $2",
+    )
+    .bind(context.workspace.id)
+    .bind(os_user_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| ApiError::not_found("Team member not found"))?;
+    if target.role == "owner" {
+        return Err(ApiError::forbidden("The owner role cannot be changed"));
+    }
+    sqlx::query_as::<_, TeamMember>(
+        r#"UPDATE workspace_members SET role = $1, updated_at = NOW()
+        WHERE workspace_id = $2 AND os_user_id = $3 RETURNING *"#,
+    )
+    .bind(role)
+    .bind(context.workspace.id)
+    .bind(os_user_id)
     .fetch_one(pool)
     .await
     .map_err(Into::into)
+}
+
+pub async fn remove_team_member(
+    pool: &PgPool,
+    context: &DashboardContext,
+    os_user_id: &str,
+) -> Result<(), ApiError> {
+    if context.role != "owner" && context.role != "admin" {
+        return Err(ApiError::forbidden(
+            "Only owners and admins can remove members",
+        ));
+    }
+    let target = sqlx::query_as::<_, TeamMember>(
+        "SELECT * FROM workspace_members WHERE workspace_id = $1 AND os_user_id = $2",
+    )
+    .bind(context.workspace.id)
+    .bind(os_user_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| ApiError::not_found("Team member not found"))?;
+    if target.role == "owner" {
+        return Err(ApiError::forbidden("The team owner cannot be removed"));
+    }
+    if context.role == "admin" && target.role != "member" {
+        return Err(ApiError::forbidden("Admins can only remove members"));
+    }
+    if target.os_user_id == context.user.id {
+        return Err(ApiError::forbidden("You cannot remove yourself"));
+    }
+    sqlx::query("DELETE FROM workspace_members WHERE workspace_id = $1 AND os_user_id = $2")
+        .bind(context.workspace.id)
+        .bind(os_user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn revoke_team_invitation(
+    pool: &PgPool,
+    context: &DashboardContext,
+    invitation_id: Uuid,
+) -> Result<(), ApiError> {
+    if context.role != "owner" && context.role != "admin" {
+        return Err(ApiError::forbidden(
+            "Only owners and admins can revoke invitations",
+        ));
+    }
+    let invitation = sqlx::query_as::<_, TeamInvitation>(
+        r#"SELECT id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
+        role, created_at, expires_at FROM workspace_invitations
+        WHERE id = $1 AND workspace_id = $2 AND accepted_at IS NULL AND revoked_at IS NULL"#,
+    )
+    .bind(invitation_id)
+    .bind(context.workspace.id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| ApiError::not_found("Invitation not found"))?;
+    if context.role == "admin" && invitation.role != "member" {
+        return Err(ApiError::forbidden(
+            "Admins can only revoke member invitations",
+        ));
+    }
+    sqlx::query("UPDATE workspace_invitations SET revoked_at = NOW() WHERE id = $1")
+        .bind(invitation_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn agent_workspace(pool: &PgPool, headers: &HeaderMap) -> Result<Workspace, ApiError> {
@@ -475,9 +859,37 @@ pub async fn dashboard(
         surfaces: counts(surface_counts),
         outcomes: counts(outcome_counts),
     };
+    let team_members = sqlx::query_as::<_, TeamMember>(
+        r#"SELECT workspace_id, os_user_id, handle, email, display_name, role,
+        joined_at, updated_at FROM workspace_members
+        WHERE workspace_id = $1
+        ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
+        LOWER(display_name), joined_at"#,
+    )
+    .bind(context.workspace.id)
+    .fetch_all(pool)
+    .await?;
+    let team_invitations = if context.role == "owner" || context.role == "admin" {
+        sqlx::query_as::<_, TeamInvitation>(
+            r#"SELECT id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
+            role, created_at, expires_at FROM workspace_invitations
+            WHERE workspace_id = $1 AND accepted_at IS NULL AND revoked_at IS NULL
+              AND expires_at > NOW()
+            ORDER BY created_at DESC"#,
+        )
+        .bind(context.workspace.id)
+        .fetch_all(pool)
+        .await?
+    } else {
+        Vec::new()
+    };
     Ok(DashboardData {
         user: context.user,
         workspace: context.workspace,
+        workspace_memberships: context.workspace_memberships,
+        current_role: context.role,
+        team_members,
+        team_invitations,
         products,
         environments,
         current_product,
@@ -1203,6 +1615,8 @@ mod product_tests {
                     display_name: "Test".into(),
                 },
                 workspace: workspace.clone(),
+                role: "owner".into(),
+                workspace_memberships: vec![],
             };
             let search_dashboard = dashboard(&pool, context(), Some(search.id), None)
                 .await
@@ -1239,6 +1653,112 @@ mod product_tests {
 
         sqlx::query("DELETE FROM workspaces WHERE id = $1")
             .bind(workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[test]
+    fn team_invitees_are_normalized() -> anyhow::Result<()> {
+        anyhow::ensure!(
+            normalize_invitee(" @Teammate ").map_err(test_error)? == ("handle", "teammate".into())
+        );
+        anyhow::ensure!(
+            normalize_invitee("Person@Example.com").map_err(test_error)?
+                == ("email", "person@example.com".into())
+        );
+        anyhow::ensure!(normalize_invitee("not a handle").is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn team_invitation_role_and_removal_flow() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let owner = OsUser {
+            id: format!("usr_owner_{suffix}"),
+            handle: format!("owner_{}", &suffix[..8]),
+            email: Some(format!("owner_{}@example.com", &suffix[..8])),
+            display_name: Some("Team Owner".into()),
+            avatar_url: None,
+        };
+        let teammate = OsUser {
+            id: format!("usr_member_{suffix}"),
+            handle: format!("member_{}", &suffix[..8]),
+            email: Some(format!("member_{}@example.com", &suffix[..8])),
+            display_name: Some("Team Member".into()),
+            avatar_url: None,
+        };
+
+        let result = async {
+            let (workspace, role, memberships) = resolve_workspace_access(&pool, &owner, None)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(role == "owner");
+            let owner_context = DashboardContext {
+                user: CurrentUser {
+                    id: owner.id.clone(),
+                    handle: owner.handle.clone(),
+                    email: owner.email.clone(),
+                    display_name: owner.display_name.clone().unwrap(),
+                },
+                workspace: workspace.clone(),
+                role,
+                workspace_memberships: memberships,
+            };
+            let invitation = create_team_invitation(
+                &pool,
+                &owner_context,
+                CreateTeamInvitationInput {
+                    invitee: format!("@{}", teammate.handle),
+                    role: "admin".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let accepted_workspace = accept_team_invitation(&pool, &teammate, invitation.id)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(accepted_workspace == workspace.id);
+            let (_, teammate_role, teammate_memberships) =
+                resolve_workspace_access(&pool, &teammate, Some(workspace.id))
+                    .await
+                    .map_err(test_error)?;
+            anyhow::ensure!(teammate_role == "admin");
+            anyhow::ensure!(teammate_memberships.len() == 2);
+
+            let updated = update_team_member_role(
+                &pool,
+                &owner_context,
+                &teammate.id,
+                UpdateTeamMemberInput {
+                    role: "member".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(updated.role == "member");
+            remove_team_member(&pool, &owner_context, &teammate.id)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(
+                resolve_workspace_access(&pool, &teammate, Some(workspace.id))
+                    .await
+                    .is_err()
+            );
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE os_user_id = $1 OR os_user_id = $2")
+            .bind(&owner.id)
+            .bind(&teammate.id)
             .execute(&pool)
             .await?;
         result

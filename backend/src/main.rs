@@ -13,7 +13,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     middleware::{Next, from_fn},
     response::{Html, IntoResponse, Redirect, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -44,6 +44,8 @@ struct AppState {
     accounts: OsAccountsClient,
     v1_writes_enabled: bool,
 }
+
+const TEAM_INVITE_COOKIE: &str = "af_team_invite";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -85,11 +87,18 @@ async fn main() -> anyhow::Result<()> {
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         .allow_headers([
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
             header::HeaderName::from_static("x-api-key"),
+            header::HeaderName::from_static("x-workspace-id"),
         ]);
 
     let app = Router::new()
@@ -103,9 +112,22 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/auth/start", get(auth_start))
         .route("/auth/callback", get(auth_callback))
+        .route("/join/{invitation_id}", get(join_team_handler))
         .route("/api/auth/logout", post(logout_handler))
         .route("/api/dashboard", get(dashboard_handler))
         .route("/api/products", post(create_product_handler))
+        .route(
+            "/api/team/invitations",
+            post(create_team_invitation_handler),
+        )
+        .route(
+            "/api/team/invitations/{invitation_id}",
+            delete(revoke_team_invitation_handler),
+        )
+        .route(
+            "/api/team/members/{os_user_id}",
+            patch(update_team_member_handler).delete(remove_team_member_handler),
+        )
         .route("/api/settings/api-keys", post(create_api_key_handler))
         .route(
             "/api/settings/api-keys/{key_id}",
@@ -310,9 +332,40 @@ async fn auth_callback(
         Err(_) => return auth_failure(&state),
     };
     get_or_create_workspace(&state.pool, &user).await?;
-    let mut response = Redirect::to("/app").into_response();
+    let invite_id =
+        cookie(&headers, TEAM_INVITE_COOKIE).and_then(|value| Uuid::parse_str(&value).ok());
+    let redirect = if let Some(invite_id) = invite_id {
+        match accept_team_invitation(&state.pool, &user, invite_id).await {
+            Ok(workspace_id) => format!("/app?view=team&team={workspace_id}"),
+            Err(_) => "/app?view=team&invite=invalid".into(),
+        }
+    } else {
+        "/app".into()
+    };
+    let mut response = Redirect::to(&redirect).into_response();
     attach_token_cookies(&mut response, &state, &tokens)?;
     clear_flow_cookies(&mut response, &state)?;
+    append_cookie(
+        &mut response,
+        clear_cookie(TEAM_INVITE_COOKIE, state.secure_cookies),
+    )?;
+    Ok(response)
+}
+
+async fn join_team_handler(
+    State(state): State<Arc<AppState>>,
+    Path(invitation_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let mut response = Redirect::to("/auth/start").into_response();
+    append_cookie(
+        &mut response,
+        http_only_cookie(
+            TEAM_INVITE_COOKIE,
+            &invitation_id.to_string(),
+            7 * 24 * 60 * 60,
+            state.secure_cookies,
+        ),
+    )?;
     Ok(response)
 }
 
@@ -363,9 +416,11 @@ fn clear_flow_cookies(response: &mut Response, state: &AppState) -> Result<(), A
 async fn dashboard_auth(
     state: &AppState,
     headers: &HeaderMap,
+    requested_workspace_id: Option<Uuid>,
 ) -> Result<(DashboardContext, Option<TokenPair>), ApiError> {
     let resolved = state.accounts.resolve(headers).await?;
-    let workspace = get_or_create_workspace(&state.pool, &resolved.user).await?;
+    let (workspace, role, workspace_memberships) =
+        resolve_workspace_access(&state.pool, &resolved.user, requested_workspace_id).await?;
     let display_name = resolved
         .user
         .display_name
@@ -378,9 +433,39 @@ async fn dashboard_auth(
         display_name,
     };
     Ok((
-        DashboardContext { user, workspace },
+        DashboardContext {
+            user,
+            workspace,
+            role,
+            workspace_memberships,
+        },
         resolved.rotated_tokens,
     ))
+}
+
+fn requested_workspace_id(headers: &HeaderMap) -> Result<Option<Uuid>, ApiError> {
+    headers
+        .get("x-workspace-id")
+        .map(|value| {
+            value
+                .to_str()
+                .map_err(|_| ApiError::bad_request("Invalid team identifier"))
+                .and_then(|value| {
+                    Uuid::parse_str(value)
+                        .map_err(|_| ApiError::bad_request("Invalid team identifier"))
+                })
+        })
+        .transpose()
+}
+
+fn require_workspace_editor(context: &DashboardContext) -> Result<(), ApiError> {
+    if context.role == "owner" || context.role == "admin" {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden(
+            "Your team role does not allow configuration changes",
+        ))
+    }
 }
 
 fn dashboard_response(
@@ -416,6 +501,7 @@ async fn logout_handler(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DashboardQuery {
+    workspace_id: Option<Uuid>,
     product_id: Option<Uuid>,
     // Kept during rollout so old dashboard links continue to resolve.
     environment_id: Option<Uuid>,
@@ -426,7 +512,7 @@ async fn dashboard_handler(
     headers: HeaderMap,
     Query(query): Query<DashboardQuery>,
 ) -> Result<Response, ApiError> {
-    let (context, tokens) = dashboard_auth(&state, &headers).await?;
+    let (context, tokens) = dashboard_auth(&state, &headers, query.workspace_id).await?;
     let data = dashboard(&state.pool, context, query.product_id, query.environment_id).await?;
     dashboard_response(&state, Json(data), tokens)
 }
@@ -436,7 +522,9 @@ async fn create_product_handler(
     headers: HeaderMap,
     Json(input): Json<CreateProductInput>,
 ) -> Result<Response, ApiError> {
-    let (context, tokens) = dashboard_auth(&state, &headers).await?;
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
     let (product, environment) = create_product(&state.pool, context.workspace.id, input).await?;
     let (api_key, secret) = create_api_key(
         &state.pool,
@@ -467,7 +555,9 @@ async fn create_api_key_handler(
     headers: HeaderMap,
     Json(input): Json<CreateApiKeyInput>,
 ) -> Result<Response, ApiError> {
-    let (context, tokens) = dashboard_auth(&state, &headers).await?;
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
     let (api_key, secret) = create_api_key(
         &state.pool,
         context.workspace.id,
@@ -491,7 +581,9 @@ async fn revoke_api_key_handler(
     headers: HeaderMap,
     Path(key_id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let (context, tokens) = dashboard_auth(&state, &headers).await?;
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
     revoke_api_key(&state.pool, context.workspace.id, key_id).await?;
     dashboard_response(&state, Json(json!({ "revoked": true })), tokens)
 }
@@ -501,9 +593,64 @@ async fn update_policy_handler(
     headers: HeaderMap,
     Json(input): Json<PolicyInput>,
 ) -> Result<Response, ApiError> {
-    let (context, tokens) = dashboard_auth(&state, &headers).await?;
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
     let environment = update_policy(&state.pool, context.workspace.id, input).await?;
     dashboard_response(&state, Json(json!({ "environment": environment })), tokens)
+}
+
+async fn create_team_invitation_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(input): Json<CreateTeamInvitationInput>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    let invitation = create_team_invitation(&state.pool, &context, input).await?;
+    let join_path = format!("/join/{}", invitation.id);
+    dashboard_response(
+        &state,
+        (
+            StatusCode::CREATED,
+            Json(json!({ "invitation": invitation, "joinPath": join_path })),
+        ),
+        tokens,
+    )
+}
+
+async fn update_team_member_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(os_user_id): Path<String>,
+    Json(input): Json<UpdateTeamMemberInput>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    let member = update_team_member_role(&state.pool, &context, &os_user_id, input).await?;
+    dashboard_response(&state, Json(json!({ "member": member })), tokens)
+}
+
+async fn remove_team_member_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(os_user_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    remove_team_member(&state.pool, &context, &os_user_id).await?;
+    dashboard_response(&state, Json(json!({ "removed": true })), tokens)
+}
+
+async fn revoke_team_invitation_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(invitation_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    revoke_team_invitation(&state.pool, &context, invitation_id).await?;
+    dashboard_response(&state, Json(json!({ "revoked": true })), tokens)
 }
 
 fn safe_input<T: DeserializeOwned>(value: Value) -> Result<T, ApiError> {
