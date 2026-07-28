@@ -38,9 +38,14 @@ def prepared():
 
 def telemetry(interaction_id, surface, operation):
     body = json.dumps({"events": [{"interactionId": interaction_id, "surface": surface, "operation": operation, "statusCode": 200, "durationMs": 1, "classification": "unclassified", "occurredAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}]}).encode()
-    request = urllib.request.Request(f"{ENDPOINT}/api/v2/telemetry/batches", data=body, method="POST", headers={"authorization": f"Bearer {API_KEY}", "content-type": "application/json"})
-    try: urllib.request.urlopen(request, timeout=3).read()
-    except Exception: pass
+    request = urllib.request.Request(f"{ENDPOINT}/api/v2/telemetry/batches", data=body, method="POST", headers={"authorization": f"Bearer {API_KEY}", "content-type": "application/json", "user-agent": "epode-manual-http/1.0"})
+    for attempt in range(3):
+        try:
+            urllib.request.urlopen(request, timeout=3).read()
+            return
+        except Exception:
+            if attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):

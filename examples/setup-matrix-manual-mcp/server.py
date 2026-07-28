@@ -45,7 +45,7 @@ class Handler(BaseHTTPRequestHandler):
             def confirmed():
                 occurred_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                 body = json.dumps({"events": [{"interactionId": interaction_id, "surface": "mcp", "operation": "search", "durationMs": 1, "classification": "confirmed", "confirmationMethod": "mcp", "occurredAt": occurred_at}]}).encode()
-                req = urllib.request.Request(f"{ENDPOINT}/api/v2/telemetry/batches", data=body, method="POST", headers={"authorization": f"Bearer {API_KEY}", "content-type": "application/json"})
+                req = urllib.request.Request(f"{ENDPOINT}/api/v2/telemetry/batches", data=body, method="POST", headers={"authorization": f"Bearer {API_KEY}", "content-type": "application/json", "user-agent": "epode-manual-mcp/1.0"})
                 for attempt in range(3):
                     try:
                         urllib.request.urlopen(req, timeout=3).read()
@@ -58,12 +58,12 @@ class Handler(BaseHTTPRequestHandler):
             self.reply({"jsonrpc": "2.0", "id": request_id, "result": result}); return
         if method == "tools/call" and name == "report_product_outcome":
             payload = json.dumps({"outcome": arguments.get("outcome"), "note": arguments.get("note")}).encode()
-            req = urllib.request.Request(f"{ENDPOINT}/api/v2/outcomes", data=payload, method="POST", headers={"authorization": f"Bearer {arguments.get('feedbackHandle', '')}", "content-type": "application/json"})
+            req = urllib.request.Request(f"{ENDPOINT}/api/v2/outcomes", data=payload, method="POST", headers={"authorization": f"Bearer {arguments.get('feedbackHandle', '')}", "content-type": "application/json", "user-agent": "epode-manual-mcp/1.0"})
             try:
                 accepted = json.loads(urllib.request.urlopen(req, timeout=5).read())
                 result = {"content": [{"type": "text", "text": "Product outcome accepted."}], "structuredContent": accepted}
             except urllib.error.HTTPError as error:
-                result = {"isError": True, "content": [{"type": "text", "text": f"Outcome submission failed: {error.code}"}], "structuredContent": {"accepted": False}}
+                result = {"isError": True, "content": [{"type": "text", "text": f"Outcome submission failed: {error.code}"}], "structuredContent": {"accepted": False, "status": error.code}}
             self.reply({"jsonrpc": "2.0", "id": request_id, "result": result}); return
         self.reply({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "method not found"}})
 

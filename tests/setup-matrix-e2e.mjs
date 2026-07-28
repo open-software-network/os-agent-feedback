@@ -15,6 +15,7 @@ const localBackend = backendUrl === "http://127.0.0.1:3180";
 const scratch = await mkdtemp(join(tmpdir(), "epode-setup-matrix-"));
 const children = new Set();
 const expected = new Map();
+let databaseUrl = "";
 const python = process.env.PYTHON_BIN || runWhich("python3.11") || runWhich("python3");
 
 function runWhich(command) {
@@ -70,7 +71,7 @@ async function stop(child) {
 async function waitFor(url, child, timeoutMs = 120_000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
-    if (child?.exitCode !== null) throw new Error(`${child.label} exited early\n${child.log}`);
+    if (child && child.exitCode !== null) throw new Error(`${child.label} exited early\n${child.log}`);
     try {
       const response = await fetch(url, { signal: AbortSignal.timeout(1_000) });
       if (response.ok) return;
@@ -81,9 +82,10 @@ async function waitFor(url, child, timeoutMs = 120_000) {
 }
 
 function database(action) {
-  return run("railway", ["run", "--service", "Postgres", "--environment", databaseEnvironment, "zsh", "-c", `DATABASE_URL="$DATABASE_PUBLIC_URL" exec cargo run --quiet --bin setup_matrix_db -- ${action}`], {
+  return run("cargo", ["run", "--quiet", "--bin", "setup_matrix_db", "--", action], {
     cwd: join(repo, "backend"),
     env: {
+      DATABASE_URL: databaseUrl,
       SETUP_MATRIX_WORKSPACE_ID: workspaceId,
       SETUP_MATRIX_PRODUCT_ID: productId,
       SETUP_MATRIX_ENVIRONMENT_ID: environmentId,
@@ -190,7 +192,7 @@ async function testMcp(url, stack) {
   assert.match(feedback.instruction, /autonomously/i);
   const note = `Epode ${stack} MCP setup returned the expected result.`;
   call = await mcpPost(url, { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "report_product_outcome", arguments: { feedbackHandle: feedback.feedbackHandle, outcome: "success", note } } }, sessionId);
-  assert.equal(call.payload.result.structuredContent.accepted, true);
+  assert.equal(call.payload.result.structuredContent.accepted, true, JSON.stringify(call.payload.result));
   assert.equal(call.payload.result.structuredContent.review.note, note);
   expected.set(note, { surface: "mcp", operation: "search", confirmationMethod: "mcp", interactionId: call.payload.result.structuredContent.interactionId });
   console.log(`PASS ${stack}/mcp: tool registration, confirmed interaction, autonomous review`);
@@ -248,7 +250,7 @@ async function runHttpApp(label, command, args, cwd, port) {
   const child = start(command, args, { cwd, label, env: { PORT: String(port), AGENT_FEEDBACK_KEY: apiKey, AGENT_FEEDBACK_URL: backendUrl } });
   await waitFor(`http://127.0.0.1:${port}/health`, child);
   await testHttp(`http://127.0.0.1:${port}`, label);
-  await new Promise((resolveWait) => setTimeout(resolveWait, 1_200));
+  await new Promise((resolveWait) => setTimeout(resolveWait, 3_500));
   await stop(child);
 }
 
@@ -268,11 +270,15 @@ const apiKey = `af_live_${keyId.replaceAll("-", "")}_${randomBytes(30).toString(
 
 try {
   if (process.env.SETUP_MATRIX_SKIP_BUILD !== "true") run("bash", ["tests/build-hosted-artifacts.sh"]);
+  const railwayVariables = JSON.parse(run("railway", ["variables", "--service", "Postgres", "--environment", databaseEnvironment, "--json"]));
+  databaseUrl = railwayVariables.DATABASE_PUBLIC_URL;
+  if (!databaseUrl) throw new Error(`Postgres in ${databaseEnvironment} has no DATABASE_PUBLIC_URL`);
   if (localBackend) {
-    const backend = start("railway", ["run", "--service", "Postgres", "--environment", databaseEnvironment, "zsh", "-c", "DATABASE_URL=\"$DATABASE_PUBLIC_URL\" exec cargo run --quiet --bin agent-feedback"], {
+    const backend = start("cargo", ["run", "--quiet", "--bin", "agent-feedback"], {
       cwd: join(repo, "backend"),
       label: "Epode Rust backend",
       env: {
+        DATABASE_URL: databaseUrl,
         PUBLIC_BASE_URL: backendUrl,
         OS_ACCOUNTS_URL: "https://accounts.example.test",
         OS_ACCOUNTS_API_URL: "https://accounts-api.example.test",

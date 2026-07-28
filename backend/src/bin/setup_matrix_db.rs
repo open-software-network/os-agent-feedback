@@ -33,6 +33,15 @@ async fn main() -> anyhow::Result<()> {
         .max_connections(2)
         .connect(&required("DATABASE_URL")?)
         .await?;
+    if action == "delete-all-tests" {
+        let deleted =
+            sqlx::query("DELETE FROM workspaces WHERE os_user_id LIKE 'usr_setup_matrix_%'")
+                .execute(&pool)
+                .await?
+                .rows_affected();
+        println!("deleted {deleted}");
+        return Ok(());
+    }
     let workspace_id = uuid("SETUP_MATRIX_WORKSPACE_ID")?;
     match action.as_str() {
         "seed" => {
