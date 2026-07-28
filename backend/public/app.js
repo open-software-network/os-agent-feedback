@@ -22,6 +22,11 @@ function setupSecretKey(environmentId) {
   return `agent-feedback:product-key:${environmentId}`;
 }
 
+function isLegacyKeyPrefix(prefix) {
+  if (!prefix) return false;
+  return !/^af_live_[0-9a-f]{8}$/.test(prefix);
+}
+
 function rememberSetupSecret(environmentId, secret) {
   if (!environmentId || !secret) return;
   try {
@@ -342,7 +347,10 @@ function setupView() {
   const stacks = setupStackOptions[setupSurface].map(([id, name, copy]) => `<button class="choice-card" data-setup-stack="${esc(id)}" aria-pressed="${setupStack === id}"><strong>${esc(name)}</strong><span>${esc(copy)}</span></button>`).join("");
   const surfaces = Object.entries(setupSurfaceCopy).map(([id, item]) => `<button class="choice-card surface-card" data-setup-surface="${esc(id)}" aria-pressed="${setupSurface === id}" ${item.disabled ? "disabled" : ""}><strong>${esc(item.name)}</strong><span>${esc(item.summary)}</span>${item.disabled ? "<small>COMING SOON</small>" : ""}</button>`).join("");
   const ready = `<div class="connection-created"><b>Installation ready</b><span>${setupKey ? `${esc(setupKey.prefix)}…` : "Preparing the product key…"}</span></div>`;
-  const secret = apiSecret ? `<div class="secret-callout"><div><b>Save this server-side key now</b><code>${esc(apiSecret)}</code><small>It was created automatically for this product. Customer agents never receive it.</small></div><button class="button" data-copy="${esc(apiSecret)}">Copy key</button></div>` : `<div class="secret-callout"><div><b>Server-side key ready</b><code>${setupKey ? `${esc(setupKey.prefix)}…` : "Preparing…"}</code><small>Use the value already saved in your server configuration. If it is unavailable, rotate the key below.</small></div></div>`;
+  const legacyKey = isLegacyKeyPrefix(setupKey?.prefix);
+  const createKeyButton = setupKey ? `<button class="button" data-revoke-key="${esc(setupKey.id)}">Create new key</button>` : "";
+  const legacyWarning = legacyKey ? `<div class="secret-callout warning"><div><b>This is a legacy key and cannot produce valid afr2 capabilities</b><code>${esc(setupKey.prefix)}…</code><small>V2 integrations will fail boot validation. Create a new key, then update the <code>AGENT_FEEDBACK_KEY</code> server environment variable.</small></div>${createKeyButton}</div>` : "";
+  const secret = apiSecret ? `<div class="secret-callout"><div><b>Save this server-side key now</b><code>${esc(apiSecret)}</code><small>It was created automatically for this product. Customer agents never receive it.</small></div><button class="button" data-copy="${esc(apiSecret)}">Copy key</button>${legacyKey ? "" : createKeyButton}</div>` : `<div class="secret-callout"><div><b>Server-side key ready</b><code>${setupKey ? `${esc(setupKey.prefix)}…` : "Preparing…"}</code><small>Use the value already saved in your server configuration. If it is unavailable, create a new key.</small></div>${legacyKey ? "" : createKeyButton}</div>`;
   const agentPrompt = setupAgentPrompt(integration);
   const installMode = `<div class="install-methods"><button data-install-mode="agent" aria-pressed="${setupInstallMode === "agent"}">Use a coding agent</button><button data-install-mode="manual" aria-pressed="${setupInstallMode === "manual"}">Manual setup</button></div>`;
   const agentInstall = `<div class="install-panel"><p>Copy this prompt into the coding agent that has access to your product repository. It receives the exact integration and verification requirements, but never the product key.</p><div class="copy-block"><pre><code>${esc(agentPrompt)}</code></pre><button class="button primary" data-copy="${esc(agentPrompt)}">Copy setup prompt</button></div></div>`;
@@ -355,7 +363,7 @@ function setupView() {
     const state = keyStatus.outcomes.length ? "Feedback received" : keyStatus.interactions.length ? "Connected" : "Never seen";
     return `<div class="connection-row"><span><strong>${esc(key.label)}</strong><small>${esc(key.prefix)}… · created ${date(key.createdAt)}</small></span><b class="${keyStatus.interactions.length ? "positive" : "neutral"}">${esc(state)}</b><button class="link-button" data-revoke-key="${esc(key.id)}">Rotate key</button></div>`;
   }).join("") || `<p class="muted">No integrations yet.</p>`;
-  return `${header("SETUP", `Connect ${dashboard.currentProduct.name}`)}<p class="setup-lede">Choose your stack, copy the ready installation, and send the first real interaction.</p><section class="setup-step"><div class="step-number">1</div><div class="step-body"><p class="eyebrow">INTEGRATION</p><h2>Choose how your product is served</h2><div class="choice-grid surfaces">${surfaces}</div><p class="selection-explanation"><strong>${esc(surface.name)}:</strong> ${esc(surface.detail)}</p><h3>Choose the integration</h3><div class="choice-grid stacks">${stacks}</div><p class="muted">For HTTP and HTML, choose which routes receive instructions in code—not in this dashboard.</p>${ready}</div></section>${installStep}${verifyStep}<details class="existing-connections"><summary>Product keys (${dashboard.apiKeys.length})</summary><div>${connections}</div></details>`;
+  return `${header("SETUP", `Connect ${dashboard.currentProduct.name}`)}<p class="setup-lede">Choose your stack, copy the ready installation, and send the first real interaction.</p><section class="setup-step"><div class="step-number">1</div><div class="step-body"><p class="eyebrow">INTEGRATION</p><h2>Choose how your product is served</h2><div class="choice-grid surfaces">${surfaces}</div><p class="selection-explanation"><strong>${esc(surface.name)}:</strong> ${esc(surface.detail)}</p><h3>Choose the integration</h3><div class="choice-grid stacks">${stacks}</div><p class="muted">For HTTP and HTML, choose which routes receive instructions in code—not in this dashboard.</p>${ready}</div></section>${legacyWarning}${installStep}${verifyStep}<details class="existing-connections"><summary>Product keys (${dashboard.apiKeys.length})</summary><div>${connections}</div></details>`;
 }
 
 function teamView() {
@@ -441,6 +449,7 @@ document.addEventListener("click", async (event) => {
       setNotice("Connection status refreshed.");
     }
     if (target.dataset.revokeKey) {
+      if (!confirm("Create a new product key? The current key stops working immediately.")) return;
       await request(`/api/settings/api-keys/${target.dataset.revokeKey}`, { method: "DELETE" });
       const body = await request("/api/settings/api-keys", {
         method: "POST",

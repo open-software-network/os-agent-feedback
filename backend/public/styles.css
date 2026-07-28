@@ -96,6 +96,7 @@ table { width:100%; border-collapse:collapse; }td { padding:10px 0; border-botto
 .secret-callout { display:flex; justify-content:space-between; align-items:start; gap:16px; border:2px solid var(--good); background:#f2faf5; padding:16px; margin:20px 0; }
 .secret-callout>div { min-width:0; display:grid; gap:8px; }
 .secret-callout code { overflow-wrap:anywhere; color:var(--good); }
+.secret-callout.warning { border-color:var(--bad); background:#fdf3f3; }.secret-callout.warning code { color:var(--bad); }
 .copy-block { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:start; }
 .copy-block pre { margin:0; }
 .install-methods { display:flex; border-bottom:1px solid var(--line); margin-top:24px; }

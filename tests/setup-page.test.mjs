@@ -10,6 +10,10 @@ const dashboardHtml = await readFile(
   new URL("../backend/public/app.html", import.meta.url),
   "utf8",
 );
+const dashboardStyles = await readFile(
+  new URL("../backend/public/styles.css", import.meta.url),
+  "utf8",
+);
 const productMigration = await readFile(
   new URL("../backend/migrations/0008_products_and_environments.sql", import.meta.url),
   "utf8",
@@ -33,7 +37,7 @@ const backendModels = await readFile(
 
 test("products exist before integration setup without an environment picker", () => {
   assert.match(dashboardHtml, /id="product-scope"/);
-  assert.match(dashboardHtml, /app\.js\?v=20260728-teams/);
+  assert.match(dashboardHtml, /app\.js\?v=20260728-keys/);
   assert.match(dashboardScript, /Create your first product/);
   assert.match(dashboardScript, /id="product-select"/);
   assert.match(dashboardScript, /\+ New product/);
@@ -69,6 +73,21 @@ test("installation is ready without a setup generation step", () => {
   assert.doesNotMatch(dashboardScript, /Generate installation/);
   assert.doesNotMatch(dashboardScript, /data-create-key/);
   assert.doesNotMatch(dashboardScript, /Choose an integration and generate its installation first/);
+});
+
+test("setup warns about legacy keys and keeps rotation visible", () => {
+  assert.match(dashboardScript, /function isLegacyKeyPrefix\(prefix\)/);
+  assert.match(dashboardScript, /if \(!prefix\) return false/);
+  assert.match(dashboardScript, /\/\^af_live_\[0-9a-f\]\{8\}\$\//);
+  assert.match(dashboardScript, /class="secret-callout warning"/);
+  assert.match(dashboardStyles, /\.secret-callout\.warning/);
+  assert.match(dashboardHtml, /styles\.css\?v=20260728-keys/);
+  assert.match(dashboardScript, /legacy key and cannot produce valid afr2 capabilities/i);
+  assert.match(dashboardScript, /V2 integrations will fail boot validation/);
+  assert.match(dashboardScript, /The current key stops working immediately/);
+  assert.match(dashboardScript, /update the <code>AGENT_FEEDBACK_KEY<\/code> server environment variable/);
+  assert.match(dashboardScript, /Create new key[\s\S]*<details class="existing-connections">/);
+  assert.doesNotMatch(dashboardScript, /<details class="existing-connections">[\s\S]*Create new key/);
 });
 
 test("new products receive their product key automatically", () => {
