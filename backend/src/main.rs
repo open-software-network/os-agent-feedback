@@ -9,7 +9,7 @@ use std::{env, net::SocketAddr, sync::Arc};
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{DefaultBodyLimit, OriginalUri, Path, Query, State},
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     middleware::{Next, from_fn},
     response::{Html, IntoResponse, Redirect, Response},
@@ -102,8 +102,8 @@ async fn main() -> anyhow::Result<()> {
         ]);
 
     let app = Router::new()
-        .route("/", get(index))
-        .route("/app", get(dashboard_page))
+        .route("/", get(root_page))
+        .route("/app", get(legacy_dashboard_redirect))
         .route("/api/health", get(health))
         .route("/.well-known/agent-feedback.json", get(feedback_discovery))
         .route(
@@ -211,11 +211,23 @@ async fn shutdown_signal() {
     tokio::select! { _ = ctrl_c => {}, _ = terminate => {} }
 }
 
-async fn index() -> Html<String> {
-    Html(read_page("public/index.html", "Agent Feedback").await)
+async fn root_page(headers: HeaderMap) -> Html<String> {
+    let page = if cookie(&headers, ACCESS_COOKIE).is_some()
+        || cookie(&headers, REFRESH_COOKIE).is_some()
+    {
+        "public/app.html"
+    } else {
+        "public/index.html"
+    };
+    Html(read_page(page, "Agent Feedback").await)
 }
-async fn dashboard_page() -> Html<String> {
-    Html(read_page("public/app.html", "Agent Feedback dashboard").await)
+
+async fn legacy_dashboard_redirect(OriginalUri(uri): OriginalUri) -> Redirect {
+    let target = uri
+        .query()
+        .map(|query| format!("/?{query}"))
+        .unwrap_or_else(|| "/".into());
+    Redirect::to(&target)
 }
 
 async fn read_page(path: &str, fallback: &str) -> String {
@@ -336,11 +348,11 @@ async fn auth_callback(
         cookie(&headers, TEAM_INVITE_COOKIE).and_then(|value| Uuid::parse_str(&value).ok());
     let redirect = if let Some(invite_id) = invite_id {
         match accept_team_invitation(&state.pool, &user, invite_id).await {
-            Ok(workspace_id) => format!("/app?view=team&team={workspace_id}"),
-            Err(_) => "/app?view=team&invite=invalid".into(),
+            Ok(workspace_id) => format!("/?view=team&team={workspace_id}"),
+            Err(_) => "/?view=team&invite=invalid".into(),
         }
     } else {
-        "/app".into()
+        "/".into()
     };
     let mut response = Redirect::to(&redirect).into_response();
     attach_token_cookies(&mut response, &state, &tokens)?;

@@ -35,10 +35,23 @@ const backendModels = await readFile(
   new URL("../backend/src/models.rs", import.meta.url),
   "utf8",
 );
+const appAuth = await readFile(
+  new URL("../app/auth.ts", import.meta.url),
+  "utf8",
+);
+
+test("the root URL is the canonical signed-in app", () => {
+  assert.match(backendMain, /\.route\("\/", get\(root_page\)\)/);
+  assert.match(backendMain, /\.route\("\/app", get\(legacy_dashboard_redirect\)\)/);
+  assert.match(backendMain, /format!\("\/\?view=team&team=\{workspace_id\}"\)/);
+  assert.match(dashboardScript, /location\.assign\("\/auth\/start"\)/);
+  assert.match(appAuth, /requireAppUser\(returnTo = "\/"\)/);
+  assert.doesNotMatch(backendMain, /"\/app"\.into\(\)/);
+});
 
 test("products exist before integration setup without an environment picker", () => {
   assert.match(dashboardHtml, /id="product-scope"/);
-  assert.match(dashboardHtml, /app\.js\?v=20260728-simple-invites/);
+  assert.match(dashboardHtml, /app\.js\?v=20260728-root-app/);
   assert.match(dashboardScript, /Create your first product/);
   assert.match(dashboardScript, /id="product-select"/);
   assert.match(dashboardScript, /\+ New product/);

@@ -14,7 +14,7 @@ export async function getAppUser(): Promise<AppUser | null> {
   return null;
 }
 
-export async function requireAppUser(returnTo = "/app") {
+export async function requireAppUser(returnTo = "/") {
   const user = await getAppUser();
   if (user) return user;
   redirect(chatGPTSignInPath(returnTo));

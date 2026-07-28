@@ -1,4 +1,4 @@
-const dashboard = "https://agent-feedback-api-production.up.railway.app";
+const dashboard = "https://app.epode.ai";
 
 const protocolCode = `// Pick your framework adapter once:
 Node    app.use(agentFeedback(options))

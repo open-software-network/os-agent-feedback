@@ -25,3 +25,10 @@ test("server-renders the Agent Feedback product contract", async () => {
   assert.doesNotMatch(html, /OS Accounts|Open Software Account/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Building your site/i);
 });
+
+test("links to the canonical app origin", async () => {
+  const response = await render();
+  const html = await response.text();
+  assert.match(html, /https:\/\/app\.epode\.ai\/auth\/start/);
+  assert.doesNotMatch(html, /agent-feedback-api-production\.up\.railway\.app/);
+});

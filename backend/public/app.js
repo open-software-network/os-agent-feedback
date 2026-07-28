@@ -70,7 +70,7 @@ async function request(path, options = {}) {
   const response = await fetch(path, { ...options, headers });
   const body = await response.json().catch(() => ({}));
   if (response.status === 401) {
-    location.assign("/");
+    location.assign("/auth/start");
     throw new Error("Authentication required");
   }
   if (!response.ok) throw new Error(body.error || `Request failed with HTTP ${response.status}`);
