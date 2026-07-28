@@ -433,11 +433,25 @@ async fn create_product_handler(
 ) -> Result<Response, ApiError> {
     let (context, tokens) = dashboard_auth(&state, &headers).await?;
     let (product, environment) = create_product(&state.pool, context.workspace.id, input).await?;
+    let (api_key, secret) = create_api_key(
+        &state.pool,
+        context.workspace.id,
+        environment.id,
+        Some("Default product key".into()),
+        None,
+    )
+    .await?;
     dashboard_response(
         &state,
         (
             StatusCode::CREATED,
-            Json(json!({ "product": product, "environment": environment })),
+            Json(json!({
+                "product": product,
+                "environment": environment,
+                "apiKey": api_key,
+                "secret": secret,
+                "shownOnce": true
+            })),
         ),
         tokens,
     )
@@ -452,11 +466,24 @@ async fn create_environment_handler(
     let (context, tokens) = dashboard_auth(&state, &headers).await?;
     let environment =
         create_product_environment(&state.pool, context.workspace.id, product_id, input).await?;
+    let (api_key, secret) = create_api_key(
+        &state.pool,
+        context.workspace.id,
+        environment.id,
+        Some("Default product key".into()),
+        None,
+    )
+    .await?;
     dashboard_response(
         &state,
         (
             StatusCode::CREATED,
-            Json(json!({ "environment": environment })),
+            Json(json!({
+                "environment": environment,
+                "apiKey": api_key,
+                "secret": secret,
+                "shownOnce": true
+            })),
         ),
         tokens,
     )

@@ -18,6 +18,14 @@ const migratedProductLabel = await readFile(
   new URL("../backend/migrations/0009_label_migrated_products.sql", import.meta.url),
   "utf8",
 );
+const backendMain = await readFile(
+  new URL("../backend/src/main.rs", import.meta.url),
+  "utf8",
+);
+const backendStore = await readFile(
+  new URL("../backend/src/store.rs", import.meta.url),
+  "utf8",
+);
 
 test("products and environments exist before integration setup", () => {
   assert.match(dashboardHtml, /id="product-scope"/);
@@ -45,6 +53,23 @@ test("setup offers one guided install with a manual fallback", () => {
   assert.match(dashboardScript, /Copy setup prompt/);
   assert.match(dashboardScript, /never the product key/);
   assert.match(dashboardScript, /Send one real interaction/);
+});
+
+test("installation is ready without a setup generation step", () => {
+  assert.match(dashboardScript, /Installation ready/);
+  assert.match(dashboardScript, /Default product key/);
+  assert.match(dashboardScript, /currentView === "setup" && dashboard\.currentEnvironment && !dashboard\.apiKeys\.length/);
+  assert.doesNotMatch(dashboardScript, /Generate installation/);
+  assert.doesNotMatch(dashboardScript, /data-create-key/);
+  assert.doesNotMatch(dashboardScript, /Choose an integration and generate its installation first/);
+});
+
+test("new products and environments receive their product key automatically", () => {
+  const defaultKeyCreations = backendMain.match(/Some\("Default product key"\.into\(\)\),\s+None,/g) || [];
+  assert.equal(defaultKeyCreations.length, 2);
+  assert.match(backendMain, /"apiKey": api_key/);
+  assert.match(backendMain, /"secret": secret/);
+  assert.match(backendStore, /None => None/);
 });
 
 test("routes stay in code and key expiration stays out of onboarding", () => {

@@ -16,6 +16,28 @@ let setupConnectionId = null;
 let setupInstallMode = "agent";
 let setupMonitor = null;
 
+function setupSecretKey(environmentId) {
+  return `agent-feedback:product-key:${environmentId}`;
+}
+
+function rememberSetupSecret(environmentId, secret) {
+  if (!environmentId || !secret) return;
+  try {
+    sessionStorage.setItem(setupSecretKey(environmentId), secret);
+  } catch {
+    // A private browsing policy may disable storage. The key still remains visible for this page load.
+  }
+}
+
+function recalledSetupSecret(environmentId) {
+  if (!environmentId) return "";
+  try {
+    return sessionStorage.getItem(setupSecretKey(environmentId)) || "";
+  } catch {
+    return "";
+  }
+}
+
 const esc = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
 const date = (value) => value ? new Date(value).toLocaleString() : "—";
 const title = (value) => String(value || "unknown").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
@@ -38,6 +60,25 @@ async function refresh() {
   const query = selectedEnvironmentId ? `?environmentId=${encodeURIComponent(selectedEnvironmentId)}` : "";
   dashboard = await request(`/api/dashboard${query}`);
   selectedEnvironmentId = dashboard.currentEnvironment?.id || "";
+  if (currentView === "setup" && dashboard.currentEnvironment && !dashboard.apiKeys.length) {
+    const body = await request("/api/settings/api-keys", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ label: "Default product key", environmentId: dashboard.currentEnvironment.id }),
+    });
+    apiSecret = body.secret;
+    setupConnectionId = body.apiKey.id;
+    rememberSetupSecret(dashboard.currentEnvironment.id, body.secret);
+    dashboard = await request(`/api/dashboard?environmentId=${encodeURIComponent(dashboard.currentEnvironment.id)}`);
+  }
+  const setupKey = dashboard.apiKeys.find((key) => key.id === setupConnectionId) || dashboard.apiKeys[0];
+  if (setupKey) {
+    setupConnectionId = setupKey.id;
+    apiSecret = apiSecret || recalledSetupSecret(dashboard.currentEnvironment.id);
+  } else {
+    setupConnectionId = null;
+    apiSecret = "";
+  }
   const identity = `@${dashboard.user.handle}${dashboard.user.email ? ` · ${dashboard.user.email}` : ""}`;
   account.innerHTML = `<strong>${esc(dashboard.user.displayName)}</strong><small>${esc(identity)}</small>`;
   renderProductScope();
@@ -275,26 +316,27 @@ function environmentCreateView() {
 function setupView() {
   const surface = setupSurfaceCopy[setupSurface];
   const integration = setupInstructions();
+  const setupKey = dashboard.apiKeys.find((key) => key.id === setupConnectionId) || dashboard.apiKeys[0];
   const status = setupConnectionId ? setupConnectionStatus(setupConnectionId) : { interactions: [], outcomes: [] };
   const connected = status.interactions.length > 0;
   const reviewed = status.outcomes.length > 0;
   const stacks = setupStackOptions[setupSurface].map(([id, name, copy]) => `<button class="choice-card" data-setup-stack="${esc(id)}" aria-pressed="${setupStack === id}"><strong>${esc(name)}</strong><span>${esc(copy)}</span></button>`).join("");
   const surfaces = Object.entries(setupSurfaceCopy).map(([id, item]) => `<button class="choice-card surface-card" data-setup-surface="${esc(id)}" aria-pressed="${setupSurface === id}" ${item.disabled ? "disabled" : ""}><strong>${esc(item.name)}</strong><span>${esc(item.summary)}</span>${item.disabled ? "<small>COMING SOON</small>" : ""}</button>`).join("");
-  const generate = setupConnectionId ? `<div class="connection-created"><b>${esc(integration.name)}</b><span>Integration key created</span></div>` : `<button class="button primary" data-create-key>Generate installation</button>`;
-  const secret = apiSecret ? `<div class="secret-callout"><div><b>Save this server-side key now</b><code>${esc(apiSecret)}</code><small>It is shown once. Customer agents never receive this key.</small></div><button class="button" data-copy="${esc(apiSecret)}">Copy key</button></div>` : "";
+  const ready = `<div class="connection-created"><b>Installation ready</b><span>${setupKey ? `${esc(setupKey.prefix)}… · ${esc(dashboard.currentEnvironment.name)}` : "Preparing the product key…"}</span></div>`;
+  const secret = apiSecret ? `<div class="secret-callout"><div><b>Save this server-side key now</b><code>${esc(apiSecret)}</code><small>It was created automatically for this environment. Customer agents never receive it.</small></div><button class="button" data-copy="${esc(apiSecret)}">Copy key</button></div>` : `<div class="secret-callout"><div><b>Server-side key ready</b><code>${setupKey ? `${esc(setupKey.prefix)}…` : "Preparing…"}</code><small>Use the value already saved in your server environment. If it is unavailable, rotate the key below.</small></div></div>`;
   const agentPrompt = setupAgentPrompt(integration);
   const installMode = `<div class="install-methods"><button data-install-mode="agent" aria-pressed="${setupInstallMode === "agent"}">Use a coding agent</button><button data-install-mode="manual" aria-pressed="${setupInstallMode === "manual"}">Manual setup</button></div>`;
   const agentInstall = `<div class="install-panel"><p>Copy this prompt into the coding agent that has access to your product repository. It receives the exact integration and verification requirements, but never the product key.</p><div class="copy-block"><pre><code>${esc(agentPrompt)}</code></pre><button class="button primary" data-copy="${esc(agentPrompt)}">Copy setup prompt</button></div></div>`;
   const manualInstall = `<div class="install-panel"><h3>Install</h3><div class="copy-block"><pre><code>${esc(integration.install)}</code></pre><button class="button" data-copy="${esc(integration.install)}">Copy</button></div><h3>Configure once</h3><div class="copy-block"><pre><code>${esc(integration.code)}</code></pre><button class="button" data-copy="${esc(integration.code)}">Copy</button></div>${integration.advanced ? `<details><summary>Optional customer grouping</summary><p>Use an opaque account ID from authentication your product already has. Do not send names or emails.</p><pre><code>${esc(integration.advanced)}</code></pre></details>` : ""}</div>`;
-  const installStep = setupConnectionId ? `<section class="setup-step"><div class="step-number">2</div><div class="step-body"><p class="eyebrow">INSTALL</p><h2>Install ${esc(integration.name)}</h2><p>Use the guided agent setup or copy the commands yourself. Your product response never waits for Agent Feedback.</p>${secret}<h3>Set the server environment variable</h3><div class="copy-block"><pre><code>${esc(integration.environment)}</code></pre><button class="button" data-copy="${esc(integration.environment)}">Copy</button></div>${installMode}${setupInstallMode === "agent" ? agentInstall : manualInstall}<a class="text-link" href="/.well-known/agent-feedback-v1.json" target="_blank" rel="noreferrer">Read the protocol contract →</a></div></section>` : `<section class="setup-step locked"><div class="step-number">2</div><div class="step-body"><h2>Install</h2><p>Choose an integration and generate its installation first.</p></div></section>`;
+  const installStep = `<section class="setup-step"><div class="step-number">2</div><div class="step-body"><p class="eyebrow">INSTALL</p><h2>Install ${esc(integration.name)}</h2><p>Your installation is ready. Use the guided agent setup or copy the commands yourself. Your product response never waits for Agent Feedback.</p>${secret}<h3>Set the server environment variable</h3><div class="copy-block"><pre><code>${esc(integration.environment)}</code></pre><button class="button" data-copy="${esc(integration.environment)}">Copy</button></div>${installMode}${setupInstallMode === "agent" ? agentInstall : manualInstall}<a class="text-link" href="/.well-known/agent-feedback-v1.json" target="_blank" rel="noreferrer">Read the protocol contract →</a></div></section>`;
   const surfaceResult = setupSurface === "mcp" ? "A normal MCP tool call will appear as a confirmed interaction." : "A successful response will appear as an opportunity. It becomes confirmed if the agent submits feedback.";
-  const verifyStep = setupConnectionId ? `<section class="setup-step"><div class="step-number">3</div><div class="step-body"><p class="eyebrow">VERIFY</p><h2>Send one real interaction</h2><p>${esc(integration.verify)}</p><p>${esc(surfaceResult)}</p><div class="verification"><div class="verification-row ${connected ? "complete" : "waiting"}"><b>${connected ? "✓" : "○"}</b><span><strong>${connected ? (setupSurface === "mcp" ? "Confirmed interaction received" : "Product connection works") : "Waiting for the first interaction"}</strong><small>${connected ? `${status.interactions.length} interaction${status.interactions.length === 1 ? "" : "s"} received for this environment.` : "This page checks automatically every few seconds."}</small></span></div><div class="verification-row ${reviewed ? "complete" : "waiting"}"><b>${reviewed ? "✓" : "○"}</b><span><strong>${reviewed ? "Agent feedback received" : "Waiting for agent feedback"}</strong><small>${reviewed ? `${status.outcomes.length} compact review${status.outcomes.length === 1 ? "" : "s"} received.` : "Feedback is a second milestone. The integration works as soon as the first interaction arrives."}</small></span></div></div><div class="setup-actions"><button class="button" data-refresh-setup>Check now</button>${connected ? `<button class="button primary" data-view="interactions">View first interaction</button>` : ""}${reviewed ? `<button class="button primary" data-view="feedback">View feedback</button>` : ""}</div></div></section>` : `<section class="setup-step locked"><div class="step-number">3</div><div class="step-body"><h2>Verify</h2><p>The finish line is a real interaction from this product environment.</p></div></section>`;
+  const verifyStep = `<section class="setup-step"><div class="step-number">3</div><div class="step-body"><p class="eyebrow">VERIFY</p><h2>Send one real interaction</h2><p>${esc(integration.verify)}</p><p>${esc(surfaceResult)}</p><div class="verification"><div class="verification-row ${connected ? "complete" : "waiting"}"><b>${connected ? "✓" : "○"}</b><span><strong>${connected ? (setupSurface === "mcp" ? "Confirmed interaction received" : "Product connection works") : "Waiting for the first interaction"}</strong><small>${connected ? `${status.interactions.length} interaction${status.interactions.length === 1 ? "" : "s"} received for this environment.` : "This page checks automatically every few seconds."}</small></span></div><div class="verification-row ${reviewed ? "complete" : "waiting"}"><b>${reviewed ? "✓" : "○"}</b><span><strong>${reviewed ? "Agent feedback received" : "Waiting for agent feedback"}</strong><small>${reviewed ? `${status.outcomes.length} compact review${status.outcomes.length === 1 ? "" : "s"} received.` : "Feedback is a second milestone. The integration works as soon as the first interaction arrives."}</small></span></div></div><div class="setup-actions"><button class="button" data-refresh-setup>Check now</button>${connected ? `<button class="button primary" data-view="interactions">View first interaction</button>` : ""}${reviewed ? `<button class="button primary" data-view="feedback">View feedback</button>` : ""}</div></div></section>`;
   const connections = dashboard.apiKeys.map((key) => {
     const keyStatus = setupConnectionStatus(key.id);
     const state = keyStatus.outcomes.length ? "Feedback received" : keyStatus.interactions.length ? "Connected" : "Never seen";
-    return `<div class="connection-row"><span><strong>${esc(key.label)}</strong><small>${esc(key.prefix)}… · created ${date(key.createdAt)}</small></span><b class="${keyStatus.interactions.length ? "positive" : "neutral"}">${esc(state)}</b><button class="link-button" data-revoke-key="${esc(key.id)}">Revoke</button></div>`;
+    return `<div class="connection-row"><span><strong>${esc(key.label)}</strong><small>${esc(key.prefix)}… · created ${date(key.createdAt)}</small></span><b class="${keyStatus.interactions.length ? "positive" : "neutral"}">${esc(state)}</b><button class="link-button" data-revoke-key="${esc(key.id)}">Rotate key</button></div>`;
   }).join("") || `<p class="muted">No integrations yet.</p>`;
-  return `${header("SETUP", `Connect ${dashboard.currentProduct.name}`, dashboard.currentEnvironment.name)}<p class="setup-lede">Choose one integration, install it, and send the first real interaction.</p><section class="setup-step"><div class="step-number">1</div><div class="step-body"><p class="eyebrow">INTEGRATION</p><h2>Choose how your product is served</h2><div class="choice-grid surfaces">${surfaces}</div><p class="selection-explanation"><strong>${esc(surface.name)}:</strong> ${esc(surface.detail)}</p><h3>Choose the integration</h3><div class="choice-grid stacks">${stacks}</div><p class="muted">For HTTP and HTML, choose which routes receive instructions in code—not in this dashboard.</p>${generate}</div></section>${installStep}${verifyStep}<details class="existing-connections"><summary>Existing integrations (${dashboard.apiKeys.length})</summary><div>${connections}</div></details>`;
+  return `${header("SETUP", `Connect ${dashboard.currentProduct.name}`, dashboard.currentEnvironment.name)}<p class="setup-lede">Choose your stack, copy the ready installation, and send the first real interaction.</p><section class="setup-step"><div class="step-number">1</div><div class="step-body"><p class="eyebrow">INTEGRATION</p><h2>Choose how your product is served</h2><div class="choice-grid surfaces">${surfaces}</div><p class="selection-explanation"><strong>${esc(surface.name)}:</strong> ${esc(surface.detail)}</p><h3>Choose the integration</h3><div class="choice-grid stacks">${stacks}</div><p class="muted">For HTTP and HTML, choose which routes receive instructions in code—not in this dashboard.</p>${ready}</div></section>${installStep}${verifyStep}<details class="existing-connections"><summary>Product keys (${dashboard.apiKeys.length})</summary><div>${connections}</div></details>`;
 }
 
 function policyView() {
@@ -329,7 +371,10 @@ document.addEventListener("click", async (event) => {
   const target = event.target.closest("button");
   if (!target) return;
   try {
-    if (target.dataset.view) navigate(target.dataset.view);
+    if (target.dataset.view) {
+      navigate(target.dataset.view);
+      if (target.dataset.view === "setup") await refresh();
+    }
     if (target.hasAttribute("data-new-product")) navigate("new-product");
     if (target.hasAttribute("data-new-environment")) navigate("new-environment");
     if (target.dataset.setupSurface) {
@@ -352,26 +397,22 @@ document.addEventListener("click", async (event) => {
     if (target.dataset.openInteraction) { currentView = "interactions"; selectedInteraction = target.dataset.openInteraction; render(); }
     if (target.hasAttribute("data-toggle-legacy")) { showingLegacy = !showingLegacy; selectedOutcome = null; render(); }
     if (target.dataset.copy) { await navigator.clipboard.writeText(target.dataset.copy); setNotice("Copied."); }
-    if (target.hasAttribute("data-create-key")) {
-      const integration = setupInstructions();
-      const body = await request("/api/settings/api-keys", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: integration.name, environmentId: dashboard.currentEnvironment.id }) });
-      apiSecret = body.secret;
-      setupConnectionId = body.apiKey.id;
-      await refresh();
-      setNotice("Installation generated. Save the server-side key, then add the integration below.");
-    }
     if (target.hasAttribute("data-refresh-setup")) {
       await refresh();
       setNotice("Connection status refreshed.");
     }
     if (target.dataset.revokeKey) {
       await request(`/api/settings/api-keys/${target.dataset.revokeKey}`, { method: "DELETE" });
-      if (target.dataset.revokeKey === setupConnectionId) {
-        apiSecret = "";
-        setupConnectionId = null;
-      }
+      const body = await request("/api/settings/api-keys", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ label: "Default product key", environmentId: dashboard.currentEnvironment.id }),
+      });
+      apiSecret = body.secret;
+      setupConnectionId = body.apiKey.id;
+      rememberSetupSecret(dashboard.currentEnvironment.id, body.secret);
       await refresh();
-      setNotice("Connection key revoked.");
+      setNotice("Product key rotated. Save the new server-side key shown above.");
     }
   } catch (error) {
     setNotice(error.message || "Request failed");
@@ -407,8 +448,9 @@ document.addEventListener("submit", async (event) => {
     if (event.target.id === "product-form") {
       const body = await request("/api/products", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: form.get("name"), environment: form.get("environment") || "Production" }) });
       selectedEnvironmentId = body.environment.id;
-      apiSecret = "";
-      setupConnectionId = null;
+      apiSecret = body.secret || "";
+      setupConnectionId = body.apiKey?.id || null;
+      rememberSetupSecret(body.environment.id, body.secret);
       currentView = "setup";
       await refresh();
       navigate("setup");
@@ -417,8 +459,9 @@ document.addEventListener("submit", async (event) => {
     if (event.target.id === "environment-form") {
       const body = await request(`/api/products/${dashboard.currentProduct.id}/environments`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: form.get("name") }) });
       selectedEnvironmentId = body.environment.id;
-      apiSecret = "";
-      setupConnectionId = null;
+      apiSecret = body.secret || "";
+      setupConnectionId = body.apiKey?.id || null;
+      rememberSetupSecret(body.environment.id, body.secret);
       currentView = "setup";
       await refresh();
       navigate("setup");

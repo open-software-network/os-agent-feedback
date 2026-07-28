@@ -245,13 +245,17 @@ pub async fn create_api_key(
     label: Option<String>,
     expires_in_seconds: Option<i64>,
 ) -> Result<(ApiKeyPublic, String), ApiError> {
-    let expires_in_seconds = expires_in_seconds.unwrap_or(90 * 24 * 60 * 60);
-    if !(60..=365 * 24 * 60 * 60).contains(&expires_in_seconds) {
-        return Err(ApiError::bad_request(
-            "expiresInSeconds must be between 60 seconds and 365 days",
-        ));
-    }
-    let expires_at = Utc::now() + chrono::Duration::seconds(expires_in_seconds);
+    let expires_at = match expires_in_seconds {
+        Some(seconds) => {
+            if !(60..=365 * 24 * 60 * 60).contains(&seconds) {
+                return Err(ApiError::bad_request(
+                    "expiresInSeconds must be between 60 seconds and 365 days",
+                ));
+            }
+            Some(Utc::now() + chrono::Duration::seconds(seconds))
+        }
+        None => None,
+    };
     let environment_exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM product_environments WHERE id = $1 AND workspace_id = $2)",
     )
