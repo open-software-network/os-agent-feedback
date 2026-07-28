@@ -16,8 +16,7 @@ let setupStack = "node-mcp";
 let setupConnectionId = null;
 let setupInstallMode = "agent";
 let setupMonitor = null;
-let latestInviteLink = "";
-let latestInviteEmail = "";
+let noticeTimer = null;
 
 function setupSecretKey(environmentId) {
   return `agent-feedback:product-key:${environmentId}`;
@@ -49,7 +48,17 @@ function recalledSetupSecret(environmentId) {
 const esc = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
 const date = (value) => value ? new Date(value).toLocaleString() : "—";
 const title = (value) => String(value || "unknown").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
-const setNotice = (message) => { notice.textContent = message; notice.hidden = !message; };
+const setNotice = (message, timeoutMs = 0) => {
+  clearTimeout(noticeTimer);
+  notice.textContent = message;
+  notice.hidden = !message;
+  if (message && timeoutMs) {
+    noticeTimer = setTimeout(() => {
+      notice.textContent = "";
+      notice.hidden = true;
+    }, timeoutMs);
+  }
+};
 const outcomeClass = (value) => value === "success" ? "positive" : value === "failure" ? "negative" : "neutral";
 const customer = (value) => value ? `Customer ${value}` : "Customer not linked";
 
@@ -370,8 +379,6 @@ function teamView() {
   const isOwner = dashboard.currentRole === "owner";
   const isAdmin = dashboard.currentRole === "admin";
   const canInvite = isOwner || isAdmin;
-  const emailHref = latestInviteEmail && latestInviteLink ? `mailto:${encodeURIComponent(latestInviteEmail)}?subject=${encodeURIComponent(`Join ${dashboard.workspace.name}`)}&body=${encodeURIComponent(`You've been invited to join ${dashboard.workspace.name}.\n\n${latestInviteLink}`)}` : "";
-  const inviteResult = latestInviteLink ? `<div class="secret-callout"><div><b>${latestInviteEmail ? "Email invitation ready" : "Invite link ready"}</b><code>${esc(latestInviteLink)}</code><small>${latestInviteEmail ? `Only ${esc(latestInviteEmail)} can accept this invitation.` : "Anyone with this link can join."} The link expires in seven days.</small></div><div class="invite-result-actions"><button class="button" data-copy="${esc(latestInviteLink)}">Copy link</button>${emailHref ? `<a class="button primary" href="${esc(emailHref)}">Open email draft</a>` : ""}</div></div>` : "";
   const roleOptions = (role) => `<option value="member" ${role === "member" ? "selected" : ""}>Member</option><option value="admin" ${role === "admin" ? "selected" : ""}>Admin</option>`;
   const memberRows = dashboard.teamMembers.map((member) => {
     const isSelf = member.osUserId === dashboard.user.id;
@@ -382,12 +389,12 @@ function teamView() {
   const invitationRows = dashboard.teamInvitations.map((invitation) => {
     const link = `${location.origin}/join/${invitation.id}`;
     const canRevoke = isOwner || (isAdmin && invitation.role === "member");
-    const recipient = invitation.inviteeKind === "email" ? invitation.inviteeValue : invitation.inviteeKind === "link" ? "Shareable invite link" : "Private invitation";
-    return `<div class="team-row"><span><strong>${esc(recipient)}</strong><small>Invited as ${esc(invitation.role)} · expires ${date(invitation.expiresAt)}</small></span><button class="link-button" data-copy="${esc(link)}">Copy link</button><span>${canRevoke ? `<button class="link-button danger" data-revoke-invitation="${esc(invitation.id)}">Revoke</button>` : ""}</span></div>`;
+    const recipient = invitation.inviteeKind === "email" ? invitation.inviteeValue : invitation.inviteeKind === "link" ? "Member invite link" : "Private invitation";
+    return `<div class="team-row"><span><strong>${esc(recipient)}</strong><small>${esc(title(invitation.role))} · expires ${date(invitation.expiresAt)}</small></span><button class="link-button" data-copy="${esc(link)}">Copy link</button><span>${canRevoke ? `<button class="link-button danger" data-revoke-invitation="${esc(invitation.id)}">Revoke</button>` : ""}</span></div>`;
   }).join("");
   const roleChoices = `${isOwner ? `<option value="admin">Admin</option>` : ""}<option value="member" selected>Member</option>`;
-  const inviteForm = canInvite ? `<section class="team-invite"><h2>Invite teammates</h2><p>Invite a specific person by email, or copy a link and share it anywhere.</p><div class="team-invite-options"><article><h3>Invite by email</h3><p>Only this email address will be able to join.</p><form id="team-invite-email-form"><label><span>Email address</span><input name="invitee" type="email" autocomplete="email" placeholder="teammate@example.com" maxlength="160" required></label><label><span>Role</span><select name="role">${roleChoices}</select></label><button class="button primary">Create email invite</button></form></article><article><h3>Share an invite link</h3><p>Anyone with the link can join in the selected role.</p><label><span>Role</span><select id="invite-link-role">${roleChoices}</select></label><button class="button primary" data-create-invite-link>Copy invite link</button></article></div>${inviteResult}</section>` : `<p class="muted">Your ${esc(dashboard.currentRole)} role can view this team. An owner or admin manages membership.</p>`;
-  return `${header("TEAM", dashboard.workspace.name, `${dashboard.teamMembers.length} member${dashboard.teamMembers.length === 1 ? "" : "s"}`)}<div class="role-guide"><article><h2>Owner</h2><p>Full product, team, and role control.</p></article><article><h2>Admin</h2><p>Manages products and can invite or remove members.</p></article><article><h2>Member</h2><p>Can view feedback, interactions, sessions, and insights.</p></article></div>${inviteForm}<section class="team-section"><h2>Members</h2><div class="team-list">${memberRows}</div></section>${canInvite ? `<section class="team-section"><h2>Pending invitations</h2>${invitationRows ? `<div class="team-list">${invitationRows}</div>` : `<p class="muted">No pending invitations.</p>`}</section>` : ""}`;
+  const inviteForm = canInvite ? `<section class="team-invite"><h2>Invite teammates</h2><form id="team-invite-email-form"><label><span>Email address</span><input name="invitee" type="email" autocomplete="email" placeholder="teammate@example.com" maxlength="160" required></label><label><span>Role</span><select name="role">${roleChoices}</select></label><button class="button primary">Invite</button></form><button class="link-button team-invite-secondary" data-create-invite-link>Copy member invite link</button></section>` : `<p class="muted">Your ${esc(dashboard.currentRole)} role can view this team. An owner or admin manages membership.</p>`;
+  return `${header("TEAM", dashboard.workspace.name, `${dashboard.teamMembers.length} member${dashboard.teamMembers.length === 1 ? "" : "s"}`)}${inviteForm}<section class="team-section"><h2>Members</h2><div class="team-list">${memberRows}</div></section>${canInvite ? `<section class="team-section"><h2>Pending invitations</h2>${invitationRows ? `<div class="team-list">${invitationRows}</div>` : `<p class="muted">No pending invitations.</p>`}</section>` : ""}`;
 }
 
 function policyView() {
@@ -446,19 +453,16 @@ document.addEventListener("click", async (event) => {
     if (target.dataset.back) { selectedOutcome = null; selectedInteraction = null; selectedSession = null; render(); }
     if (target.dataset.openInteraction) { currentView = "interactions"; selectedInteraction = target.dataset.openInteraction; render(); }
     if (target.hasAttribute("data-toggle-legacy")) { showingLegacy = !showingLegacy; selectedOutcome = null; render(); }
-    if (target.dataset.copy) { await navigator.clipboard.writeText(target.dataset.copy); setNotice("Copied."); }
+    if (target.dataset.copy) { await navigator.clipboard.writeText(target.dataset.copy); setNotice("Copied.", 1800); }
     if (target.hasAttribute("data-create-invite-link")) {
-      const role = document.querySelector("#invite-link-role")?.value || "member";
       const body = await request("/api/team/invitations", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ role }),
+        body: JSON.stringify({ role: "member" }),
       });
-      latestInviteLink = `${location.origin}${body.joinPath}`;
-      latestInviteEmail = "";
-      await navigator.clipboard.writeText(latestInviteLink);
+      await navigator.clipboard.writeText(`${location.origin}${body.joinPath}`);
       await refresh();
-      setNotice("Invite link copied. Anyone with the link can join.");
+      setNotice("Invite link copied.", 1800);
     }
     if (target.hasAttribute("data-refresh-setup")) {
       await refresh();
@@ -502,8 +506,6 @@ document.addEventListener("change", async (event) => {
       selectedProductId = "";
       apiSecret = "";
       setupConnectionId = null;
-      latestInviteLink = "";
-      latestInviteEmail = "";
       await refresh();
     }
     if (event.target.id === "product-select") {
@@ -554,11 +556,12 @@ document.addEventListener("submit", async (event) => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ invitee, role: form.get("role") }),
       });
-      latestInviteLink = `${location.origin}${body.joinPath}`;
-      latestInviteEmail = invitee;
+      const inviteLink = `${location.origin}${body.joinPath}`;
+      const emailHref = `mailto:${encodeURIComponent(invitee)}?subject=${encodeURIComponent(`Join ${dashboard.workspace.name}`)}&body=${encodeURIComponent(`You've been invited to join ${dashboard.workspace.name}.\n\n${inviteLink}`)}`;
       event.target.reset();
       await refresh();
-      setNotice("Email invitation ready. Open an email draft or copy the link.");
+      setNotice("Email draft ready.", 1800);
+      location.assign(emailHref);
     }
   } catch (error) {
     setNotice(error.message || "Request failed");

@@ -13,9 +13,13 @@ test("dashboard exposes team switching and membership management", () => {
   assert.match(dashboardHtml, /data-view="team"/);
   assert.match(dashboardScript, /id="workspace-select"/);
   assert.match(dashboardScript, /Invite teammates/);
-  assert.match(dashboardScript, /Invite by email/);
-  assert.match(dashboardScript, /Share an invite link/);
+  assert.match(dashboardScript, /type="email"/);
+  assert.match(dashboardScript, />Invite<\/button>/);
+  assert.match(dashboardScript, /Copy member invite link/);
   assert.match(dashboardScript, /data-create-invite-link/);
+  assert.doesNotMatch(dashboardScript, /invite-link-role/);
+  assert.doesNotMatch(dashboardScript, /latestInviteLink|latestInviteEmail|inviteResult/);
+  assert.doesNotMatch(dashboardScript, /Anyone with this link can join/);
   assert.doesNotMatch(dashboardScript, /OS Account|@handle/);
   assert.match(dashboardScript, /data-member-role/);
   assert.match(dashboardScript, /data-remove-member/);

@@ -22,7 +22,7 @@ input, select { width:100%; border:1px solid var(--line); padding:11px; backgrou
 .button { display:inline-block; width:max-content; border:1px solid var(--ink); background:#fff; color:var(--ink); padding:10px 14px; text-decoration:none; }
 .button.primary { background:var(--ink); color:#fff; }
 button:disabled { cursor:not-allowed; opacity:.5; }
-.notice { border:1px solid var(--accent); background:#eef5ff; padding:12px; margin:0 0 20px; }
+.notice { width:max-content; max-width:100%; border:1px solid var(--accent); background:#eef5ff; padding:12px; margin:0 0 20px; }
 .app-shell { min-height:100vh; display:grid; grid-template-columns:210px minmax(0,1fr); }
 .sidebar { border-right:1px solid var(--line); padding:22px 16px; display:flex; flex-direction:column; }
 .brand { color:var(--ink); font-weight:800; text-decoration:none; margin-bottom:24px; }
@@ -126,18 +126,9 @@ pre { background:#111; color:#eee; padding:14px; overflow:auto; white-space:pre-
 .secret code { display:block; overflow-wrap:anywhere; color:var(--good); }
 .policy { max-width:700px; }.check { display:flex; grid-template-columns:auto 1fr; align-items:center; }.check input { width:auto; }
 .guardrails ul { margin-bottom:0; }
-.role-guide { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-bottom:24px; }
-.role-guide article { border:1px solid var(--line); padding:16px; }
-.role-guide p { margin-bottom:0; color:var(--muted); }
 .team-invite { border:1px solid var(--line); padding:20px; margin-bottom:28px; }
-.team-invite>p { color:var(--muted); max-width:720px; }
-.team-invite-options { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; margin-top:18px; }
-.team-invite-options article { border:1px solid var(--line); padding:18px; }
-.team-invite-options article>p { color:var(--muted); min-height:48px; }
-.team-invite-options form { grid-template-columns:minmax(0,1fr) 150px; align-items:end; }
-.team-invite-options form .button { grid-column:1/-1; }
-.team-invite-options article>.button { margin-top:16px; }
-.invite-result-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.team-invite form { grid-template-columns:minmax(0,1fr) 150px auto; align-items:end; }
+.team-invite-secondary { margin-top:12px; }
 .team-section { margin-top:28px; }
 .team-list { border-top:1px solid var(--line); }
 .team-row { display:grid; grid-template-columns:minmax(0,1fr) 150px 80px; gap:16px; align-items:center; border-bottom:1px solid var(--line); padding:14px 4px; }
@@ -146,4 +137,4 @@ pre { background:#111; color:#eee; padding:14px; overflow:auto; white-space:pre-
 .compact-select { padding:8px; }
 .link-button.danger { color:var(--bad); }
 @media (max-width:900px) { .metrics.five,.setup-tabs,.three-col,.choice-grid.stacks,.choice-grid.surfaces { grid-template-columns:1fr 1fr; } }
-@media (max-width:760px) { .landing { grid-template-columns:1fr; gap:28px; }.app-shell { grid-template-columns:1fr; }.sidebar { border-right:0; border-bottom:1px solid var(--line); }.sidebar nav { grid-template-columns:repeat(2,minmax(0,1fr)); }.sidebar nav p { grid-column:1/-1; }.account { margin-top:20px; }.content { padding:22px 16px; }.content header { align-items:start; flex-direction:column; }.header-actions { align-items:start; flex-direction:column; }.list-row { grid-template-columns:1fr; }.list-row time { text-align:left; }.detail-grid,.two-col,.three-col,.metrics,.metrics.five,.session-meta,.identity-cards,.setup-tabs,.choice-grid.surfaces,.choice-grid.stacks,.connection-form,.role-guide,.team-invite-options,.team-invite-options form { grid-template-columns:1fr; }.team-invite-options form .button { grid-column:auto; }.steps li { flex-direction:column; }.setup-step { grid-template-columns:34px minmax(0,1fr); gap:12px; }.secret-callout,.connection-created { flex-direction:column; }.copy-block,.connection-row,.team-row { grid-template-columns:1fr; }.team-row>span:last-child { text-align:left; } }
+@media (max-width:760px) { .landing { grid-template-columns:1fr; gap:28px; }.app-shell { grid-template-columns:1fr; }.sidebar { border-right:0; border-bottom:1px solid var(--line); }.sidebar nav { grid-template-columns:repeat(2,minmax(0,1fr)); }.sidebar nav p { grid-column:1/-1; }.account { margin-top:20px; }.content { padding:22px 16px; }.content header { align-items:start; flex-direction:column; }.header-actions { align-items:start; flex-direction:column; }.list-row { grid-template-columns:1fr; }.list-row time { text-align:left; }.detail-grid,.two-col,.three-col,.metrics,.metrics.five,.session-meta,.identity-cards,.setup-tabs,.choice-grid.surfaces,.choice-grid.stacks,.connection-form,.team-invite form { grid-template-columns:1fr; }.steps li { flex-direction:column; }.setup-step { grid-template-columns:34px minmax(0,1fr); gap:12px; }.secret-callout,.connection-created { flex-direction:column; }.copy-block,.connection-row,.team-row { grid-template-columns:1fr; }.team-row>span:last-child { text-align:left; } }
