@@ -93,7 +93,7 @@ export default function Home() {
 
       <footer>
         <span>AGENT FEEDBACK</span>
-        <a href={`${dashboard}/auth/start`}>Sign in with OS Accounts →</a>
+        <a href={`${dashboard}/auth/start`}>Sign in →</a>
       </footer>
     </main>
   );

@@ -63,7 +63,7 @@ pub struct TeamInvitation {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateTeamInvitationInput {
-    pub invitee: String,
+    pub invitee: Option<String>,
     pub role: String,
 }
 

@@ -143,6 +143,7 @@ fn invitation_matches(invitation: &TeamInvitation, os_user: &OsUser) -> bool {
             .handle
             .trim_start_matches('@')
             .eq_ignore_ascii_case(&invitation.invitee_value),
+        "link" => true,
         _ => false,
     }
 }
@@ -154,7 +155,7 @@ async fn accept_invitation(
 ) -> Result<Uuid, ApiError> {
     if !invitation_matches(invitation, os_user) {
         return Err(ApiError::forbidden(
-            "This invitation belongs to a different OS Account",
+            "This invitation was created for a different email address",
         ));
     }
     let mut tx = pool.begin().await?;
@@ -291,24 +292,17 @@ pub async fn resolve_workspace_access(
     Ok((workspace, selected.role.clone(), memberships))
 }
 
-fn normalize_invitee(value: &str) -> Result<(&'static str, String), ApiError> {
+fn normalize_invitee_email(value: &str) -> Result<String, ApiError> {
     let value = value.trim().to_lowercase();
-    let (kind, value) = if value.starts_with('@') {
-        ("handle", value.trim_start_matches('@').to_string())
-    } else if value.contains('@') {
-        ("email", value)
-    } else {
-        ("handle", value)
-    };
-    let valid = (2..=160).contains(&value.len())
+    let valid = (3..=160).contains(&value.len())
         && !value.chars().any(char::is_whitespace)
-        && (kind != "email" || value.split('@').count() == 2);
+        && value.split('@').count() == 2
+        && !value.starts_with('@')
+        && !value.ends_with('@');
     if !valid {
-        return Err(ApiError::bad_request(
-            "Enter a valid OS Account email or @handle",
-        ));
+        return Err(ApiError::bad_request("Enter a valid email address"));
     }
-    Ok((kind, value))
+    Ok(value)
 }
 
 fn validate_team_role(role: &str) -> Result<&str, ApiError> {
@@ -332,7 +326,11 @@ pub async fn create_team_invitation(
     if context.role == "admin" && role != "member" {
         return Err(ApiError::forbidden("Admins can only invite members"));
     }
-    let (invitee_kind, invitee_value) = normalize_invitee(&input.invitee)?;
+    let invitation_id = Uuid::new_v4();
+    let (invitee_kind, invitee_value) = match input.invitee {
+        Some(value) => ("email", normalize_invitee_email(&value)?),
+        None => ("link", invitation_id.to_string()),
+    };
     let existing_member: bool = match invitee_kind {
         "email" => sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND LOWER(email) = $2)",
@@ -341,13 +339,14 @@ pub async fn create_team_invitation(
         .bind(&invitee_value)
         .fetch_one(pool)
         .await?,
-        _ => sqlx::query_scalar(
+        "handle" => sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND LOWER(handle) = $2)",
         )
         .bind(context.workspace.id)
         .bind(&invitee_value)
         .fetch_one(pool)
         .await?,
+        _ => false,
     };
     if existing_member {
         return Err(ApiError::conflict("This person is already a team member"));
@@ -369,7 +368,7 @@ pub async fn create_team_invitation(
         RETURNING id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
         role, created_at, expires_at"#,
     )
-    .bind(Uuid::new_v4())
+    .bind(invitation_id)
     .bind(context.workspace.id)
     .bind(&context.user.id)
     .bind(invitee_kind)
@@ -1659,15 +1658,13 @@ mod product_tests {
     }
 
     #[test]
-    fn team_invitees_are_normalized() -> anyhow::Result<()> {
+    fn team_invitee_emails_are_normalized() -> anyhow::Result<()> {
         anyhow::ensure!(
-            normalize_invitee(" @Teammate ").map_err(test_error)? == ("handle", "teammate".into())
+            normalize_invitee_email("Person@Example.com").map_err(test_error)?
+                == "person@example.com"
         );
-        anyhow::ensure!(
-            normalize_invitee("Person@Example.com").map_err(test_error)?
-                == ("email", "person@example.com".into())
-        );
-        anyhow::ensure!(normalize_invitee("not a handle").is_err());
+        anyhow::ensure!(normalize_invitee_email("@teammate").is_err());
+        anyhow::ensure!(normalize_invitee_email("not an email").is_err());
         Ok(())
     }
 
@@ -1695,6 +1692,13 @@ mod product_tests {
             display_name: Some("Team Member".into()),
             avatar_url: None,
         };
+        let guest = OsUser {
+            id: format!("usr_guest_{suffix}"),
+            handle: format!("guest_{}", &suffix[..8]),
+            email: Some(format!("guest_{}@example.com", &suffix[..8])),
+            display_name: Some("Team Guest".into()),
+            avatar_url: None,
+        };
 
         let result = async {
             let (workspace, role, memberships) = resolve_workspace_access(&pool, &owner, None)
@@ -1716,12 +1720,17 @@ mod product_tests {
                 &pool,
                 &owner_context,
                 CreateTeamInvitationInput {
-                    invitee: format!("@{}", teammate.handle),
+                    invitee: teammate.email.clone(),
                     role: "admin".into(),
                 },
             )
             .await
             .map_err(test_error)?;
+            anyhow::ensure!(
+                accept_team_invitation(&pool, &guest, invitation.id)
+                    .await
+                    .is_err()
+            );
             let accepted_workspace = accept_team_invitation(&pool, &teammate, invitation.id)
                 .await
                 .map_err(test_error)?;
@@ -1752,15 +1761,39 @@ mod product_tests {
                     .await
                     .is_err()
             );
+            let link_invitation = create_team_invitation(
+                &pool,
+                &owner_context,
+                CreateTeamInvitationInput {
+                    invitee: None,
+                    role: "member".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(link_invitation.invitee_kind == "link");
+            anyhow::ensure!(
+                accept_team_invitation(&pool, &guest, link_invitation.id)
+                    .await
+                    .map_err(test_error)?
+                    == workspace.id
+            );
+            let (_, guest_role, _) = resolve_workspace_access(&pool, &guest, Some(workspace.id))
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(guest_role == "member");
             Ok::<(), anyhow::Error>(())
         }
         .await;
 
-        sqlx::query("DELETE FROM workspaces WHERE os_user_id = $1 OR os_user_id = $2")
-            .bind(&owner.id)
-            .bind(&teammate.id)
-            .execute(&pool)
-            .await?;
+        sqlx::query(
+            "DELETE FROM workspaces WHERE os_user_id = $1 OR os_user_id = $2 OR os_user_id = $3",
+        )
+        .bind(&owner.id)
+        .bind(&teammate.id)
+        .bind(&guest.id)
+        .execute(&pool)
+        .await?;
         result
     }
 }

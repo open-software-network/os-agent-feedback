@@ -22,6 +22,6 @@ test("server-renders the Agent Feedback product contract", async () => {
   assert.match(html, /Node, Python, Go, Rust/i);
   assert.match(html, /language-neutral protocol/i);
   assert.match(html, /success/);
-  assert.match(html, /OS Accounts/);
+  assert.doesNotMatch(html, /OS Accounts|Open Software Account/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Building your site/i);
 });
