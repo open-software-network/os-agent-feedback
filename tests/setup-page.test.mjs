@@ -26,13 +26,19 @@ const backendStore = await readFile(
   new URL("../backend/src/store.rs", import.meta.url),
   "utf8",
 );
+const backendModels = await readFile(
+  new URL("../backend/src/models.rs", import.meta.url),
+  "utf8",
+);
 
-test("products and environments exist before integration setup", () => {
+test("products exist before integration setup without an environment picker", () => {
   assert.match(dashboardHtml, /id="product-scope"/);
   assert.match(dashboardScript, /Create your first product/);
   assert.match(dashboardScript, /id="product-select"/);
-  assert.match(dashboardScript, /id="environment-select"/);
   assert.match(dashboardScript, /\+ New product/);
+  assert.doesNotMatch(dashboardScript, /id="environment-select"/);
+  assert.doesNotMatch(dashboardScript, /data-new-environment/);
+  assert.doesNotMatch(dashboardScript, /First environment/);
   assert.doesNotMatch(dashboardScript, /id="setup-connection-name"/);
   assert.doesNotMatch(dashboardScript, /id="setup-environment"/);
 });
@@ -64,12 +70,14 @@ test("installation is ready without a setup generation step", () => {
   assert.doesNotMatch(dashboardScript, /Choose an integration and generate its installation first/);
 });
 
-test("new products and environments receive their product key automatically", () => {
+test("new products receive their product key automatically", () => {
   const defaultKeyCreations = backendMain.match(/Some\("Default product key"\.into\(\)\),\s+None,/g) || [];
-  assert.equal(defaultKeyCreations.length, 2);
+  assert.equal(defaultKeyCreations.length, 1);
   assert.match(backendMain, /"apiKey": api_key/);
   assert.match(backendMain, /"secret": secret/);
   assert.match(backendStore, /None => None/);
+  assert.doesNotMatch(backendMain, /\/api\/products\/\{product_id\}\/environments/);
+  assert.doesNotMatch(backendModels, /CreateEnvironmentInput/);
 });
 
 test("routes stay in code and key expiration stays out of onboarding", () => {
@@ -92,7 +100,7 @@ test("setup communicates the HTTP and MCP evidence models separately", () => {
   assert.match(dashboardScript, /product response never waits for Agent Feedback/i);
 });
 
-test("legacy v2 data is migrated into a default product environment", () => {
+test("legacy v2 data remains linked to its migrated product", () => {
   assert.match(productMigration, /CREATE TABLE products/);
   assert.match(productMigration, /CREATE TABLE product_environments/);
   assert.match(productMigration, /legacy-product/);

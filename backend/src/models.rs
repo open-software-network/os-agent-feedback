@@ -76,13 +76,6 @@ pub struct ProductEnvironment {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateProductInput {
     pub name: String,
-    pub environment: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CreateEnvironmentInput {
-    pub name: String,
 }
 
 #[derive(Debug, Deserialize)]

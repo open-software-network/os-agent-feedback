@@ -148,10 +148,9 @@ pub async fn create_product(
     input: CreateProductInput,
 ) -> Result<(Product, ProductEnvironment), ApiError> {
     let name = clean(&input.name, 80);
-    let environment_name = clean(input.environment.as_deref().unwrap_or("Production"), 40);
-    if name.len() < 2 || environment_name.len() < 2 {
+    if name.len() < 2 {
         return Err(ApiError::bad_request(
-            "Product and environment names must contain at least 2 characters",
+            "Product name must contain at least 2 characters",
         ));
     }
     let product_count: i64 =
@@ -182,60 +181,13 @@ pub async fn create_product(
     .bind(Uuid::new_v4())
     .bind(workspace_id)
     .bind(product.id)
-    .bind(&environment_name)
-    .bind(slug(&environment_name))
+    .bind("Default")
+    .bind("default")
     .fetch_one(&mut *tx)
     .await
-    .map_err(|error| database_conflict(error, "This environment already exists"))?;
+    .map_err(|error| database_conflict(error, "This product already exists"))?;
     tx.commit().await?;
     Ok((product, environment))
-}
-
-pub async fn create_product_environment(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    product_id: Uuid,
-    input: CreateEnvironmentInput,
-) -> Result<ProductEnvironment, ApiError> {
-    let name = clean(&input.name, 40);
-    if name.len() < 2 {
-        return Err(ApiError::bad_request(
-            "Environment name must contain at least 2 characters",
-        ));
-    }
-    let product_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM products WHERE id = $1 AND workspace_id = $2)",
-    )
-    .bind(product_id)
-    .bind(workspace_id)
-    .fetch_one(pool)
-    .await?;
-    if !product_exists {
-        return Err(ApiError::not_found("Product not found"));
-    }
-    let environment_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM product_environments WHERE product_id = $1")
-            .bind(product_id)
-            .fetch_one(pool)
-            .await?;
-    if environment_count >= 10 {
-        return Err(ApiError::conflict(
-            "This product already has 10 environments",
-        ));
-    }
-    sqlx::query_as::<_, ProductEnvironment>(
-        r#"INSERT INTO product_environments
-        (id, workspace_id, product_id, name, slug)
-        VALUES ($1, $2, $3, $4, $5) RETURNING *"#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(workspace_id)
-    .bind(product_id)
-    .bind(&name)
-    .bind(slug(&name))
-    .fetch_one(pool)
-    .await
-    .map_err(|error| database_conflict(error, "This environment already exists"))
 }
 
 pub async fn create_api_key(
@@ -341,6 +293,7 @@ pub async fn update_policy(
 pub async fn dashboard(
     pool: &PgPool,
     context: DashboardContext,
+    selected_product_id: Option<Uuid>,
     selected_environment_id: Option<Uuid>,
 ) -> Result<DashboardData, ApiError> {
     let products = sqlx::query_as::<_, Product>(
@@ -355,16 +308,31 @@ pub async fn dashboard(
     .bind(context.workspace.id)
     .fetch_all(pool)
     .await?;
-    let current_environment = selected_environment_id
-        .and_then(|id| environments.iter().find(|environment| environment.id == id))
-        .or_else(|| environments.first())
+    let legacy_environment = selected_environment_id
+        .and_then(|id| environments.iter().find(|environment| environment.id == id));
+    let current_product = selected_product_id
+        .and_then(|id| products.iter().find(|product| product.id == id))
+        .or_else(|| {
+            legacy_environment.and_then(|environment| {
+                products
+                    .iter()
+                    .find(|product| product.id == environment.product_id)
+            })
+        })
+        .or_else(|| products.first())
         .cloned();
-    let current_product = current_environment.as_ref().and_then(|environment| {
-        products
-            .iter()
-            .find(|product| product.id == environment.product_id)
-            .cloned()
-    });
+    let current_environment = current_product
+        .as_ref()
+        .and_then(|product| {
+            legacy_environment
+                .filter(|environment| environment.product_id == product.id)
+                .or_else(|| {
+                    environments
+                        .iter()
+                        .find(|environment| environment.product_id == product.id)
+                })
+        })
+        .cloned();
     let environment_id = current_environment
         .as_ref()
         .map(|environment| environment.id);
@@ -1137,7 +1105,7 @@ pub async fn submit_customer_agent_feedback(
 }
 
 #[cfg(test)]
-mod product_environment_tests {
+mod product_tests {
     use sqlx::postgres::PgPoolOptions;
 
     use super::*;
@@ -1148,7 +1116,7 @@ mod product_environment_tests {
 
     #[tokio::test]
     #[ignore = "requires DATABASE_URL"]
-    async fn product_environment_scope_isolated_end_to_end() -> anyhow::Result<()> {
+    async fn product_scope_isolated_end_to_end() -> anyhow::Result<()> {
         let database_url = std::env::var("DATABASE_URL")?;
         let pool = PgPoolOptions::new()
             .max_connections(2)
@@ -1171,32 +1139,20 @@ mod product_environment_tests {
         .await?;
 
         let result = async {
-            let (search, production) = create_product(
+            let (search, search_settings) = create_product(
                 &pool,
                 workspace_id,
                 CreateProductInput {
                     name: "Search".into(),
-                    environment: Some("Production".into()),
                 },
             )
             .await
             .map_err(test_error)?;
-            let staging = create_product_environment(
-                &pool,
-                workspace_id,
-                search.id,
-                CreateEnvironmentInput {
-                    name: "Staging".into(),
-                },
-            )
-            .await
-            .map_err(test_error)?;
-            let (_docs, _docs_production) = create_product(
+            let (docs, docs_settings) = create_product(
                 &pool,
                 workspace_id,
                 CreateProductInput {
                     name: "Documentation".into(),
-                    environment: Some("Production".into()),
                 },
             )
             .await
@@ -1204,7 +1160,7 @@ mod product_environment_tests {
             let (key, _) = create_api_key(
                 &pool,
                 workspace_id,
-                production.id,
+                search_settings.id,
                 Some("Express".into()),
                 None,
             )
@@ -1215,7 +1171,7 @@ mod product_environment_tests {
                 &pool,
                 &ProductAuth {
                     workspace: workspace.clone(),
-                    environment: production.clone(),
+                    environment: search_settings.clone(),
                     api_key_id: key.id,
                 },
                 TelemetryBatchInput {
@@ -1248,26 +1204,26 @@ mod product_environment_tests {
                 },
                 workspace: workspace.clone(),
             };
-            let production_dashboard = dashboard(&pool, context(), Some(production.id))
+            let search_dashboard = dashboard(&pool, context(), Some(search.id), None)
                 .await
                 .map_err(test_error)?;
-            anyhow::ensure!(production_dashboard.products.len() == 2);
-            anyhow::ensure!(production_dashboard.environments.len() == 3);
-            anyhow::ensure!(production_dashboard.interactions.len() == 1);
-            anyhow::ensure!(production_dashboard.api_keys.len() == 1);
+            anyhow::ensure!(search_dashboard.products.len() == 2);
+            anyhow::ensure!(search_dashboard.current_product.unwrap().id == search.id);
+            anyhow::ensure!(search_dashboard.interactions.len() == 1);
+            anyhow::ensure!(search_dashboard.api_keys.len() == 1);
 
-            let staging_dashboard = dashboard(&pool, context(), Some(staging.id))
+            let docs_dashboard = dashboard(&pool, context(), Some(docs.id), None)
                 .await
                 .map_err(test_error)?;
-            anyhow::ensure!(staging_dashboard.current_product.unwrap().id == search.id);
-            anyhow::ensure!(staging_dashboard.interactions.is_empty());
-            anyhow::ensure!(staging_dashboard.api_keys.is_empty());
+            anyhow::ensure!(docs_dashboard.current_product.unwrap().id == docs.id);
+            anyhow::ensure!(docs_dashboard.interactions.is_empty());
+            anyhow::ensure!(docs_dashboard.api_keys.is_empty());
 
             let updated = update_policy(
                 &pool,
                 workspace_id,
                 PolicyInput {
-                    environment_id: staging.id,
+                    environment_id: docs_settings.id,
                     feedback_mode: "ask".into(),
                     collect_event_summaries: false,
                     retention_days: 7,
@@ -1276,7 +1232,7 @@ mod product_environment_tests {
             .await
             .map_err(test_error)?;
             anyhow::ensure!(updated.feedback_mode == "ask");
-            anyhow::ensure!(production.feedback_mode == "auto");
+            anyhow::ensure!(search_settings.feedback_mode == "auto");
             Ok::<(), anyhow::Error>(())
         }
         .await;

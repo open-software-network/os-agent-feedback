@@ -13,7 +13,7 @@ A company instruments selected API, website, or MCP surfaces once. Every SDK cre
 
 Agent Feedback does not identify agents. HTTP responses are unclassified opportunities until a receipt is used; generic HTTP agents may ignore response-side instructions, while a feedback-aware runtime can submit deterministically. MCP tool calls are confirmed agent interactions and expose feedback as an explicit protocol tool. Sessions exist only when the company or MCP provides proof of continuity.
 
-Dashboard data is organized as workspace → product → environment → integration. Product and environment selection happen before SDK setup, and every key, interaction, review, session, insight, and collection policy is scoped to the selected environment.
+Dashboard data is organized as workspace → product → integration. Users choose a product once; its keys, interactions, reviews, sessions, insights, and collection policy stay scoped to that product.
 
 ## Protocol-first integrations
 

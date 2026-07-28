@@ -106,10 +106,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/auth/logout", post(logout_handler))
         .route("/api/dashboard", get(dashboard_handler))
         .route("/api/products", post(create_product_handler))
-        .route(
-            "/api/products/{product_id}/environments",
-            post(create_environment_handler),
-        )
         .route("/api/settings/api-keys", post(create_api_key_handler))
         .route(
             "/api/settings/api-keys/{key_id}",
@@ -413,6 +409,8 @@ async fn logout_handler(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DashboardQuery {
+    product_id: Option<Uuid>,
+    // Kept during rollout so old dashboard links continue to resolve.
     environment_id: Option<Uuid>,
 }
 
@@ -422,7 +420,7 @@ async fn dashboard_handler(
     Query(query): Query<DashboardQuery>,
 ) -> Result<Response, ApiError> {
     let (context, tokens) = dashboard_auth(&state, &headers).await?;
-    let data = dashboard(&state.pool, context, query.environment_id).await?;
+    let data = dashboard(&state.pool, context, query.product_id, query.environment_id).await?;
     dashboard_response(&state, Json(data), tokens)
 }
 
@@ -447,38 +445,6 @@ async fn create_product_handler(
             StatusCode::CREATED,
             Json(json!({
                 "product": product,
-                "environment": environment,
-                "apiKey": api_key,
-                "secret": secret,
-                "shownOnce": true
-            })),
-        ),
-        tokens,
-    )
-}
-
-async fn create_environment_handler(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(product_id): Path<Uuid>,
-    Json(input): Json<CreateEnvironmentInput>,
-) -> Result<Response, ApiError> {
-    let (context, tokens) = dashboard_auth(&state, &headers).await?;
-    let environment =
-        create_product_environment(&state.pool, context.workspace.id, product_id, input).await?;
-    let (api_key, secret) = create_api_key(
-        &state.pool,
-        context.workspace.id,
-        environment.id,
-        Some("Default product key".into()),
-        None,
-    )
-    .await?;
-    dashboard_response(
-        &state,
-        (
-            StatusCode::CREATED,
-            Json(json!({
                 "environment": environment,
                 "apiKey": api_key,
                 "secret": secret,
