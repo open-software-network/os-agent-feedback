@@ -110,8 +110,8 @@ pub async fn agent_product_auth(
         .filter(|token| token.starts_with("af_live_"))
         .ok_or_else(ApiError::unauthorized)?;
     let key_hash = sha256(&token);
-    let key = sqlx::query_as::<_, (Uuid, Uuid)>(
-        r#"SELECT k.id, k.workspace_id FROM api_keys k
+    let key = sqlx::query_as::<_, (Uuid, Uuid, Uuid)>(
+        r#"SELECT k.id, k.workspace_id, k.environment_id FROM api_keys k
         WHERE k.key_hash = $1
           AND k.revoked_at IS NULL
           AND (k.expires_at IS NULL OR k.expires_at > NOW())"#,
@@ -124,19 +124,124 @@ pub async fn agent_product_auth(
         .bind(key.1)
         .fetch_one(pool)
         .await?;
+    let environment = sqlx::query_as::<_, ProductEnvironment>(
+        "SELECT * FROM product_environments WHERE id = $1 AND workspace_id = $2",
+    )
+    .bind(key.2)
+    .bind(key.1)
+    .fetch_one(pool)
+    .await?;
     sqlx::query("UPDATE api_keys SET last_used_at = NOW() WHERE key_hash = $1")
         .bind(&key_hash)
         .execute(pool)
         .await?;
     Ok(ProductAuth {
         workspace,
+        environment,
         api_key_id: key.0,
     })
+}
+
+pub async fn create_product(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    input: CreateProductInput,
+) -> Result<(Product, ProductEnvironment), ApiError> {
+    let name = clean(&input.name, 80);
+    let environment_name = clean(input.environment.as_deref().unwrap_or("Production"), 40);
+    if name.len() < 2 || environment_name.len() < 2 {
+        return Err(ApiError::bad_request(
+            "Product and environment names must contain at least 2 characters",
+        ));
+    }
+    let product_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM products WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .fetch_one(pool)
+            .await?;
+    if product_count >= 25 {
+        return Err(ApiError::conflict("This workspace already has 25 products"));
+    }
+    let mut tx = pool.begin().await?;
+    let product = sqlx::query_as::<_, Product>(
+        r#"INSERT INTO products (id, workspace_id, name, slug)
+        VALUES ($1, $2, $3, $4) RETURNING *"#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(workspace_id)
+    .bind(&name)
+    .bind(slug(&name))
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| database_conflict(error, "A product with this name already exists"))?;
+    let environment = sqlx::query_as::<_, ProductEnvironment>(
+        r#"INSERT INTO product_environments
+        (id, workspace_id, product_id, name, slug)
+        VALUES ($1, $2, $3, $4, $5) RETURNING *"#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(workspace_id)
+    .bind(product.id)
+    .bind(&environment_name)
+    .bind(slug(&environment_name))
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| database_conflict(error, "This environment already exists"))?;
+    tx.commit().await?;
+    Ok((product, environment))
+}
+
+pub async fn create_product_environment(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    input: CreateEnvironmentInput,
+) -> Result<ProductEnvironment, ApiError> {
+    let name = clean(&input.name, 40);
+    if name.len() < 2 {
+        return Err(ApiError::bad_request(
+            "Environment name must contain at least 2 characters",
+        ));
+    }
+    let product_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM products WHERE id = $1 AND workspace_id = $2)",
+    )
+    .bind(product_id)
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
+    if !product_exists {
+        return Err(ApiError::not_found("Product not found"));
+    }
+    let environment_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM product_environments WHERE product_id = $1")
+            .bind(product_id)
+            .fetch_one(pool)
+            .await?;
+    if environment_count >= 10 {
+        return Err(ApiError::conflict(
+            "This product already has 10 environments",
+        ));
+    }
+    sqlx::query_as::<_, ProductEnvironment>(
+        r#"INSERT INTO product_environments
+        (id, workspace_id, product_id, name, slug)
+        VALUES ($1, $2, $3, $4, $5) RETURNING *"#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(&name)
+    .bind(slug(&name))
+    .fetch_one(pool)
+    .await
+    .map_err(|error| database_conflict(error, "This environment already exists"))
 }
 
 pub async fn create_api_key(
     pool: &PgPool,
     workspace_id: Uuid,
+    environment_id: Uuid,
     label: Option<String>,
     expires_in_seconds: Option<i64>,
 ) -> Result<(ApiKeyPublic, String), ApiError> {
@@ -147,10 +252,20 @@ pub async fn create_api_key(
         ));
     }
     let expires_at = Utc::now() + chrono::Duration::seconds(expires_in_seconds);
-    let active_keys: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM api_keys WHERE workspace_id = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())",
+    let environment_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM product_environments WHERE id = $1 AND workspace_id = $2)",
     )
+    .bind(environment_id)
     .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
+    if !environment_exists {
+        return Err(ApiError::not_found("Product environment not found"));
+    }
+    let active_keys: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM api_keys WHERE environment_id = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())",
+    )
+    .bind(environment_id)
     .fetch_one(pool)
     .await?;
     if active_keys >= 10 {
@@ -163,11 +278,13 @@ pub async fn create_api_key(
     let prefix = secret.chars().take(16).collect::<String>();
     let row = sqlx::query_as::<_, ApiKeyPublic>(
         r#"INSERT INTO api_keys
-        (id, workspace_id, label, prefix, key_hash, expires_at) VALUES ($1, $2, $3, $4, $5, $6)
-        RETURNING id, label, prefix, created_at, last_used_at, revoked_at, expires_at"#,
+        (id, workspace_id, environment_id, label, prefix, key_hash, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id, environment_id, label, prefix, created_at, last_used_at, revoked_at, expires_at"#,
     )
     .bind(key_id)
     .bind(workspace_id)
+    .bind(environment_id)
     .bind(clean(label.as_deref().unwrap_or("Production"), 60))
     .bind(prefix)
     .bind(sha256(&secret))
@@ -194,7 +311,7 @@ pub async fn update_policy(
     pool: &PgPool,
     workspace_id: Uuid,
     input: PolicyInput,
-) -> Result<Workspace, ApiError> {
+) -> Result<ProductEnvironment, ApiError> {
     if !["auto", "ask", "off"].contains(&input.feedback_mode.as_str())
         || !(1..=365).contains(&input.retention_days)
     {
@@ -202,32 +319,64 @@ pub async fn update_policy(
             "Invalid feedback mode or retention period",
         ));
     }
-    sqlx::query_as::<_, Workspace>(
-        r#"UPDATE workspaces SET feedback_mode = $1,
+    let updated = sqlx::query_as::<_, ProductEnvironment>(
+        r#"UPDATE product_environments SET feedback_mode = $1,
         collect_event_summaries = $2, retention_days = $3, updated_at = NOW()
-        WHERE id = $4 RETURNING *"#,
+        WHERE id = $4 AND workspace_id = $5 RETURNING *"#,
     )
     .bind(input.feedback_mode)
     .bind(input.collect_event_summaries)
     .bind(input.retention_days)
+    .bind(input.environment_id)
     .bind(workspace_id)
-    .fetch_one(pool)
-    .await
-    .map_err(Into::into)
+    .fetch_optional(pool)
+    .await?;
+    updated.ok_or_else(|| ApiError::not_found("Product environment not found"))
 }
 
 pub async fn dashboard(
     pool: &PgPool,
     context: DashboardContext,
+    selected_environment_id: Option<Uuid>,
 ) -> Result<DashboardData, ApiError> {
-    let cutoff = Utc::now() - Duration::days(context.workspace.retention_days.into());
+    let products = sqlx::query_as::<_, Product>(
+        "SELECT * FROM products WHERE workspace_id = $1 ORDER BY created_at, name",
+    )
+    .bind(context.workspace.id)
+    .fetch_all(pool)
+    .await?;
+    let environments = sqlx::query_as::<_, ProductEnvironment>(
+        "SELECT * FROM product_environments WHERE workspace_id = $1 ORDER BY created_at, name",
+    )
+    .bind(context.workspace.id)
+    .fetch_all(pool)
+    .await?;
+    let current_environment = selected_environment_id
+        .and_then(|id| environments.iter().find(|environment| environment.id == id))
+        .or_else(|| environments.first())
+        .cloned();
+    let current_product = current_environment.as_ref().and_then(|environment| {
+        products
+            .iter()
+            .find(|product| product.id == environment.product_id)
+            .cloned()
+    });
+    let environment_id = current_environment
+        .as_ref()
+        .map(|environment| environment.id);
+    let retention_days = current_environment
+        .as_ref()
+        .map(|environment| environment.retention_days)
+        .unwrap_or(context.workspace.retention_days);
+    let cutoff = Utc::now() - Duration::days(retention_days.into());
+    let legacy_cutoff = Utc::now() - Duration::days(context.workspace.retention_days.into());
     sqlx::query("DELETE FROM agent_sessions WHERE workspace_id = $1 AND created_at < $2")
         .bind(context.workspace.id)
-        .bind(cutoff)
+        .bind(legacy_cutoff)
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM interactions_v2 WHERE workspace_id = $1 AND occurred_at < $2")
-        .bind(context.workspace.id)
+    sqlx::query("DELETE FROM interactions_v2 WHERE environment_id = $1 AND occurred_at < $2")
+        .bind(environment_id)
         .bind(cutoff)
         .execute(pool)
         .await?;
@@ -238,14 +387,14 @@ pub async fn dashboard(
     .execute(pool)
     .await?;
     let api_keys = sqlx::query_as::<_, ApiKeyPublic>(
-        r#"SELECT id, label, prefix, created_at, last_used_at, revoked_at, expires_at
+        r#"SELECT id, environment_id, label, prefix, created_at, last_used_at, revoked_at, expires_at
         FROM api_keys
-        WHERE workspace_id = $1
+        WHERE environment_id = $1
           AND revoked_at IS NULL
           AND (expires_at IS NULL OR expires_at > NOW())
         ORDER BY created_at DESC"#,
     )
-    .bind(context.workspace.id)
+    .bind(environment_id)
     .fetch_all(pool)
     .await?;
     let legacy_sessions = sqlx::query_as::<_, AgentSession>(
@@ -273,12 +422,12 @@ pub async fn dashboard(
     .await?;
 
     let interactions = sqlx::query_as::<_, ProductInteraction>(
-        r#"SELECT id, workspace_id, api_key_id, session_id, surface, operation,
+        r#"SELECT id, workspace_id, environment_id, api_key_id, session_id, surface, operation,
         status_code, duration_ms, customer_ref, classification, confirmation_method,
         runtime_hint, runtime_hint_source, occurred_at, created_at, updated_at
-        FROM interactions_v2 WHERE workspace_id = $1 ORDER BY occurred_at DESC LIMIT 250"#,
+        FROM interactions_v2 WHERE environment_id = $1 ORDER BY occurred_at DESC LIMIT 250"#,
     )
-    .bind(context.workspace.id)
+    .bind(environment_id)
     .fetch_all(pool)
     .await?;
     let outcomes = sqlx::query_as::<_, ProductOutcomeWithInteraction>(
@@ -287,16 +436,16 @@ pub async fn dashboard(
         i.customer_ref, i.classification, i.confirmation_method, i.runtime_hint,
         i.runtime_hint_source, i.occurred_at
         FROM outcomes_v2 o JOIN interactions_v2 i ON i.id = o.interaction_id
-        WHERE o.workspace_id = $1 ORDER BY o.created_at DESC LIMIT 250"#,
+        WHERE i.environment_id = $1 ORDER BY o.created_at DESC LIMIT 250"#,
     )
-    .bind(context.workspace.id)
+    .bind(environment_id)
     .fetch_all(pool)
     .await?;
     let sessions = sqlx::query_as::<_, ProductSession>(
-        r#"SELECT id, workspace_id, source, ref_hint, started_at, last_seen_at, created_at
-        FROM sessions_v2 WHERE workspace_id = $1 ORDER BY last_seen_at DESC LIMIT 100"#,
+        r#"SELECT id, workspace_id, environment_id, source, ref_hint, started_at, last_seen_at, created_at
+        FROM sessions_v2 WHERE environment_id = $1 ORDER BY last_seen_at DESC LIMIT 100"#,
     )
-    .bind(context.workspace.id)
+    .bind(environment_id)
     .fetch_all(pool)
     .await?;
 
@@ -357,6 +506,10 @@ pub async fn dashboard(
     Ok(DashboardData {
         user: context.user,
         workspace: context.workspace,
+        products,
+        environments,
+        current_product,
+        current_environment,
         api_keys,
         interactions,
         outcomes,
@@ -389,6 +542,7 @@ fn opaque_ref(value: Option<String>, field: &str) -> Result<Option<String>, ApiE
 async fn resolve_v2_session(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
+    environment_id: Uuid,
     session_ref: Option<String>,
     session_source: Option<String>,
     occurred_at: DateTime<Utc>,
@@ -404,14 +558,15 @@ async fn resolve_v2_session(
     let session_id = Uuid::new_v4();
     let resolved = sqlx::query_scalar::<_, Uuid>(
         r#"INSERT INTO sessions_v2
-        (id, workspace_id, source, ref_hash, ref_hint, started_at, last_seen_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $6)
-        ON CONFLICT (workspace_id, source, ref_hash) DO UPDATE
+        (id, workspace_id, environment_id, source, ref_hash, ref_hint, started_at, last_seen_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+        ON CONFLICT (environment_id, source, ref_hash) DO UPDATE
         SET last_seen_at = GREATEST(sessions_v2.last_seen_at, EXCLUDED.last_seen_at)
         RETURNING id"#,
     )
     .bind(session_id)
     .bind(workspace_id)
+    .bind(environment_id)
     .bind(source)
     .bind(sha256(&session_ref))
     .bind(ref_hint)
@@ -478,6 +633,7 @@ pub async fn ingest_telemetry_batch(
         let session_id = resolve_v2_session(
             &mut tx,
             auth.workspace.id,
+            auth.environment.id,
             event.session_ref,
             event.session_source,
             occurred_at,
@@ -497,10 +653,10 @@ pub async fn ingest_telemetry_batch(
         };
         let row = sqlx::query_as::<_, ProductInteraction>(
             r#"INSERT INTO interactions_v2
-            (id, workspace_id, api_key_id, session_id, surface, operation, status_code,
+            (id, workspace_id, environment_id, api_key_id, session_id, surface, operation, status_code,
              duration_ms, customer_ref, classification, confirmation_method, runtime_hint,
              runtime_hint_source, occurred_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             ON CONFLICT (id) DO UPDATE SET
               api_key_id = COALESCE(interactions_v2.api_key_id, EXCLUDED.api_key_id),
               session_id = COALESCE(interactions_v2.session_id, EXCLUDED.session_id),
@@ -518,13 +674,14 @@ pub async fn ingest_telemetry_batch(
               runtime_hint_source = COALESCE(interactions_v2.runtime_hint_source, EXCLUDED.runtime_hint_source),
               occurred_at = LEAST(interactions_v2.occurred_at, EXCLUDED.occurred_at),
               updated_at = NOW()
-            WHERE interactions_v2.workspace_id = EXCLUDED.workspace_id
-            RETURNING id, workspace_id, api_key_id, session_id, surface, operation,
+            WHERE interactions_v2.environment_id = EXCLUDED.environment_id
+            RETURNING id, workspace_id, environment_id, api_key_id, session_id, surface, operation,
               status_code, duration_ms, customer_ref, classification, confirmation_method,
               runtime_hint, runtime_hint_source, occurred_at, created_at, updated_at"#,
         )
         .bind(event.interaction_id)
         .bind(auth.workspace.id)
+        .bind(auth.environment.id)
         .bind(auth.api_key_id)
         .bind(session_id)
         .bind(event.surface)
@@ -583,9 +740,10 @@ pub async fn submit_product_outcome(
     }
 
     let parsed = parse_capability(capability)?;
-    let key = sqlx::query_as::<_, (Uuid, Vec<u8>, String)>(
-        r#"SELECT k.workspace_id, k.key_hash, w.feedback_mode
-        FROM api_keys k JOIN workspaces w ON w.id = k.workspace_id
+    let key = sqlx::query_as::<_, (Uuid, Vec<u8>, String, Uuid)>(
+        r#"SELECT k.workspace_id, k.key_hash, e.feedback_mode, k.environment_id
+        FROM api_keys k
+        JOIN product_environments e ON e.id = k.environment_id
         WHERE k.id = $1 AND k.revoked_at IS NULL
           AND (k.expires_at IS NULL OR k.expires_at > NOW())"#,
     )
@@ -601,28 +759,29 @@ pub async fn submit_product_outcome(
     let mut tx = pool.begin().await?;
     let interaction = sqlx::query_as::<_, ProductInteraction>(
         r#"INSERT INTO interactions_v2
-        (id, workspace_id, api_key_id, surface, operation, classification,
+        (id, workspace_id, environment_id, api_key_id, surface, operation, classification,
          confirmation_method, capability_nonce_hash, occurred_at)
-        VALUES ($1, $2, $3, 'unknown', 'pending', 'confirmed',
-          'outcome_submission', $4, TO_TIMESTAMP($5))
+        VALUES ($1, $2, $3, $4, 'unknown', 'pending', 'confirmed',
+          'outcome_submission', $5, TO_TIMESTAMP($6))
         ON CONFLICT (id) DO UPDATE SET
           classification = 'confirmed',
           confirmation_method = COALESCE(interactions_v2.confirmation_method, 'outcome_submission'),
           capability_nonce_hash = COALESCE(interactions_v2.capability_nonce_hash, EXCLUDED.capability_nonce_hash),
           updated_at = NOW()
-        WHERE interactions_v2.workspace_id = EXCLUDED.workspace_id
-        RETURNING id, workspace_id, api_key_id, session_id, surface, operation,
+        WHERE interactions_v2.environment_id = EXCLUDED.environment_id
+        RETURNING id, workspace_id, environment_id, api_key_id, session_id, surface, operation,
           status_code, duration_ms, customer_ref, classification, confirmation_method,
           runtime_hint, runtime_hint_source, occurred_at, created_at, updated_at"#,
     )
     .bind(claims.i)
     .bind(key.0)
+    .bind(key.3)
     .bind(parsed.key_id)
     .bind(sha256(&claims.n))
     .bind(claims.iat)
     .fetch_optional(&mut *tx)
     .await?
-    .ok_or_else(|| ApiError::conflict("interactionId belongs to another workspace"))?;
+    .ok_or_else(|| ApiError::conflict("interactionId belongs to another product environment"))?;
 
     if let Some(existing) =
         sqlx::query_as::<_, ProductOutcome>("SELECT * FROM outcomes_v2 WHERE interaction_id = $1")

@@ -1,8 +1,10 @@
 const page = document.querySelector("#page");
 const notice = document.querySelector("#notice");
 const account = document.querySelector("#account");
+const productScope = document.querySelector("#product-scope");
 let dashboard;
 let currentView = new URL(location.href).searchParams.get("view") || "feedback";
+let selectedEnvironmentId = new URL(location.href).searchParams.get("environment") || "";
 let selectedOutcome = null;
 let selectedInteraction = null;
 let selectedSession = null;
@@ -11,8 +13,6 @@ let apiSecret = "";
 let setupSurface = "mcp";
 let setupStack = "node-mcp";
 let setupConnectionId = null;
-let setupConnectionName = "";
-let setupEnvironment = "production";
 let setupInstallMode = "agent";
 let setupMonitor = null;
 
@@ -35,10 +35,29 @@ async function request(path, options) {
 }
 
 async function refresh() {
-  dashboard = await request("/api/dashboard");
+  const query = selectedEnvironmentId ? `?environmentId=${encodeURIComponent(selectedEnvironmentId)}` : "";
+  dashboard = await request(`/api/dashboard${query}`);
+  selectedEnvironmentId = dashboard.currentEnvironment?.id || "";
   const identity = `@${dashboard.user.handle}${dashboard.user.email ? ` · ${dashboard.user.email}` : ""}`;
   account.innerHTML = `<strong>${esc(dashboard.user.displayName)}</strong><small>${esc(identity)}</small>`;
+  renderProductScope();
+  const url = new URL(location.href);
+  if (selectedEnvironmentId) url.searchParams.set("environment", selectedEnvironmentId);
+  else url.searchParams.delete("environment");
+  history.replaceState({}, "", url);
   render();
+}
+
+function renderProductScope() {
+  if (!dashboard.products.length) {
+    productScope.innerHTML = `<p class="eyebrow">PRODUCT</p><button class="scope-empty" data-new-product>Create your first product</button>`;
+    return;
+  }
+  const product = dashboard.currentProduct;
+  const environment = dashboard.currentEnvironment;
+  const productOptions = dashboard.products.map((entry) => `<option value="${esc(entry.id)}" ${entry.id === product?.id ? "selected" : ""}>${esc(entry.name)}</option>`).join("");
+  const environmentOptions = dashboard.environments.filter((entry) => entry.productId === product?.id).map((entry) => `<option value="${esc(entry.id)}" ${entry.id === environment?.id ? "selected" : ""}>${esc(entry.name)}</option>`).join("");
+  productScope.innerHTML = `<label><span>Product</span><select id="product-select">${productOptions}</select></label><label><span>Environment</span><select id="environment-select">${environmentOptions}</select></label><div><button class="link-button" data-new-product>+ New product</button><button class="link-button" data-new-environment>+ Environment</button></div>`;
 }
 
 function navigate(view) {
@@ -243,6 +262,16 @@ function setupAgentPrompt(integration) {
   return `Add Agent Feedback to this repository.\n\nProduct surface: ${surface.name}\nIntegration: ${integration.name}\n\nRequirements:\n- Use AGENT_FEEDBACK_KEY from the server environment. It is already configured; never print or expose it.\n- Install the official package with: ${integration.install}\n- Configure the integration once using this reference:\n\n${integration.code}\n\n- For HTTP or HTML, change include routes in code to only the product surfaces used by customer agents.\n- Do not put the product key in browser JavaScript.\n- Do not change existing response shapes, error handling, streams, or binary responses.\n- Start the product and make one real request or MCP tool call so the connection can be verified.\n\nProtocol: ${location.origin}/.well-known/agent-feedback-v1.json`;
 }
 
+function productCreateView(firstProduct = false) {
+  const heading = firstProduct ? "Create your first product" : "Create a product";
+  const copy = firstProduct ? "Products keep feedback and interactions separate. Start with the product your customers' agents use." : "The new product gets its own environments, integrations, interactions, and feedback.";
+  return `${header(firstProduct ? "WELCOME" : "NEW PRODUCT", heading)}<section class="create-product"><p>${esc(copy)}</p><form id="product-form"><label><span>Product name</span><input name="name" placeholder="Search" maxlength="80" required autofocus></label><label><span>First environment</span><select name="environment"><option>Production</option><option>Staging</option><option>Development</option></select></label><button class="button primary">Create product</button></form>${firstProduct ? "" : `<button class="back" data-view="feedback">← Cancel</button>`}</section>`;
+}
+
+function environmentCreateView() {
+  return `${header("NEW ENVIRONMENT", `Add an environment to ${dashboard.currentProduct.name}`)}<section class="create-product"><p>Use environments to keep production, staging, and development feedback separate.</p><form id="environment-form"><label><span>Environment name</span><input name="name" placeholder="Staging" maxlength="40" required autofocus></label><button class="button primary">Create environment</button></form><button class="back" data-view="feedback">← Cancel</button></section>`;
+}
+
 function setupView() {
   const surface = setupSurfaceCopy[setupSurface];
   const integration = setupInstructions();
@@ -251,46 +280,44 @@ function setupView() {
   const reviewed = status.outcomes.length > 0;
   const stacks = setupStackOptions[setupSurface].map(([id, name, copy]) => `<button class="choice-card" data-setup-stack="${esc(id)}" aria-pressed="${setupStack === id}"><strong>${esc(name)}</strong><span>${esc(copy)}</span></button>`).join("");
   const surfaces = Object.entries(setupSurfaceCopy).map(([id, item]) => `<button class="choice-card surface-card" data-setup-surface="${esc(id)}" aria-pressed="${setupSurface === id}" ${item.disabled ? "disabled" : ""}><strong>${esc(item.name)}</strong><span>${esc(item.summary)}</span>${item.disabled ? "<small>COMING SOON</small>" : ""}</button>`).join("");
-  const connectionForm = setupConnectionId ? `<div class="connection-created"><b>${esc(setupConnectionName)} · ${esc(title(setupEnvironment))}</b><span>Connection created</span></div>` : `<div class="connection-form"><label><span>Connection name</span><input id="setup-connection-name" value="${esc(setupConnectionName)}" placeholder="Search API" maxlength="40"></label><label><span>Environment</span><select id="setup-environment"><option value="production" ${setupEnvironment === "production" ? "selected" : ""}>Production</option><option value="staging" ${setupEnvironment === "staging" ? "selected" : ""}>Staging</option><option value="development" ${setupEnvironment === "development" ? "selected" : ""}>Development</option></select></label><button class="button primary" data-create-key>Create connection</button></div>`;
+  const generate = setupConnectionId ? `<div class="connection-created"><b>${esc(integration.name)}</b><span>Integration key created</span></div>` : `<button class="button primary" data-create-key>Generate installation</button>`;
   const secret = apiSecret ? `<div class="secret-callout"><div><b>Save this server-side key now</b><code>${esc(apiSecret)}</code><small>It is shown once. Customer agents never receive this key.</small></div><button class="button" data-copy="${esc(apiSecret)}">Copy key</button></div>` : "";
   const agentPrompt = setupAgentPrompt(integration);
   const installMode = `<div class="install-methods"><button data-install-mode="agent" aria-pressed="${setupInstallMode === "agent"}">Use a coding agent</button><button data-install-mode="manual" aria-pressed="${setupInstallMode === "manual"}">Manual setup</button></div>`;
   const agentInstall = `<div class="install-panel"><p>Copy this prompt into the coding agent that has access to your product repository. It receives the exact integration and verification requirements, but never the product key.</p><div class="copy-block"><pre><code>${esc(agentPrompt)}</code></pre><button class="button primary" data-copy="${esc(agentPrompt)}">Copy setup prompt</button></div></div>`;
   const manualInstall = `<div class="install-panel"><h3>Install</h3><div class="copy-block"><pre><code>${esc(integration.install)}</code></pre><button class="button" data-copy="${esc(integration.install)}">Copy</button></div><h3>Configure once</h3><div class="copy-block"><pre><code>${esc(integration.code)}</code></pre><button class="button" data-copy="${esc(integration.code)}">Copy</button></div>${integration.advanced ? `<details><summary>Optional customer grouping</summary><p>Use an opaque account ID from authentication your product already has. Do not send names or emails.</p><pre><code>${esc(integration.advanced)}</code></pre></details>` : ""}</div>`;
-  const installStep = setupConnectionId ? `<section class="setup-step"><div class="step-number">3</div><div class="step-body"><p class="eyebrow">INSTALL</p><h2>Install ${esc(integration.name)}</h2><p>Use the guided agent setup or copy the commands yourself. Both produce the same integration, and your product response never waits for Agent Feedback.</p>${secret}<h3>Set the server environment variable</h3><div class="copy-block"><pre><code>${esc(integration.environment)}</code></pre><button class="button" data-copy="${esc(integration.environment)}">Copy</button></div>${installMode}${setupInstallMode === "agent" ? agentInstall : manualInstall}<a class="text-link" href="/.well-known/agent-feedback-v1.json" target="_blank" rel="noreferrer">Read the protocol contract →</a></div></section>` : `<section class="setup-step locked"><div class="step-number">3</div><div class="step-body"><h2>Install</h2><p>Create the connection first. Then this page will generate one setup path for the selected integration.</p></div></section>`;
+  const installStep = setupConnectionId ? `<section class="setup-step"><div class="step-number">2</div><div class="step-body"><p class="eyebrow">INSTALL</p><h2>Install ${esc(integration.name)}</h2><p>Use the guided agent setup or copy the commands yourself. Your product response never waits for Agent Feedback.</p>${secret}<h3>Set the server environment variable</h3><div class="copy-block"><pre><code>${esc(integration.environment)}</code></pre><button class="button" data-copy="${esc(integration.environment)}">Copy</button></div>${installMode}${setupInstallMode === "agent" ? agentInstall : manualInstall}<a class="text-link" href="/.well-known/agent-feedback-v1.json" target="_blank" rel="noreferrer">Read the protocol contract →</a></div></section>` : `<section class="setup-step locked"><div class="step-number">2</div><div class="step-body"><h2>Install</h2><p>Choose an integration and generate its installation first.</p></div></section>`;
   const surfaceResult = setupSurface === "mcp" ? "A normal MCP tool call will appear as a confirmed interaction." : "A successful response will appear as an opportunity. It becomes confirmed if the agent submits feedback.";
-  const verifyStep = setupConnectionId ? `<section class="setup-step"><div class="step-number">4</div><div class="step-body"><p class="eyebrow">VERIFY</p><h2>Send one real interaction</h2><p>${esc(integration.verify)}</p><p>${esc(surfaceResult)}</p><div class="verification"><div class="verification-row ${connected ? "complete" : "waiting"}"><b>${connected ? "✓" : "○"}</b><span><strong>${connected ? (setupSurface === "mcp" ? "Confirmed interaction received" : "Product connection works") : "Waiting for the first interaction"}</strong><small>${connected ? `${status.interactions.length} interaction${status.interactions.length === 1 ? "" : "s"} received for this connection.` : "This page checks automatically every few seconds."}</small></span></div><div class="verification-row ${reviewed ? "complete" : "waiting"}"><b>${reviewed ? "✓" : "○"}</b><span><strong>${reviewed ? "Agent feedback received" : "Waiting for agent feedback"}</strong><small>${reviewed ? `${status.outcomes.length} compact review${status.outcomes.length === 1 ? "" : "s"} received.` : "Feedback is a second milestone. The connection works as soon as the first interaction arrives."}</small></span></div></div><div class="setup-actions"><button class="button" data-refresh-setup>Check now</button>${connected ? `<button class="button primary" data-view="interactions">View first interaction</button>` : ""}${reviewed ? `<button class="button primary" data-view="feedback">View feedback</button>` : ""}</div></div></section>` : `<section class="setup-step locked"><div class="step-number">4</div><div class="step-body"><h2>Verify</h2><p>The finish line is a real interaction from this connection—not a synthetic test inside Agent Feedback.</p></div></section>`;
+  const verifyStep = setupConnectionId ? `<section class="setup-step"><div class="step-number">3</div><div class="step-body"><p class="eyebrow">VERIFY</p><h2>Send one real interaction</h2><p>${esc(integration.verify)}</p><p>${esc(surfaceResult)}</p><div class="verification"><div class="verification-row ${connected ? "complete" : "waiting"}"><b>${connected ? "✓" : "○"}</b><span><strong>${connected ? (setupSurface === "mcp" ? "Confirmed interaction received" : "Product connection works") : "Waiting for the first interaction"}</strong><small>${connected ? `${status.interactions.length} interaction${status.interactions.length === 1 ? "" : "s"} received for this environment.` : "This page checks automatically every few seconds."}</small></span></div><div class="verification-row ${reviewed ? "complete" : "waiting"}"><b>${reviewed ? "✓" : "○"}</b><span><strong>${reviewed ? "Agent feedback received" : "Waiting for agent feedback"}</strong><small>${reviewed ? `${status.outcomes.length} compact review${status.outcomes.length === 1 ? "" : "s"} received.` : "Feedback is a second milestone. The integration works as soon as the first interaction arrives."}</small></span></div></div><div class="setup-actions"><button class="button" data-refresh-setup>Check now</button>${connected ? `<button class="button primary" data-view="interactions">View first interaction</button>` : ""}${reviewed ? `<button class="button primary" data-view="feedback">View feedback</button>` : ""}</div></div></section>` : `<section class="setup-step locked"><div class="step-number">3</div><div class="step-body"><h2>Verify</h2><p>The finish line is a real interaction from this product environment.</p></div></section>`;
   const connections = dashboard.apiKeys.map((key) => {
     const keyStatus = setupConnectionStatus(key.id);
     const state = keyStatus.outcomes.length ? "Feedback received" : keyStatus.interactions.length ? "Connected" : "Never seen";
     return `<div class="connection-row"><span><strong>${esc(key.label)}</strong><small>${esc(key.prefix)}… · created ${date(key.createdAt)}</small></span><b class="${keyStatus.interactions.length ? "positive" : "neutral"}">${esc(state)}</b><button class="link-button" data-revoke-key="${esc(key.id)}">Revoke</button></div>`;
-  }).join("") || `<p class="muted">No connections yet.</p>`;
-  return `${header("SETUP", "Connect a product", "")}
-    <p class="setup-lede">Create one connection, install one integration, and send the first real interaction.</p>
-    <section class="setup-step"><div class="step-number">1</div><div class="step-body"><p class="eyebrow">CONNECTION</p><h2>Name this connection</h2><p>This name is for your dashboard. The private key stays on your server.</p>${connectionForm}</div></section>
-    <section class="setup-step" id="setup-integration"><div class="step-number">2</div><div class="step-body"><p class="eyebrow">INTEGRATION</p><h2>Choose how your product is served</h2><div class="choice-grid surfaces">${surfaces}</div><p class="selection-explanation"><strong>${esc(surface.name)}:</strong> ${esc(surface.detail)}</p><h3>Choose the integration</h3><div class="choice-grid stacks">${stacks}</div><p class="muted">For HTTP and HTML, choose which routes receive instructions in code—not in this dashboard.</p></div></section>
-    ${installStep}${verifyStep}
-    <details class="existing-connections"><summary>Existing connections (${dashboard.apiKeys.length})</summary><div>${connections}</div></details>`;
+  }).join("") || `<p class="muted">No integrations yet.</p>`;
+  return `${header("SETUP", `Connect ${dashboard.currentProduct.name}`, dashboard.currentEnvironment.name)}<p class="setup-lede">Choose one integration, install it, and send the first real interaction.</p><section class="setup-step"><div class="step-number">1</div><div class="step-body"><p class="eyebrow">INTEGRATION</p><h2>Choose how your product is served</h2><div class="choice-grid surfaces">${surfaces}</div><p class="selection-explanation"><strong>${esc(surface.name)}:</strong> ${esc(surface.detail)}</p><h3>Choose the integration</h3><div class="choice-grid stacks">${stacks}</div><p class="muted">For HTTP and HTML, choose which routes receive instructions in code—not in this dashboard.</p>${generate}</div></section>${installStep}${verifyStep}<details class="existing-connections"><summary>Existing integrations (${dashboard.apiKeys.length})</summary><div>${connections}</div></details>`;
 }
 
 function policyView() {
-  const workspace = dashboard.workspace;
-  return `${header("COLLECTION POLICY", "Control outcome collection")}<form id="policy-form" class="policy"><label><span>Feedback mode</span><select name="feedbackMode"><option value="auto" ${workspace.feedbackMode === "auto" ? "selected" : ""}>Auto — ask the agent to submit autonomously</option><option value="ask" ${workspace.feedbackMode === "ask" ? "selected" : ""}>Ask — make outcome submission optional</option><option value="off" ${workspace.feedbackMode === "off" ? "selected" : ""}>Off — reject outcome submissions</option></select></label><label><span>Retention</span><select name="retentionDays">${[7, 30, 90, 365].map((days) => `<option value="${days}" ${workspace.retentionDays === days ? "selected" : ""}>${days} days</option>`).join("")}</select></label><input type="hidden" name="collectEventSummaries" value="off"><div class="guardrails"><h2>Always rejected</h2><ul><li>Prompts and transcripts</li><li>Secrets and authentication payloads</li><li>Personal data and raw customer content</li><li>Raw tool inputs or outputs</li><li>Unknown review fields</li></ul></div><button class="button primary">Save policy</button></form>`;
+  const environment = dashboard.currentEnvironment;
+  return `${header("COLLECTION POLICY", "Control outcome collection", `${dashboard.currentProduct.name} · ${environment.name}`)}<form id="policy-form" class="policy"><label><span>Feedback mode</span><select name="feedbackMode"><option value="auto" ${environment.feedbackMode === "auto" ? "selected" : ""}>Auto — ask the agent to submit autonomously</option><option value="ask" ${environment.feedbackMode === "ask" ? "selected" : ""}>Ask — make outcome submission optional</option><option value="off" ${environment.feedbackMode === "off" ? "selected" : ""}>Off — reject outcome submissions</option></select></label><label><span>Retention</span><select name="retentionDays">${[7, 30, 90, 365].map((days) => `<option value="${days}" ${environment.retentionDays === days ? "selected" : ""}>${days} days</option>`).join("")}</select></label><input type="hidden" name="collectEventSummaries" value="off"><div class="guardrails"><h2>Always rejected</h2><ul><li>Prompts and transcripts</li><li>Secrets and authentication payloads</li><li>Personal data and raw customer content</li><li>Raw tool inputs or outputs</li><li>Unknown review fields</li></ul></div><button class="button primary">Save policy</button></form>`;
 }
 
 function render() {
   if (!dashboard) return;
   document.querySelectorAll("[data-view]").forEach((button) => button.setAttribute("aria-current", button.dataset.view === currentView ? "page" : "false"));
-  page.innerHTML = ({ feedback: feedbackView, insights: insightsView, interactions: interactionsView, sessions: sessionsView, setup: setupView, policy: policyView }[currentView] || feedbackView)();
+  if (!dashboard.products.length) {
+    page.innerHTML = productCreateView(true);
+  } else {
+    page.innerHTML = ({ feedback: feedbackView, insights: insightsView, interactions: interactionsView, sessions: sessionsView, setup: setupView, policy: policyView, "new-product": productCreateView, "new-environment": environmentCreateView }[currentView] || feedbackView)();
+  }
   if (currentView !== "setup" || !setupConnectionId || setupConnectionStatus(setupConnectionId).outcomes.length) {
     clearInterval(setupMonitor);
     setupMonitor = null;
   } else if (!setupMonitor) {
     setupMonitor = setInterval(async () => {
       try {
-        dashboard = await request("/api/dashboard");
-        render();
-      } catch (error) {
+        await refresh();
+      } catch {
         clearInterval(setupMonitor);
         setupMonitor = null;
       }
@@ -303,6 +330,8 @@ document.addEventListener("click", async (event) => {
   if (!target) return;
   try {
     if (target.dataset.view) navigate(target.dataset.view);
+    if (target.hasAttribute("data-new-product")) navigate("new-product");
+    if (target.hasAttribute("data-new-environment")) navigate("new-environment");
     if (target.dataset.setupSurface) {
       setupSurface = target.dataset.setupSurface;
       setupStack = setupStackOptions[setupSurface][0][0];
@@ -324,15 +353,12 @@ document.addEventListener("click", async (event) => {
     if (target.hasAttribute("data-toggle-legacy")) { showingLegacy = !showingLegacy; selectedOutcome = null; render(); }
     if (target.dataset.copy) { await navigator.clipboard.writeText(target.dataset.copy); setNotice("Copied."); }
     if (target.hasAttribute("data-create-key")) {
-      setupConnectionName = document.querySelector("#setup-connection-name")?.value.trim() || "";
-      setupEnvironment = document.querySelector("#setup-environment")?.value || "production";
-      if (!setupConnectionName) throw new Error("Name this connection before creating it.");
-      const label = `${setupConnectionName} · ${title(setupEnvironment)}`;
-      const body = await request("/api/settings/api-keys", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label }) });
+      const integration = setupInstructions();
+      const body = await request("/api/settings/api-keys", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: integration.name, environmentId: dashboard.currentEnvironment.id }) });
       apiSecret = body.secret;
       setupConnectionId = body.apiKey.id;
       await refresh();
-      setNotice("Connection created. Save the server-side key, then install the integration below.");
+      setNotice("Installation generated. Save the server-side key, then add the integration below.");
     }
     if (target.hasAttribute("data-refresh-setup")) {
       await refresh();
@@ -343,7 +369,6 @@ document.addEventListener("click", async (event) => {
       if (target.dataset.revokeKey === setupConnectionId) {
         apiSecret = "";
         setupConnectionId = null;
-        setupConnectionName = "";
       }
       await refresh();
       setNotice("Connection key revoked.");
@@ -353,19 +378,57 @@ document.addEventListener("click", async (event) => {
   }
 });
 
-document.addEventListener("input", (event) => {
-  if (event.target.id === "setup-connection-name") setupConnectionName = event.target.value;
-  if (event.target.id === "setup-environment") setupEnvironment = event.target.value;
+document.addEventListener("change", async (event) => {
+  try {
+    if (event.target.id === "product-select") {
+      const environment = dashboard.environments.find((entry) => entry.productId === event.target.value);
+      if (!environment) throw new Error("This product does not have an environment yet.");
+      selectedEnvironmentId = environment.id;
+      apiSecret = "";
+      setupConnectionId = null;
+      await refresh();
+    }
+    if (event.target.id === "environment-select") {
+      selectedEnvironmentId = event.target.value;
+      apiSecret = "";
+      setupConnectionId = null;
+      await refresh();
+    }
+  } catch (error) {
+    setNotice(error.message || "Could not switch product environment");
+  }
 });
 
 document.addEventListener("submit", async (event) => {
-  if (event.target.id !== "policy-form") return;
+  if (!["product-form", "environment-form", "policy-form"].includes(event.target.id)) return;
   event.preventDefault();
   const form = new FormData(event.target);
   try {
-    await request("/api/settings/policy", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ feedbackMode: form.get("feedbackMode"), collectEventSummaries: false, retentionDays: Number(form.get("retentionDays")) }) });
-    await refresh();
-    setNotice("Collection policy saved.");
+    if (event.target.id === "product-form") {
+      const body = await request("/api/products", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: form.get("name"), environment: form.get("environment") || "Production" }) });
+      selectedEnvironmentId = body.environment.id;
+      apiSecret = "";
+      setupConnectionId = null;
+      currentView = "setup";
+      await refresh();
+      navigate("setup");
+      setNotice(`${body.product.name} created. Choose its first integration.`);
+    }
+    if (event.target.id === "environment-form") {
+      const body = await request(`/api/products/${dashboard.currentProduct.id}/environments`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: form.get("name") }) });
+      selectedEnvironmentId = body.environment.id;
+      apiSecret = "";
+      setupConnectionId = null;
+      currentView = "setup";
+      await refresh();
+      navigate("setup");
+      setNotice(`${body.environment.name} environment created.`);
+    }
+    if (event.target.id === "policy-form") {
+      await request("/api/settings/policy", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ environmentId: dashboard.currentEnvironment.id, feedbackMode: form.get("feedbackMode"), collectEventSummaries: false, retentionDays: Number(form.get("retentionDays")) }) });
+      await refresh();
+      setNotice("Collection policy saved for this environment.");
+    }
   } catch (error) {
     setNotice(error.message || "Request failed");
   }
@@ -376,7 +439,9 @@ document.querySelector("#signout").addEventListener("click", async () => {
   location.assign("/");
 });
 window.addEventListener("popstate", () => {
-  currentView = new URL(location.href).searchParams.get("view") || "feedback";
-  render();
+  const url = new URL(location.href);
+  currentView = url.searchParams.get("view") || "feedback";
+  selectedEnvironmentId = url.searchParams.get("environment") || "";
+  refresh().catch(() => location.assign("/"));
 });
 refresh().catch(() => location.assign("/"));

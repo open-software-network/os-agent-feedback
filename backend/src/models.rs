@@ -29,6 +29,7 @@ pub struct CurrentUser {
 #[serde(rename_all = "camelCase")]
 pub struct ApiKeyPublic {
     pub id: Uuid,
+    pub environment_id: Uuid,
     pub label: String,
     pub prefix: String,
     pub created_at: DateTime<Utc>,
@@ -40,13 +41,54 @@ pub struct ApiKeyPublic {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateApiKeyInput {
+    pub environment_id: Uuid,
     pub label: Option<String>,
     pub expires_in_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct Product {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub name: String,
+    pub slug: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductEnvironment {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub product_id: Uuid,
+    pub name: String,
+    pub slug: String,
+    pub feedback_mode: String,
+    pub collect_event_summaries: bool,
+    pub retention_days: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateProductInput {
+    pub name: String,
+    pub environment: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateEnvironmentInput {
+    pub name: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PolicyInput {
+    pub environment_id: Uuid,
     pub feedback_mode: String,
     pub collect_event_summaries: bool,
     pub retention_days: i32,
@@ -149,6 +191,7 @@ pub struct CustomerAgentFeedbackInput {
 pub struct ProductSession {
     pub id: Uuid,
     pub workspace_id: Uuid,
+    pub environment_id: Uuid,
     pub source: String,
     pub ref_hint: String,
     pub started_at: DateTime<Utc>,
@@ -161,6 +204,7 @@ pub struct ProductSession {
 pub struct ProductInteraction {
     pub id: Uuid,
     pub workspace_id: Uuid,
+    pub environment_id: Uuid,
     pub api_key_id: Option<Uuid>,
     pub session_id: Option<Uuid>,
     pub surface: String,
@@ -295,6 +339,10 @@ pub struct Insights {
 pub struct DashboardData {
     pub user: CurrentUser,
     pub workspace: Workspace,
+    pub products: Vec<Product>,
+    pub environments: Vec<ProductEnvironment>,
+    pub current_product: Option<Product>,
+    pub current_environment: Option<ProductEnvironment>,
     pub api_keys: Vec<ApiKeyPublic>,
     pub interactions: Vec<ProductInteraction>,
     pub outcomes: Vec<ProductOutcomeWithInteraction>,
@@ -308,6 +356,7 @@ pub struct DashboardData {
 #[derive(Debug, Clone)]
 pub struct ProductAuth {
     pub workspace: Workspace,
+    pub environment: ProductEnvironment,
     pub api_key_id: Uuid,
 }
 

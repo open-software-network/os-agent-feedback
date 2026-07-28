@@ -2,6 +2,8 @@
 
 The production API and OS Accounts dashboard for collecting compact product-outcome reviews from customers' independent agents.
 
+The dashboard hierarchy is workspace → product → environment → integration. Existing v2 records are migrated into a default product and Production environment; new workspaces create their first product before entering integration setup.
+
 ## V2 contract
 
 The company's Node SDK creates an interaction ID and signs a two-hour capability locally. It does not call Agent Feedback while serving the company's product response.
