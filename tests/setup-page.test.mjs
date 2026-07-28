@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import test from "node:test";
 
 const dashboardScript = await readFile(
@@ -99,6 +100,34 @@ test("setup communicates the HTTP and MCP evidence models separately", () => {
   assert.match(dashboardScript, /confirmed agent interaction/);
   assert.match(dashboardScript, /becomes confirmed when its receipt returns/);
   assert.match(dashboardScript, /product response never waits for Agent Feedback/i);
+});
+
+test("every enabled setup choice has a fresh executable E2E example", async () => {
+  const expected = {
+    mcp: ["node-mcp", "manual-mcp"],
+    api: ["node-express", "node-fastify", "python-asgi", "python-wsgi", "go", "rust", "manual-http"],
+    website: ["node-express", "node-fastify", "python-asgi", "python-wsgi", "go", "rust", "manual-http"],
+  };
+  for (const [surface, integrations] of Object.entries(expected)) {
+    const start = dashboardScript.indexOf(`  ${surface}: [`);
+    const end = dashboardScript.indexOf("  ],", start);
+    const block = dashboardScript.slice(start, end);
+    assert.ok(start >= 0 && end > start, `missing ${surface} setup block`);
+    assert.deepEqual([...block.matchAll(/\["([^"]+)"/g)].map((match) => match[1]), integrations);
+  }
+  const fixtures = [
+    "setup-matrix-node-express/index.js",
+    "setup-matrix-node-fastify/index.js",
+    "setup-matrix-python-asgi/app.py",
+    "setup-matrix-python-wsgi/app.py",
+    "setup-matrix-go/main.go",
+    "setup-matrix-rust/src/main.rs",
+    "setup-matrix-manual-http/server.py",
+    "setup-matrix-node-mcp/index.js",
+    "setup-matrix-manual-mcp/server.py",
+  ];
+  await Promise.all(fixtures.map((fixture) => access(new URL(`../examples/${fixture}`, import.meta.url))));
+  assert.match(await readFile(new URL("setup-matrix-e2e.mjs", import.meta.url), "utf8"), /expected\.size, 16/);
 });
 
 test("legacy v2 data remains linked to its migrated product", () => {

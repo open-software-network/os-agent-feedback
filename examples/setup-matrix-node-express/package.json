@@ -1,0 +1,10 @@
+{
+  "name": "epode-setup-matrix-node-express",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "@agent-feedback/node": "https://app.epode.ai/static/agent-feedback-node-0.1.0.tgz",
+    "express": "^5.2.1"
+  }
+}

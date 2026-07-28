@@ -1,0 +1,10 @@
+{
+  "name": "epode-setup-matrix-node-fastify",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "@agent-feedback/node": "https://app.epode.ai/static/agent-feedback-node-0.1.0.tgz",
+    "fastify": "^5.10.0"
+  }
+}

@@ -15,7 +15,9 @@
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "test": "npm run build && node --test tests/*.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "build:artifacts": "bash tests/build-hosted-artifacts.sh",
+    "test:setup-matrix": "node tests/setup-matrix-e2e.mjs"
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",
