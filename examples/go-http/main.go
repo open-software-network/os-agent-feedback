@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	agentfeedback "github.com/open-software-network/os-agent-feedback/sdk/go"
+	agentfeedback "github.com/open-software-network/os-epode/sdk/go"
 )
 
 func respond(response http.ResponseWriter, value any) {

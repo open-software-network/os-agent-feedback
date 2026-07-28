@@ -5,8 +5,8 @@ edition = "2024"
 rust-version = "1.88"
 description = "Protocol-first Agent Feedback middleware for Rust web products"
 license = "MIT"
-repository = "https://github.com/open-software-network/os-agent-feedback"
-homepage = "https://github.com/open-software-network/os-agent-feedback/tree/main/sdk/rust"
+repository = "https://github.com/open-software-network/os-epode"
+homepage = "https://github.com/open-software-network/os-epode/tree/main/sdk/rust"
 
 [dependencies]
 axum = "0.8"

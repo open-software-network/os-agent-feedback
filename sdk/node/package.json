@@ -4,11 +4,11 @@
   "description": "Collect compact outcome feedback from the customer agents using your Node product.",
   "repository": {
     "type": "git",
-    "url": "https://github.com/open-software-network/os-agent-feedback.git",
+    "url": "https://github.com/open-software-network/os-epode.git",
     "directory": "sdk/node"
   },
-  "homepage": "https://github.com/open-software-network/os-agent-feedback/tree/main/sdk/node",
-  "bugs": "https://github.com/open-software-network/os-agent-feedback/issues",
+  "homepage": "https://github.com/open-software-network/os-epode/tree/main/sdk/node",
+  "bugs": "https://github.com/open-software-network/os-epode/issues",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

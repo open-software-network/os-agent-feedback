@@ -228,7 +228,7 @@ function setupInstructions() {
     },
     go: {
       name: "Go · net/http",
-      install: `go get github.com/open-software-network/os-agent-feedback/sdk/go@latest`,
+      install: `go get github.com/open-software-network/os-epode/sdk/go@latest`,
       code: `feedback, err := agentfeedback.New(agentfeedback.Options{\n    APIKey: os.Getenv("AGENT_FEEDBACK_KEY"),\n    Include: []string{"${route}"},\n})\nif err != nil { log.Fatal(err) }\ndefer feedback.Shutdown(context.Background())\n\nhandler := feedback.Middleware(router)`,
       advanced: `CustomerRef: func(r *http.Request) string { return accountID(r.Context()) }`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
