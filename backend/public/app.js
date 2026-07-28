@@ -13,7 +13,6 @@ let setupStack = "node-mcp";
 let setupConnectionId = null;
 let setupConnectionName = "";
 let setupEnvironment = "production";
-let setupRoute = "/search";
 let setupMonitor = null;
 
 const esc = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
@@ -124,9 +123,15 @@ const setupSurfaceCopy = {
     detail: "Each response begins as an opportunity. It becomes confirmed when its receipt returns with feedback.",
   },
   website: {
-    name: "Agent-readable website",
-    summary: "Instrument HTML pages agents use",
-    detail: "Eligible pages receive machine-readable feedback instructions without changing what people see.",
+    name: "Server-rendered website",
+    summary: "HTML returned by your app server",
+    detail: "The server injects machine-readable feedback instructions without exposing your private key in browser code.",
+  },
+  static: {
+    name: "Static site or CMS",
+    summary: "Edge integration coming soon",
+    detail: "Static and no-code sites need a server or edge adapter because a private product key cannot live in browser JavaScript.",
+    disabled: true,
   },
 };
 
@@ -157,7 +162,7 @@ const setupStackOptions = {
 
 function setupInstructions() {
   const artifacts = `${location.origin}/static`;
-  const route = setupRoute.trim() || (setupSurface === "website" ? "/docs/*" : "/search");
+  const route = setupSurface === "website" ? "/docs/*" : "/search";
   const nodeInstall = `npm install ${artifacts}/agent-feedback-node-0.1.0.tgz`;
   const environment = `AGENT_FEEDBACK_KEY=${apiSecret || "paste_product_key_here"}`;
   const instructions = {
@@ -239,9 +244,8 @@ function setupView() {
   const connected = status.interactions.length > 0;
   const reviewed = status.outcomes.length > 0;
   const stacks = setupStackOptions[setupSurface].map(([id, name, copy]) => `<button class="choice-card" data-setup-stack="${esc(id)}" aria-pressed="${setupStack === id}"><strong>${esc(name)}</strong><span>${esc(copy)}</span></button>`).join("");
-  const surfaces = Object.entries(setupSurfaceCopy).map(([id, item]) => `<button class="choice-card surface-card" data-setup-surface="${esc(id)}" aria-pressed="${setupSurface === id}" ${setupConnectionId ? "disabled" : ""}><strong>${esc(item.name)}</strong><span>${esc(item.summary)}</span></button>`).join("");
-  const routeField = setupSurface === "mcp" ? "" : `<label><span>Routes agents use</span><input id="setup-route" value="${esc(setupRoute)}" placeholder="/search or /docs/*"><small>Only successful responses on these routes receive feedback instructions.</small></label>`;
-  const connectionForm = setupConnectionId ? `<div class="connection-created"><b>${esc(setupConnectionName)} · ${esc(title(setupEnvironment))}</b><span>Connection created</span></div>` : `<div class="connection-form"><label><span>Connection name</span><input id="setup-connection-name" value="${esc(setupConnectionName)}" placeholder="Search API" maxlength="40"></label><label><span>Environment</span><select id="setup-environment"><option value="production" ${setupEnvironment === "production" ? "selected" : ""}>Production</option><option value="staging" ${setupEnvironment === "staging" ? "selected" : ""}>Staging</option><option value="development" ${setupEnvironment === "development" ? "selected" : ""}>Development</option></select></label>${routeField}<label><span>Key expiration</span><select id="api-key-expiration"><option value="2592000">30 days</option><option value="7776000" selected>90 days</option><option value="31536000">365 days</option></select></label><button class="button primary" data-create-key>Create connection</button></div>`;
+  const surfaces = Object.entries(setupSurfaceCopy).map(([id, item]) => `<button class="choice-card surface-card" data-setup-surface="${esc(id)}" aria-pressed="${setupSurface === id}" ${item.disabled ? "disabled" : ""}><strong>${esc(item.name)}</strong><span>${esc(item.summary)}</span>${item.disabled ? "<small>COMING SOON</small>" : ""}</button>`).join("");
+  const connectionForm = setupConnectionId ? `<div class="connection-created"><b>${esc(setupConnectionName)} · ${esc(title(setupEnvironment))}</b><span>Connection created</span></div>` : `<div class="connection-form"><label><span>Connection name</span><input id="setup-connection-name" value="${esc(setupConnectionName)}" placeholder="Search API" maxlength="40"></label><label><span>Environment</span><select id="setup-environment"><option value="production" ${setupEnvironment === "production" ? "selected" : ""}>Production</option><option value="staging" ${setupEnvironment === "staging" ? "selected" : ""}>Staging</option><option value="development" ${setupEnvironment === "development" ? "selected" : ""}>Development</option></select></label><button class="button primary" data-create-key>Create connection</button></div>`;
   const secret = apiSecret ? `<div class="secret-callout"><div><b>Save this server-side key now</b><code>${esc(apiSecret)}</code><small>It is shown once. Customer agents never receive this key.</small></div><button class="button" data-copy="${esc(apiSecret)}">Copy key</button></div>` : "";
   const installStep = setupConnectionId ? `<section class="setup-step"><div class="step-number">4</div><div class="step-body"><p class="eyebrow">INSTALL</p><h2>Add ${esc(integration.name)} to your product</h2><p>This instruments the selected surface and sends telemetry in the background. Your product response never waits for Agent Feedback.</p>${secret}<h3>Set the server environment variable</h3><div class="copy-block"><pre><code>${esc(integration.environment)}</code></pre><button class="button" data-copy="${esc(integration.environment)}">Copy</button></div><h3>Install</h3><div class="copy-block"><pre><code>${esc(integration.install)}</code></pre><button class="button" data-copy="${esc(integration.install)}">Copy</button></div><h3>Configure once</h3><div class="copy-block"><pre><code>${esc(integration.code)}</code></pre><button class="button" data-copy="${esc(integration.code)}">Copy</button></div>${integration.advanced ? `<details><summary>Optional customer grouping</summary><p>Use an opaque account ID from authentication your product already has. Do not send names or emails.</p><pre><code>${esc(integration.advanced)}</code></pre></details>` : ""}<a class="text-link" href="/.well-known/agent-feedback-v1.json" target="_blank" rel="noreferrer">Read the protocol contract →</a></div></section>` : `<section class="setup-step locked"><div class="step-number">4</div><div class="step-body"><h2>Install</h2><p>Create the connection first. Then this page will show one install command and one setup snippet for your stack.</p></div></section>`;
   const surfaceResult = setupSurface === "mcp" ? "A normal MCP tool call will appear as a confirmed interaction." : "A successful response will appear as an opportunity. It becomes confirmed if the agent submits feedback.";
@@ -249,13 +253,13 @@ function setupView() {
   const connections = dashboard.apiKeys.map((key) => {
     const keyStatus = setupConnectionStatus(key.id);
     const state = keyStatus.outcomes.length ? "Feedback received" : keyStatus.interactions.length ? "Connected" : "Never seen";
-    return `<div class="connection-row"><span><strong>${esc(key.label)}</strong><small>${esc(key.prefix)}… · expires ${date(key.expiresAt)}</small></span><b class="${keyStatus.interactions.length ? "positive" : "neutral"}">${esc(state)}</b><button class="link-button" data-revoke-key="${esc(key.id)}">Revoke</button></div>`;
+    return `<div class="connection-row"><span><strong>${esc(key.label)}</strong><small>${esc(key.prefix)}… · created ${date(key.createdAt)}</small></span><b class="${keyStatus.interactions.length ? "positive" : "neutral"}">${esc(state)}</b><button class="link-button" data-revoke-key="${esc(key.id)}">Revoke</button></div>`;
   }).join("") || `<p class="muted">No connections yet.</p>`;
   return `${header("SETUP", "Connect a product", "")}
-    <p class="setup-lede">Choose what your customers' agents use. We will show only the integration they need, then wait for the first real interaction.</p>
-    <section class="setup-step"><div class="step-number">1</div><div class="step-body"><p class="eyebrow">PRODUCT SURFACE</p><h2>What are your customers' agents using?</h2><div class="choice-grid surfaces">${surfaces}</div><p class="selection-explanation"><strong>${esc(surface.name)}:</strong> ${esc(surface.detail)}</p></div></section>
-    <section class="setup-step"><div class="step-number">2</div><div class="step-body"><p class="eyebrow">STACK</p><h2>What is it built with?</h2><div class="choice-grid stacks">${stacks}</div></div></section>
-    <section class="setup-step"><div class="step-number">3</div><div class="step-body"><p class="eyebrow">CONNECTION</p><h2>Name this connection</h2><p>This name is for your dashboard. The private key stays on your server.</p>${connectionForm}</div></section>
+    <p class="setup-lede">Name the connection, choose what your customers' agents use, then add the generated integration to your code.</p>
+    <section class="setup-step"><div class="step-number">1</div><div class="step-body"><p class="eyebrow">CONNECTION</p><h2>Name this connection</h2><p>This name is for your dashboard. The private key stays on your server.</p>${connectionForm}</div></section>
+    <section class="setup-step"><div class="step-number">2</div><div class="step-body"><p class="eyebrow">PRODUCT SURFACE</p><h2>What are your customers' agents using?</h2><div class="choice-grid surfaces">${surfaces}</div><p class="selection-explanation"><strong>${esc(surface.name)}:</strong> ${esc(surface.detail)}</p></div></section>
+    <section class="setup-step"><div class="step-number">3</div><div class="step-body"><p class="eyebrow">STACK</p><h2>What is it built with?</h2><div class="choice-grid stacks">${stacks}</div><p class="muted">Choose which routes receive feedback instructions in the generated code below.</p></div></section>
     ${installStep}${verifyStep}
     <details class="existing-connections"><summary>Existing connections (${dashboard.apiKeys.length})</summary><div>${connections}</div></details>`;
 }
@@ -293,7 +297,6 @@ document.addEventListener("click", async (event) => {
     if (target.dataset.setupSurface) {
       setupSurface = target.dataset.setupSurface;
       setupStack = setupStackOptions[setupSurface][0][0];
-      setupRoute = setupSurface === "website" ? "/docs/*" : "/search";
       render();
     }
     if (target.dataset.setupStack) {
@@ -310,11 +313,9 @@ document.addEventListener("click", async (event) => {
     if (target.hasAttribute("data-create-key")) {
       setupConnectionName = document.querySelector("#setup-connection-name")?.value.trim() || "";
       setupEnvironment = document.querySelector("#setup-environment")?.value || "production";
-      setupRoute = document.querySelector("#setup-route")?.value.trim() || setupRoute;
       if (!setupConnectionName) throw new Error("Name this connection before creating it.");
       const label = `${setupConnectionName} · ${title(setupEnvironment)}`;
-      const expiresInSeconds = Number(document.querySelector("#api-key-expiration")?.value || 7776000);
-      const body = await request("/api/settings/api-keys", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label, expiresInSeconds }) });
+      const body = await request("/api/settings/api-keys", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label }) });
       apiSecret = body.secret;
       setupConnectionId = body.apiKey.id;
       await refresh();
@@ -342,7 +343,6 @@ document.addEventListener("click", async (event) => {
 document.addEventListener("input", (event) => {
   if (event.target.id === "setup-connection-name") setupConnectionName = event.target.value;
   if (event.target.id === "setup-environment") setupEnvironment = event.target.value;
-  if (event.target.id === "setup-route") setupRoute = event.target.value;
 });
 
 document.addEventListener("submit", async (event) => {
