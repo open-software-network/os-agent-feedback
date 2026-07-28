@@ -148,8 +148,15 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn security_headers(request: Request<Body>, next: Next) -> Response {
+    let static_asset = request.uri().path().starts_with("/static/");
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
+    if static_asset {
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=0, must-revalidate"),
+        );
+    }
     headers.insert(
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),

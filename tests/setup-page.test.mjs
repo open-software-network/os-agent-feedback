@@ -33,6 +33,7 @@ const backendModels = await readFile(
 
 test("products exist before integration setup without an environment picker", () => {
   assert.match(dashboardHtml, /id="product-scope"/);
+  assert.match(dashboardHtml, /app\.js\?v=20260728-product-only/);
   assert.match(dashboardScript, /Create your first product/);
   assert.match(dashboardScript, /id="product-select"/);
   assert.match(dashboardScript, /\+ New product/);
