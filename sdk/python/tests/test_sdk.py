@@ -71,6 +71,39 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(feedback_from_response({"Agent-Feedback": header}, ["available"]))
         middleware.shutdown()
 
+    def test_wsgi_injects_buffered_json_and_html_iterables(self) -> None:
+        class ClosingBody:
+            def __init__(self, body: bytes):
+                self.body = body
+
+            def __iter__(self):
+                yield self.body
+
+            def close(self):
+                pass
+
+        for content_type, original in (
+            ("application/json", b'{"answer":"available"}'),
+            ("text/html; charset=utf-8", b"<!doctype html><html><head></head><body>available</body></html>"),
+        ):
+            def app(_environ, start_response):
+                start_response("200 OK", [("Content-Type", content_type), ("Content-Length", str(len(original)))])
+                return ClosingBody(original)
+
+            middleware = AgentFeedbackWSGI(app, api_key=KEY, endpoint="https://feedback.test", include=("/status",), sender=lambda *_: None)
+            captured: dict = {}
+            result = middleware(
+                {"PATH_INFO": "/status", "REQUEST_METHOD": "GET", "wsgi.input": BytesIO()},
+                lambda status, headers, _exc=None: captured.update(status=status, headers=headers),
+            )
+            output = b"".join(result)
+            if content_type.startswith("application/json"):
+                self.assertIn("_agentFeedback", json.loads(output))
+            else:
+                self.assertIn(b'id="agent-feedback"', output)
+            self.assertEqual(int(dict(captured["headers"])["Content-Length"]), len(output))
+            middleware.shutdown()
+
     def test_agent_helper_allowlists_destination_and_sends_compact_body(self) -> None:
         envelope = {
             "v": 1,

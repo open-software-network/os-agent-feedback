@@ -1,0 +1,339 @@
+#!/usr/bin/env node
+
+import assert from "node:assert/strict";
+import { randomBytes, randomUUID } from "node:crypto";
+import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawn, spawnSync } from "node:child_process";
+
+const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const backendUrl = (process.env.SETUP_MATRIX_BACKEND_URL || "http://127.0.0.1:3180").replace(/\/$/, "");
+const databaseEnvironment = process.env.SETUP_MATRIX_DB_ENVIRONMENT || "v2-canary";
+const localBackend = backendUrl === "http://127.0.0.1:3180";
+const scratch = await mkdtemp(join(tmpdir(), "epode-setup-matrix-"));
+const children = new Set();
+const expected = new Map();
+let databaseUrl = "";
+const python = process.env.PYTHON_BIN || runWhich("python3.11") || runWhich("python3");
+
+function runWhich(command) {
+  const result = spawnSync("which", [command], { encoding: "utf8" });
+  return result.status === 0 ? result.stdout.trim() : "";
+}
+
+function run(command, args, options = {}) {
+  const result = spawnSync(command, args, {
+    cwd: options.cwd || repo,
+    env: { ...process.env, ...options.env },
+    input: options.input,
+    encoding: "utf8",
+    maxBuffer: 20 * 1024 * 1024,
+  });
+  if (result.status !== 0) {
+    throw new Error(`${command} ${args.join(" ")} failed\n${result.stdout || ""}\n${result.stderr || ""}`);
+  }
+  return (result.stdout || "").trim();
+}
+
+function start(command, args, { cwd, env = {}, label }) {
+  const child = spawn(command, args, {
+    cwd,
+    env: { ...process.env, ...env },
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
+  });
+  child.label = label;
+  child.log = "";
+  for (const stream of [child.stdout, child.stderr]) {
+    stream.on("data", (chunk) => {
+      child.log = `${child.log}${chunk}`.slice(-12_000);
+    });
+  }
+  children.add(child);
+  return child;
+}
+
+async function stop(child) {
+  if (!child || child.exitCode !== null) return;
+  try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+  await Promise.race([
+    new Promise((resolveExit) => child.once("exit", resolveExit)),
+    new Promise((resolveWait) => setTimeout(resolveWait, 2_000)),
+  ]);
+  if (child.exitCode === null) {
+    try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
+  }
+  children.delete(child);
+}
+
+async function waitFor(url, child, timeoutMs = 120_000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (child && child.exitCode !== null) throw new Error(`${child.label} exited early\n${child.log}`);
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(1_000) });
+      if (response.ok) return;
+    } catch {}
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+  }
+  throw new Error(`Timed out waiting for ${url}${child ? `\n${child.log}` : ""}`);
+}
+
+function database(action) {
+  return run("cargo", ["run", "--quiet", "--bin", "setup_matrix_db", "--", action], {
+    cwd: join(repo, "backend"),
+    env: {
+      DATABASE_URL: databaseUrl,
+      SETUP_MATRIX_WORKSPACE_ID: workspaceId,
+      SETUP_MATRIX_PRODUCT_ID: productId,
+      SETUP_MATRIX_ENVIRONMENT_ID: environmentId,
+      SETUP_MATRIX_KEY_ID: keyId,
+      SETUP_MATRIX_API_KEY: apiKey,
+    },
+  });
+}
+
+function envelopeFrom(response, body) {
+  if (body && typeof body === "object" && !Array.isArray(body) && body._agentFeedback) return body._agentFeedback;
+  if (typeof body === "string") {
+    const match = /<script[^>]+id=["']agent-feedback["'][^>]*>([\s\S]*?)<\/script>/i.exec(body);
+    if (match) return JSON.parse(match[1]);
+  }
+  const header = response.headers.get("agent-feedback");
+  return header ? JSON.parse(Buffer.from(header, "base64url").toString("utf8")) : undefined;
+}
+
+function assertEnvelope(envelope) {
+  assert.equal(envelope.v, 1);
+  assert.equal(envelope.mode, "auto");
+  assert.equal(envelope.requested, true);
+  assert.equal(envelope.reliability, "best_effort_without_agent_adapter");
+  assert.match(envelope.instruction, /autonomously/i);
+  assert.match(envelope.instruction, /do not ask the human/i);
+  assert.equal(envelope.submit.url, `${backendUrl}/api/v2/outcomes`);
+  assert.equal(envelope.submit.method, "POST");
+  assert.match(envelope.submit.authorization, /^Bearer afr2_/);
+  assert.deepEqual(envelope.submit.fields.outcome, ["success", "partial", "failure"]);
+  assert.doesNotMatch(JSON.stringify(envelope), /af_live_/);
+}
+
+async function submit(envelope, note) {
+  const response = await fetch(envelope.submit.url, {
+    method: "POST",
+    headers: { authorization: envelope.submit.authorization, "content-type": "application/json" },
+    body: JSON.stringify({ outcome: "success", note }),
+  });
+  const body = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(body));
+  assert.equal(body.accepted, true);
+  assert.equal(body.review.outcome, "success");
+  assert.equal(body.review.note, note);
+  const duplicate = await fetch(envelope.submit.url, {
+    method: "POST",
+    headers: { authorization: envelope.submit.authorization, "content-type": "application/json" },
+    body: JSON.stringify({ outcome: "failure", note: "This duplicate must not replace the first outcome." }),
+  });
+  const duplicateBody = await duplicate.json();
+  assert.equal(duplicate.status, 200);
+  assert.equal(duplicateBody.review.id, body.review.id);
+  assert.equal(duplicateBody.review.note, note);
+  return body;
+}
+
+async function testHttp(base, stack) {
+  for (const [surfaceName, path, surface] of [
+    ["api", "/search", "http_json"],
+    ["website", "/docs/test", "http_html"],
+  ]) {
+    const response = await fetch(`${base}${path}`);
+    const contentType = response.headers.get("content-type") || "";
+    const body = contentType.includes("json") ? await response.json() : await response.text();
+    assert.equal(response.status, 200);
+    const envelope = envelopeFrom(response, body);
+    assert.ok(envelope, `${stack}/${surfaceName} did not expose feedback metadata`);
+    assertEnvelope(envelope);
+    const note = `Epode ${stack} ${surfaceName} setup returned the expected result.`;
+    const outcome = await submit(envelope, note);
+    expected.set(note, { surface, operation: path, confirmationMethod: "outcome_submission", interactionId: outcome.interactionId });
+    console.log(`PASS ${stack}/${surfaceName}: response contract, autonomous review, idempotency`);
+  }
+}
+
+async function mcpPost(url, body, sessionId) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(payload));
+  return { payload, sessionId: response.headers.get("mcp-session-id") || sessionId };
+}
+
+async function testMcp(url, stack) {
+  let call = await mcpPost(url, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "epode-setup-matrix-agent", version: "1.0.0" } } });
+  const sessionId = call.sessionId;
+  assert.ok(sessionId);
+  call = await mcpPost(url, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, sessionId);
+  const names = call.payload.result.tools.map((tool) => tool.name);
+  assert.ok(names.includes("search"));
+  assert.ok(names.includes("report_product_outcome"));
+  call = await mcpPost(url, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "search", arguments: { query: "setup" } } }, sessionId);
+  const feedback = call.payload.result.structuredContent._agentFeedback;
+  assert.equal(feedback.reliability, "protocol_tool");
+  assert.equal(feedback.reportTool, "report_product_outcome");
+  assert.match(feedback.feedbackHandle, /^afr2_/);
+  assert.match(feedback.instruction, /autonomously/i);
+  const note = `Epode ${stack} MCP setup returned the expected result.`;
+  call = await mcpPost(url, { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "report_product_outcome", arguments: { feedbackHandle: feedback.feedbackHandle, outcome: "success", note } } }, sessionId);
+  assert.equal(call.payload.result.structuredContent.accepted, true, JSON.stringify(call.payload.result));
+  assert.equal(call.payload.result.structuredContent.review.note, note);
+  expected.set(note, { surface: "mcp", operation: "search", confirmationMethod: "mcp", interactionId: call.payload.result.structuredContent.interactionId });
+  console.log(`PASS ${stack}/mcp: tool registration, confirmed interaction, autonomous review`);
+}
+
+async function prepareNode(fixtureName) {
+  const target = join(scratch, fixtureName);
+  await cp(join(repo, "examples", fixtureName), target, { recursive: true });
+  const manifestPath = join(target, "package.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  manifest.dependencies["@agent-feedback/node"] = `${backendUrl}/static/agent-feedback-node-0.1.0.tgz`;
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  run("npm", ["install", "--ignore-scripts"], { cwd: target });
+  return target;
+}
+
+async function preparePython(fixtureName) {
+  const target = join(scratch, fixtureName);
+  await cp(join(repo, "examples", fixtureName), target, { recursive: true });
+  const requirements = join(target, "requirements.txt");
+  await writeFile(requirements, (await readFile(requirements, "utf8")).replaceAll("https://app.epode.ai", backendUrl));
+  run(python, ["-m", "venv", ".venv"], { cwd: target });
+  run(join(target, ".venv", "bin", "python"), ["-m", "pip", "install", "-q", "-r", "requirements.txt"], { cwd: target });
+  return target;
+}
+
+async function prepareGo() {
+  const target = join(scratch, "setup-matrix-go");
+  await cp(join(repo, "examples", "setup-matrix-go"), target, { recursive: true });
+  await rm(join(target, "go.mod"));
+  run("go", ["mod", "init", "setup-matrix-go"], { cwd: target });
+  run("go", ["get", "github.com/open-software-network/os-epode/sdk/go@latest"], { cwd: target });
+  run("go", ["build", "-o", "setup-matrix-go", "."], { cwd: target });
+  return target;
+}
+
+async function prepareRust() {
+  const target = join(scratch, "setup-matrix-rust");
+  await cp(join(repo, "examples", "setup-matrix-rust"), target, { recursive: true });
+  run("bash", ["prepare.sh"], { cwd: target, env: { EP0DE_ORIGIN: backendUrl } });
+  run("cargo", ["build", "--quiet"], { cwd: target });
+  return target;
+}
+
+async function prepareManual(fixtureName) {
+  const target = join(scratch, fixtureName);
+  await cp(join(repo, "examples", fixtureName), target, { recursive: true });
+  run("curl", ["-fsS", "-o", "protocol.zip", `${backendUrl}/static/agent-feedback-protocol-v1.zip`], { cwd: target });
+  run("unzip", ["-q", "protocol.zip"], { cwd: target });
+  assert.ok((await readFile(join(target, "protocol", "v1", "README.md"), "utf8")).includes("Agent Feedback Protocol v1"));
+  return target;
+}
+
+async function runHttpApp(label, command, args, cwd, port) {
+  const child = start(command, args, { cwd, label, env: { PORT: String(port), AGENT_FEEDBACK_KEY: apiKey, AGENT_FEEDBACK_URL: backendUrl } });
+  await waitFor(`http://127.0.0.1:${port}/health`, child);
+  await testHttp(`http://127.0.0.1:${port}`, label);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 3_500));
+  await stop(child);
+}
+
+async function runMcpApp(label, command, args, cwd, port) {
+  const child = start(command, args, { cwd, label, env: { PORT: String(port), AGENT_FEEDBACK_KEY: apiKey, AGENT_FEEDBACK_URL: backendUrl } });
+  await waitFor(`http://127.0.0.1:${port}/health`, child);
+  await testMcp(`http://127.0.0.1:${port}/mcp`, label);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 5_000));
+  await stop(child);
+}
+
+const workspaceId = randomUUID();
+const productId = randomUUID();
+const environmentId = randomUUID();
+const keyId = randomUUID();
+const apiKey = `af_live_${keyId.replaceAll("-", "")}_${randomBytes(30).toString("base64url")}`;
+
+try {
+  if (process.env.SETUP_MATRIX_SKIP_BUILD !== "true") run("bash", ["tests/build-hosted-artifacts.sh"]);
+  const railwayVariables = JSON.parse(run("railway", ["variables", "--service", "Postgres", "--environment", databaseEnvironment, "--json"]));
+  databaseUrl = railwayVariables.DATABASE_PUBLIC_URL;
+  if (!databaseUrl) throw new Error(`Postgres in ${databaseEnvironment} has no DATABASE_PUBLIC_URL`);
+  if (localBackend) {
+    const backend = start("cargo", ["run", "--quiet", "--bin", "agent-feedback"], {
+      cwd: join(repo, "backend"),
+      label: "Epode Rust backend",
+      env: {
+        DATABASE_URL: databaseUrl,
+        PUBLIC_BASE_URL: backendUrl,
+        OS_ACCOUNTS_URL: "https://accounts.example.test",
+        OS_ACCOUNTS_API_URL: "https://accounts-api.example.test",
+        OS_ACCOUNTS_CLIENT_ID: "ocl_setup_matrix",
+        PORT: "3180",
+      },
+    });
+    await waitFor(`${backendUrl}/api/health`, backend, 240_000);
+  } else {
+    await waitFor(`${backendUrl}/api/health`, undefined, 60_000);
+  }
+  database("seed");
+
+  const nodeExpress = await prepareNode("setup-matrix-node-express");
+  await runHttpApp("node-express", "node", ["index.js"], nodeExpress, 4101);
+  const nodeFastify = await prepareNode("setup-matrix-node-fastify");
+  await runHttpApp("node-fastify", "node", ["index.js"], nodeFastify, 4102);
+  const pythonAsgi = await preparePython("setup-matrix-python-asgi");
+  await runHttpApp("python-asgi", join(pythonAsgi, ".venv", "bin", "python"), ["-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", "4103"], pythonAsgi, 4103);
+  const pythonWsgi = await preparePython("setup-matrix-python-wsgi");
+  await runHttpApp("python-wsgi", join(pythonWsgi, ".venv", "bin", "python"), ["app.py"], pythonWsgi, 4104);
+  const go = await prepareGo();
+  await runHttpApp("go", join(go, "setup-matrix-go"), [], go, 4105);
+  const rust = await prepareRust();
+  await runHttpApp("rust", join(rust, "target", "debug", "setup-matrix-rust"), [], rust, 4106);
+  const manualHttp = await prepareManual("setup-matrix-manual-http");
+  await runHttpApp("manual-http", python, ["server.py"], manualHttp, 4108);
+  const nodeMcp = await prepareNode("setup-matrix-node-mcp");
+  await runMcpApp("node-mcp", "node", ["index.js"], nodeMcp, 4107);
+  const manualMcp = await prepareManual("setup-matrix-manual-mcp");
+  await runMcpApp("manual-mcp", python, ["server.py"], manualMcp, 4109);
+
+  let rows = [];
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const raw = database("read").split("\n").findLast((line) => line.trim().startsWith("["));
+    rows = JSON.parse(raw || "[]");
+    if (rows.length === expected.size && rows.every((row) => row.surface !== "unknown" && row.operation !== "pending")) break;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+  }
+  assert.equal(expected.size, 16);
+  assert.equal(rows.length, 16, JSON.stringify(rows, null, 2));
+  for (const row of rows) {
+    const contract = expected.get(row.note);
+    assert.ok(contract, `Unexpected stored note: ${row.note}`);
+    assert.equal(row.id, contract.interactionId);
+    assert.equal(row.surface, contract.surface, `surface mismatch for ${row.note}: ${JSON.stringify(row)}`);
+    assert.equal(row.operation, contract.operation, `operation mismatch for ${row.note}: ${JSON.stringify(row)}`);
+    assert.equal(row.classification, "confirmed");
+    assert.equal(row.confirmationMethod, contract.confirmationMethod);
+    assert.equal(row.outcome, "success");
+  }
+  console.log("PASS persistence: all 16 Setup permutations stored the exact agent note on the correct confirmed interaction");
+  console.log("PASS setup matrix E2E: 7 API + 7 website + 2 MCP permutations");
+} finally {
+  for (const child of children) await stop(child);
+  try { database("delete"); } catch {}
+  await rm(scratch, { recursive: true, force: true });
+}

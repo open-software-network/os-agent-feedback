@@ -4,9 +4,16 @@
 
 | Surface | Company setup | Agent handoff | Classification |
 | --- | --- | --- | --- |
-| Express JSON API | Global middleware with selected routes | `_agentFeedback` on JSON objects; headers for arrays/scalars | Unclassified until review |
-| Fastify API/website | One registered plugin | JSON object, compact headers, or embedded HTML JSON | Unclassified until review |
+| Express and Fastify | Global middleware/plugin with selected routes | JSON object, compact headers, or embedded HTML JSON | Unclassified until review |
+| Python ASGI and WSGI | One middleware wrapper | JSON object, compact headers, or embedded HTML JSON | Unclassified until review |
+| Go net/http and Rust Tower | One middleware/layer | JSON object, compact headers, or embedded HTML JSON | Unclassified until review |
+| Language-neutral HTTP | Public v1 protocol | Same JSON, header, and HTML contract | Unclassified until review |
 | Node MCP | `instrumentMcp` immediately after server construction | Decorated business result plus `report_product_outcome` | Confirmed on tool use |
+| Language-neutral MCP | Public v1 protocol | Explicit outcome tool and decorated result | Confirmed on tool use |
+
+The Setup page currently exposes 16 enabled permutations: seven HTTP API integrations,
+the same seven server-rendered website integrations, and two MCP integrations. Static
+site/CMS remains visibly disabled and is not counted as supported.
 
 ## Automated acceptance
 
@@ -26,6 +33,25 @@
 | Optional customer and MCP session grouping | V2 acceptance and customer E2E |
 | V1 writes disabled; data preserved | V2 acceptance and dashboard legacy filter |
 | OS Accounts dashboard | Production browser E2E after canary migration |
+
+## Exact setup matrix
+
+`npm run test:setup-matrix` rebuilds the hosted SDK artifacts, creates a fresh disposable
+canary product and product key, installs each integration from the same artifact/command
+shown by Setup, and launches nine new product examples. A feedback-aware customer-agent
+client then exercises every enabled permutation.
+
+For all 16 cases it asserts:
+
+- the product result and existing response shape remain intact;
+- auto-mode instructions and a scoped capability are present without the company key;
+- the agent submits an exact, unique success note;
+- a contradictory duplicate returns the original review;
+- PostgreSQL contains one linked review with the expected surface and operation;
+- HTTP/HTML is confirmed by `outcome_submission`, while MCP remains confirmed by `mcp`.
+
+The test deletes only its randomly generated workspace when it finishes. The current full
+run passed `7 API + 7 website + 2 MCP` and stored all 16 exact notes.
 
 ## Behavioral agent check
 
