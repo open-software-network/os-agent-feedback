@@ -92,6 +92,11 @@ table { width:100%; border-collapse:collapse; }td { padding:10px 0; border-botto
 .secret-callout code { overflow-wrap:anywhere; color:var(--good); }
 .copy-block { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:start; }
 .copy-block pre { margin:0; }
+.install-methods { display:flex; border-bottom:1px solid var(--line); margin-top:24px; }
+.install-methods button { border:0; border-bottom:2px solid transparent; background:none; padding:11px 14px; }
+.install-methods button[aria-pressed="true"] { border-bottom-color:var(--ink); font-weight:700; }
+.install-panel { border:1px solid var(--line); border-top:0; padding:18px; }
+.install-panel>p:first-child { margin-top:0; }
 .verification { border:1px solid var(--line); margin:20px 0; }
 .verification-row { display:flex; gap:14px; padding:16px; border-bottom:1px solid var(--line); }
 .verification-row:last-child { border-bottom:0; }

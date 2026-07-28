@@ -9,15 +9,23 @@ const dashboardScript = await readFile(
 
 test("setup starts with connection identity and reveals only the selected stack", () => {
   const connectionStep = dashboardScript.indexOf('<div class="step-number">1</div><div class="step-body"><p class="eyebrow">CONNECTION</p>');
-  const surfaceStep = dashboardScript.indexOf('<div class="step-number">2</div><div class="step-body"><p class="eyebrow">PRODUCT SURFACE</p>');
-  assert.ok(connectionStep > 0 && connectionStep < surfaceStep);
-  assert.match(dashboardScript, /What are your customers' agents using\?/);
+  const integrationStep = dashboardScript.indexOf('<div class="step-number">2</div><div class="step-body"><p class="eyebrow">INTEGRATION</p>');
+  assert.ok(connectionStep > 0 && connectionStep < integrationStep);
+  assert.match(dashboardScript, /Choose how your product is served/);
   assert.match(dashboardScript, /MCP server/);
   assert.match(dashboardScript, /HTTP API/);
   assert.match(dashboardScript, /Server-rendered website/);
   assert.match(dashboardScript, /Static site or CMS/);
   assert.match(dashboardScript, /setupStackOptions\[setupSurface\]/);
   assert.doesNotMatch(dashboardScript, /Run backend contract test/);
+});
+
+test("setup offers one guided install with a manual fallback", () => {
+  assert.match(dashboardScript, /Use a coding agent/);
+  assert.match(dashboardScript, /Manual setup/);
+  assert.match(dashboardScript, /Copy setup prompt/);
+  assert.match(dashboardScript, /never the product key/);
+  assert.match(dashboardScript, /Send one real interaction/);
 });
 
 test("routes stay in code and key expiration stays out of onboarding", () => {
