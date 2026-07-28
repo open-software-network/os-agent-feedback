@@ -1131,3 +1131,156 @@ pub async fn submit_customer_agent_feedback(
     tx.commit().await?;
     Ok((session, feedback))
 }
+
+#[cfg(test)]
+mod product_environment_tests {
+    use sqlx::postgres::PgPoolOptions;
+
+    use super::*;
+
+    fn test_error(error: ApiError) -> anyhow::Error {
+        anyhow::anyhow!("{}: {}", error.status, error.message)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn product_environment_scope_isolated_end_to_end() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+
+        let workspace_id = Uuid::new_v4();
+        let workspace = sqlx::query_as::<_, Workspace>(
+            r#"INSERT INTO workspaces (id, os_user_id, name, slug)
+            VALUES ($1, $2, 'Hierarchy acceptance', $3) RETURNING *"#,
+        )
+        .bind(workspace_id)
+        .bind(format!("usr_test_{}", workspace_id.simple()))
+        .bind(format!(
+            "hierarchy-{}",
+            &workspace_id.simple().to_string()[..8]
+        ))
+        .fetch_one(&pool)
+        .await?;
+
+        let result = async {
+            let (search, production) = create_product(
+                &pool,
+                workspace_id,
+                CreateProductInput {
+                    name: "Search".into(),
+                    environment: Some("Production".into()),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let staging = create_product_environment(
+                &pool,
+                workspace_id,
+                search.id,
+                CreateEnvironmentInput {
+                    name: "Staging".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let (_docs, _docs_production) = create_product(
+                &pool,
+                workspace_id,
+                CreateProductInput {
+                    name: "Documentation".into(),
+                    environment: Some("Production".into()),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let (key, _) = create_api_key(
+                &pool,
+                workspace_id,
+                production.id,
+                Some("Express".into()),
+                None,
+            )
+            .await
+            .map_err(test_error)?;
+            let interaction_id = Uuid::new_v4();
+            ingest_telemetry_batch(
+                &pool,
+                &ProductAuth {
+                    workspace: workspace.clone(),
+                    environment: production.clone(),
+                    api_key_id: key.id,
+                },
+                TelemetryBatchInput {
+                    events: vec![InteractionTelemetryInput {
+                        interaction_id,
+                        surface: "http_json".into(),
+                        operation: "/search".into(),
+                        status_code: Some(200),
+                        duration_ms: Some(12),
+                        customer_ref: None,
+                        classification: Some("unclassified".into()),
+                        confirmation_method: None,
+                        runtime_hint: None,
+                        runtime_hint_source: None,
+                        session_ref: None,
+                        session_source: None,
+                        occurred_at: Some(Utc::now()),
+                    }],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+
+            let context = || DashboardContext {
+                user: CurrentUser {
+                    id: "usr_test".into(),
+                    handle: "test".into(),
+                    email: None,
+                    display_name: "Test".into(),
+                },
+                workspace: workspace.clone(),
+            };
+            let production_dashboard = dashboard(&pool, context(), Some(production.id))
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(production_dashboard.products.len() == 2);
+            anyhow::ensure!(production_dashboard.environments.len() == 3);
+            anyhow::ensure!(production_dashboard.interactions.len() == 1);
+            anyhow::ensure!(production_dashboard.api_keys.len() == 1);
+
+            let staging_dashboard = dashboard(&pool, context(), Some(staging.id))
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(staging_dashboard.current_product.unwrap().id == search.id);
+            anyhow::ensure!(staging_dashboard.interactions.is_empty());
+            anyhow::ensure!(staging_dashboard.api_keys.is_empty());
+
+            let updated = update_policy(
+                &pool,
+                workspace_id,
+                PolicyInput {
+                    environment_id: staging.id,
+                    feedback_mode: "ask".into(),
+                    collect_event_summaries: false,
+                    retention_days: 7,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(updated.feedback_mode == "ask");
+            anyhow::ensure!(production.feedback_mode == "auto");
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+}

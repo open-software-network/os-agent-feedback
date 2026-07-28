@@ -14,6 +14,10 @@ const productMigration = await readFile(
   new URL("../backend/migrations/0008_products_and_environments.sql", import.meta.url),
   "utf8",
 );
+const migratedProductLabel = await readFile(
+  new URL("../backend/migrations/0009_label_migrated_products.sql", import.meta.url),
+  "utf8",
+);
 
 test("products and environments exist before integration setup", () => {
   assert.match(dashboardHtml, /id="product-scope"/);
@@ -69,4 +73,5 @@ test("legacy v2 data is migrated into a default product environment", () => {
   assert.match(productMigration, /legacy-product/);
   assert.match(productMigration, /legacy-production/);
   assert.match(productMigration, /ALTER COLUMN environment_id SET NOT NULL/);
+  assert.match(migratedProductLabel, /Existing product/);
 });
