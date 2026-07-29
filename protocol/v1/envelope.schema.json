@@ -4,13 +4,14 @@
   "title": "Agent Feedback HTTP envelope",
   "type": "object",
   "additionalProperties": false,
-  "required": ["v", "mode", "requested", "reliability", "when", "instruction", "submit", "privacy", "expiresAt"],
+  "required": ["v", "mode", "requested", "consentRequired", "reliability", "when", "instruction", "submit", "privacy", "expiresAt"],
   "properties": {
     "v": { "const": 1 },
     "mode": { "enum": ["auto", "ask"] },
     "requested": { "type": "boolean" },
+    "consentRequired": { "type": "boolean" },
     "reliability": { "const": "best_effort_without_agent_adapter" },
-    "when": { "const": "after_outcome_known_before_final_response" },
+    "when": { "enum": ["after_outcome_known_before_final_response", "after_outcome_known_and_explicit_user_approval"] },
     "instruction": { "type": "string", "minLength": 1, "maxLength": 1000 },
     "submit": {
       "type": "object",
@@ -34,5 +35,27 @@
     },
     "privacy": { "type": "string", "minLength": 1, "maxLength": 1000 },
     "expiresAt": { "type": "string", "format": "date-time" }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "mode": { "const": "auto" } } },
+      "then": {
+        "properties": {
+          "requested": { "const": true },
+          "consentRequired": { "const": false },
+          "when": { "const": "after_outcome_known_before_final_response" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "mode": { "const": "ask" } } },
+      "then": {
+        "properties": {
+          "requested": { "const": true },
+          "consentRequired": { "const": true },
+          "when": { "const": "after_outcome_known_and_explicit_user_approval" }
+        }
+      }
+    }
+  ]
 }

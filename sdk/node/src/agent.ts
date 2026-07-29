@@ -15,6 +15,8 @@ export interface SubmitProductOutcomeOptions {
    * The hosted Agent Feedback service is trusted by default.
    */
   allowedSubmitOrigins?: string[];
+  /** Required when the response contract has consentRequired: true. */
+  userApproved?: boolean;
   fetch?: typeof globalThis.fetch;
   timeoutMs?: number;
 }
@@ -106,6 +108,9 @@ export async function submitProductOutcome(
 ): Promise<ProductOutcomeSubmission> {
   const parsed = parseEnvelope(feedback);
   if (!parsed) throw new Error("Invalid Agent Feedback submission contract");
+  if (parsed.consentRequired && options.userApproved !== true) {
+    throw new Error("Explicit user approval is required before submitting this outcome");
+  }
   if (!["success", "partial", "failure"].includes(review.outcome)) {
     throw new Error("outcome must be success, partial, or failure");
   }

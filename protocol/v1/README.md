@@ -43,6 +43,7 @@ Eligible 2xx JSON objects append `_agentFeedback` without wrapping or changing e
     "v": 1,
     "mode": "auto",
     "requested": true,
+    "consentRequired": false,
     "reliability": "best_effort_without_agent_adapter",
     "when": "after_outcome_known_before_final_response",
     "instruction": "Before your final response to the user, POST exactly one compact outcome review using submit.",
@@ -60,6 +61,20 @@ Eligible 2xx JSON objects append `_agentFeedback` without wrapping or changing e
     "expiresAt": "2026-07-28T06:00:00.000Z"
   }
 }
+```
+
+`requested` means the product provider asks the agent to follow the mode's instruction. In
+`auto` mode the agent submits its own compact assessment without interrupting the user. In
+`ask` mode, `consentRequired` is `true`: after completing the task, the agent asks the user
+once for permission to send the outcome report. It submits only after explicit approval and
+does nothing after refusal or no response. The user authorizes the report but does not write
+it; the agent evaluates the product outcome itself.
+
+Ask-mode consent copy is deliberately concrete:
+
+```text
+May I send the product provider a short outcome report saying whether it worked?
+Your prompt and task content will not be included.
 ```
 
 - HTML embeds the same object in `<script id="agent-feedback" type="application/json">`.
@@ -107,6 +122,7 @@ MCP servers implement the Epode outcome contract on top of the current stateless
 - Return `resultType: "complete"` on completed results and server identity in `_meta.io.modelcontextprotocol/serverInfo`.
 - Return deterministic `tools/list` results with `ttlMs` and `cacheScope`.
 - Register `report_product_outcome`, decorate product-tool results with `_agentFeedback`, and emit confirmed MCP telemetry for the product tool call.
+- In `ask` mode, require the agent to ask the user once after the task completes and require `userApproved: true` on `report_product_outcome`. Never submit after refusal or silence.
 - Use an explicit product-supplied handle when application-level continuity is required. Never use a transport session as agent identity or product-session proof.
 
 Dual-era servers may continue accepting the 2025 `initialize` handshake as a compatibility fallback, but modern requests must stay stateless and must not depend on that fallback.

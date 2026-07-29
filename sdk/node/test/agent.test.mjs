@@ -10,6 +10,7 @@ const envelope = {
   v: 1,
   mode: "auto",
   requested: true,
+  consentRequired: false,
   reliability: "best_effort_without_agent_adapter",
   when: "after_outcome_known_before_final_response",
   instruction: "Submit one outcome.",
@@ -78,4 +79,37 @@ test("feedback-aware adapter rejects untrusted submission origins", async () => 
     ),
     /untrusted origin/,
   );
+});
+
+test("feedback-aware adapter enforces Ask-mode approval", async () => {
+  const askEnvelope = {
+    ...envelope,
+    mode: "ask",
+    consentRequired: true,
+    when: "after_outcome_known_and_explicit_user_approval",
+  };
+  const review = {
+    outcome: "success",
+    note: "The product response completed the task.",
+  };
+  await assert.rejects(
+    submitProductOutcome(askEnvelope, review, {
+      allowedSubmitOrigins: ["https://feedback.test"],
+    }),
+    /Explicit user approval is required/,
+  );
+
+  let submitted = false;
+  await submitProductOutcome(askEnvelope, review, {
+    allowedSubmitOrigins: ["https://feedback.test"],
+    userApproved: true,
+    fetch: async () => {
+      submitted = true;
+      return new Response('{"accepted":true}', {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  assert.equal(submitted, true);
 });

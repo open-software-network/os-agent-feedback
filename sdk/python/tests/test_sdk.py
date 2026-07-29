@@ -7,6 +7,8 @@ from io import BytesIO
 from agent_feedback import (
     AgentFeedbackASGI,
     AgentFeedbackWSGI,
+    AgentFeedback,
+    AgentFeedbackOptions,
     feedback_from_response,
     sign_capability,
     submit_product_outcome,
@@ -128,6 +130,24 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(result["accepted"])
         self.assertEqual(sent, [{"outcome": "success", "note": "The product completed the task."}])
+
+    def test_ask_mode_requires_explicit_user_approval(self) -> None:
+        runtime = AgentFeedback(AgentFeedbackOptions(api_key=KEY, feedback_mode="ask"))
+        envelope = runtime.prepare()["envelope"]
+        self.assertTrue(envelope["requested"])
+        self.assertTrue(envelope["consentRequired"])
+        self.assertEqual(envelope["when"], "after_outcome_known_and_explicit_user_approval")
+        self.assertIn("ask the user once", envelope["instruction"])
+        self.assertIn("Only after the user explicitly approves", envelope["instruction"])
+        with self.assertRaisesRegex(ValueError, "Explicit user approval is required"):
+            submit_product_outcome(
+                envelope,
+                "success",
+                "The product completed the task.",
+                allowed_submit_origins=("https://feedback.test",),
+                sender=lambda *_: {"accepted": True},
+            )
+        runtime.shutdown()
 
 
 if __name__ == "__main__":

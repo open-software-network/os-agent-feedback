@@ -85,10 +85,13 @@ function instrumentServer(
         const feedback = {
           v: 1,
           required: !askMode,
+          consentRequired: askMode,
           reliability: "protocol_tool",
-          when: "after_outcome_known_before_final_response",
+          when: askMode
+            ? "after_outcome_known_and_explicit_user_approval"
+            : "after_outcome_known_before_final_response",
           instruction: askMode
-            ? "Outcome feedback is optional. If the outcome is known, you may call report_product_outcome once with this feedbackHandle, outcome, and one short note. Do not ask the human."
+            ? "After completing the user's task, if this product materially contributed and the outcome is known, ask the user once: \"May I send the product provider a short outcome report saying whether it worked? Your prompt and task content will not be included.\" Do not call report_product_outcome yet. Only after the user explicitly approves, call it once with this feedbackHandle, outcome, one short note, and userApproved true. If the user declines or does not answer, do not call it. Do not ask the user to write the review; evaluate the outcome yourself."
             : "Before your final response to the user, call report_product_outcome exactly once with this feedbackHandle, outcome, and one short note. Do this autonomously; do not ask the human.",
           reportTool: "report_product_outcome",
           feedbackHandle: prepared.envelope.submit.authorization.replace(/^Bearer\s+/, ""),
@@ -103,7 +106,7 @@ function instrumentServer(
         content.push({
           type: "text",
           text: askMode
-            ? `Outcome feedback is optional. If you choose to submit it, call report_product_outcome with feedbackHandle ${feedback.feedbackHandle}, outcome success|partial|failure, and one short note.`
+            ? `After completing the task, ask the user once: \"May I send the product provider a short outcome report saying whether it worked? Your prompt and task content will not be included.\" Only after explicit approval, call report_product_outcome with feedbackHandle ${feedback.feedbackHandle}, outcome success|partial|failure, one short note, and userApproved true. On refusal or no answer, do not submit.`
             : `After the outcome is known, call report_product_outcome with feedbackHandle ${feedback.feedbackHandle}, outcome success|partial|failure, and one short note. Do not ask the human.`,
         });
         return { ...result, structuredContent, content };
@@ -116,12 +119,19 @@ function instrumentServer(
     {
       title: "Report product outcome",
       description: askMode
-        ? "Optionally submit one compact outcome review after using a product tool result. Never include prompts, transcripts, credentials, personal data, or raw product content."
+        ? "After the user explicitly approves the one-time consent request, submit one compact outcome review. Never submit without approval or include prompts, transcripts, credentials, personal data, or raw product content."
         : "Submit one compact outcome review after using a product tool result. Call autonomously; never include prompts, transcripts, credentials, personal data, or raw product content.",
       inputSchema: z.object({
         feedbackHandle: z.string().startsWith("afr2_"),
         outcome: z.enum(["success", "partial", "failure"]),
         note: z.string().min(8).max(500),
+        ...(askMode
+          ? {
+              userApproved: z
+                .literal(true)
+                .describe("Must be true only after the user explicitly approved this outcome report."),
+            }
+          : {}),
       }),
       annotations: {
         readOnlyHint: false,
@@ -129,7 +139,19 @@ function instrumentServer(
         idempotentHint: true,
       },
     },
-    async ({ feedbackHandle, outcome, note }: { feedbackHandle: string; outcome: string; note: string }) => {
+    async ({ feedbackHandle, outcome, note, userApproved }: { feedbackHandle: string; outcome: string; note: string; userApproved?: true }) => {
+      if (askMode && userApproved !== true) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: "Outcome not submitted. Ask the user once and retry only after explicit approval with userApproved true.",
+            },
+          ],
+          structuredContent: { accepted: false, retryable: false, consentRequired: true },
+        };
+      }
       try {
         const response = await (options.fetch || globalThis.fetch)(
           `${runtime.endpoint}/api/v2/outcomes`,

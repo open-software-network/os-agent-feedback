@@ -54,10 +54,13 @@ def submit_product_outcome(
     note: str,
     *,
     allowed_submit_origins: tuple[str, ...] = (DEFAULT_ENDPOINT,),
+    user_approved: bool = False,
     sender: Any = None,
 ) -> dict[str, Any]:
     if not _valid(feedback):
         raise ValueError("Invalid Agent Feedback submission contract")
+    if feedback.get("consentRequired") is True and not user_approved:
+        raise ValueError("Explicit user approval is required before submitting this outcome")
     if outcome not in {"success", "partial", "failure"}:
         raise ValueError("outcome must be success, partial, or failure")
     note = note.strip()

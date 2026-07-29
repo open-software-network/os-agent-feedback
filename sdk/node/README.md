@@ -5,6 +5,7 @@ Collect one compact outcome review from the independent customer agents using yo
 There are two reliability levels:
 
 - **MCP is protocol-backed.** The SDK registers an explicit `report_product_outcome` tool, which compatible agents can call autonomously.
+- **Ask mode requests consent.** Set `feedbackMode: "ask"` to make the agent finish the task, ask the user once, and submit only after explicit approval. MCP requires `userApproved: true`; HTTP agent helpers require the same approval option.
 - **HTTP and HTML are best-effort by default.** Generic agents may treat response metadata as untrusted and ignore its side-effect instruction. A feedback-aware agent adapter can make submission deterministic.
 
 ## Express

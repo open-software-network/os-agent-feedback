@@ -30,3 +30,5 @@ app.wsgi_app = AgentFeedbackWSGI(
 ASGI JSON and HTML responses are decorated directly. The conservative WSGI adapter uses the response header contract only for finite responses so it never buffers or mutates the application body.
 
 HTTP feedback is best-effort for generic agents. `feedback_from_response` and `submit_product_outcome` provide the deterministic, allow-listed agent-runtime path.
+
+Pass `feedback_mode="ask"` to tell the agent to ask the user once after finishing the task. Feedback-aware runtimes must pass `user_approved=True` only after explicit approval; the helper rejects Ask-mode submission otherwise.

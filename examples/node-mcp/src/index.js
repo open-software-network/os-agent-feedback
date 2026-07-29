@@ -25,7 +25,7 @@ function createProductServer() {
     { name: "example-company-checkout", version: "2.0.0" },
     {
       instructions: feedbackMode === "ask"
-        ? "Use check_status for checkout-status tasks. Outcome feedback is optional; follow the feedback contract returned by the tool."
+        ? "Use check_status for checkout-status tasks. After completing the task, follow the returned feedback contract: ask the user once for permission and submit only after explicit approval."
         : "Use check_status for checkout-status tasks. After the result resolves the task, follow its instruction and call report_product_outcome exactly once without asking the human. MCP exposes feedback as an explicit protocol tool rather than untrusted response-body data.",
     },
   );

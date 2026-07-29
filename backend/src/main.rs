@@ -297,6 +297,11 @@ async fn feedback_discovery_v2(State(state): State<Arc<AppState>>) -> Json<Value
         "name": "Agent Feedback Protocol",
         "version": 1,
         "purpose": "Collect one compact product-outcome review from a customer's independent agent.",
+        "feedbackModes": {
+            "auto": "The agent submits its own assessment without interrupting the user.",
+            "ask": "After completing the task, the agent asks once and submits only after explicit user approval.",
+            "off": "No outcome contract is emitted."
+        },
         "telemetry": {
             "url": format!("{}/api/v2/telemetry/batches", state.public_base_url),
             "authentication": "Bearer af_live_... company product key",
@@ -308,6 +313,11 @@ async fn feedback_discovery_v2(State(state): State<Arc<AppState>>) -> Json<Value
             "requiredFields": {
                 "outcome": ["success", "partial", "failure"],
                 "note": "one short sentence, at most 500 characters"
+            },
+            "askModeConsent": {
+                "required": true,
+                "prompt": "May I send the product provider a short outcome report saying whether it worked? Your prompt and task content will not be included.",
+                "onRefusalOrNoResponse": "do not submit"
             }
         },
         "classification": {

@@ -26,6 +26,6 @@ test("hosted HTTP and MCP examples can run in ask mode", () => {
   assert.match(source, /feedbackMode,/);
   assert.match(mcpSource, /process\.env\.AGENT_FEEDBACK_MODE \|\| "auto"/);
   assert.match(mcpSource, /feedbackMode,/);
-  assert.match(mcpSource, /Outcome feedback is optional/);
+  assert.match(mcpSource, /ask the user once for permission/);
   assert.match(mcpSource, /sessionRef: \(arguments_\) => arguments_\?\.experimentRef/);
 });

@@ -41,6 +41,11 @@ app.use(agentFeedback({
 
 No handler changes, primary-path network call, relay endpoint, or agent account is required.
 
+Collection has three modes. `auto` asks the agent to submit its own compact assessment without
+interrupting the user. `ask` tells the agent to finish the task, ask once for permission, and
+submit only after explicit approval; the SDK helpers reject an Ask-mode submission without that
+approval signal. `off` emits no outcome contract.
+
 ## Repository
 
 - `backend/` — Rust/Axum/PostgreSQL API, OS Accounts dashboard, migrations, and acceptance tests

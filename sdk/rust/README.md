@@ -21,3 +21,5 @@ let app = Router::new()
 Finite Axum JSON and HTML bodies are instrumented. Bodies without an exact bounded size—including streams—are left untouched. Telemetry uses a bounded Tokio queue and never blocks the product response.
 
 `feedback_from_response` and `submit_product_outcome` provide the deterministic, allow-listed customer-agent path.
+
+Set `options.feedback_mode = FeedbackMode::Ask` to tell the agent to ask the user once after the task completes. Pass `user_approved: true` to `submit_product_outcome` only after explicit approval; Ask-mode submissions are otherwise rejected.

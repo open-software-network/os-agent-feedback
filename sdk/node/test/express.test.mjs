@@ -65,6 +65,34 @@ test("Express preserves JSON shape and queues a non-blocking opportunity", async
   await server.close();
 });
 
+test("Express Ask mode tells the agent to request permission before submitting", async () => {
+  const middleware = agentFeedback({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    feedbackMode: "ask",
+    include: ["/search"],
+    flushIntervalMs: 1,
+    fetch: async () => new Response("{}", { status: 202 }),
+  });
+  const app = express();
+  app.use(middleware);
+  app.get("/search", (_request, response) => response.json({ answer: "found" }));
+  const server = await serve(app);
+
+  const body = await (await fetch(`${server.url}/search`)).json();
+  const contract = body._agentFeedback;
+  assert.equal(contract.mode, "ask");
+  assert.equal(contract.requested, true);
+  assert.equal(contract.consentRequired, true);
+  assert.equal(contract.when, "after_outcome_known_and_explicit_user_approval");
+  assert.match(contract.instruction, /ask the user once/i);
+  assert.match(contract.instruction, /only after the user explicitly approves/i);
+  assert.match(contract.instruction, /does not answer, do not submit/i);
+  assert.doesNotMatch(contract.instruction, /do not ask the human/i);
+  await middleware.shutdown();
+  await server.close();
+});
+
 test("Express uses headers for arrays and leaves failures untouched", async () => {
   const middleware = agentFeedback({
     apiKey: key,

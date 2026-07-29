@@ -15,8 +15,9 @@ import (
 )
 
 type OutcomeReview struct {
-	Outcome string `json:"outcome"`
-	Note    string `json:"note"`
+	Outcome      string `json:"outcome"`
+	Note         string `json:"note"`
+	UserApproved bool   `json:"-"`
 }
 
 func FeedbackFromResponse(response *http.Response, body []byte) (*Envelope, error) {
@@ -55,6 +56,9 @@ func validEnvelope(envelope *Envelope) bool {
 func SubmitProductOutcome(ctx context.Context, envelope *Envelope, review OutcomeReview, allowedOrigins []string, client *http.Client) (map[string]any, error) {
 	if !validEnvelope(envelope) {
 		return nil, errors.New("invalid Agent Feedback submission contract")
+	}
+	if envelope.ConsentRequired && !review.UserApproved {
+		return nil, errors.New("explicit user approval is required before submitting this outcome")
 	}
 	if review.Outcome != "success" && review.Outcome != "partial" && review.Outcome != "failure" {
 		return nil, errors.New("outcome must be success, partial, or failure")

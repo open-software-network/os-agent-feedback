@@ -17,3 +17,5 @@ http.ListenAndServe(":8080", feedback.Middleware(router))
 ```
 
 It instruments finite JSON and HTML responses, detects `Flush` and leaves streams untouched, and sends telemetry through a bounded background queue. `FeedbackFromResponse` and `SubmitProductOutcome` provide the allow-listed feedback-aware agent path.
+
+Set `FeedbackMode: agentfeedback.FeedbackAsk` to instruct the agent to ask the user once after the task completes. For feedback-aware agent code, set `OutcomeReview.UserApproved` only after explicit approval; the helper otherwise rejects the submission.

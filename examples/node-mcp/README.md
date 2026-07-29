@@ -17,6 +17,6 @@ const mcp = createMcpHandler(() => {
 
 The customer's MCP client can see and call the outcome tool explicitly. A successful business-tool call is immediately a confirmed interaction; the later outcome tool links a compact `success`, `partial`, or `failure` review to it.
 
-Set `AGENT_FEEDBACK_MODE=ask` to make the outcome tool optional. In Ask mode, tool results and the outcome-tool description no longer instruct the agent to report autonomously.
+Set `AGENT_FEEDBACK_MODE=ask` to require one end-of-task permission question. The outcome tool accepts `userApproved: true` only after explicit approval; refusal or no response means no submission.
 
 This example intentionally does not claim to identify the agent. MCP client information remains a self-reported runtime hint, and Epode records each tool call as its own interaction unless the product supplies an explicit application-level continuity handle.

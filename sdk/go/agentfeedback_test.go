@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -75,6 +76,35 @@ func TestAgentHelperRejectsUntrustedOrigin(t *testing.T) {
 	}, []string{"https://feedback.test"}, nil)
 	if err == nil {
 		t.Fatal("untrusted origin was accepted")
+	}
+}
+
+func TestAskModeRequiresExplicitUserApproval(t *testing.T) {
+	runtime, err := New(Options{APIKey: conformanceKey, FeedbackMode: FeedbackAsk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Shutdown(context.Background())
+	prepared, err := runtime.prepare(time.Unix(1_715_000_000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := prepared.Envelope
+	if !envelope.Requested || !envelope.ConsentRequired {
+		t.Fatalf("ask contract is not requested with consent: %#v", envelope)
+	}
+	if envelope.When != "after_outcome_known_and_explicit_user_approval" {
+		t.Fatalf("wrong ask timing: %s", envelope.When)
+	}
+	if !strings.Contains(envelope.Instruction, "ask the user once") ||
+		!strings.Contains(envelope.Instruction, "Only after the user explicitly approves") {
+		t.Fatalf("wrong ask instruction: %s", envelope.Instruction)
+	}
+	_, err = SubmitProductOutcome(context.Background(), &envelope, OutcomeReview{
+		Outcome: "success", Note: "The product completed the task.",
+	}, []string{"https://feedback.test"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "explicit user approval") {
+		t.Fatalf("ask helper did not enforce approval: %v", err)
 	}
 }
 

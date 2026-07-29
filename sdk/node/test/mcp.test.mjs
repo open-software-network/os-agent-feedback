@@ -95,8 +95,9 @@ test("stateless MCP factories share one process-level telemetry queue", async ()
   );
 });
 
-test("MCP ask mode exposes optional rather than autonomous outcome instructions", async () => {
+test("MCP Ask mode requires explicit user approval before outcome submission", async () => {
   const tools = new Map();
+  const outcomes = [];
   const server = {
     registerTool(name, configuration, handler) {
       tools.set(name, { configuration, handler });
@@ -108,7 +109,16 @@ test("MCP ask mode exposes optional rather than autonomous outcome instructions"
     endpoint: "https://feedback.test",
     feedbackMode: "ask",
     flushIntervalMs: 60_000,
-    fetch: async () => new Response("{}", { status: 202 }),
+    fetch: async (url, init) => {
+      if (String(url).endsWith("/api/v2/outcomes")) {
+        outcomes.push(JSON.parse(init.body));
+        return new Response('{"accepted":true}', {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("{}", { status: 202 });
+    },
   });
   feedback.instrument(server);
   server.registerTool("search", {}, async () => ({
@@ -119,10 +129,34 @@ test("MCP ask mode exposes optional rather than autonomous outcome instructions"
   const result = await tools.get("search").handler({}, {});
   const contract = result.structuredContent._agentFeedback;
   assert.equal(contract.required, false);
-  assert.match(contract.instruction, /optional/i);
+  assert.equal(contract.consentRequired, true);
+  assert.equal(contract.when, "after_outcome_known_and_explicit_user_approval");
+  assert.match(contract.instruction, /ask the user once/i);
+  assert.match(contract.instruction, /only after the user explicitly approves/i);
   assert.doesNotMatch(contract.instruction, /autonomously/i);
-  assert.match(result.content.at(-1).text, /optional/i);
-  assert.match(tools.get("report_product_outcome").configuration.description, /Optionally/);
+  assert.match(result.content.at(-1).text, /ask the user once/i);
+  assert.match(tools.get("report_product_outcome").configuration.description, /explicitly approves/i);
   assert.doesNotMatch(tools.get("report_product_outcome").configuration.description, /autonomously/i);
+
+  const feedbackHandle = contract.feedbackHandle;
+  const withoutApproval = await tools.get("report_product_outcome").handler({
+    feedbackHandle,
+    outcome: "success",
+    note: "The search result completed the task.",
+  });
+  assert.equal(withoutApproval.isError, true);
+  assert.equal(withoutApproval.structuredContent.consentRequired, true);
+  assert.deepEqual(outcomes, []);
+
+  const approved = await tools.get("report_product_outcome").handler({
+    feedbackHandle,
+    outcome: "success",
+    note: "The search result completed the task.",
+    userApproved: true,
+  });
+  assert.equal(approved.structuredContent.accepted, true);
+  assert.deepEqual(outcomes, [
+    { outcome: "success", note: "The search result completed the task." },
+  ]);
   await feedback.shutdown();
 });
