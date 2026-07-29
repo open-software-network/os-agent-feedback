@@ -1,7 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use axum::http::HeaderMap;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -501,18 +503,48 @@ pub async fn agent_product_auth(
 ) -> Result<ProductAuth, ApiError> {
     let token = bearer_token(headers)
         .filter(|token| token.starts_with("af_live_"))
-        .ok_or_else(ApiError::unauthorized)?;
+        .ok_or_else(invalid_api_key)?;
     let key_hash = sha256(&token);
-    let key = sqlx::query_as::<_, (Uuid, Uuid, Uuid)>(
-        r#"SELECT k.id, k.workspace_id, k.environment_id FROM api_keys k
-        WHERE k.key_hash = $1
-          AND k.revoked_at IS NULL
-          AND (k.expires_at IS NULL OR k.expires_at > NOW())"#,
+    product_auth_for_key(pool, &key_hash, None).await
+}
+
+pub async fn read_product_auth(
+    pool: &PgPool,
+    headers: &HeaderMap,
+) -> Result<ProductAuth, ApiError> {
+    let token = bearer_token(headers)
+        .filter(|token| token.starts_with("af_read_"))
+        .ok_or_else(invalid_api_key)?;
+    let key_hash = sha256(&token);
+    product_auth_for_key(pool, &key_hash, Some("read")).await
+}
+
+fn invalid_api_key() -> ApiError {
+    ApiError::new(axum::http::StatusCode::UNAUTHORIZED, "Invalid API key")
+}
+
+fn expired_api_key() -> ApiError {
+    ApiError::new(axum::http::StatusCode::UNAUTHORIZED, "API key expired")
+}
+
+async fn product_auth_for_key(
+    pool: &PgPool,
+    key_hash: &[u8],
+    required_kind: Option<&str>,
+) -> Result<ProductAuth, ApiError> {
+    let key = sqlx::query_as::<_, (Uuid, Uuid, Uuid, Option<DateTime<Utc>>)>(
+        r#"SELECT k.id, k.workspace_id, k.environment_id, k.expires_at FROM api_keys k
+        WHERE k.key_hash = $1 AND k.revoked_at IS NULL
+          AND ($2::TEXT IS NULL OR k.kind = $2)"#,
     )
-    .bind(&key_hash)
+    .bind(key_hash)
+    .bind(required_kind)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(ApiError::unauthorized)?;
+    .ok_or_else(invalid_api_key)?;
+    if key.3.is_some_and(|expires_at| expires_at <= Utc::now()) {
+        return Err(expired_api_key());
+    }
     let workspace = sqlx::query_as::<_, Workspace>("SELECT * FROM workspaces WHERE id = $1")
         .bind(key.1)
         .fetch_one(pool)
@@ -525,7 +557,7 @@ pub async fn agent_product_auth(
     .fetch_one(pool)
     .await?;
     sqlx::query("UPDATE api_keys SET last_used_at = NOW() WHERE key_hash = $1")
-        .bind(&key_hash)
+        .bind(key_hash)
         .execute(pool)
         .await?;
     Ok(ProductAuth {
@@ -654,8 +686,15 @@ pub async fn create_api_key(
     workspace_id: Uuid,
     environment_id: Uuid,
     label: Option<String>,
+    kind: Option<String>,
     expires_in_seconds: Option<i64>,
 ) -> Result<(ApiKeyPublic, String), ApiError> {
+    let kind = kind.unwrap_or_else(|| "write".into());
+    let key_prefix = match kind.as_str() {
+        "write" => "af_live_",
+        "read" => "af_read_",
+        _ => return Err(ApiError::bad_request("kind must be write or read")),
+    };
     let expires_at = match expires_in_seconds {
         Some(seconds) => {
             if !(60..=365 * 24 * 60 * 60).contains(&seconds) {
@@ -678,9 +717,10 @@ pub async fn create_api_key(
         return Err(ApiError::not_found("Product environment not found"));
     }
     let active_keys: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM api_keys WHERE environment_id = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())",
+        "SELECT COUNT(*) FROM api_keys WHERE environment_id = $1 AND kind = $2 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())",
     )
     .bind(environment_id)
+    .bind(&kind)
     .fetch_one(pool)
     .await?;
     if active_keys >= 10 {
@@ -689,19 +729,20 @@ pub async fn create_api_key(
         ));
     }
     let key_id = Uuid::new_v4();
-    let secret = format!("af_live_{}_{}", key_id.simple(), random_token(""));
+    let secret = format!("{key_prefix}{}_{}", key_id.simple(), random_token(""));
     let prefix = secret.chars().take(16).collect::<String>();
     let row = sqlx::query_as::<_, ApiKeyPublic>(
         r#"INSERT INTO api_keys
-        (id, workspace_id, environment_id, label, prefix, key_hash, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING id, environment_id, label, prefix, created_at, last_used_at, revoked_at, expires_at"#,
+        (id, workspace_id, environment_id, label, prefix, kind, key_hash, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at, expires_at"#,
     )
     .bind(key_id)
     .bind(workspace_id)
     .bind(environment_id)
     .bind(clean(label.as_deref().unwrap_or("Production"), 60))
     .bind(prefix)
+    .bind(kind)
     .bind(sha256(&secret))
     .bind(expires_at)
     .fetch_one(pool)
@@ -720,6 +761,293 @@ pub async fn revoke_api_key(
         return Err(ApiError::not_found("API key not found"));
     }
     Ok(())
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct FeedbackCursor {
+    occurred_at: DateTime<Utc>,
+    id: Uuid,
+}
+
+fn feedback_window(
+    retention_days: i32,
+    requested_since: Option<DateTime<Utc>>,
+) -> (FeedbackWindow, DateTime<Utc>) {
+    let retained_since = Utc::now() - Duration::days(retention_days.into());
+    let since = requested_since
+        .filter(|requested| *requested > retained_since)
+        .unwrap_or(retained_since);
+    (
+        FeedbackWindow {
+            since,
+            retention_days,
+        },
+        retained_since,
+    )
+}
+
+fn feedback_limit(limit: Option<i64>) -> Result<i64, ApiError> {
+    let limit = limit.unwrap_or(25);
+    if !(1..=100).contains(&limit) {
+        return Err(ApiError::bad_request("limit must be between 1 and 100"));
+    }
+    Ok(limit)
+}
+
+fn validate_feedback_values(
+    values: Option<&[String]>,
+    allowed: &[&str],
+    field: &str,
+) -> Result<(), ApiError> {
+    if values.is_some_and(|values| {
+        values
+            .iter()
+            .any(|value| !allowed.contains(&value.as_str()))
+    }) {
+        return Err(ApiError::bad_request(format!("Invalid {field} filter")));
+    }
+    Ok(())
+}
+
+fn decode_feedback_cursor(
+    value: Option<&str>,
+    retained_since: DateTime<Utc>,
+) -> Result<Option<FeedbackCursor>, ApiError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| ApiError::bad_request("Invalid cursor"))?;
+    let cursor: FeedbackCursor =
+        serde_json::from_slice(&bytes).map_err(|_| ApiError::bad_request("Invalid cursor"))?;
+    if cursor.occurred_at < retained_since {
+        return Err(ApiError::gone("Cursor is outside the retained window"));
+    }
+    Ok(Some(cursor))
+}
+
+fn encode_feedback_cursor(occurred_at: DateTime<Utc>, id: Uuid) -> Result<String, ApiError> {
+    let bytes =
+        serde_json::to_vec(&FeedbackCursor { occurred_at, id }).map_err(ApiError::internal)?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn rounded_rate(numerator: i64, denominator: i64) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        (numerator as f64 / denominator as f64 * 100.0).round() / 100.0
+    }
+}
+
+async fn feedback_summary(
+    pool: &PgPool,
+    auth: &ProductAuth,
+    since: Option<DateTime<Utc>>,
+) -> Result<FeedbackSummary, ApiError> {
+    let (window, _) = feedback_window(auth.environment.retention_days, since);
+    let product: String =
+        sqlx::query_scalar("SELECT name FROM products WHERE id = $1 AND workspace_id = $2")
+            .bind(auth.environment.product_id)
+            .bind(auth.workspace.id)
+            .fetch_one(pool)
+            .await?;
+    let counts = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64)>(
+        r#"SELECT COUNT(i.id), COUNT(o.id),
+        COUNT(i.id) FILTER (WHERE i.classification = 'confirmed'),
+        COUNT(o.id) FILTER (WHERE o.outcome = 'success'),
+        COUNT(o.id) FILTER (WHERE o.outcome = 'partial'),
+        COUNT(o.id) FILTER (WHERE o.outcome = 'failure')
+        FROM interactions_v2 i
+        LEFT JOIN outcomes_v2 o ON o.interaction_id = i.id
+        WHERE i.environment_id = $1 AND i.occurred_at >= $2"#,
+    )
+    .bind(auth.environment.id)
+    .bind(window.since)
+    .fetch_one(pool)
+    .await?;
+    let operation_counts = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
+        r#"SELECT i.operation, COUNT(i.id),
+        COUNT(o.id) FILTER (WHERE o.outcome = 'success'),
+        COUNT(o.id) FILTER (WHERE o.outcome = 'partial'),
+        COUNT(o.id) FILTER (WHERE o.outcome = 'failure')
+        FROM interactions_v2 i
+        LEFT JOIN outcomes_v2 o ON o.interaction_id = i.id
+        WHERE i.environment_id = $1 AND i.occurred_at >= $2
+        GROUP BY i.operation
+        ORDER BY COUNT(i.id) DESC, i.operation"#,
+    )
+    .bind(auth.environment.id)
+    .bind(window.since)
+    .fetch_all(pool)
+    .await?;
+    let top_operations = operation_counts
+        .into_iter()
+        .map(|(operation, interactions, success, partial, failure)| {
+            let mut outcomes = BTreeMap::new();
+            for (name, count) in [
+                ("success", success),
+                ("partial", partial),
+                ("failure", failure),
+            ] {
+                if count > 0 {
+                    outcomes.insert(name.into(), count);
+                }
+            }
+            FeedbackOperationSummary {
+                operation,
+                interactions,
+                outcomes,
+            }
+        })
+        .collect();
+    let surfaces = sqlx::query_as::<_, (String, i64)>(
+        r#"SELECT surface, COUNT(*) FROM interactions_v2
+        WHERE environment_id = $1 AND occurred_at >= $2
+        GROUP BY surface ORDER BY COUNT(*) DESC, surface"#,
+    )
+    .bind(auth.environment.id)
+    .bind(window.since)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|(surface, interactions)| FeedbackSurfaceSummary {
+        surface,
+        interactions,
+    })
+    .collect();
+    let outcomes = BTreeMap::from([
+        ("failure".into(), counts.5),
+        ("partial".into(), counts.4),
+        ("success".into(), counts.3),
+    ]);
+    Ok(FeedbackSummary {
+        product,
+        window,
+        interactions: counts.0,
+        reviewed: counts.1,
+        review_rate: rounded_rate(counts.1, counts.0),
+        confirmation_rate: rounded_rate(counts.2, counts.0),
+        outcomes,
+        outcome_success_rate: rounded_rate(counts.3, counts.1),
+        top_operations,
+        surfaces,
+    })
+}
+
+pub async fn feedback_list_outcomes(
+    pool: &PgPool,
+    auth: &ProductAuth,
+    input: FeedbackListOutcomesInput,
+) -> Result<FeedbackOutcomesResponse, ApiError> {
+    if input.summary.unwrap_or(false) {
+        return Ok(FeedbackOutcomesResponse::Summary(
+            feedback_summary(pool, auth, input.since).await?,
+        ));
+    }
+    validate_feedback_values(
+        input.outcome.as_deref(),
+        &["success", "partial", "failure"],
+        "outcome",
+    )?;
+    let limit = feedback_limit(input.limit)?;
+    let (window, retained_since) = feedback_window(auth.environment.retention_days, input.since);
+    let cursor = decode_feedback_cursor(input.cursor.as_deref(), retained_since)?;
+    let cursor_occurred_at = cursor.as_ref().map(|cursor| cursor.occurred_at);
+    let cursor_id = cursor.as_ref().map(|cursor| cursor.id);
+    let mut outcomes = sqlx::query_as::<_, FeedbackOutcomeItem>(
+        r#"SELECT o.id, o.outcome, o.note, i.operation, i.customer_ref, i.surface,
+        i.duration_ms, i.status_code, i.occurred_at, o.created_at, i.id AS interaction_id
+        FROM outcomes_v2 o
+        JOIN interactions_v2 i ON i.id = o.interaction_id
+        WHERE i.environment_id = $1 AND i.occurred_at >= $2
+          AND ($3::TEXT[] IS NULL OR o.outcome = ANY($3))
+          AND ($4::TEXT IS NULL OR i.operation = $4)
+          AND ($5::TEXT IS NULL OR i.customer_ref = $5)
+          AND ($6::TIMESTAMPTZ IS NULL OR (i.occurred_at, i.id) < ($6, $7))
+        ORDER BY i.occurred_at DESC, i.id DESC
+        LIMIT $8"#,
+    )
+    .bind(auth.environment.id)
+    .bind(window.since)
+    .bind(input.outcome)
+    .bind(input.operation)
+    .bind(input.customer_ref)
+    .bind(cursor_occurred_at)
+    .bind(cursor_id)
+    .bind(limit + 1)
+    .fetch_all(pool)
+    .await?;
+    let next_cursor = if outcomes.len() > limit as usize {
+        let last = &outcomes[limit as usize - 1];
+        Some(encode_feedback_cursor(
+            last.occurred_at,
+            last.interaction_id,
+        )?)
+    } else {
+        None
+    };
+    outcomes.truncate(limit as usize);
+    Ok(FeedbackOutcomesResponse::Page(FeedbackOutcomesPage {
+        outcomes,
+        next_cursor,
+        window,
+    }))
+}
+
+pub async fn feedback_list_interactions(
+    pool: &PgPool,
+    auth: &ProductAuth,
+    input: FeedbackListInteractionsInput,
+) -> Result<FeedbackInteractionsPage, ApiError> {
+    validate_feedback_values(
+        input.surface.as_deref(),
+        &["http_json", "http_html", "http_headers", "mcp", "unknown"],
+        "surface",
+    )?;
+    let limit = feedback_limit(input.limit)?;
+    let (window, retained_since) = feedback_window(auth.environment.retention_days, input.since);
+    let cursor = decode_feedback_cursor(input.cursor.as_deref(), retained_since)?;
+    let cursor_occurred_at = cursor.as_ref().map(|cursor| cursor.occurred_at);
+    let cursor_id = cursor.as_ref().map(|cursor| cursor.id);
+    let mut interactions = sqlx::query_as::<_, FeedbackInteractionItem>(
+        r#"SELECT i.id, i.operation, i.customer_ref, i.surface, i.classification,
+        i.duration_ms, i.status_code, i.occurred_at
+        FROM interactions_v2 i
+        LEFT JOIN outcomes_v2 o ON o.interaction_id = i.id
+        WHERE i.environment_id = $1 AND i.occurred_at >= $2
+          AND ($3::BOOLEAN IS NULL OR (o.id IS NOT NULL) = $3)
+          AND ($4::TEXT IS NULL OR i.operation = $4)
+          AND ($5::TEXT IS NULL OR i.customer_ref = $5)
+          AND ($6::TEXT[] IS NULL OR i.surface = ANY($6))
+          AND ($7::TIMESTAMPTZ IS NULL OR (i.occurred_at, i.id) < ($7, $8))
+        ORDER BY i.occurred_at DESC, i.id DESC
+        LIMIT $9"#,
+    )
+    .bind(auth.environment.id)
+    .bind(window.since)
+    .bind(input.reviewed)
+    .bind(input.operation)
+    .bind(input.customer_ref)
+    .bind(input.surface)
+    .bind(cursor_occurred_at)
+    .bind(cursor_id)
+    .bind(limit + 1)
+    .fetch_all(pool)
+    .await?;
+    let next_cursor = if interactions.len() > limit as usize {
+        let last = &interactions[limit as usize - 1];
+        Some(encode_feedback_cursor(last.occurred_at, last.id)?)
+    } else {
+        None
+    };
+    interactions.truncate(limit as usize);
+    Ok(FeedbackInteractionsPage {
+        interactions,
+        next_cursor,
+        window,
+    })
 }
 
 pub async fn update_policy(
@@ -818,7 +1146,7 @@ pub async fn dashboard(
     .execute(pool)
     .await?;
     let api_keys = sqlx::query_as::<_, ApiKeyPublic>(
-        r#"SELECT id, environment_id, label, prefix, created_at, last_used_at, revoked_at, expires_at
+        r#"SELECT id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at, expires_at
         FROM api_keys
         WHERE environment_id = $1
           AND revoked_at IS NULL
@@ -1594,12 +1922,323 @@ pub async fn submit_customer_agent_feedback(
 
 #[cfg(test)]
 mod product_tests {
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use sqlx::postgres::PgPoolOptions;
 
     use super::*;
 
     fn test_error(error: ApiError) -> anyhow::Error {
         anyhow::anyhow!("{}: {}", error.status, error.message)
+    }
+
+    fn api_key_headers(secret: &str) -> anyhow::Result<HeaderMap> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {secret}"))?,
+        );
+        Ok(headers)
+    }
+
+    #[test]
+    fn feedback_cursor_is_opaque_and_retention_bounded() -> anyhow::Result<()> {
+        let occurred_at = Utc::now() - Duration::hours(1);
+        let id = Uuid::new_v4();
+        let encoded = encode_feedback_cursor(occurred_at, id).map_err(test_error)?;
+        anyhow::ensure!(!encoded.contains(&id.to_string()));
+        let decoded = decode_feedback_cursor(Some(&encoded), Utc::now() - Duration::days(1))
+            .map_err(test_error)?
+            .unwrap();
+        anyhow::ensure!(decoded.id == id);
+        anyhow::ensure!(decoded.occurred_at == occurred_at);
+        let expired = decode_feedback_cursor(Some(&encoded), Utc::now()).unwrap_err();
+        anyhow::ensure!(expired.status == StatusCode::GONE);
+        anyhow::ensure!(
+            decode_feedback_cursor(Some("not-a-cursor"), Utc::now() - Duration::days(1))
+                .unwrap_err()
+                .status
+                == StatusCode::BAD_REQUEST
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn read_key_auth_kind_caps_and_expiration() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+
+        let workspace_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO workspaces (id, os_user_id, name, slug)
+            VALUES ($1, $2, 'Read key acceptance', $3)"#,
+        )
+        .bind(workspace_id)
+        .bind(format!("usr_test_{}", workspace_id.simple()))
+        .bind(format!(
+            "read-key-{}",
+            &workspace_id.simple().to_string()[..8]
+        ))
+        .execute(&pool)
+        .await?;
+
+        let result = async {
+            let (_, environment) = create_product(
+                &pool,
+                workspace_id,
+                CreateProductInput {
+                    name: "Read key product".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let (read_key, read_secret) = create_api_key(
+                &pool,
+                workspace_id,
+                environment.id,
+                Some("Reader".into()),
+                Some("read".into()),
+                None,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(read_key.kind == "read");
+            anyhow::ensure!(read_key.prefix.starts_with("af_read_"));
+            anyhow::ensure!(read_secret.starts_with(&format!("af_read_{}_", read_key.id.simple())));
+            let (write_key, write_secret) = create_api_key(
+                &pool,
+                workspace_id,
+                environment.id,
+                Some("Writer".into()),
+                None,
+                None,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(write_key.kind == "write");
+            anyhow::ensure!(write_key.prefix.starts_with("af_live_"));
+
+            let read_headers = api_key_headers(&read_secret)?;
+            let write_headers = api_key_headers(&write_secret)?;
+            let read_auth = read_product_auth(&pool, &read_headers)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(read_auth.api_key_id == read_key.id);
+            let read_on_write = agent_product_auth(&pool, &read_headers).await.unwrap_err();
+            anyhow::ensure!(read_on_write.status == StatusCode::UNAUTHORIZED);
+            anyhow::ensure!(read_on_write.message == "Invalid API key");
+            let write_on_read = read_product_auth(&pool, &write_headers).await.unwrap_err();
+            anyhow::ensure!(write_on_read.status == StatusCode::UNAUTHORIZED);
+            anyhow::ensure!(write_on_read.message == "Invalid API key");
+
+            let reviewed_id = Uuid::new_v4();
+            let unreviewed_id = Uuid::new_v4();
+            let retained_times = [
+                (reviewed_id, Utc::now() - Duration::minutes(1), "search"),
+                (
+                    unreviewed_id,
+                    Utc::now() - Duration::minutes(2),
+                    "fetch",
+                ),
+                (
+                    Uuid::new_v4(),
+                    Utc::now() - Duration::days(31),
+                    "retained-but-hidden",
+                ),
+            ];
+            for (interaction_id, occurred_at, operation) in retained_times {
+                sqlx::query(
+                    r#"INSERT INTO interactions_v2
+                    (id, workspace_id, environment_id, api_key_id, surface, operation,
+                     customer_ref, classification, confirmation_method, occurred_at)
+                    VALUES ($1, $2, $3, $4, 'mcp', $5, 'acct_1',
+                            'confirmed', 'mcp', $6)"#,
+                )
+                .bind(interaction_id)
+                .bind(workspace_id)
+                .bind(environment.id)
+                .bind(write_key.id)
+                .bind(operation)
+                .bind(occurred_at)
+                .execute(&pool)
+                .await?;
+            }
+            sqlx::query(
+                r#"INSERT INTO outcomes_v2
+                (id, workspace_id, interaction_id, outcome, note)
+                VALUES ($1, $2, $3, 'success', 'The operation completed successfully.')"#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(workspace_id)
+            .bind(reviewed_id)
+            .execute(&pool)
+            .await?;
+
+            let summary = feedback_list_outcomes(
+                &pool,
+                &read_auth,
+                FeedbackListOutcomesInput {
+                    summary: Some(true),
+                    since: None,
+                    outcome: Some(vec!["failure".into()]),
+                    operation: Some("ignored".into()),
+                    customer_ref: Some("ignored".into()),
+                    limit: Some(101),
+                    cursor: Some("ignored".into()),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let FeedbackOutcomesResponse::Summary(summary) = summary else {
+                anyhow::bail!("summary:true returned a paginated response");
+            };
+            anyhow::ensure!(summary.product == "Read key product");
+            anyhow::ensure!(summary.interactions == 2);
+            anyhow::ensure!(summary.reviewed == 1);
+            anyhow::ensure!(summary.review_rate == 0.5);
+            anyhow::ensure!(summary.confirmation_rate == 1.0);
+            anyhow::ensure!(summary.outcomes.get("success") == Some(&1));
+
+            let outcomes = feedback_list_outcomes(
+                &pool,
+                &read_auth,
+                FeedbackListOutcomesInput {
+                    summary: None,
+                    since: None,
+                    outcome: Some(vec!["success".into()]),
+                    operation: Some("search".into()),
+                    customer_ref: Some("acct_1".into()),
+                    limit: None,
+                    cursor: None,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let FeedbackOutcomesResponse::Page(outcomes) = outcomes else {
+                anyhow::bail!("list call returned a summary response");
+            };
+            anyhow::ensure!(outcomes.outcomes.len() == 1);
+            anyhow::ensure!(outcomes.outcomes[0].interaction_id == reviewed_id);
+
+            let first_page = feedback_list_interactions(
+                &pool,
+                &read_auth,
+                FeedbackListInteractionsInput {
+                    since: None,
+                    reviewed: None,
+                    operation: None,
+                    customer_ref: Some("acct_1".into()),
+                    surface: Some(vec!["mcp".into()]),
+                    limit: Some(1),
+                    cursor: None,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(first_page.interactions.len() == 1);
+            anyhow::ensure!(first_page.interactions[0].id == reviewed_id);
+            let next_cursor = first_page
+                .next_cursor
+                .ok_or_else(|| anyhow::anyhow!("first page did not return a cursor"))?;
+            let second_page = feedback_list_interactions(
+                &pool,
+                &read_auth,
+                FeedbackListInteractionsInput {
+                    since: None,
+                    reviewed: Some(false),
+                    operation: None,
+                    customer_ref: Some("acct_1".into()),
+                    surface: Some(vec!["mcp".into()]),
+                    limit: Some(1),
+                    cursor: Some(next_cursor),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(second_page.interactions.len() == 1);
+            anyhow::ensure!(second_page.interactions[0].id == unreviewed_id);
+            let old_interaction_still_exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM interactions_v2 WHERE operation = 'retained-but-hidden' AND environment_id = $1)",
+            )
+            .bind(environment.id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(old_interaction_still_exists);
+
+            for index in 1..10 {
+                create_api_key(
+                    &pool,
+                    workspace_id,
+                    environment.id,
+                    Some(format!("Reader {index}")),
+                    Some("read".into()),
+                    None,
+                )
+                .await
+                .map_err(test_error)?;
+                create_api_key(
+                    &pool,
+                    workspace_id,
+                    environment.id,
+                    Some(format!("Writer {index}")),
+                    Some("write".into()),
+                    None,
+                )
+                .await
+                .map_err(test_error)?;
+            }
+            let read_cap = create_api_key(
+                &pool,
+                workspace_id,
+                environment.id,
+                Some("Reader 11".into()),
+                Some("read".into()),
+                None,
+            )
+            .await
+            .unwrap_err();
+            anyhow::ensure!(read_cap.status == StatusCode::CONFLICT);
+            let write_cap = create_api_key(
+                &pool,
+                workspace_id,
+                environment.id,
+                Some("Writer 11".into()),
+                Some("write".into()),
+                None,
+            )
+            .await
+            .unwrap_err();
+            anyhow::ensure!(write_cap.status == StatusCode::CONFLICT);
+
+            sqlx::query(
+                "UPDATE api_keys SET expires_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+            )
+            .bind(read_key.id)
+            .execute(&pool)
+            .await?;
+            let expired = read_product_auth(&pool, &read_headers).await.unwrap_err();
+            anyhow::ensure!(expired.status == StatusCode::UNAUTHORIZED);
+            anyhow::ensure!(expired.message == "API key expired");
+            let invalid_headers = api_key_headers("af_read_missing")?;
+            let invalid = read_product_auth(&pool, &invalid_headers)
+                .await
+                .unwrap_err();
+            anyhow::ensure!(invalid.status == StatusCode::UNAUTHORIZED);
+            anyhow::ensure!(invalid.message == "Invalid API key");
+            anyhow::ensure!(expired.message != invalid.message);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await?;
+        result
     }
 
     #[tokio::test]
@@ -1650,6 +2289,7 @@ mod product_tests {
                 workspace_id,
                 search_settings.id,
                 Some("Express".into()),
+                None,
                 None,
             )
             .await

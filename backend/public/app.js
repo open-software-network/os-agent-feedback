@@ -16,6 +16,9 @@ let explorerSecondary = initialUrl.searchParams.get("surface") || "all";
 let explorerRange = initialUrl.searchParams.get("range") || "30d";
 let showingLegacy = initialUrl.searchParams.get("legacy") === "1";
 let apiSecret = "";
+let readSecret = "";
+let readKeyId = null;
+let readSnippetClient = "claude-code";
 let setupSurface = "mcp";
 let setupStack = "node-mcp";
 let setupConnectionId = null;
@@ -29,28 +32,32 @@ const validRanges = new Set(["24h", "7d", "30d", "all"]);
 if (!validViews.has(currentView)) currentView = "feedback";
 if (!validRanges.has(explorerRange)) explorerRange = "30d";
 
-function setupSecretKey(environmentId) {
-  return `agent-feedback:product-key:${environmentId}`;
+function setupSecretKey(environmentId, kind = "write") {
+  return kind === "read" ? `agent-feedback:read-key:${environmentId}` : `agent-feedback:product-key:${environmentId}`;
 }
 
 function isLegacyKeyPrefix(prefix) {
   if (!prefix) return false;
-  return !/^af_live_[0-9a-f]{8}$/.test(prefix);
+  return !/^af_(live|read)_[0-9a-f]{8}$/.test(prefix);
 }
 
-function rememberSetupSecret(environmentId, secret) {
+function keyKind(key) {
+  return key?.kind === "read" ? "read" : "write";
+}
+
+function rememberSetupSecret(environmentId, secret, kind) {
   if (!environmentId || !secret) return;
   try {
-    sessionStorage.setItem(setupSecretKey(environmentId), secret);
+    sessionStorage.setItem(setupSecretKey(environmentId, kind), secret);
   } catch {
     // A private browsing policy may disable storage. The key still remains visible for this page load.
   }
 }
 
-function recalledSetupSecret(environmentId) {
+function recalledSetupSecret(environmentId, kind) {
   if (!environmentId) return "";
   try {
-    return sessionStorage.getItem(setupSecretKey(environmentId)) || "";
+    return sessionStorage.getItem(setupSecretKey(environmentId, kind)) || "";
   } catch {
     return "";
   }
@@ -211,13 +218,21 @@ async function refresh() {
     rememberSetupSecret(dashboard.currentEnvironment.id, body.secret);
     dashboard = await request(`/api/dashboard?environmentId=${encodeURIComponent(dashboard.currentEnvironment.id)}`);
   }
-  const setupKey = dashboard.apiKeys.find((key) => key.id === setupConnectionId) || dashboard.apiKeys[0];
+  const setupKey = dashboard.apiKeys.find((key) => key.id === setupConnectionId && keyKind(key) === "write") || dashboard.apiKeys.find((key) => keyKind(key) === "write");
   if (setupKey) {
     setupConnectionId = setupKey.id;
     apiSecret = apiSecret || recalledSetupSecret(dashboard.currentEnvironment.id);
   } else {
     setupConnectionId = null;
     apiSecret = "";
+  }
+  const readKey = dashboard.apiKeys.find((key) => key.id === readKeyId && keyKind(key) === "read") || dashboard.apiKeys.find((key) => keyKind(key) === "read");
+  if (readKey) {
+    readKeyId = readKey.id;
+    readSecret = readSecret || recalledSetupSecret(dashboard.currentEnvironment.id, "read");
+  } else {
+    readKeyId = null;
+    readSecret = "";
   }
   account.innerHTML = `<strong>${esc(dashboard.user.displayName)}</strong>${dashboard.user.email ? `<small>${esc(dashboard.user.email)}</small>` : ""}<small>${esc(title(dashboard.currentRole))} · ${esc(dashboard.workspace.name)}</small>`;
   renderProductScope();
@@ -578,6 +593,27 @@ function setupAgentPrompt(integration) {
   return `Add Agent Feedback to this repository.\n\nProduct surface: ${surface.name}\nIntegration: ${integration.name}\n\nRequirements:\n- Use AGENT_FEEDBACK_KEY from the server environment. It is already configured; never print or expose it.\n- Install the official package with: ${integration.install}\n- Configure the integration once using this reference:\n\n${integration.code}\n\n- For HTTP or HTML, change include routes in code to only the product surfaces used by customer agents.\n- Do not put the product key in browser JavaScript.\n- Do not change existing response shapes, error handling, streams, or binary responses.\n- Start the product and make one real request or MCP tool call so the connection can be verified.\n\nProtocol: ${location.origin}/.well-known/agent-feedback-v1.json`;
 }
 
+function readKeyClientSnippets() {
+  const url = `${location.origin}/mcp`;
+  return {
+    "claude-code": {
+      name: "Claude Code",
+      note: "Claude Code expands ${VAR} inside headers. \"type\" is required — an entry with a url but no type is read as a stdio server and skipped.",
+      config: `{\n  "mcpServers": {\n    "agent-feedback": {\n      "type": "http",\n      "url": "${url}",\n      "headers": { "Authorization": "Bearer \${AGENT_FEEDBACK_READ_KEY}" }\n    }\n  }\n}`,
+    },
+    cursor: {
+      name: "Cursor",
+      note: "Cursor interpolates with ${env:VAR} — note the env: prefix inside the braces, unlike Claude Code.",
+      config: `{\n  "mcpServers": {\n    "agent-feedback": {\n      "url": "${url}",\n      "headers": { "Authorization": "Bearer \${env:AGENT_FEEDBACK_READ_KEY}" }\n    }\n  }\n}`,
+    },
+    "vs-code": {
+      name: "VS Code",
+      note: "VS Code prompts for the secret once and stores it securely, so nothing lands in the file. The top-level key is \"servers\", not \"mcpServers\".",
+      config: `{\n  "inputs": [\n    {\n      "type": "promptString",\n      "id": "epode-read-key",\n      "description": "Agent Feedback read key",\n      "password": true\n    }\n  ],\n  "servers": {\n    "agent-feedback": {\n      "type": "http",\n      "url": "${url}",\n      "headers": { "Authorization": "Bearer \${input:epode-read-key}" }\n    }\n  }\n}`,
+    },
+  };
+}
+
 function productCreateView(firstProduct = false) {
   const heading = firstProduct ? "Create your first product" : "Create a product";
   const copy = firstProduct ? "Products keep feedback and interactions separate. Start with the product your customers' agents use." : "The new product gets its own integration, interactions, feedback, and insights.";
@@ -587,7 +623,7 @@ function productCreateView(firstProduct = false) {
 function setupView() {
   const surface = setupSurfaceCopy[setupSurface];
   const integration = setupInstructions();
-  const setupKey = dashboard.apiKeys.find((key) => key.id === setupConnectionId) || dashboard.apiKeys[0];
+  const setupKey = dashboard.apiKeys.find((key) => key.id === setupConnectionId && keyKind(key) === "write") || dashboard.apiKeys.find((key) => keyKind(key) === "write");
   const status = setupConnectionId ? setupConnectionStatus(setupConnectionId) : { interactions: [], outcomes: [] };
   const connected = status.interactions.length > 0;
   const reviewed = status.outcomes.length > 0;
@@ -608,9 +644,18 @@ function setupView() {
   const connections = dashboard.apiKeys.map((key) => {
     const keyStatus = setupConnectionStatus(key.id);
     const state = keyStatus.outcomes.length ? "Feedback received" : keyStatus.interactions.length ? "Connected" : "Never seen";
-    return `<div class="connection-row"><span><strong>${esc(key.label)}</strong><small>${esc(key.prefix)}… · created ${date(key.createdAt)}</small></span><b class="${keyStatus.interactions.length ? "positive" : "neutral"}">${esc(state)}</b><button class="link-button" data-revoke-key="${esc(key.id)}">Rotate key</button></div>`;
+    return `<div class="connection-row"><span><strong>${esc(key.label)} <i class="key-kind ${esc(keyKind(key))}">${esc(keyKind(key))}</i></strong><small>${esc(key.prefix)}… · created ${date(key.createdAt)}</small><small>expires ${key.expiresAt ? date(key.expiresAt) : "never"} · ${key.lastUsedAt ? `last used ${date(key.lastUsedAt)}` : "never used"}</small></span><b class="${keyStatus.interactions.length ? "positive" : "neutral"}">${esc(state)}</b><button class="link-button" data-revoke-key="${esc(key.id)}">Rotate key</button></div>`;
   }).join("") || `<p class="muted">No integrations yet.</p>`;
-  return `${header("SETUP", `Connect ${dashboard.currentProduct.name}`, connected ? "Receiving data" : "Not connected")}${metricStrip([[setupKey ? "Ready" : "Missing", "Product key", setupKey ? "positive" : "negative"], [connected ? "Connected" : "Waiting", "Telemetry", connected ? "positive" : "neutral"], [reviewed ? "Received" : "Waiting", "Agent feedback", reviewed ? "positive" : "neutral"]])}<p class="setup-lede">Choose your stack, copy the ready installation, and send the first real interaction.</p><section class="setup-step"><div class="step-number">1</div><div class="step-body"><p class="eyebrow">INTEGRATION</p><h2>Choose how your product is served</h2><div class="choice-grid surfaces">${surfaces}</div><p class="selection-explanation"><strong>${esc(surface.name)}:</strong> ${esc(surface.detail)}</p><h3>Choose the integration</h3><div class="choice-grid stacks">${stacks}</div><p class="muted">For HTTP and HTML, choose which routes receive instructions in code—not in this dashboard.</p>${ready}</div></section>${legacyWarning}${installStep}${verifyStep}<details class="existing-connections"><summary>Product keys (${dashboard.apiKeys.length})</summary><div>${connections}</div></details>`;
+  const readKeys = dashboard.apiKeys.filter((key) => keyKind(key) === "read");
+  const readSecretCallout = readSecret ? `<div class="secret-callout"><div><b>Save this read key now</b><code>${esc(readSecret)}</code><small>It is shown once. Keep it in your MCP client environment as <code>AGENT_FEEDBACK_READ_KEY</code>. It can read this product's feedback but never write.</small></div><button class="button" data-copy="${esc(readSecret)}">Copy key</button></div>` : "";
+  const clientSnippets = readKeyClientSnippets();
+  const activeClient = clientSnippets[readSnippetClient] ? readSnippetClient : "claude-code";
+  const clientTabs = `<div class="install-methods">${Object.entries(clientSnippets).map(([id, client]) => `<button data-read-client="${esc(id)}" aria-pressed="${activeClient === id}">${esc(client.name)}</button>`).join("")}</div>`;
+  const clientSnippet = clientSnippets[activeClient];
+  const readEnvironment = `AGENT_FEEDBACK_READ_KEY=${readSecret || "paste_read_key_here"}`;
+  const readConnect = readKeys.length ? `<h3>Set the client environment variable</h3><div class="copy-block"><pre><code>${esc(readEnvironment)}</code></pre><button class="button" data-copy="${esc(readEnvironment)}">Copy</button></div>${clientTabs}<div class="install-panel"><p>${esc(clientSnippet.note)}</p><div class="copy-block"><pre><code>${esc(clientSnippet.config)}</code></pre><button class="button" data-copy="${esc(clientSnippet.config)}">Copy</button></div></div>` : "";
+  const readPanel = `<div class="read-key-panel"><h3>Read key for MCP clients</h3><p>A read key goes in an MCP client config — not a server environment variable — so an agent in your product's repository can pull this product's feedback. It cannot write.</p><form id="read-key-form" class="connection-form"><label><span>Label</span><input name="label" maxlength="80" placeholder="Repo read key"></label><label><span>Expires</span><select name="expiresIn"><option value="2592000">30 days</option><option value="7776000" selected>90 days</option><option value="31536000">1 year</option><option value="never">Never</option></select></label><button class="button">Create read key</button></form>${readSecretCallout}${readConnect}</div>`;
+  return `${header("SETUP", `Connect ${dashboard.currentProduct.name}`, connected ? "Receiving data" : "Not connected")}${metricStrip([[setupKey ? "Ready" : "Missing", "Product key", setupKey ? "positive" : "negative"], [connected ? "Connected" : "Waiting", "Telemetry", connected ? "positive" : "neutral"], [reviewed ? "Received" : "Waiting", "Agent feedback", reviewed ? "positive" : "neutral"]])}<p class="setup-lede">Choose your stack, copy the ready installation, and send the first real interaction.</p><section class="setup-step"><div class="step-number">1</div><div class="step-body"><p class="eyebrow">INTEGRATION</p><h2>Choose how your product is served</h2><div class="choice-grid surfaces">${surfaces}</div><p class="selection-explanation"><strong>${esc(surface.name)}:</strong> ${esc(surface.detail)}</p><h3>Choose the integration</h3><div class="choice-grid stacks">${stacks}</div><p class="muted">For HTTP and HTML, choose which routes receive instructions in code—not in this dashboard.</p>${ready}</div></section>${legacyWarning}${installStep}${verifyStep}<details class="existing-connections"><summary>Product keys (${dashboard.apiKeys.length})</summary><div>${connections}</div>${readPanel}</details>`;
 }
 
 function teamView() {
@@ -782,18 +827,32 @@ document.addEventListener("click", async (event) => {
       setNotice("Dashboard loaded.", 1800);
     }
     if (target.dataset.revokeKey) {
-      if (!confirm("Create a new product key? The current key stops working immediately.")) return;
+      const rotated = dashboard.apiKeys.find((key) => key.id === target.dataset.revokeKey);
+      const kind = keyKind(rotated);
+      if (!confirm(`Create a new ${kind} key? The current ${kind} key stops working immediately.`)) return;
       await request(`/api/settings/api-keys/${target.dataset.revokeKey}`, { method: "DELETE" });
+      const payload = { label: rotated?.label || (kind === "read" ? "Read key" : "Default product key"), environmentId: dashboard.currentEnvironment.id, kind };
+      if (kind === "read" && rotated?.expiresAt) payload.expiresInSeconds = 7776000;
       const body = await request("/api/settings/api-keys", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ label: "Default product key", environmentId: dashboard.currentEnvironment.id }),
+        body: JSON.stringify(payload),
       });
-      apiSecret = body.secret;
-      setupConnectionId = body.apiKey.id;
-      rememberSetupSecret(dashboard.currentEnvironment.id, body.secret);
+      if (kind === "read") {
+        readSecret = body.secret;
+        readKeyId = body.apiKey.id;
+        rememberSetupSecret(dashboard.currentEnvironment.id, body.secret, "read");
+      } else {
+        apiSecret = body.secret;
+        setupConnectionId = body.apiKey.id;
+        rememberSetupSecret(dashboard.currentEnvironment.id, body.secret);
+      }
       await refresh();
-      setNotice("Product key rotated. Save the new server-side key shown above.", 6000);
+      setNotice(kind === "read" ? "Read key rotated. Save the new key and update AGENT_FEEDBACK_READ_KEY in your MCP client environment." : "Product key rotated. Save the new server-side key shown above.", 6000);
+    }
+    if (target.dataset.readClient) {
+      readSnippetClient = target.dataset.readClient;
+      render();
     }
     if (target.dataset.removeMember) {
       if (!confirm("Remove this member from the team?")) return;
@@ -838,6 +897,8 @@ document.addEventListener("change", async (event) => {
       resetExplorer();
       apiSecret = "";
       setupConnectionId = null;
+      readSecret = "";
+      readKeyId = null;
       await refresh();
     }
     if (event.target.id === "product-select") {
@@ -848,6 +909,8 @@ document.addEventListener("change", async (event) => {
       resetExplorer();
       apiSecret = "";
       setupConnectionId = null;
+      readSecret = "";
+      readKeyId = null;
       await refresh();
     }
     if (event.target.dataset.memberRole) {
@@ -880,7 +943,7 @@ document.addEventListener("input", (event) => {
 });
 
 document.addEventListener("submit", async (event) => {
-  if (!["product-form", "policy-form", "team-invite-email-form"].includes(event.target.id)) return;
+  if (!["product-form", "policy-form", "team-invite-email-form", "read-key-form"].includes(event.target.id)) return;
   event.preventDefault();
   const form = new FormData(event.target);
   try {
@@ -899,6 +962,17 @@ document.addEventListener("submit", async (event) => {
       await request("/api/settings/policy", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ environmentId: dashboard.currentEnvironment.id, feedbackMode: form.get("feedbackMode"), collectEventSummaries: false, retentionDays: Number(form.get("retentionDays")) }) });
       await refresh();
       setNotice("Collection policy saved for this product.");
+    }
+    if (event.target.id === "read-key-form") {
+      const expiresIn = String(form.get("expiresIn") || "7776000");
+      const payload = { label: String(form.get("label") || "").trim() || "Repo read key", environmentId: dashboard.currentEnvironment.id, kind: "read" };
+      if (expiresIn !== "never") payload.expiresInSeconds = Number(expiresIn);
+      const body = await request("/api/settings/api-keys", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+      readSecret = body.secret;
+      readKeyId = body.apiKey.id;
+      rememberSetupSecret(dashboard.currentEnvironment.id, body.secret, "read");
+      await refresh();
+      setNotice("Read key created. Save it now — it is shown once.");
     }
     if (event.target.id === "team-invite-email-form") {
       const invitee = String(form.get("invitee") || "").trim();

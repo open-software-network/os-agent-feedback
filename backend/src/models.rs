@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -80,6 +82,7 @@ pub struct ApiKeyPublic {
     pub environment_id: Uuid,
     pub label: String,
     pub prefix: String,
+    pub kind: String,
     pub created_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
@@ -91,6 +94,7 @@ pub struct ApiKeyPublic {
 pub struct CreateApiKeyInput {
     pub environment_id: Uuid,
     pub label: Option<String>,
+    pub kind: Option<String>,
     pub expires_in_seconds: Option<i64>,
 }
 
@@ -306,6 +310,119 @@ pub struct ProductOutcomeWithInteraction {
     pub runtime_hint: Option<String>,
     pub runtime_hint_source: Option<String>,
     pub occurred_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FeedbackListOutcomesInput {
+    pub summary: Option<bool>,
+    pub since: Option<DateTime<Utc>>,
+    pub outcome: Option<Vec<String>>,
+    pub operation: Option<String>,
+    pub customer_ref: Option<String>,
+    pub limit: Option<i64>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FeedbackListInteractionsInput {
+    pub since: Option<DateTime<Utc>>,
+    pub reviewed: Option<bool>,
+    pub operation: Option<String>,
+    pub customer_ref: Option<String>,
+    pub surface: Option<Vec<String>>,
+    pub limit: Option<i64>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackWindow {
+    pub since: DateTime<Utc>,
+    pub retention_days: i32,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackOutcomeItem {
+    pub id: Uuid,
+    pub outcome: String,
+    pub note: String,
+    pub operation: String,
+    pub customer_ref: Option<String>,
+    pub surface: String,
+    pub duration_ms: Option<i64>,
+    pub status_code: Option<i32>,
+    pub occurred_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub interaction_id: Uuid,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackOutcomesPage {
+    pub outcomes: Vec<FeedbackOutcomeItem>,
+    pub next_cursor: Option<String>,
+    pub window: FeedbackWindow,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackInteractionItem {
+    pub id: Uuid,
+    pub operation: String,
+    pub customer_ref: Option<String>,
+    pub surface: String,
+    pub classification: String,
+    pub duration_ms: Option<i64>,
+    pub status_code: Option<i32>,
+    pub occurred_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackInteractionsPage {
+    pub interactions: Vec<FeedbackInteractionItem>,
+    pub next_cursor: Option<String>,
+    pub window: FeedbackWindow,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackOperationSummary {
+    pub operation: String,
+    pub interactions: i64,
+    pub outcomes: BTreeMap<String, i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackSurfaceSummary {
+    pub surface: String,
+    pub interactions: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackSummary {
+    pub product: String,
+    pub window: FeedbackWindow,
+    pub interactions: i64,
+    pub reviewed: i64,
+    pub review_rate: f64,
+    pub confirmation_rate: f64,
+    pub outcomes: BTreeMap<String, i64>,
+    pub outcome_success_rate: f64,
+    pub top_operations: Vec<FeedbackOperationSummary>,
+    pub surfaces: Vec<FeedbackSurfaceSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum FeedbackOutcomesResponse {
+    Summary(FeedbackSummary),
+    Page(FeedbackOutcomesPage),
 }
 
 #[derive(Debug, Deserialize)]

@@ -597,6 +597,7 @@ async fn create_product_handler(
         environment.id,
         Some("Default product key".into()),
         None,
+        None,
     )
     .await?;
     dashboard_response(
@@ -670,6 +671,7 @@ async fn create_api_key_handler(
         context.workspace.id,
         input.environment_id,
         input.label,
+        input.kind,
         input.expires_in_seconds,
     )
     .await?;
@@ -957,7 +959,7 @@ async fn mcp_info(State(state): State<Arc<AppState>>) -> Json<Value> {
         "name": "Agent Feedback",
         "transport": "MCP 2026-07-28 stateless Streamable HTTP / JSON-RPC",
         "endpoint": format!("{}/mcp", state.public_base_url),
-        "authentication": "Authorization: Bearer af_live_...",
+        "authentication": "Authorization: Bearer af_live_... or af_read_...",
         "privacy": "Metadata-only. Prompts, transcripts, secrets, personal data, and customer payloads are rejected."
     }))
 }
@@ -967,6 +969,12 @@ const MCP_PROTOCOL_META: &str = "io.modelcontextprotocol/protocolVersion";
 const MCP_CAPABILITIES_META: &str = "io.modelcontextprotocol/clientCapabilities";
 const MCP_SERVER_INFO_META: &str = "io.modelcontextprotocol/serverInfo";
 const MCP_INSTRUCTIONS: &str = "Start an explicit product workflow before the task. Record metadata-only events. Always call agent_complete_session before finishing and include concise outcome feedback. Never send prompts, transcripts, secrets, personal data, customer data, or raw tool payloads.";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum McpKeyKind {
+    Write,
+    Read,
+}
 
 fn mcp_server_info() -> Value {
     json!({ "name": "agent-feedback", "version": "2.0.0" })
@@ -1016,6 +1024,25 @@ fn mcp_error_response(
         Json(json!({ "jsonrpc": "2.0", "id": id, "error": error })),
     )
         .into_response()
+}
+
+async fn mcp_product_auth(
+    pool: &PgPool,
+    headers: &HeaderMap,
+) -> Result<(McpKeyKind, ProductAuth), ApiError> {
+    match bearer_token(headers).as_deref() {
+        Some(token) if token.starts_with("af_live_") => {
+            Ok((McpKeyKind::Write, agent_product_auth(pool, headers).await?))
+        }
+        Some(token) if token.starts_with("af_read_") => {
+            Ok((McpKeyKind::Read, read_product_auth(pool, headers).await?))
+        }
+        _ => Err(ApiError::new(StatusCode::UNAUTHORIZED, "Invalid API key")),
+    }
+}
+
+fn mcp_auth_error(id: Value, error: ApiError) -> Response {
+    mcp_error_response(id, error.status, -32001, error.message, None)
 }
 
 fn decode_mcp_header(value: &str) -> Option<String> {
@@ -1170,7 +1197,11 @@ async fn mcp_handler(
         )
         .into_response(),
         Some("tools/list") => {
-            let mut result = json!({ "tools": mcp_tools() });
+            let (key_kind, _) = match mcp_product_auth(&state.pool, &headers).await {
+                Ok(auth) => auth,
+                Err(error) => return mcp_auth_error(id, error),
+            };
+            let mut result = json!({ "tools": mcp_tools(key_kind) });
             if modern {
                 result["resultType"] = json!("complete");
                 result["_meta"] = json!({ (MCP_SERVER_INFO_META): mcp_server_info() });
@@ -1181,23 +1212,24 @@ async fn mcp_handler(
         }
         Some("notifications/initialized") if !modern => StatusCode::ACCEPTED.into_response(),
         Some("tools/call") => {
-            if !state.v1_writes_enabled {
-                return v1_maintenance_response();
-            }
-            let workspace = match agent_workspace(&state.pool, &headers).await {
-                Ok(workspace) => workspace,
-                Err(error) => {
-                    return mcp_ok(
-                        id,
-                        mcp_tool_result(json!({ "error": error.message }), true, modern),
-                    )
-                    .into_response();
-                }
+            let (key_kind, auth) = match mcp_product_auth(&state.pool, &headers).await {
+                Ok(auth) => auth,
+                Err(error) => return mcp_auth_error(id, error),
             };
             let name = body
                 .pointer("/params/name")
                 .and_then(Value::as_str)
                 .unwrap_or("");
+            if !mcp_tool_allowed(key_kind, name) {
+                return mcp_ok(
+                    id,
+                    mcp_tool_result(json!({ "error": "Unknown MCP tool" }), true, modern),
+                )
+                .into_response();
+            }
+            if key_kind == McpKeyKind::Write && !state.v1_writes_enabled {
+                return v1_maintenance_response();
+            }
             let arguments = body
                 .pointer("/params/arguments")
                 .cloned()
@@ -1211,14 +1243,14 @@ async fn mcp_handler(
             }
             let result = match name {
                 "agent_start_session" => match serde_json::from_value::<StartSessionInput>(arguments) {
-                    Ok(input) => start_session(&state.pool, &workspace, input).await.map(|session| json!({ "session": session, "feedbackMode": workspace.feedback_mode })),
+                    Ok(input) => start_session(&state.pool, &auth.workspace, input).await.map(|session| json!({ "session": session, "feedbackMode": auth.workspace.feedback_mode })),
                     Err(error) => Err(ApiError::bad_request(format!("Invalid arguments: {error}"))),
                 },
                 "agent_record_event" => {
                     let session_id = arguments.get("sessionId").and_then(Value::as_str).and_then(|value| Uuid::parse_str(value).ok());
                     let input = serde_json::from_value::<RecordEventInput>(arguments.clone());
                     match (session_id, input) {
-                        (Some(session_id), Ok(input)) => record_event(&state.pool, &workspace, session_id, input).await.map(|event| json!({ "accepted": true, "event": event })),
+                        (Some(session_id), Ok(input)) => record_event(&state.pool, &auth.workspace, session_id, input).await.map(|event| json!({ "accepted": true, "event": event })),
                         _ => Err(ApiError::bad_request("sessionId and valid event fields are required")),
                     }
                 },
@@ -1226,11 +1258,31 @@ async fn mcp_handler(
                     let session_id = arguments.get("sessionId").and_then(Value::as_str).and_then(|value| Uuid::parse_str(value).ok());
                     let input = serde_json::from_value::<CompleteSessionInput>(arguments.clone());
                     match (session_id, input) {
-                        (Some(session_id), Ok(input)) => complete_session(&state.pool, &workspace, session_id, input).await
+                        (Some(session_id), Ok(input)) => complete_session(&state.pool, &auth.workspace, session_id, input).await
                             .map(|(session, feedback)| json!({ "completed": true, "session": session, "feedbackStored": feedback.is_some(), "feedback": feedback })),
                         _ => Err(ApiError::bad_request("sessionId and valid completion feedback are required")),
                     }
                 },
+                "feedback_list_outcomes" => {
+                    match serde_json::from_value::<FeedbackListOutcomesInput>(arguments) {
+                        Ok(input) => feedback_list_outcomes(&state.pool, &auth, input)
+                            .await
+                            .map(|response| json!(response)),
+                        Err(error) => Err(ApiError::bad_request(format!(
+                            "Invalid arguments: {error}"
+                        ))),
+                    }
+                }
+                "feedback_list_interactions" => {
+                    match serde_json::from_value::<FeedbackListInteractionsInput>(arguments) {
+                        Ok(input) => feedback_list_interactions(&state.pool, &auth, input)
+                            .await
+                            .map(|response| json!(response)),
+                        Err(error) => Err(ApiError::bad_request(format!(
+                            "Invalid arguments: {error}"
+                        ))),
+                    }
+                }
                 _ => Err(ApiError::not_found("Unknown MCP tool")),
             };
             match result {
@@ -1249,7 +1301,27 @@ async fn mcp_handler(
     }
 }
 
-fn mcp_tools() -> Value {
+fn mcp_tool_allowed(kind: McpKeyKind, name: &str) -> bool {
+    match kind {
+        McpKeyKind::Write => matches!(
+            name,
+            "agent_start_session" | "agent_record_event" | "agent_complete_session"
+        ),
+        McpKeyKind::Read => matches!(
+            name,
+            "feedback_list_outcomes" | "feedback_list_interactions"
+        ),
+    }
+}
+
+fn mcp_tools(kind: McpKeyKind) -> Value {
+    match kind {
+        McpKeyKind::Write => mcp_write_tools(),
+        McpKeyKind::Read => mcp_read_tools(),
+    }
+}
+
+fn mcp_write_tools() -> Value {
     json!([
         {
             "name": "agent_start_session",
@@ -1290,9 +1362,94 @@ fn mcp_tools() -> Value {
     ])
 }
 
+fn mcp_read_tools() -> Value {
+    json!([
+        {
+            "name": "feedback_list_outcomes",
+            "description": "List outcome reviews submitted by customer agents, newest first. Each carries a short free-text note explaining what worked or did not. This is where actionable signal lives. Pass summary:true to get aggregate counts and rates for the whole product instead of individual records — call that first to orient.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Return aggregate counts and rates for the product instead of records. All other filters except since are ignored."
+                    },
+                    "since": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "ISO 8601. Track this per client to poll for what is new."
+                    },
+                    "outcome": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["success", "partial", "failure"]
+                        },
+                        "description": "Filter to these outcomes. Omit for all. Use [\"partial\",\"failure\"] to find problems."
+                    },
+                    "operation": {
+                        "type": "string",
+                        "description": "Exact operation name, e.g. a tool or route name."
+                    },
+                    "customerRef": {
+                        "type": "string",
+                        "description": "Opaque customer id as supplied by the product. Use to see whether one customer keeps failing."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "default": 25
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "Opaque cursor from a previous response's nextCursor."
+                    }
+                }
+            }
+        },
+        {
+            "name": "feedback_list_interactions",
+            "description": "List product interactions, newest first, including those with no outcome review. Use reviewed:false to find operations customer agents use but never review.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "since": { "type": "string", "format": "date-time" },
+                    "reviewed": {
+                        "type": "boolean",
+                        "description": "true = only interactions with an outcome; false = only those without; omit for both."
+                    },
+                    "operation": { "type": "string" },
+                    "customerRef": { "type": "string" },
+                    "surface": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["http_json", "http_html", "http_headers", "mcp", "unknown"]
+                        }
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "default": 25
+                    },
+                    "cursor": { "type": "string" }
+                }
+            }
+        }
+    ])
+}
+
 #[cfg(test)]
 mod page_tests {
-    use super::reveal_auth_error;
+    use axum::{body::to_bytes, http::StatusCode};
+
+    use super::{
+        ApiError, McpKeyKind, mcp_auth_error, mcp_tool_allowed, mcp_tools, reveal_auth_error,
+    };
+    use serde_json::Value;
 
     #[test]
     fn failed_authentication_message_is_revealed() {
@@ -1300,5 +1457,53 @@ mod page_tests {
         let revealed = reveal_auth_error(html.into());
         assert!(revealed.contains(r#"id="auth-error" class="auth-error">Try again"#));
         assert!(!revealed.contains("auth-error\" hidden"));
+    }
+
+    fn tool_names(kind: McpKeyKind) -> Vec<String> {
+        mcp_tools(kind)
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn mcp_tool_surface_is_scoped_by_key_kind() {
+        assert_eq!(
+            tool_names(McpKeyKind::Write),
+            [
+                "agent_start_session",
+                "agent_record_event",
+                "agent_complete_session"
+            ]
+        );
+        assert_eq!(
+            tool_names(McpKeyKind::Read),
+            ["feedback_list_outcomes", "feedback_list_interactions"]
+        );
+        assert!(!mcp_tool_allowed(McpKeyKind::Read, "agent_start_session"));
+        assert!(!mcp_tool_allowed(
+            McpKeyKind::Write,
+            "feedback_list_outcomes"
+        ));
+    }
+
+    #[tokio::test]
+    async fn invalid_and_expired_mcp_auth_are_distinct_unauthorized_responses() {
+        for message in ["Invalid API key", "API key expired"] {
+            let response = mcp_auth_error(
+                Value::from(1),
+                ApiError::new(StatusCode::UNAUTHORIZED, message),
+            );
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let payload: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                payload.pointer("/error/message"),
+                Some(&Value::from(message))
+            );
+        }
     }
 }

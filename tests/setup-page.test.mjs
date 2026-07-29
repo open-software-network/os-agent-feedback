@@ -80,7 +80,7 @@ test("dashboard action notices are ephemeral fixed toasts", () => {
 
 test("products exist before integration setup without an environment picker", () => {
   assert.match(dashboardHtml, /id="product-scope"/);
-  assert.match(dashboardHtml, /app\.js\?v=20260729-toasts/);
+  assert.match(dashboardHtml, /app\.js\?v=20260729-readkeys/);
   assert.match(dashboardScript, /Create your first product/);
   assert.match(dashboardScript, /id="product-select"/);
   assert.match(dashboardScript, /\+ New product/);
@@ -121,16 +121,55 @@ test("installation is ready without a setup generation step", () => {
 test("setup warns about legacy keys and keeps rotation visible", () => {
   assert.match(dashboardScript, /function isLegacyKeyPrefix\(prefix\)/);
   assert.match(dashboardScript, /if \(!prefix\) return false/);
-  assert.match(dashboardScript, /\/\^af_live_\[0-9a-f\]\{8\}\$\//);
+  assert.match(dashboardScript, /\/\^af_\(live\|read\)_\[0-9a-f\]\{8\}\$\//);
   assert.match(dashboardScript, /class="secret-callout warning"/);
   assert.match(dashboardStyles, /\.secret-callout\.warning/);
-  assert.match(dashboardHtml, /styles\.css\?v=20260729-toasts/);
+  assert.match(dashboardHtml, /styles\.css\?v=20260729-readkeys/);
   assert.match(dashboardScript, /legacy key and cannot produce valid afr2 capabilities/i);
   assert.match(dashboardScript, /V2 integrations will fail boot validation/);
-  assert.match(dashboardScript, /The current key stops working immediately/);
+  assert.match(dashboardScript, /The current \$\{kind\} key stops working immediately/);
   assert.match(dashboardScript, /update the <code>AGENT_FEEDBACK_KEY<\/code> server environment variable/);
   assert.match(dashboardScript, /Create new key[\s\S]*<details class="existing-connections">/);
   assert.doesNotMatch(dashboardScript, /<details class="existing-connections">[\s\S]*Create new key/);
+});
+
+test("rotating a key preserves its kind instead of minting a write key", () => {
+  assert.match(dashboardScript, /const rotated = dashboard\.apiKeys\.find\(\(key\) => key\.id === target\.dataset\.revokeKey\)/);
+  assert.match(dashboardScript, /const kind = keyKind\(rotated\)/);
+  assert.match(dashboardScript, /Create a new \$\{kind\} key\?/);
+  assert.match(dashboardScript, /environmentId: dashboard\.currentEnvironment\.id, kind \}/);
+  assert.doesNotMatch(dashboardScript, /revokeKey[\s\S]{0,600}JSON\.stringify\(\{ label: "Default product key", environmentId/);
+});
+
+test("key rows surface kind, expiry, and last-used", () => {
+  assert.match(dashboardScript, /function keyKind\(key\)/);
+  assert.match(dashboardScript, /class="key-kind \$\{esc\(keyKind\(key\)\)\}"/);
+  assert.match(dashboardScript, /expires \$\{key\.expiresAt \? date\(key\.expiresAt\) : "never"\}/);
+  assert.match(dashboardScript, /key\.lastUsedAt \? `last used \$\{date\(key\.lastUsedAt\)\}` : "never used"/);
+  assert.match(dashboardStyles, /\.key-kind/);
+  assert.match(dashboardStyles, /\.key-kind\.read/);
+});
+
+test("read keys are created with a 90-day default expiry and an explicit never option", () => {
+  assert.match(dashboardScript, /id="read-key-form"/);
+  assert.match(dashboardScript, /<option value="7776000" selected>90 days<\/option>/);
+  assert.match(dashboardScript, /<option value="never">Never<\/option>/);
+  assert.match(dashboardScript, /kind: "read"/);
+  assert.match(dashboardScript, /if \(expiresIn !== "never"\) payload\.expiresInSeconds = Number\(expiresIn\)/);
+  assert.match(dashboardScript, /Save this read key now/);
+  assert.match(dashboardScript, /rememberSetupSecret\(dashboard\.currentEnvironment\.id, body\.secret, "read"\)/);
+});
+
+test("read keys ship per-client MCP config snippets, not a server env variable", () => {
+  assert.match(dashboardScript, /function readKeyClientSnippets\(\)/);
+  assert.match(dashboardScript, /data-read-client/);
+  assert.match(dashboardScript, /AGENT_FEEDBACK_READ_KEY/);
+  assert.match(dashboardScript, /"mcpServers"/);
+  assert.match(dashboardScript, /"type": "http"/);
+  assert.match(dashboardScript, /\\\$\{env:AGENT_FEEDBACK_READ_KEY\}/);
+  assert.match(dashboardScript, /promptString/);
+  assert.match(dashboardScript, /"servers"/);
+  assert.match(dashboardScript, /\\\$\{input:epode-read-key\}/);
 });
 
 test("new products receive their product key automatically", () => {

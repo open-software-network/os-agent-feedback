@@ -18,7 +18,10 @@ const dashboard = {
   currentProduct: { id: "product-1", name: "Search API" },
   environments: [{ id: "environment-1", productId: "product-1", feedbackMode: "auto", retentionDays: 30 }],
   currentEnvironment: { id: "environment-1", productId: "product-1", feedbackMode: "auto", retentionDays: 30 },
-  apiKeys: [{ id: "key-1", prefix: "af_live_1234abcd", label: "Default product key", createdAt: iso(-120) }],
+  apiKeys: [
+    { id: "key-1", prefix: "af_live_1234abcd", label: "Default product key", kind: "write", createdAt: iso(-120), expiresAt: null, lastUsedAt: iso(-4) },
+    { id: "key-2", prefix: "af_read_5678beef", label: "Repo read key", kind: "read", createdAt: iso(-60), expiresAt: iso(129_600), lastUsedAt: null },
+  ],
   sessions: [{ id: "session-1", source: "product", refHint: "sess_01H", startedAt: iso(-20), lastSeenAt: iso(-5) }],
   interactions: [
     { id: "interaction-1", apiKeyId: "key-1", sessionId: "session-1", surface: "http_json", operation: "search", statusCode: 200, durationMs: 320, customerRef: "acct_42", classification: "confirmed", confirmationMethod: "outcome_submission", runtimeHint: "codex", runtimeHintSource: "user-agent", occurredAt: iso(-20) },
@@ -69,7 +72,10 @@ async function loadDashboard({ href = "https://app.epode.ai/?view=feedback", fet
     URL,
     URLSearchParams,
     Headers,
-    FormData,
+    FormData: class {
+      constructor(form) { this.data = form?.formData || new Map(); }
+      get(name) { return this.data.get(name) ?? null; }
+    },
     Intl,
     Date,
     confirm: () => true,
@@ -166,6 +172,83 @@ test("action notices render as ephemeral accessible toasts", async () => {
   vm.runInContext('setNotice("Update failed", 5, "error")', context);
   assert.equal(notice.role, "alert");
   assert.match(notice.className, /notice-error/);
+});
+
+test("setup lists key kinds with expiry and last-used, and rotating a read key keeps it a read key", async () => {
+  const state = structuredClone(dashboard);
+  const created = [];
+  const fetchImpl = async (path, options = {}) => {
+    if (path.startsWith("/api/settings/api-keys/") && options.method === "DELETE") {
+      return { ok: true, status: 200, json: async () => ({ revoked: true }) };
+    }
+    if (path === "/api/settings/api-keys" && options.method === "POST") {
+      const body = JSON.parse(options.body);
+      created.push(body);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          secret: "af_read_9999aaaa9999aaaa9999aaaa9999aaaa_rotated_secret_value",
+          apiKey: { id: "key-3", prefix: "af_read_9999aaaa", label: body.label, kind: body.kind || "write", createdAt: iso(0), expiresAt: iso(129_600), lastUsedAt: null },
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => structuredClone(state) };
+  };
+  const { handlers, page } = await loadDashboard({ fetchImpl });
+  await handlers.click({ target: { closest: () => button({ view: "setup" }) } });
+  assert.match(page.innerHTML, /key-kind read/);
+  assert.match(page.innerHTML, /key-kind write/);
+  assert.match(page.innerHTML, /never used/);
+  assert.match(page.innerHTML, /expires never/);
+  assert.match(page.innerHTML, /AGENT_FEEDBACK_READ_KEY/);
+  assert.match(page.innerHTML, /&quot;mcpServers&quot;/);
+
+  await handlers.click({ target: { closest: () => button({ readClient: "vs-code" }) } });
+  assert.match(page.innerHTML, /promptString/);
+  assert.match(page.innerHTML, /&quot;servers&quot;/);
+
+  await handlers.click({ target: { closest: () => button({ revokeKey: "key-2" }) } });
+  assert.equal(created.length, 1);
+  assert.equal(created[0].kind, "read");
+  assert.equal(created[0].label, "Repo read key");
+  assert.equal(created[0].expiresInSeconds, 7776000);
+  assert.match(page.innerHTML, /Save this read key now/);
+
+  await handlers.click({ target: { closest: () => button({ revokeKey: "key-1" }) } });
+  assert.equal(created.length, 2);
+  assert.equal(created[1].kind, "write");
+  assert.equal(created[1].expiresInSeconds, undefined);
+});
+
+test("creating a read key posts kind and expiry and shows the shown-once secret", async () => {
+  const state = structuredClone(dashboard);
+  const created = [];
+  const fetchImpl = async (path, options = {}) => {
+    if (path === "/api/settings/api-keys" && options.method === "POST") {
+      const body = JSON.parse(options.body);
+      created.push(body);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          secret: "af_read_bbbbccccbbbbccccbbbbccccbbbbcccc_fresh_secret_value",
+          apiKey: { id: "key-4", prefix: "af_read_bbbbcccc", label: body.label, kind: "read", createdAt: iso(0), expiresAt: null, lastUsedAt: null },
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => structuredClone(state) };
+  };
+  const { handlers, page } = await loadDashboard({ fetchImpl });
+  await handlers.click({ target: { closest: () => button({ view: "setup" }) } });
+  const form = new Map([["label", "CI read key"], ["expiresIn", "never"]]);
+  await handlers.submit({ preventDefault() {}, target: { id: "read-key-form", formData: form } });
+  assert.equal(created.length, 1);
+  assert.equal(created[0].kind, "read");
+  assert.equal(created[0].label, "CI read key");
+  assert.equal(created[0].expiresInSeconds, undefined);
+  assert.match(page.innerHTML, /Save this read key now/);
+  assert.match(page.innerHTML, /fresh_secret_value/);
 });
 
 test("owners can rename the team and current product in place", async () => {
