@@ -58,6 +58,7 @@ export default function Home() {
             <li>No agent identity or Agent Feedback account required</li>
             <li>No blocking call on the product response path</li>
             <li>No prompts, transcripts, credentials, or raw payloads accepted</li>
+            <li>Choose Auto, Ask once, Ask every time, or Off</li>
             <li>Node, Python, Go, Rust, and MCP adapters use the same contract</li>
             <li>Every other stack can implement the small public HTTP protocol</li>
           </ul>

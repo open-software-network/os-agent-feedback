@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  feedbackConsentAction,
   feedbackFromResponse,
   submitProductOutcome,
 } from "../dist/agent.js";
@@ -11,6 +12,7 @@ const envelope = {
   mode: "auto",
   requested: true,
   consentRequired: false,
+  consentPolicy: "none",
   reliability: "best_effort_without_agent_adapter",
   when: "after_outcome_known_before_final_response",
   instruction: "Submit one outcome.",
@@ -81,28 +83,35 @@ test("feedback-aware adapter rejects untrusted submission origins", async () => 
   );
 });
 
-test("feedback-aware adapter enforces Ask-mode approval", async () => {
-  const askEnvelope = {
+test("feedback-aware adapter resolves and enforces both consent modes", async () => {
+  const askOnceEnvelope = {
     ...envelope,
-    mode: "ask",
+    mode: "ask_once",
     consentRequired: true,
-    when: "after_outcome_known_and_explicit_user_approval",
+    consentPolicy: "once",
+    consentScope: "afcs1_0123456789abcdef0123456789abcdef",
+    when: "after_outcome_known_and_consent_resolved",
   };
   const review = {
     outcome: "success",
     note: "The product response completed the task.",
   };
   await assert.rejects(
-    submitProductOutcome(askEnvelope, review, {
+    submitProductOutcome(askOnceEnvelope, review, {
       allowedSubmitOrigins: ["https://feedback.test"],
     }),
     /Explicit user approval is required/,
   );
 
+  assert.equal(feedbackConsentAction(askOnceEnvelope), "ask");
+  assert.equal(feedbackConsentAction(askOnceEnvelope, "approved"), "submit");
+  assert.equal(feedbackConsentAction(askOnceEnvelope, "refused"), "skip");
+
   let submitted = false;
-  await submitProductOutcome(askEnvelope, review, {
+  await submitProductOutcome(askOnceEnvelope, review, {
     allowedSubmitOrigins: ["https://feedback.test"],
     userApproved: true,
+    approvalSource: "stored_grant",
     fetch: async () => {
       submitted = true;
       return new Response('{"accepted":true}', {
@@ -112,4 +121,48 @@ test("feedback-aware adapter enforces Ask-mode approval", async () => {
     },
   });
   assert.equal(submitted, true);
+
+  const askAlwaysEnvelope = {
+    ...askOnceEnvelope,
+    mode: "ask_always",
+    consentPolicy: "always",
+    consentScope: undefined,
+    when: "after_outcome_known_and_explicit_user_approval",
+  };
+  assert.equal(feedbackConsentAction(askAlwaysEnvelope, "approved"), "ask");
+  await assert.rejects(
+    submitProductOutcome(askAlwaysEnvelope, review, {
+      allowedSubmitOrigins: ["https://feedback.test"],
+      userApproved: true,
+      approvalSource: "stored_grant",
+    }),
+    /fresh approval/,
+  );
+});
+
+test("feedback-aware adapter rejects malformed consent contracts", () => {
+  const malformedAlways = {
+    ...envelope,
+    mode: "ask_always",
+    consentRequired: false,
+    consentPolicy: "always",
+    when: "after_outcome_known_and_explicit_user_approval",
+  };
+  assert.equal(
+    feedbackFromResponse(
+      { headers: new Headers() },
+      { _agentFeedback: malformedAlways },
+    ),
+    undefined,
+  );
+  assert.equal(feedbackConsentAction(malformedAlways, "approved"), "skip");
+
+  const missingScope = {
+    ...envelope,
+    mode: "ask_once",
+    consentRequired: true,
+    consentPolicy: "once",
+    when: "after_outcome_known_and_consent_resolved",
+  };
+  assert.equal(feedbackConsentAction(missingScope), "skip");
 });

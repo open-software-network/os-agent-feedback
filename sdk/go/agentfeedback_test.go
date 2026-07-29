@@ -67,10 +67,13 @@ func TestMiddlewarePreservesShapeAndQueuesOpportunity(t *testing.T) {
 }
 
 func TestAgentHelperRejectsUntrustedOrigin(t *testing.T) {
-	envelope := &Envelope{V: 1, Submit: SubmitContract{
-		URL: "https://evil.test/outcomes", Method: http.MethodPost,
-		Authorization: "Bearer afr2_test.payload.signature",
-	}}
+	envelope := &Envelope{
+		V: 1, Mode: FeedbackAuto, Requested: true, ConsentPolicy: "none",
+		When: "after_outcome_known_before_final_response",
+		Submit: SubmitContract{
+			URL: "https://evil.test/outcomes", Method: http.MethodPost,
+			Authorization: "Bearer afr2_test.payload.signature", ContentType: "application/json",
+		}}
 	_, err := SubmitProductOutcome(context.Background(), envelope, OutcomeReview{
 		Outcome: "success", Note: "The product completed the task.",
 	}, []string{"https://feedback.test"}, nil)
@@ -79,8 +82,33 @@ func TestAgentHelperRejectsUntrustedOrigin(t *testing.T) {
 	}
 }
 
-func TestAskModeRequiresExplicitUserApproval(t *testing.T) {
-	runtime, err := New(Options{APIKey: conformanceKey, FeedbackMode: FeedbackAsk})
+func TestAgentHelperRejectsMalformedConsentContracts(t *testing.T) {
+	runtime, err := New(Options{APIKey: conformanceKey, FeedbackMode: FeedbackAskAlways})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Shutdown(context.Background())
+	prepared, err := runtime.prepare(time.Unix(1_715_000_000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	malformed := prepared.Envelope
+	malformed.ConsentRequired = false
+	if validEnvelope(&malformed) || FeedbackConsentAction(&malformed, "approved") != "skip" {
+		t.Fatal("malformed ask-always contract was accepted")
+	}
+	malformed = prepared.Envelope
+	malformed.Mode = FeedbackAskOnce
+	malformed.ConsentPolicy = "once"
+	malformed.When = "after_outcome_known_and_consent_resolved"
+	malformed.ConsentScope = ""
+	if validEnvelope(&malformed) {
+		t.Fatal("ask-once contract without a scope was accepted")
+	}
+}
+
+func TestAskModesExposeDistinctConsentPolicies(t *testing.T) {
+	runtime, err := New(Options{APIKey: conformanceKey, FeedbackMode: FeedbackAskOnce})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,18 +121,45 @@ func TestAskModeRequiresExplicitUserApproval(t *testing.T) {
 	if !envelope.Requested || !envelope.ConsentRequired {
 		t.Fatalf("ask contract is not requested with consent: %#v", envelope)
 	}
-	if envelope.When != "after_outcome_known_and_explicit_user_approval" {
+	if envelope.ConsentPolicy != "once" || envelope.ConsentScope != "afcs1_0123456789abcdef0123456789abcdef" {
+		t.Fatalf("wrong ask-once scope: %#v", envelope)
+	}
+	if envelope.When != "after_outcome_known_and_consent_resolved" {
 		t.Fatalf("wrong ask timing: %s", envelope.When)
 	}
 	if !strings.Contains(envelope.Instruction, "ask the user once") ||
-		!strings.Contains(envelope.Instruction, "Only after the user explicitly approves") {
+		!strings.Contains(envelope.Instruction, "do not ask again") {
 		t.Fatalf("wrong ask instruction: %s", envelope.Instruction)
+	}
+	if FeedbackConsentAction(&envelope, "") != "ask" ||
+		FeedbackConsentAction(&envelope, "approved") != "submit" ||
+		FeedbackConsentAction(&envelope, "refused") != "skip" {
+		t.Fatal("ask-once decision was not resolved correctly")
 	}
 	_, err = SubmitProductOutcome(context.Background(), &envelope, OutcomeReview{
 		Outcome: "success", Note: "The product completed the task.",
 	}, []string{"https://feedback.test"}, nil)
 	if err == nil || !strings.Contains(err.Error(), "explicit user approval") {
 		t.Fatalf("ask helper did not enforce approval: %v", err)
+	}
+
+	always, err := New(Options{APIKey: conformanceKey, FeedbackMode: FeedbackAskAlways})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer always.Shutdown(context.Background())
+	alwaysPrepared, err := always.prepare(time.Unix(1_715_000_000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alwaysPrepared.Envelope.ConsentPolicy != "always" || alwaysPrepared.Envelope.ConsentScope != "" {
+		t.Fatalf("wrong ask-always policy: %#v", alwaysPrepared.Envelope)
+	}
+	if !strings.Contains(alwaysPrepared.Envelope.Instruction, "every future report") {
+		t.Fatalf("ask-always does not require fresh permission: %s", alwaysPrepared.Envelope.Instruction)
+	}
+	if FeedbackConsentAction(&alwaysPrepared.Envelope, "approved") != "ask" {
+		t.Fatal("ask-always incorrectly reused stored approval")
 	}
 }
 

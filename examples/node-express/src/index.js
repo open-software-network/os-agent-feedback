@@ -4,9 +4,10 @@ import { agentFeedback } from "@agent-feedback/node/express";
 
 const apiKey = process.env.AGENT_FEEDBACK_KEY;
 if (!apiKey) throw new Error("AGENT_FEEDBACK_KEY is required");
-const feedbackMode = process.env.AGENT_FEEDBACK_MODE || "auto";
-if (!["auto", "ask"].includes(feedbackMode)) {
-  throw new Error("AGENT_FEEDBACK_MODE must be auto or ask");
+const configuredFeedbackMode = process.env.AGENT_FEEDBACK_MODE || "auto";
+const feedbackMode = configuredFeedbackMode === "ask" ? "ask_always" : configuredFeedbackMode;
+if (!["auto", "ask_once", "ask_always"].includes(feedbackMode)) {
+  throw new Error("AGENT_FEEDBACK_MODE must be auto, ask_once, or ask_always");
 }
 
 const app = express();

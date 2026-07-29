@@ -11,13 +11,41 @@ from .core import DEFAULT_ENDPOINT
 
 
 def _valid(value: Any) -> bool:
-    return (
+    if not (
         isinstance(value, dict)
         and value.get("v") == 1
+        and value.get("requested") is True
         and isinstance(value.get("submit"), dict)
         and value["submit"].get("method") == "POST"
+        and value["submit"].get("contentType") == "application/json"
         and str(value["submit"].get("authorization", "")).startswith("Bearer afr2_")
-    )
+    ):
+        return False
+    mode = value.get("mode")
+    scope = value.get("consentScope")
+    if mode == "auto":
+        return (
+            value.get("consentRequired") is False
+            and value.get("consentPolicy") == "none"
+            and value.get("when") == "after_outcome_known_before_final_response"
+            and scope is None
+        )
+    if mode == "ask_once":
+        return (
+            value.get("consentRequired") is True
+            and value.get("consentPolicy") == "once"
+            and isinstance(scope, str)
+            and re.fullmatch(r"afcs1_[0-9a-f]{32}", scope) is not None
+            and value.get("when") == "after_outcome_known_and_consent_resolved"
+        )
+    if mode == "ask_always":
+        return (
+            value.get("consentRequired") is True
+            and value.get("consentPolicy") == "always"
+            and scope is None
+            and value.get("when") == "after_outcome_known_and_explicit_user_approval"
+        )
+    return False
 
 
 def feedback_from_response(headers: Mapping[str, str], body: Any) -> dict[str, Any] | None:
@@ -48,6 +76,24 @@ def feedback_from_response(headers: Mapping[str, str], body: Any) -> dict[str, A
     return None
 
 
+def feedback_consent_action(
+    feedback: Mapping[str, Any], stored_decision: str | None = None
+) -> str:
+    """Resolve agent-local consent without sending the decision to Epode."""
+    if not _valid(feedback):
+        return "skip"
+    if feedback.get("consentRequired") is not True:
+        return "submit"
+    if feedback.get("mode") == "ask_always":
+        return "ask"
+    if feedback.get("mode") == "ask_once":
+        if stored_decision == "approved":
+            return "submit"
+        if stored_decision == "refused":
+            return "skip"
+    return "ask"
+
+
 def submit_product_outcome(
     feedback: Mapping[str, Any],
     outcome: str,
@@ -55,12 +101,17 @@ def submit_product_outcome(
     *,
     allowed_submit_origins: tuple[str, ...] = (DEFAULT_ENDPOINT,),
     user_approved: bool = False,
+    approval_source: str | None = None,
     sender: Any = None,
 ) -> dict[str, Any]:
     if not _valid(feedback):
         raise ValueError("Invalid Agent Feedback submission contract")
     if feedback.get("consentRequired") is True and not user_approved:
         raise ValueError("Explicit user approval is required before submitting this outcome")
+    if feedback.get("mode") == "ask_once" and approval_source not in {"granted_now", "stored_grant"}:
+        raise ValueError("Ask-once submission requires granted_now or stored_grant approval")
+    if feedback.get("mode") == "ask_always" and approval_source != "granted_now":
+        raise ValueError("Ask-every-time submission requires fresh approval")
     if outcome not in {"success", "partial", "failure"}:
         raise ValueError("outcome must be success, partial, or failure")
     note = note.strip()

@@ -31,4 +31,4 @@ ASGI JSON and HTML responses are decorated directly. The conservative WSGI adapt
 
 HTTP feedback is best-effort for generic agents. `feedback_from_response` and `submit_product_outcome` provide the deterministic, allow-listed agent-runtime path.
 
-Pass `feedback_mode="ask"` to tell the agent to ask the user once after finishing the task. Feedback-aware runtimes must pass `user_approved=True` only after explicit approval; the helper rejects Ask-mode submission otherwise.
+Pass `feedback_mode="ask_once"` to store approval or refusal under the returned product-scoped `consentScope`; approved future reports use `approval_source="stored_grant"`. Use `ask_always` to require `approval_source="granted_now"` for every report. `feedback_consent_action` resolves the agent-local preference without sending it to Epode.

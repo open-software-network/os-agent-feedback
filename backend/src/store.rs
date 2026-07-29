@@ -1053,9 +1053,12 @@ pub async fn feedback_list_interactions(
 pub async fn update_policy(
     pool: &PgPool,
     workspace_id: Uuid,
-    input: PolicyInput,
+    mut input: PolicyInput,
 ) -> Result<ProductEnvironment, ApiError> {
-    if !["auto", "ask", "off"].contains(&input.feedback_mode.as_str())
+    if input.feedback_mode == "ask" {
+        input.feedback_mode = "ask_always".into();
+    }
+    if !["auto", "ask_once", "ask_always", "off"].contains(&input.feedback_mode.as_str())
         || !(1..=365).contains(&input.retention_days)
     {
         return Err(ApiError::bad_request(
@@ -1662,6 +1665,14 @@ pub async fn start_interaction(
     workspace: &Workspace,
     input: StartSessionInput,
 ) -> Result<(AgentSession, Option<IssuedFeedbackReceipt>), ApiError> {
+    if matches!(
+        workspace.feedback_mode.as_str(),
+        "ask_once" | "ask_always" | "ask"
+    ) {
+        return Err(ApiError::gone(
+            "Consent-aware feedback is available only through the v2 SDK and protocol",
+        ));
+    }
     let session = start_session(pool, workspace, input).await?;
     if workspace.feedback_mode == "off" {
         return Ok((session, None));
@@ -1751,6 +1762,14 @@ pub async fn complete_session(
     session_id: Uuid,
     input: CompleteSessionInput,
 ) -> Result<(AgentSession, Option<Feedback>), ApiError> {
+    if matches!(
+        workspace.feedback_mode.as_str(),
+        "ask_once" | "ask_always" | "ask"
+    ) {
+        return Err(ApiError::gone(
+            "Consent-aware feedback is available only through the v2 SDK and protocol",
+        ));
+    }
     let summary = input
         .summary
         .as_deref()
@@ -1846,6 +1865,11 @@ pub async fn submit_customer_agent_feedback(
             .await?;
     if feedback_mode == "off" {
         return Err(ApiError::gone("Feedback collection is disabled"));
+    }
+    if matches!(feedback_mode.as_str(), "ask_once" | "ask_always" | "ask") {
+        return Err(ApiError::gone(
+            "Consent-aware feedback is available only through the v2 SDK and protocol",
+        ));
     }
 
     let session = lock_session(&mut tx, receipt.workspace_id, receipt.session_id).await?;
@@ -2393,14 +2417,14 @@ mod product_tests {
                 workspace_id,
                 PolicyInput {
                     environment_id: docs_settings.id,
-                    feedback_mode: "ask".into(),
+                    feedback_mode: "ask_once".into(),
                     collect_event_summaries: false,
                     retention_days: 7,
                 },
             )
             .await
             .map_err(test_error)?;
-            anyhow::ensure!(updated.feedback_mode == "ask");
+            anyhow::ensure!(updated.feedback_mode == "ask_once");
             anyhow::ensure!(search_settings.feedback_mode == "auto");
 
             anyhow::ensure!(

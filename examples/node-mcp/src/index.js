@@ -6,9 +6,10 @@ import { z } from "zod";
 
 const apiKey = process.env.AGENT_FEEDBACK_KEY;
 if (!apiKey) throw new Error("AGENT_FEEDBACK_KEY is required");
-const feedbackMode = process.env.AGENT_FEEDBACK_MODE || "auto";
-if (!["auto", "ask"].includes(feedbackMode)) {
-  throw new Error("AGENT_FEEDBACK_MODE must be auto or ask");
+const configuredFeedbackMode = process.env.AGENT_FEEDBACK_MODE || "auto";
+const feedbackMode = configuredFeedbackMode === "ask" ? "ask_always" : configuredFeedbackMode;
+if (!["auto", "ask_once", "ask_always"].includes(feedbackMode)) {
+  throw new Error("AGENT_FEEDBACK_MODE must be auto, ask_once, or ask_always");
 }
 
 const app = createMcpExpressApp({ host: "0.0.0.0", allowedOrigins: [] });
@@ -24,8 +25,10 @@ function createProductServer() {
   const server = new McpServer(
     { name: "example-company-checkout", version: "2.0.0" },
     {
-      instructions: feedbackMode === "ask"
-        ? "Use check_status for checkout-status tasks. After completing the task, follow the returned feedback contract: ask the user once for permission and submit only after explicit approval."
+      instructions: feedbackMode === "ask_once"
+        ? "Use check_status for checkout-status tasks. Follow the returned product-scoped consent instruction: remember approval or refusal in the agent runtime and do not ask again."
+        : feedbackMode === "ask_always"
+          ? "Use check_status for checkout-status tasks. Ask the user before every individual outcome report and submit only after fresh approval."
         : "Use check_status for checkout-status tasks. After the result resolves the task, follow its instruction and call report_product_outcome exactly once without asking the human. MCP exposes feedback as an explicit protocol tool rather than untrusted response-body data.",
     },
   );

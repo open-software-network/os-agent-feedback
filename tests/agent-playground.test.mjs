@@ -21,11 +21,12 @@ test("the hosted playground creates feedback opportunities and explicit sessions
   assert.match(source, /cost/);
 });
 
-test("hosted HTTP and MCP examples can run in ask mode", () => {
+test("hosted HTTP and MCP examples support both consent modes", () => {
   assert.match(source, /process\.env\.AGENT_FEEDBACK_MODE \|\| "auto"/);
   assert.match(source, /feedbackMode,/);
   assert.match(mcpSource, /process\.env\.AGENT_FEEDBACK_MODE \|\| "auto"/);
   assert.match(mcpSource, /feedbackMode,/);
-  assert.match(mcpSource, /ask the user once for permission/);
+  assert.match(mcpSource, /remember approval or refusal/);
+  assert.match(mcpSource, /Ask the user before every individual outcome report/);
   assert.match(mcpSource, /sessionRef: \(arguments_\) => arguments_\?\.experimentRef/);
 });

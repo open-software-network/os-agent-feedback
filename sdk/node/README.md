@@ -5,7 +5,8 @@ Collect one compact outcome review from the independent customer agents using yo
 There are two reliability levels:
 
 - **MCP is protocol-backed.** The SDK registers an explicit `report_product_outcome` tool, which compatible agents can call autonomously.
-- **Ask mode requests consent.** Set `feedbackMode: "ask"` to make the agent finish the task, ask the user once, and submit only after explicit approval. MCP requires `userApproved: true`; HTTP agent helpers require the same approval option.
+- **Ask once remembers product consent.** Set `feedbackMode: "ask_once"`; the agent runtime stores approval or refusal under the returned `consentScope`. Approved future reports use `approvalSource: "stored_grant"` without asking again.
+- **Ask every time requires fresh consent.** Set `feedbackMode: "ask_always"`; every report requires `userApproved: true` and `approvalSource: "granted_now"`. The deprecated `ask` value maps to this mode.
 - **HTTP and HTML are best-effort by default.** Generic agents may treat response metadata as untrusted and ignore its side-effect instruction. A feedback-aware agent adapter can make submission deterministic.
 
 ## Express
@@ -76,6 +77,7 @@ Agent runtimes that want deterministic HTTP/HTML feedback can explicitly consume
 
 ```ts
 import {
+  feedbackConsentAction,
   feedbackFromResponse,
   submitProductOutcome,
 } from "@agent-feedback/node/agent";
@@ -85,15 +87,28 @@ const body = await response.json();
 const feedback = feedbackFromResponse(response, body);
 
 if (feedback) {
+  const stored = feedback.consentScope
+    ? await agentPreferences.get(feedback.consentScope)
+    : undefined;
+  const action = feedbackConsentAction(feedback, stored);
+  if (action === "skip") return;
+  const approvalSource = action === "ask"
+    ? (await askUserForPermission() ? "granted_now" : undefined)
+    : "stored_grant";
+  if (!approvalSource && feedback.consentRequired) return;
   await submitProductOutcome(
     feedback,
     { outcome: "success", note: "The product completed the task." },
-    { allowedSubmitOrigins: ["https://agent-feedback-api-production.up.railway.app"] },
+    {
+      allowedSubmitOrigins: ["https://agent-feedback-api-production.up.railway.app"],
+      userApproved: feedback.consentRequired ? true : undefined,
+      approvalSource,
+    },
   );
 }
 ```
 
-The adapter requires an allow-listed HTTPS destination and submits only `outcome` and `note`.
+The adapter requires an allow-listed HTTPS destination and submits only `outcome` and `note`. In Ask once mode, the agent runtime—not Epode—stores approval or refusal under `consentScope`.
 
 ## Verify the whole loop
 
@@ -101,4 +116,4 @@ The adapter requires an allow-listed HTTPS destination and submits only `outcome
 npx agent-feedback-doctor https://your-product.example/search?q=test
 ```
 
-The doctor verifies response injection and submits a real synthetic review with the scoped receipt. Set `AGENT_FEEDBACK_ENABLED=false` as an emergency kill switch.
+In Auto mode, the doctor verifies response injection and submits a real synthetic review with the scoped receipt. In either consent mode, it validates the consent contract but does not submit a review because a diagnostic cannot impersonate user approval. Set `AGENT_FEEDBACK_ENABLED=false` as an emergency kill switch.

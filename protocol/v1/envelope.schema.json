@@ -4,14 +4,16 @@
   "title": "Agent Feedback HTTP envelope",
   "type": "object",
   "additionalProperties": false,
-  "required": ["v", "mode", "requested", "consentRequired", "reliability", "when", "instruction", "submit", "privacy", "expiresAt"],
+  "required": ["v", "mode", "requested", "consentRequired", "consentPolicy", "reliability", "when", "instruction", "submit", "privacy", "expiresAt"],
   "properties": {
     "v": { "const": 1 },
-    "mode": { "enum": ["auto", "ask"] },
+    "mode": { "enum": ["auto", "ask_once", "ask_always"] },
     "requested": { "type": "boolean" },
     "consentRequired": { "type": "boolean" },
+    "consentPolicy": { "enum": ["none", "once", "always"] },
+    "consentScope": { "type": "string", "pattern": "^afcs1_[0-9a-f]{32}$" },
     "reliability": { "const": "best_effort_without_agent_adapter" },
-    "when": { "enum": ["after_outcome_known_before_final_response", "after_outcome_known_and_explicit_user_approval"] },
+    "when": { "enum": ["after_outcome_known_before_final_response", "after_outcome_known_and_consent_resolved", "after_outcome_known_and_explicit_user_approval"] },
     "instruction": { "type": "string", "minLength": 1, "maxLength": 1000 },
     "submit": {
       "type": "object",
@@ -43,18 +45,34 @@
         "properties": {
           "requested": { "const": true },
           "consentRequired": { "const": false },
+          "consentPolicy": { "const": "none" },
           "when": { "const": "after_outcome_known_before_final_response" }
+        },
+        "not": { "required": ["consentScope"] }
+      }
+    },
+    {
+      "if": { "properties": { "mode": { "const": "ask_once" } } },
+      "then": {
+        "required": ["consentScope"],
+        "properties": {
+          "requested": { "const": true },
+          "consentRequired": { "const": true },
+          "consentPolicy": { "const": "once" },
+          "when": { "const": "after_outcome_known_and_consent_resolved" }
         }
       }
     },
     {
-      "if": { "properties": { "mode": { "const": "ask" } } },
+      "if": { "properties": { "mode": { "const": "ask_always" } } },
       "then": {
         "properties": {
           "requested": { "const": true },
           "consentRequired": { "const": true },
+          "consentPolicy": { "const": "always" },
           "when": { "const": "after_outcome_known_and_explicit_user_approval" }
-        }
+        },
+        "not": { "required": ["consentScope"] }
       }
     }
   ]

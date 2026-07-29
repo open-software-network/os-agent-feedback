@@ -3,7 +3,7 @@ set -euo pipefail
 
 base_url="${BASE_URL:-https://agent-feedback-api-production.up.railway.app}"
 api_key="${API_KEY:?Set API_KEY to a disposable Agent Feedback key}"
-phase="${1:?Usage: production_acceptance.sh auto|ask|off|auth-rejected}"
+phase="${1:?Usage: production_acceptance.sh auto|ask_once|ask_always|off|auth-rejected}"
 
 request() {
   local method="$1"
@@ -30,6 +30,12 @@ fi
 external_id="acceptance-$phase-$(date +%s%N)"
 start_payload="$(jq -n --arg external_id "$external_id" --arg phase "$phase" '{externalId:$external_id,agentName:"production-acceptance-agent",task:("Exercise the " + $phase + " feedback policy") }')"
 started="$(request POST /api/v1/sessions "$start_payload")"
+if [[ "$phase" == "ask_once" || "$phase" == "ask_always" ]]; then
+  test "$(status_of "$started")" = "410"
+  jq -e '.error | test("v2 SDK")' <<<"$(body_of "$started")" >/dev/null
+  echo "PASS $phase: legacy V1 refuses to claim consent semantics"
+  exit 0
+fi
 test "$(status_of "$started")" = "201"
 session_id="$(jq -er '.session.id' <<<"$(body_of "$started")")"
 
@@ -58,12 +64,6 @@ case "$phase" in
     test "$(jq -er '.feedback.id' <<<"$duplicate_body")" = "$feedback_id"
     test "$(jq -er '.session.completedAt' <<<"$duplicate_body")" = "$completed_at"
     echo "PASS auto: required feedback, retry-safe start, idempotent completion"
-    ;;
-  ask)
-    completed="$(request POST "/api/v1/sessions/$session_id/complete" '{}')"
-    test "$(status_of "$completed")" = "200"
-    jq -e '.feedbackStored == false and .feedback == null' <<<"$(body_of "$completed")" >/dev/null
-    echo "PASS ask: optional feedback, retry-safe start"
     ;;
   off)
     completion='{"worked":true,"summary":"Off mode must discard this submitted review.","confidence":0.99,"wouldUseAgain":true,"friction":"none"}'

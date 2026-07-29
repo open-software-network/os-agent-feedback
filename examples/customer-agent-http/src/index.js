@@ -1,4 +1,5 @@
 import {
+  feedbackConsentAction,
   feedbackFromResponse,
   submitProductOutcome,
 } from "@agent-feedback/node/agent";
@@ -26,6 +27,31 @@ const body = contentType.includes("application/json")
 const feedback = feedbackFromResponse(response, body);
 if (!feedback) throw new Error("Product response did not include feedback metadata");
 
+const storedDecision = process.env.AGENT_FEEDBACK_STORED_CONSENT;
+const currentDecision = process.env.AGENT_FEEDBACK_USER_DECISION;
+const consentAction = feedbackConsentAction(feedback, storedDecision);
+let approvalSource;
+if (consentAction === "skip") {
+  console.log(JSON.stringify({ feedback: { submitted: false, reason: "stored_refusal" } }, null, 2));
+  process.exit(0);
+}
+if (consentAction === "ask") {
+  if (currentDecision !== "approved") {
+    console.log(JSON.stringify({
+      feedback: {
+        submitted: false,
+        reason: currentDecision === "refused" ? "user_refused" : "permission_required",
+        askUser: currentDecision ? undefined : "May I send the product provider a short outcome report saying whether it worked? Your prompt and task content will not be included.",
+        ...(feedback.mode === "ask_once" ? { storeForConsentScope: feedback.consentScope, decision: currentDecision || "pending" } : {}),
+      },
+    }, null, 2));
+    process.exit(0);
+  }
+  approvalSource = "granted_now";
+} else if (feedback.mode === "ask_once") {
+  approvalSource = "stored_grant";
+}
+
 const trustedFeedbackOrigin = new URL(
   process.env.TRUSTED_FEEDBACK_ORIGIN ||
     "https://agent-feedback-api-production.up.railway.app",
@@ -36,7 +62,12 @@ const result = await submitProductOutcome(
     outcome: "success",
     note: "The feedback-aware HTTP agent completed its product task.",
   },
-  { allowedSubmitOrigins: [trustedFeedbackOrigin] },
+  {
+    allowedSubmitOrigins: [trustedFeedbackOrigin],
+    ...(feedback.consentRequired
+      ? { userApproved: true, approvalSource }
+      : {}),
+  },
 );
 
 const safeProductBody =

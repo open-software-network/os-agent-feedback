@@ -34,6 +34,7 @@ import { agentFeedback } from "@agent-feedback/node/express";
 
 app.use(agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
+  feedbackMode: "ask_once", // or use AGENT_FEEDBACK_MODE from Setup
   include: ["/search", "/docs/*"],
   customerRef: req => req.user?.accountId, // optional opaque ID
 }));
@@ -41,10 +42,10 @@ app.use(agentFeedback({
 
 No handler changes, primary-path network call, relay endpoint, or agent account is required.
 
-Collection has three modes. `auto` asks the agent to submit its own compact assessment without
-interrupting the user. `ask` tells the agent to finish the task, ask once for permission, and
-submit only after explicit approval; the SDK helpers reject an Ask-mode submission without that
-approval signal. `off` emits no outcome contract.
+Collection has four modes. `auto` submits without interrupting the user. `ask_once` asks once per
+product and agent runtime, then remembers approval or refusal under an opaque product-scoped key.
+`ask_always` requests fresh permission for every report. `off` emits no outcome contract. Epode
+does not receive the stored ask-once preference or treat it as an identity.
 
 ## Repository
 

@@ -17,6 +17,8 @@ export interface SubmitProductOutcomeOptions {
   allowedSubmitOrigins?: string[];
   /** Required when the response contract has consentRequired: true. */
   userApproved?: boolean;
+  /** Ask-once accepts a stored grant; ask-every-time requires granted_now. */
+  approvalSource?: "granted_now" | "stored_grant";
   fetch?: typeof globalThis.fetch;
   timeoutMs?: number;
 }
@@ -35,13 +37,61 @@ export interface ProductOutcomeSubmission {
 const DEFAULT_SUBMIT_ORIGIN =
   "https://agent-feedback-api-production.up.railway.app";
 
+export type StoredFeedbackConsent = "approved" | "refused";
+export type FeedbackConsentAction = "submit" | "ask" | "skip";
+
+/**
+ * Resolves an agent-runtime consent preference without sending it to Epode.
+ * Persist `stored` under feedback.consentScope in the agent's own preference store.
+ */
+export function feedbackConsentAction(
+  feedback: FeedbackEnvelope,
+  stored?: StoredFeedbackConsent,
+): FeedbackConsentAction {
+  if (!parseEnvelope(feedback)) return "skip";
+  if (!feedback.consentRequired) return "submit";
+  if (feedback.mode === "ask_always") return "ask";
+  if (feedback.mode === "ask_once") {
+    if (stored === "approved") return "submit";
+    if (stored === "refused") return "skip";
+  }
+  return "ask";
+}
+
 function object(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function validConsentContract(value: Record<string, unknown>): boolean {
+  const scope = value.consentScope;
+  const validScope =
+    typeof scope === "string" && /^afcs1_[0-9a-f]{32}$/.test(scope);
+  if (value.mode === "auto") {
+    return value.consentRequired === false &&
+      value.consentPolicy === "none" &&
+      value.when === "after_outcome_known_before_final_response" &&
+      scope === undefined;
+  }
+  if (value.mode === "ask_once") {
+    return value.consentRequired === true &&
+      value.consentPolicy === "once" &&
+      value.when === "after_outcome_known_and_consent_resolved" &&
+      validScope;
+  }
+  if (value.mode === "ask_always") {
+    return value.consentRequired === true &&
+      value.consentPolicy === "always" &&
+      value.when === "after_outcome_known_and_explicit_user_approval" &&
+      scope === undefined;
+  }
+  return false;
 }
 
 function parseEnvelope(value: unknown): FeedbackEnvelope | undefined {
   if (!object(value) || value.v !== 1 || !object(value.submit)) return undefined;
   if (
+    value.requested !== true ||
+    !validConsentContract(value) ||
     value.submit.method !== "POST" ||
     typeof value.submit.url !== "string" ||
     typeof value.submit.authorization !== "string" ||
@@ -110,6 +160,15 @@ export async function submitProductOutcome(
   if (!parsed) throw new Error("Invalid Agent Feedback submission contract");
   if (parsed.consentRequired && options.userApproved !== true) {
     throw new Error("Explicit user approval is required before submitting this outcome");
+  }
+  if (
+    parsed.mode === "ask_once" &&
+    !["granted_now", "stored_grant"].includes(options.approvalSource || "")
+  ) {
+    throw new Error("Ask-once submission requires granted_now or stored_grant approval");
+  }
+  if (parsed.mode === "ask_always" && options.approvalSource !== "granted_now") {
+    throw new Error("Ask-every-time submission requires fresh approval");
   }
   if (!["success", "partial", "failure"].includes(review.outcome)) {
     throw new Error("outcome must be success, partial, or failure");

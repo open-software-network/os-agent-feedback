@@ -3,6 +3,11 @@
 import { Buffer } from "node:buffer";
 
 type Envelope = {
+  mode?: string;
+  consentRequired?: boolean;
+  consentPolicy?: string;
+  consentScope?: string;
+  when?: string;
   submit?: {
     url?: string;
     method?: string;
@@ -57,6 +62,33 @@ async function main(): Promise<void> {
     !envelope.submit.fields
   ) {
     fail("Response has an incomplete feedback submission contract");
+  }
+  const consentMode = envelope.mode === "ask_once" || envelope.mode === "ask_always";
+  if (consentMode) {
+    const validOnce = envelope.mode === "ask_once" &&
+      envelope.consentRequired === true &&
+      envelope.consentPolicy === "once" &&
+      /^afcs1_[0-9a-f]{32}$/.test(envelope.consentScope || "") &&
+      envelope.when === "after_outcome_known_and_consent_resolved";
+    const validAlways = envelope.mode === "ask_always" &&
+      envelope.consentRequired === true &&
+      envelope.consentPolicy === "always" &&
+      envelope.consentScope === undefined &&
+      envelope.when === "after_outcome_known_and_explicit_user_approval";
+    if (!validOnce && !validAlways) fail("Response has an invalid consent contract");
+    console.log("PASS response injection");
+    console.log(`PASS ${envelope.mode} consent contract`);
+    console.log("PASS synthetic review skipped; the doctor cannot impersonate user consent");
+    return;
+  }
+  if (
+    envelope.mode !== "auto" ||
+    envelope.consentRequired !== false ||
+    envelope.consentPolicy !== "none" ||
+    envelope.consentScope !== undefined ||
+    envelope.when !== "after_outcome_known_before_final_response"
+  ) {
+    fail("Response has an invalid automatic feedback contract");
   }
   const review = await fetch(envelope.submit.url, {
     method: "POST",

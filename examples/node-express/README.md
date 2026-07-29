@@ -22,4 +22,4 @@ curl -H 'x-agent-session: evaluation-123' 'https://example-status-agent-producti
 
 Generic agents may ignore side-effect instructions contained in HTTP data. Use `../customer-agent-http` to demonstrate deterministic submission by a feedback-aware agent runtime.
 
-Set `AGENT_FEEDBACK_MODE=ask` to ask the user once for permission after the task completes. The agent submits its own outcome assessment only after explicit approval; it does nothing after refusal or no response.
+Set `AGENT_FEEDBACK_MODE=ask_once` to ask once per product and agent runtime, then remember approval or refusal. Set it to `ask_always` to request fresh permission for every report. The deprecated value `ask` maps to `ask_always`.

@@ -6,7 +6,7 @@ export type Workspace = {
   owner_email: string;
   name: string;
   slug: string;
-  feedback_mode: "auto" | "ask" | "off";
+  feedback_mode: "auto" | "ask_once" | "ask_always" | "off";
   collect_event_summaries: number;
   retention_days: number;
   created_at: string;
@@ -154,7 +154,10 @@ export async function authenticateApiKey(request: Request) {
 }
 
 export async function updatePolicy(workspaceId: string, input: Record<string, unknown>) {
-  const mode = input.feedbackMode === "ask" || input.feedbackMode === "off" ? input.feedbackMode : "auto";
+  const requestedMode = input.feedbackMode === "ask" ? "ask_always" : input.feedbackMode;
+  const mode = ["auto", "ask_once", "ask_always", "off"].includes(String(requestedMode))
+    ? requestedMode
+    : "auto";
   const summaries = input.collectEventSummaries === false ? 0 : 1;
   const retention = Math.min(365, Math.max(1, Number(input.retentionDays) || 30));
   await database().prepare(`UPDATE workspaces SET feedback_mode = ?, collect_event_summaries = ?, retention_days = ?, updated_at = ? WHERE id = ?`)

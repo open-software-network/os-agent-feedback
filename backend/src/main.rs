@@ -299,7 +299,8 @@ async fn feedback_discovery_v2(State(state): State<Arc<AppState>>) -> Json<Value
         "purpose": "Collect one compact product-outcome review from a customer's independent agent.",
         "feedbackModes": {
             "auto": "The agent submits its own assessment without interrupting the user.",
-            "ask": "After completing the task, the agent asks once and submits only after explicit user approval.",
+            "ask_once": "The agent asks once per product and agent runtime, then remembers approval or refusal.",
+            "ask_always": "The agent asks before every individual outcome report.",
             "off": "No outcome contract is emitted."
         },
         "telemetry": {
@@ -314,9 +315,10 @@ async fn feedback_discovery_v2(State(state): State<Arc<AppState>>) -> Json<Value
                 "outcome": ["success", "partial", "failure"],
                 "note": "one short sentence, at most 500 characters"
             },
-            "askModeConsent": {
-                "required": true,
+            "consent": {
                 "prompt": "May I send the product provider a short outcome report saying whether it worked? Your prompt and task content will not be included.",
+                "askOnceScope": "per product and agent runtime; no user or agent identity is stored by Epode",
+                "askAlwaysScope": "per outcome report",
                 "onRefusalOrNoResponse": "do not submit"
             }
         },
@@ -1239,6 +1241,26 @@ async fn mcp_handler(
             }
             if key_kind == McpKeyKind::Write && !state.v1_writes_enabled {
                 return v1_maintenance_response();
+            }
+            if key_kind == McpKeyKind::Write
+                && matches!(
+                    auth.workspace.feedback_mode.as_str(),
+                    "ask" | "ask_once" | "ask_always"
+                )
+                && matches!(
+                    name,
+                    "agent_start_session" | "agent_record_event" | "agent_complete_session"
+                )
+            {
+                return mcp_ok(
+                    id,
+                    mcp_tool_result(
+                        json!({ "error": "Consent-aware feedback is available only through the v2 SDK and protocol" }),
+                        true,
+                        modern,
+                    ),
+                )
+                .into_response();
             }
             let arguments = body
                 .pointer("/params/arguments")

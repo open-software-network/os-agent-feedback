@@ -22,4 +22,4 @@ Finite Axum JSON and HTML bodies are instrumented. Bodies without an exact bound
 
 `feedback_from_response` and `submit_product_outcome` provide the deterministic, allow-listed customer-agent path.
 
-Set `options.feedback_mode = FeedbackMode::Ask` to tell the agent to ask the user once after the task completes. Pass `user_approved: true` to `submit_product_outcome` only after explicit approval; Ask-mode submissions are otherwise rejected.
+Use `FeedbackMode::AskOnce` to store approval or refusal under the returned product-scoped `consent_scope`; approved future reports pass `Some("stored_grant")`. Use `FeedbackMode::AskAlways` to require `Some("granted_now")` for every report. `feedback_consent_action` resolves the agent-local preference without sending it to Epode.

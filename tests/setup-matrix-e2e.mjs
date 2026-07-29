@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const backendUrl = (process.env.SETUP_MATRIX_BACKEND_URL || "http://127.0.0.1:3180").replace(/\/$/, "");
@@ -17,6 +19,15 @@ const children = new Set();
 const expected = new Map();
 let databaseUrl = "";
 const python = process.env.PYTHON_BIN || runWhich("python3.11") || runWhich("python3");
+const envelopeSchema = JSON.parse(
+  await readFile(join(repo, "protocol", "v1", "envelope.schema.json"), "utf8"),
+);
+if (localBackend) {
+  envelopeSchema.properties.submit.properties.url.pattern = "^https?://";
+}
+const ajv = new Ajv2020({ allErrors: true });
+addFormats(ajv);
+const validateEnvelopeSchema = ajv.compile(envelopeSchema);
 
 function runWhich(command) {
   const result = spawnSync("which", [command], { encoding: "utf8" });
@@ -106,6 +117,11 @@ function envelopeFrom(response, body) {
 }
 
 function assertEnvelope(envelope) {
+  assert.equal(
+    validateEnvelopeSchema(envelope),
+    true,
+    `invalid protocol envelope: ${JSON.stringify(validateEnvelopeSchema.errors)}`,
+  );
   assert.equal(envelope.v, 1);
   assert.equal(envelope.mode, "auto");
   assert.equal(envelope.requested, true);
@@ -319,6 +335,7 @@ async function prepareGo() {
   await cp(join(repo, "examples", "setup-matrix-go"), target, { recursive: true });
   await rm(join(target, "go.mod"));
   run("go", ["mod", "init", "setup-matrix-go"], { cwd: target });
+  run("go", ["mod", "edit", "-replace", `github.com/open-software-network/os-epode/sdk/go=${join(repo, "sdk", "go")}`], { cwd: target });
   run("go", ["get", "github.com/open-software-network/os-epode/sdk/go@latest"], { cwd: target });
   run("go", ["build", "-o", "setup-matrix-go", "."], { cwd: target });
   return target;

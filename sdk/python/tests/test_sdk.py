@@ -9,6 +9,7 @@ from agent_feedback import (
     AgentFeedbackWSGI,
     AgentFeedback,
     AgentFeedbackOptions,
+    feedback_consent_action,
     feedback_from_response,
     sign_capability,
     submit_product_outcome,
@@ -109,10 +110,16 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
     def test_agent_helper_allowlists_destination_and_sends_compact_body(self) -> None:
         envelope = {
             "v": 1,
+            "mode": "auto",
+            "requested": True,
+            "consentRequired": False,
+            "consentPolicy": "none",
+            "when": "after_outcome_known_before_final_response",
             "submit": {
                 "url": "https://feedback.test/api/v2/outcomes",
                 "method": "POST",
                 "authorization": "Bearer afr2_test.payload.signature",
+                "contentType": "application/json",
             },
         }
         sent: list[dict] = []
@@ -131,14 +138,19 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["accepted"])
         self.assertEqual(sent, [{"outcome": "success", "note": "The product completed the task."}])
 
-    def test_ask_mode_requires_explicit_user_approval(self) -> None:
-        runtime = AgentFeedback(AgentFeedbackOptions(api_key=KEY, feedback_mode="ask"))
+    def test_ask_modes_have_distinct_consent_policies(self) -> None:
+        runtime = AgentFeedback(AgentFeedbackOptions(api_key=KEY, feedback_mode="ask_once"))
         envelope = runtime.prepare()["envelope"]
         self.assertTrue(envelope["requested"])
         self.assertTrue(envelope["consentRequired"])
-        self.assertEqual(envelope["when"], "after_outcome_known_and_explicit_user_approval")
+        self.assertEqual(envelope["consentPolicy"], "once")
+        self.assertEqual(envelope["consentScope"], "afcs1_0123456789abcdef0123456789abcdef")
+        self.assertEqual(envelope["when"], "after_outcome_known_and_consent_resolved")
         self.assertIn("ask the user once", envelope["instruction"])
-        self.assertIn("Only after the user explicitly approves", envelope["instruction"])
+        self.assertIn("do not ask again", envelope["instruction"])
+        self.assertEqual(feedback_consent_action(envelope), "ask")
+        self.assertEqual(feedback_consent_action(envelope, "approved"), "submit")
+        self.assertEqual(feedback_consent_action(envelope, "refused"), "skip")
         with self.assertRaisesRegex(ValueError, "Explicit user approval is required"):
             submit_product_outcome(
                 envelope,
@@ -147,6 +159,32 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
                 allowed_submit_origins=("https://feedback.test",),
                 sender=lambda *_: {"accepted": True},
             )
+        runtime.shutdown()
+
+        always = AgentFeedback(AgentFeedbackOptions(api_key=KEY, feedback_mode="ask_always"))
+        always_envelope = always.prepare()["envelope"]
+        self.assertEqual(always_envelope["consentPolicy"], "always")
+        self.assertNotIn("consentScope", always_envelope)
+        self.assertIn("every future report", always_envelope["instruction"])
+        self.assertEqual(feedback_consent_action(always_envelope, "approved"), "ask")
+        always.shutdown()
+
+    def test_agent_helper_rejects_malformed_consent_contracts(self) -> None:
+        runtime = AgentFeedback(AgentFeedbackOptions(api_key=KEY, feedback_mode="ask_always"))
+        malformed = runtime.prepare()["envelope"]
+        malformed["consentRequired"] = False
+        self.assertIsNone(
+            feedback_from_response({}, {"_agentFeedback": malformed})
+        )
+        self.assertEqual(feedback_consent_action(malformed, "approved"), "skip")
+
+        missing_scope = runtime.prepare()["envelope"]
+        missing_scope.update(
+            mode="ask_once",
+            consentPolicy="once",
+            when="after_outcome_known_and_consent_resolved",
+        )
+        self.assertEqual(feedback_consent_action(missing_scope), "skip")
         runtime.shutdown()
 
 
