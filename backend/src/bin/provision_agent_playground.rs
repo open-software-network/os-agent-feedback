@@ -58,6 +58,33 @@ async fn main() -> anyhow::Result<()> {
     .fetch_optional(&pool)
     .await?;
 
+    if action == "set-mode" {
+        let product_id = existing_product_id
+            .ok_or_else(|| anyhow::anyhow!("{product_name} has not been provisioned"))?;
+        let environment_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM product_environments WHERE product_id = $1 ORDER BY created_at LIMIT 1",
+        )
+        .bind(product_id)
+        .fetch_one(&pool)
+        .await?;
+        sqlx::query(
+            "UPDATE product_environments SET feedback_mode = $2, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(environment_id)
+        .bind(&feedback_mode)
+        .execute(&pool)
+        .await?;
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "productId": product_id,
+                "environmentId": environment_id,
+                "feedbackMode": feedback_mode,
+            }))?
+        );
+        return Ok(());
+    }
+
     if action == "status" {
         let product_id = existing_product_id
             .ok_or_else(|| anyhow::anyhow!("{product_name} has not been provisioned"))?;
@@ -125,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if action != "provision" {
-        anyhow::bail!("action must be provision or status");
+        anyhow::bail!("action must be provision, status, or set-mode");
     }
 
     let mut tx = pool.begin().await?;
