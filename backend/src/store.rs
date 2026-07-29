@@ -14,13 +14,6 @@ use crate::{
     security::{bearer_token, parse_capability, random_token, sha256, verify_capability},
 };
 
-#[derive(sqlx::FromRow)]
-struct FeedbackReceiptRow {
-    workspace_id: Uuid,
-    session_id: Uuid,
-    expires_at: DateTime<Utc>,
-}
-
 pub fn clean(value: &str, max: usize) -> String {
     value
         .split_whitespace()
@@ -491,10 +484,6 @@ pub async fn revoke_team_invitation(
         .execute(pool)
         .await?;
     Ok(())
-}
-
-pub async fn agent_workspace(pool: &PgPool, headers: &HeaderMap) -> Result<Workspace, ApiError> {
-    Ok(agent_product_auth(pool, headers).await?.workspace)
 }
 
 pub async fn agent_product_auth(
@@ -1128,12 +1117,6 @@ pub async fn dashboard(
         .map(|environment| environment.retention_days)
         .unwrap_or(context.workspace.retention_days);
     let cutoff = Utc::now() - Duration::days(retention_days.into());
-    let legacy_cutoff = Utc::now() - Duration::days(context.workspace.retention_days.into());
-    sqlx::query("DELETE FROM agent_sessions WHERE workspace_id = $1 AND created_at < $2")
-        .bind(context.workspace.id)
-        .bind(legacy_cutoff)
-        .execute(pool)
-        .await?;
     sqlx::query("DELETE FROM interactions_v2 WHERE environment_id = $1 AND occurred_at < $2")
         .bind(environment_id)
         .bind(cutoff)
@@ -1156,30 +1139,6 @@ pub async fn dashboard(
     .bind(environment_id)
     .fetch_all(pool)
     .await?;
-    let legacy_sessions = sqlx::query_as::<_, AgentSession>(
-        "SELECT * FROM agent_sessions WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT 100",
-    )
-    .bind(context.workspace.id)
-    .fetch_all(pool)
-    .await?;
-    let legacy_feedback = sqlx::query_as::<_, FeedbackWithSession>(
-        r#"SELECT f.id, f.session_id, f.worked, f.summary,
-        f.confidence, f.would_use_again, f.friction, f.source, f.created_at,
-        s.task, s.customer_ref, s.agent_name, s.agent_version,
-        s.agent_identity_source, s.started_at, s.completed_at
-        FROM feedback f JOIN agent_sessions s ON s.id = f.session_id
-        WHERE f.workspace_id = $1 ORDER BY f.created_at DESC LIMIT 100"#,
-    )
-    .bind(context.workspace.id)
-    .fetch_all(pool)
-    .await?;
-    let legacy_events = sqlx::query_as::<_, AgentEvent>(
-        "SELECT * FROM agent_events WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT 1000",
-    )
-    .bind(context.workspace.id)
-    .fetch_all(pool)
-    .await?;
-
     let interactions = sqlx::query_as::<_, ProductInteraction>(
         r#"SELECT id, workspace_id, environment_id, api_key_id, session_id, surface, operation,
         status_code, duration_ms, customer_ref, classification, confirmation_method,
@@ -1301,9 +1260,6 @@ pub async fn dashboard(
         interactions,
         outcomes,
         sessions,
-        legacy_sessions,
-        legacy_feedback,
-        legacy_events,
         insights,
     })
 }
@@ -1596,351 +1552,6 @@ pub async fn submit_product_outcome(
     Ok((interaction, outcome))
 }
 
-pub async fn start_session(
-    pool: &PgPool,
-    workspace: &Workspace,
-    input: StartSessionInput,
-) -> Result<AgentSession, ApiError> {
-    let task = clean(&input.task, 500);
-    if task.len() < 3 {
-        return Err(ApiError::bad_request("task is required"));
-    }
-    let external_id = input
-        .external_id
-        .map(|value| clean(&value, 160))
-        .filter(|value| !value.is_empty());
-    let customer_ref = input
-        .customer_ref
-        .map(|value| clean(&value, 120))
-        .filter(|value| !value.is_empty());
-    let agent_name = input
-        .agent_name
-        .map(|value| clean(&value, 100))
-        .filter(|value| !value.is_empty());
-    let agent_version = input
-        .agent_version
-        .map(|value| clean(&value, 60))
-        .filter(|value| !value.is_empty());
-    let agent_identity_source = if agent_name.is_some() || agent_version.is_some() {
-        "company_observed"
-    } else {
-        "unknown"
-    };
-    if let Some(ref external_id) = external_id
-        && let Some(existing) = sqlx::query_as::<_, AgentSession>(
-            "SELECT * FROM agent_sessions WHERE workspace_id = $1 AND external_id = $2",
-        )
-        .bind(workspace.id)
-        .bind(external_id)
-        .fetch_optional(pool)
-        .await?
-    {
-        return Ok(existing);
-    }
-    let session = sqlx::query_as::<_, AgentSession>(
-        r#"INSERT INTO agent_sessions
-        (id, workspace_id, external_id, customer_ref, agent_name, agent_version,
-         agent_identity_source, task)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *"#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(workspace.id)
-    .bind(external_id)
-    .bind(customer_ref)
-    .bind(agent_name.unwrap_or_else(|| "anonymous-customer-agent".into()))
-    .bind(agent_version)
-    .bind(agent_identity_source)
-    .bind(task)
-    .fetch_one(pool)
-    .await
-    .map_err(|error| database_conflict(error, "externalId already exists"))?;
-    Ok(session)
-}
-
-pub async fn start_interaction(
-    pool: &PgPool,
-    workspace: &Workspace,
-    input: StartSessionInput,
-) -> Result<(AgentSession, Option<IssuedFeedbackReceipt>), ApiError> {
-    if matches!(
-        workspace.feedback_mode.as_str(),
-        "ask_once" | "ask_always" | "ask"
-    ) {
-        return Err(ApiError::gone(
-            "Consent-aware feedback is available only through the v2 SDK and protocol",
-        ));
-    }
-    let session = start_session(pool, workspace, input).await?;
-    if workspace.feedback_mode == "off" {
-        return Ok((session, None));
-    }
-
-    let token = random_token("afr_");
-    let expires_at = Utc::now() + Duration::hours(24);
-    sqlx::query(
-        r#"INSERT INTO feedback_receipts
-        (id, workspace_id, session_id, token_hash, expires_at)
-        VALUES ($1, $2, $3, $4, $5)"#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(workspace.id)
-    .bind(session.id)
-    .bind(sha256(&token))
-    .bind(expires_at)
-    .execute(pool)
-    .await?;
-
-    Ok((session, Some(IssuedFeedbackReceipt { token, expires_at })))
-}
-
-async fn lock_session<'a>(
-    tx: &mut Transaction<'a, Postgres>,
-    workspace_id: Uuid,
-    session_id: Uuid,
-) -> Result<AgentSession, ApiError> {
-    sqlx::query_as::<_, AgentSession>(
-        "SELECT * FROM agent_sessions WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
-    )
-    .bind(session_id)
-    .bind(workspace_id)
-    .fetch_optional(&mut **tx)
-    .await?
-    .ok_or_else(|| ApiError::not_found("Session not found"))
-}
-
-pub async fn record_event(
-    pool: &PgPool,
-    workspace: &Workspace,
-    session_id: Uuid,
-    input: RecordEventInput,
-) -> Result<AgentEvent, ApiError> {
-    let name = clean(&input.name, 120);
-    if name.is_empty() {
-        return Err(ApiError::bad_request("event name is required"));
-    }
-    let status = input.status.unwrap_or_else(|| "info".into());
-    if !["started", "succeeded", "failed", "info"].contains(&status.as_str()) {
-        return Err(ApiError::bad_request("Invalid event status"));
-    }
-    let mut tx = pool.begin().await?;
-    let session = lock_session(&mut tx, workspace.id, session_id).await?;
-    if session.status == "completed" {
-        return Err(ApiError::conflict("Session is already completed"));
-    }
-    let sequence: i32 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM agent_events WHERE session_id = $1",
-    )
-    .bind(session_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    let summary = if workspace.collect_event_summaries {
-        input
-            .summary
-            .map(|value| clean(&value, 500))
-            .filter(|value| !value.is_empty())
-    } else {
-        None
-    };
-    let event = sqlx::query_as::<_, AgentEvent>(r#"INSERT INTO agent_events
-        (id, workspace_id, session_id, sequence, event_type, name, status, duration_ms, summary, error_code)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *"#)
-        .bind(Uuid::new_v4()).bind(workspace.id).bind(session_id).bind(sequence)
-        .bind(clean(input.event_type.as_deref().unwrap_or("event"), 40)).bind(name).bind(status)
-        .bind(input.duration_ms.map(|value| value.max(0))).bind(summary)
-        .bind(input.error_code.map(|value| clean(&value, 80)).filter(|value| !value.is_empty()))
-        .fetch_one(&mut *tx).await?;
-    tx.commit().await?;
-    Ok(event)
-}
-
-pub async fn complete_session(
-    pool: &PgPool,
-    workspace: &Workspace,
-    session_id: Uuid,
-    input: CompleteSessionInput,
-) -> Result<(AgentSession, Option<Feedback>), ApiError> {
-    if matches!(
-        workspace.feedback_mode.as_str(),
-        "ask_once" | "ask_always" | "ask"
-    ) {
-        return Err(ApiError::gone(
-            "Consent-aware feedback is available only through the v2 SDK and protocol",
-        ));
-    }
-    let summary = input
-        .summary
-        .as_deref()
-        .map(|value| clean(value, 700))
-        .filter(|value| !value.is_empty());
-    if workspace.feedback_mode == "never_ask"
-        && (input.worked.is_none() || summary.as_deref().is_none_or(|value| value.len() < 8))
-    {
-        return Err(ApiError::bad_request(
-            "worked and a feedback summary are required while Never ask feedback is enabled",
-        ));
-    }
-    if input
-        .confidence
-        .is_some_and(|value| !(0.0..=1.0).contains(&value))
-    {
-        return Err(ApiError::bad_request("confidence must be between 0 and 1"));
-    }
-    let mut tx = pool.begin().await?;
-    let locked_session = lock_session(&mut tx, workspace.id, session_id).await?;
-    if locked_session.status == "completed" {
-        let feedback = sqlx::query_as::<_, Feedback>(
-            "SELECT * FROM feedback WHERE workspace_id = $1 AND session_id = $2",
-        )
-        .bind(workspace.id)
-        .bind(session_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        return Ok((locked_session, feedback));
-    }
-    let session = sqlx::query_as::<_, AgentSession>("UPDATE agent_sessions SET status = 'completed', completed_at = NOW() WHERE id = $1 RETURNING *")
-        .bind(session_id).fetch_one(&mut *tx).await?;
-    let feedback = if workspace.feedback_mode != "off"
-        && let (Some(worked), Some(summary)) = (input.worked, summary)
-    {
-        Some(sqlx::query_as::<_, Feedback>(r#"INSERT INTO feedback
-            (id, workspace_id, session_id, worked, summary, confidence, would_use_again, friction, source)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'agent')
-            ON CONFLICT (session_id) DO UPDATE SET worked = EXCLUDED.worked, summary = EXCLUDED.summary,
-              confidence = EXCLUDED.confidence, would_use_again = EXCLUDED.would_use_again,
-              friction = EXCLUDED.friction, source = EXCLUDED.source, created_at = NOW()
-            RETURNING *"#)
-            .bind(Uuid::new_v4()).bind(workspace.id).bind(session_id).bind(worked).bind(summary)
-            .bind(input.confidence).bind(input.would_use_again)
-            .bind(clean(input.friction.as_deref().unwrap_or("none"), 80))
-            .fetch_one(&mut *tx).await?)
-    } else {
-        None
-    };
-    tx.commit().await?;
-    Ok((session, feedback))
-}
-
-pub async fn submit_customer_agent_feedback(
-    pool: &PgPool,
-    receipt_token: &str,
-    input: CustomerAgentFeedbackInput,
-) -> Result<(AgentSession, Feedback), ApiError> {
-    if !receipt_token.starts_with("afr_") {
-        return Err(ApiError::unauthorized());
-    }
-    let summary = clean(&input.summary, 700);
-    if summary.len() < 8 {
-        return Err(ApiError::bad_request(
-            "A feedback summary of at least 8 characters is required",
-        ));
-    }
-    if input
-        .confidence
-        .is_some_and(|value| !(0.0..=1.0).contains(&value))
-    {
-        return Err(ApiError::bad_request("confidence must be between 0 and 1"));
-    }
-
-    let mut tx = pool.begin().await?;
-    let receipt = sqlx::query_as::<_, FeedbackReceiptRow>(
-        r#"SELECT workspace_id, session_id, expires_at
-        FROM feedback_receipts WHERE token_hash = $1 FOR UPDATE"#,
-    )
-    .bind(sha256(receipt_token))
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(ApiError::unauthorized)?;
-    if receipt.expires_at <= Utc::now() {
-        return Err(ApiError::gone("This feedback receipt has expired"));
-    }
-
-    let feedback_mode: String =
-        sqlx::query_scalar("SELECT feedback_mode FROM workspaces WHERE id = $1")
-            .bind(receipt.workspace_id)
-            .fetch_one(&mut *tx)
-            .await?;
-    if feedback_mode == "off" {
-        return Err(ApiError::gone("Feedback collection is disabled"));
-    }
-    if matches!(feedback_mode.as_str(), "ask_once" | "ask_always" | "ask") {
-        return Err(ApiError::gone(
-            "Consent-aware feedback is available only through the v2 SDK and protocol",
-        ));
-    }
-
-    let session = lock_session(&mut tx, receipt.workspace_id, receipt.session_id).await?;
-    if let Some(existing) = sqlx::query_as::<_, Feedback>(
-        "SELECT * FROM feedback WHERE workspace_id = $1 AND session_id = $2",
-    )
-    .bind(receipt.workspace_id)
-    .bind(receipt.session_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    {
-        sqlx::query(
-            "UPDATE feedback_receipts SET submitted_at = COALESCE(submitted_at, NOW()) WHERE session_id = $1",
-        )
-        .bind(receipt.session_id)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        return Ok((session, existing));
-    }
-
-    let reported_agent_name = input
-        .agent_name
-        .map(|value| clean(&value, 100))
-        .filter(|value| !value.is_empty());
-    let reported_agent_version = input
-        .agent_version
-        .map(|value| clean(&value, 60))
-        .filter(|value| !value.is_empty());
-    let has_reported_identity = reported_agent_name.is_some() || reported_agent_version.is_some();
-    let session = sqlx::query_as::<_, AgentSession>(
-        r#"UPDATE agent_sessions SET
-          status = 'completed', completed_at = NOW(),
-          agent_name = CASE
-            WHEN agent_identity_source = 'unknown' AND $2 IS NOT NULL THEN $2
-            ELSE agent_name END,
-          agent_version = CASE
-            WHEN agent_identity_source = 'unknown' AND $3 IS NOT NULL THEN $3
-            ELSE agent_version END,
-          agent_identity_source = CASE
-            WHEN agent_identity_source = 'unknown' AND $4 THEN 'agent_reported'
-            ELSE agent_identity_source END
-        WHERE id = $1 RETURNING *"#,
-    )
-    .bind(receipt.session_id)
-    .bind(reported_agent_name)
-    .bind(reported_agent_version)
-    .bind(has_reported_identity)
-    .fetch_one(&mut *tx)
-    .await?;
-    let feedback = sqlx::query_as::<_, Feedback>(
-        r#"INSERT INTO feedback
-        (id, workspace_id, session_id, worked, summary, confidence, would_use_again, friction, source)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'customer_agent')
-        RETURNING *"#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(receipt.workspace_id)
-    .bind(receipt.session_id)
-    .bind(input.worked)
-    .bind(summary)
-    .bind(input.confidence)
-    .bind(input.would_use_again)
-    .bind(clean(input.friction.as_deref().unwrap_or("none"), 80))
-    .fetch_one(&mut *tx)
-    .await?;
-    sqlx::query("UPDATE feedback_receipts SET submitted_at = NOW() WHERE session_id = $1")
-        .bind(receipt.session_id)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok((session, feedback))
-}
-
 #[cfg(test)]
 mod product_tests {
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -1980,6 +1591,31 @@ mod product_tests {
                 .status
                 == StatusCode::BAD_REQUEST
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn legacy_prototype_tables_are_absent() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+
+        for table in [
+            "feedback_receipts",
+            "feedback",
+            "agent_events",
+            "agent_sessions",
+        ] {
+            let relation: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)::text")
+                .bind(format!("public.{table}"))
+                .fetch_one(&pool)
+                .await?;
+            anyhow::ensure!(relation.is_none(), "legacy table {table} still exists");
+        }
         Ok(())
     }
 

@@ -59,9 +59,9 @@ The only v2 review fields are:
 
 Unknown fields and recursively nested prompt, transcript, credential, personal-data, customer-data, and raw-tool-data fields are rejected. Secret-shaped note content is also rejected.
 
-## Rollout and legacy data
+## Data model
 
-V1 write routes return `503 Service Unavailable` with `Retry-After` unless `V1_WRITES_ENABLED=true`. Existing PostgreSQL rows remain readable under the dashboard's legacy filter and are excluded from v2 metrics. No data or services are deleted by the v2 migration.
+Only v2 product interactions, proof-based sessions, and compact outcome reviews are retained. The prototype v1 write routes and tables have been removed.
 
 ## Local checks
 

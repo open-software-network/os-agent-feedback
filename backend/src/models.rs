@@ -153,98 +153,6 @@ pub struct PolicyInput {
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct AgentSession {
-    pub id: Uuid,
-    pub workspace_id: Uuid,
-    pub external_id: Option<String>,
-    pub customer_ref: Option<String>,
-    pub agent_name: String,
-    pub agent_version: Option<String>,
-    pub agent_identity_source: String,
-    pub task: String,
-    pub status: String,
-    pub started_at: DateTime<Utc>,
-    pub completed_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StartSessionInput {
-    pub external_id: Option<String>,
-    pub customer_ref: Option<String>,
-    pub agent_name: Option<String>,
-    pub agent_version: Option<String>,
-    pub task: String,
-}
-
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentEvent {
-    pub id: Uuid,
-    pub workspace_id: Uuid,
-    pub session_id: Uuid,
-    pub sequence: i32,
-    pub event_type: String,
-    pub name: String,
-    pub status: String,
-    pub duration_ms: Option<i64>,
-    pub summary: Option<String>,
-    pub error_code: Option<String>,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RecordEventInput {
-    #[serde(rename = "type")]
-    pub event_type: Option<String>,
-    pub name: String,
-    pub status: Option<String>,
-    pub duration_ms: Option<i64>,
-    pub summary: Option<String>,
-    pub error_code: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
-#[serde(rename_all = "camelCase")]
-pub struct Feedback {
-    pub id: Uuid,
-    pub workspace_id: Uuid,
-    pub session_id: Uuid,
-    pub worked: bool,
-    pub summary: String,
-    pub confidence: Option<f64>,
-    pub would_use_again: Option<bool>,
-    pub friction: String,
-    pub source: String,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CompleteSessionInput {
-    pub worked: Option<bool>,
-    pub summary: Option<String>,
-    pub confidence: Option<f64>,
-    pub would_use_again: Option<bool>,
-    pub friction: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CustomerAgentFeedbackInput {
-    pub worked: bool,
-    pub summary: String,
-    pub confidence: Option<f64>,
-    pub would_use_again: Option<bool>,
-    pub friction: Option<String>,
-    pub agent_name: Option<String>,
-    pub agent_version: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
-#[serde(rename_all = "camelCase")]
 pub struct ProductSession {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -456,33 +364,6 @@ pub struct ProductOutcomeInput {
     pub note: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct IssuedFeedbackReceipt {
-    pub token: String,
-    pub expires_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Serialize, sqlx::FromRow)]
-#[serde(rename_all = "camelCase")]
-pub struct FeedbackWithSession {
-    pub id: Uuid,
-    pub session_id: Uuid,
-    pub worked: bool,
-    pub summary: String,
-    pub confidence: Option<f64>,
-    pub would_use_again: Option<bool>,
-    pub friction: String,
-    pub source: String,
-    pub created_at: DateTime<Utc>,
-    pub task: String,
-    pub customer_ref: Option<String>,
-    pub agent_name: String,
-    pub agent_version: Option<String>,
-    pub agent_identity_source: String,
-    pub started_at: DateTime<Utc>,
-    pub completed_at: Option<DateTime<Utc>>,
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InsightCount {
@@ -521,9 +402,6 @@ pub struct DashboardData {
     pub interactions: Vec<ProductInteraction>,
     pub outcomes: Vec<ProductOutcomeWithInteraction>,
     pub sessions: Vec<ProductSession>,
-    pub legacy_sessions: Vec<AgentSession>,
-    pub legacy_feedback: Vec<FeedbackWithSession>,
-    pub legacy_events: Vec<AgentEvent>,
     pub insights: Insights,
 }
 

@@ -88,11 +88,10 @@ await call("/api/v2/outcomes", {
 });
 console.log("PASS privacy: unknown, recursive, and secret-shaped review data rejected");
 
-const legacy = await call("/api/v1/interactions", {
-  expected: 503,
-  body: { task: "legacy write" },
+await call("/api/v1/interactions", {
+  expected: 404,
+  body: { task: "removed prototype write" },
 });
-assert.ok(legacy.response.headers.get("retry-after"));
-console.log("PASS rollout: legacy writes disabled with Retry-After while reads remain intact");
+console.log("PASS cleanup: prototype write routes no longer exist");
 
 console.log("PASS v2 acceptance");

@@ -9,7 +9,7 @@ use std::{env, net::SocketAddr, sync::Arc};
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, OriginalUri, Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     middleware::{Next, from_fn},
     response::{Html, IntoResponse, Redirect, Response},
@@ -43,7 +43,6 @@ struct AppState {
     public_base_url: String,
     secure_cookies: bool,
     accounts: OsAccountsClient,
-    v1_writes_enabled: bool,
     mcp_allowed_origins: Vec<String>,
 }
 
@@ -94,7 +93,6 @@ async fn main() -> anyhow::Result<()> {
         public_base_url,
         pool,
         accounts,
-        v1_writes_enabled: env::var("V1_WRITES_ENABLED").as_deref() == Ok("true"),
         mcp_allowed_origins,
     });
 
@@ -119,9 +117,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/", get(root_page))
-        .route("/app", get(legacy_dashboard_redirect))
         .route("/api/health", get(health))
-        .route("/.well-known/agent-feedback.json", get(feedback_discovery))
         .route(
             "/.well-known/agent-feedback-v1.json",
             get(feedback_discovery_v2),
@@ -157,21 +153,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/settings/policy", post(update_policy_handler))
         .route("/api/v2/telemetry/batches", post(telemetry_batch_handler))
         .route("/api/v2/outcomes", post(product_outcome_handler))
-        .route("/api/v1/sessions", post(start_session_handler))
-        .route("/api/v1/interactions", post(start_session_handler))
-        .route(
-            "/api/v1/sessions/{session_id}/events",
-            post(record_event_handler),
-        )
-        .route(
-            "/api/v1/interactions/{session_id}/events",
-            post(record_event_handler),
-        )
-        .route(
-            "/api/v1/sessions/{session_id}/complete",
-            post(complete_session_handler),
-        )
-        .route("/api/v1/feedback", post(customer_agent_feedback_handler))
         .route("/mcp", get(mcp_info).post(mcp_handler))
         .nest_service("/static", ServeDir::new("public"))
         .layer(DefaultBodyLimit::max(64 * 1024))
@@ -259,14 +240,6 @@ fn reveal_auth_error(html: String) -> String {
     )
 }
 
-async fn legacy_dashboard_redirect(OriginalUri(uri): OriginalUri) -> Redirect {
-    let target = uri
-        .query()
-        .map(|query| format!("/?{query}"))
-        .unwrap_or_else(|| "/".into());
-    Redirect::to(&target)
-}
-
 async fn read_page(path: &str, fallback: &str) -> String {
     tokio::fs::read_to_string(path)
         .await
@@ -280,16 +253,6 @@ async fn health(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiEr
     Ok(Json(
         json!({ "status": "ok", "service": "agent-feedback", "database": "ok" }),
     ))
-}
-
-async fn feedback_discovery(State(state): State<Arc<AppState>>) -> Json<Value> {
-    Json(json!({
-        "name": "Agent Feedback",
-        "version": "1",
-        "deprecated": true,
-        "writesEnabled": state.v1_writes_enabled,
-        "replacement": format!("{}/.well-known/agent-feedback-v1.json", state.public_base_url)
-    }))
 }
 
 async fn feedback_discovery_v2(State(state): State<Arc<AppState>>) -> Json<Value> {
@@ -780,21 +743,6 @@ fn safe_input<T: DeserializeOwned>(value: Value) -> Result<T, ApiError> {
         .map_err(|error| ApiError::bad_request(format!("Invalid request: {error}")))
 }
 
-fn v1_maintenance_response() -> Response {
-    let mut response = (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({
-            "error": "The prototype write API is in maintenance mode.",
-            "replacement": "/.well-known/agent-feedback-v1.json"
-        })),
-    )
-        .into_response();
-    response
-        .headers_mut()
-        .insert(header::RETRY_AFTER, HeaderValue::from_static("3600"));
-    response
-}
-
 async fn telemetry_batch_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -841,137 +789,12 @@ async fn product_outcome_handler(
     Ok(response)
 }
 
-async fn start_session_handler(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(value): Json<Value>,
-) -> Result<Response, ApiError> {
-    if !state.v1_writes_enabled {
-        return Ok(v1_maintenance_response());
-    }
-    let workspace = agent_workspace(&state.pool, &headers).await?;
-    let (session, receipt) = start_interaction(&state.pool, &workspace, safe_input(value)?).await?;
-    let agent_feedback = receipt
-        .map(|receipt| feedback_handoff(&state, &workspace, &session, receipt))
-        .unwrap_or(Value::Null);
-    let mut response = (
-        StatusCode::CREATED,
-        Json(json!({
-            "session": session,
-            "interaction": session,
-            "_agentFeedback": agent_feedback,
-            "collectionPolicy": { "feedbackMode": workspace.feedback_mode, "metadataOnly": true },
-            "next": "Attach _agentFeedback to the product response returned to the customer's agent. Never expose the af_live_ company key."
-        })),
-    )
-        .into_response();
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-store"),
-    );
-    Ok(response)
-}
-
-fn feedback_handoff(
-    state: &AppState,
-    workspace: &Workspace,
-    session: &AgentSession,
-    receipt: IssuedFeedbackReceipt,
-) -> Value {
-    let instruction = if workspace.feedback_mode == "never_ask" {
-        "After using this product result, submit exactly one outcome review before finishing."
-    } else {
-        "If you can evaluate this product result, submit one concise outcome review."
-    };
-    json!({
-        "schema": format!("{}/.well-known/agent-feedback.json", state.public_base_url),
-        "interactionId": session.id,
-        "mode": workspace.feedback_mode,
-        "instruction": instruction,
-        "submit": {
-            "url": format!("{}/api/v1/feedback", state.public_base_url),
-            "method": "POST",
-            "authorization": format!("Bearer {}", receipt.token),
-            "contentType": "application/json"
-        },
-        "requiredFields": ["worked", "summary"],
-        "optionalFields": ["confidence", "wouldUseAgain", "friction", "agentName", "agentVersion"],
-        "expiresAt": receipt.expires_at
-    })
-}
-
-async fn record_event_handler(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(session_id): Path<Uuid>,
-    Json(value): Json<Value>,
-) -> Result<Response, ApiError> {
-    if !state.v1_writes_enabled {
-        return Ok(v1_maintenance_response());
-    }
-    let workspace = agent_workspace(&state.pool, &headers).await?;
-    let event = record_event(&state.pool, &workspace, session_id, safe_input(value)?).await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({ "accepted": true, "event": event })),
-    )
-        .into_response())
-}
-
-async fn complete_session_handler(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(session_id): Path<Uuid>,
-    Json(value): Json<Value>,
-) -> Result<Response, ApiError> {
-    if !state.v1_writes_enabled {
-        return Ok(v1_maintenance_response());
-    }
-    let workspace = agent_workspace(&state.pool, &headers).await?;
-    let (session, feedback) =
-        complete_session(&state.pool, &workspace, session_id, safe_input(value)?).await?;
-    Ok(Json(
-        json!({ "completed": true, "session": session, "feedbackStored": feedback.is_some(), "feedback": feedback }),
-    )
-    .into_response())
-}
-
-async fn customer_agent_feedback_handler(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(value): Json<Value>,
-) -> Result<Response, ApiError> {
-    if !state.v1_writes_enabled {
-        return Ok(v1_maintenance_response());
-    }
-    let receipt_token = bearer_token(&headers)
-        .filter(|token| token.starts_with("afr_"))
-        .ok_or_else(ApiError::unauthorized)?;
-    let (session, feedback) = submit_customer_agent_feedback(
-        &state.pool,
-        &receipt_token,
-        safe_input::<CustomerAgentFeedbackInput>(value)?,
-    )
-    .await?;
-    let mut response = Json(json!({
-        "accepted": true,
-        "interactionId": session.id,
-        "feedback": feedback
-    }))
-    .into_response();
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-store"),
-    );
-    Ok(response)
-}
-
 async fn mcp_info(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({
         "name": "Agent Feedback",
         "transport": "MCP 2026-07-28 stateless Streamable HTTP / JSON-RPC",
         "endpoint": format!("{}/mcp", state.public_base_url),
-        "authentication": "Authorization: Bearer af_live_... or af_read_...",
+        "authentication": "Authorization: Bearer af_read_...",
         "privacy": "Metadata-only. Prompts, transcripts, secrets, personal data, and customer payloads are rejected."
     }))
 }
@@ -980,13 +803,7 @@ const MCP_PROTOCOL_VERSION: &str = "2026-07-28";
 const MCP_PROTOCOL_META: &str = "io.modelcontextprotocol/protocolVersion";
 const MCP_CAPABILITIES_META: &str = "io.modelcontextprotocol/clientCapabilities";
 const MCP_SERVER_INFO_META: &str = "io.modelcontextprotocol/serverInfo";
-const MCP_INSTRUCTIONS: &str = "Start an explicit product workflow before the task. Record metadata-only events. Always call agent_complete_session before finishing and include concise outcome feedback. Never send prompts, transcripts, secrets, personal data, customer data, or raw tool payloads.";
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum McpKeyKind {
-    Write,
-    Read,
-}
+const MCP_INSTRUCTIONS: &str = "Inspect product interactions and outcome feedback. This server is read-only. Never request prompts, transcripts, secrets, personal data, customer data, or raw tool payloads.";
 
 fn mcp_server_info() -> Value {
     json!({ "name": "agent-feedback", "version": "2.0.0" })
@@ -1038,19 +855,8 @@ fn mcp_error_response(
         .into_response()
 }
 
-async fn mcp_product_auth(
-    pool: &PgPool,
-    headers: &HeaderMap,
-) -> Result<(McpKeyKind, ProductAuth), ApiError> {
-    match bearer_token(headers).as_deref() {
-        Some(token) if token.starts_with("af_live_") => {
-            Ok((McpKeyKind::Write, agent_product_auth(pool, headers).await?))
-        }
-        Some(token) if token.starts_with("af_read_") => {
-            Ok((McpKeyKind::Read, read_product_auth(pool, headers).await?))
-        }
-        _ => Err(ApiError::new(StatusCode::UNAUTHORIZED, "Invalid API key")),
-    }
+async fn mcp_product_auth(pool: &PgPool, headers: &HeaderMap) -> Result<ProductAuth, ApiError> {
+    read_product_auth(pool, headers).await
 }
 
 fn mcp_auth_error(id: Value, error: ApiError) -> Response {
@@ -1209,11 +1015,11 @@ async fn mcp_handler(
         )
         .into_response(),
         Some("tools/list") => {
-            let (key_kind, _) = match mcp_product_auth(&state.pool, &headers).await {
+            let _auth = match mcp_product_auth(&state.pool, &headers).await {
                 Ok(auth) => auth,
                 Err(error) => return mcp_auth_error(id, error),
             };
-            let mut result = json!({ "tools": mcp_tools(key_kind) });
+            let mut result = json!({ "tools": mcp_tools() });
             if modern {
                 result["resultType"] = json!("complete");
                 result["_meta"] = json!({ (MCP_SERVER_INFO_META): mcp_server_info() });
@@ -1224,7 +1030,7 @@ async fn mcp_handler(
         }
         Some("notifications/initialized") if !modern => StatusCode::ACCEPTED.into_response(),
         Some("tools/call") => {
-            let (key_kind, auth) = match mcp_product_auth(&state.pool, &headers).await {
+            let auth = match mcp_product_auth(&state.pool, &headers).await {
                 Ok(auth) => auth,
                 Err(error) => return mcp_auth_error(id, error),
             };
@@ -1232,33 +1038,10 @@ async fn mcp_handler(
                 .pointer("/params/name")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            if !mcp_tool_allowed(key_kind, name) {
+            if !mcp_tool_allowed(name) {
                 return mcp_ok(
                     id,
                     mcp_tool_result(json!({ "error": "Unknown MCP tool" }), true, modern),
-                )
-                .into_response();
-            }
-            if key_kind == McpKeyKind::Write && !state.v1_writes_enabled {
-                return v1_maintenance_response();
-            }
-            if key_kind == McpKeyKind::Write
-                && matches!(
-                    auth.workspace.feedback_mode.as_str(),
-                    "ask_once" | "ask_always"
-                )
-                && matches!(
-                    name,
-                    "agent_start_session" | "agent_record_event" | "agent_complete_session"
-                )
-            {
-                return mcp_ok(
-                    id,
-                    mcp_tool_result(
-                        json!({ "error": "Consent-aware feedback is available only through the v2 SDK and protocol" }),
-                        true,
-                        modern,
-                    ),
                 )
                 .into_response();
             }
@@ -1274,35 +1057,14 @@ async fn mcp_handler(
                 .into_response();
             }
             let result = match name {
-                "agent_start_session" => match serde_json::from_value::<StartSessionInput>(arguments) {
-                    Ok(input) => start_session(&state.pool, &auth.workspace, input).await.map(|session| json!({ "session": session, "feedbackMode": auth.workspace.feedback_mode })),
-                    Err(error) => Err(ApiError::bad_request(format!("Invalid arguments: {error}"))),
-                },
-                "agent_record_event" => {
-                    let session_id = arguments.get("sessionId").and_then(Value::as_str).and_then(|value| Uuid::parse_str(value).ok());
-                    let input = serde_json::from_value::<RecordEventInput>(arguments.clone());
-                    match (session_id, input) {
-                        (Some(session_id), Ok(input)) => record_event(&state.pool, &auth.workspace, session_id, input).await.map(|event| json!({ "accepted": true, "event": event })),
-                        _ => Err(ApiError::bad_request("sessionId and valid event fields are required")),
-                    }
-                },
-                "agent_complete_session" => {
-                    let session_id = arguments.get("sessionId").and_then(Value::as_str).and_then(|value| Uuid::parse_str(value).ok());
-                    let input = serde_json::from_value::<CompleteSessionInput>(arguments.clone());
-                    match (session_id, input) {
-                        (Some(session_id), Ok(input)) => complete_session(&state.pool, &auth.workspace, session_id, input).await
-                            .map(|(session, feedback)| json!({ "completed": true, "session": session, "feedbackStored": feedback.is_some(), "feedback": feedback })),
-                        _ => Err(ApiError::bad_request("sessionId and valid completion feedback are required")),
-                    }
-                },
                 "feedback_list_outcomes" => {
                     match serde_json::from_value::<FeedbackListOutcomesInput>(arguments) {
                         Ok(input) => feedback_list_outcomes(&state.pool, &auth, input)
                             .await
                             .map(|response| json!(response)),
-                        Err(error) => Err(ApiError::bad_request(format!(
-                            "Invalid arguments: {error}"
-                        ))),
+                        Err(error) => {
+                            Err(ApiError::bad_request(format!("Invalid arguments: {error}")))
+                        }
                     }
                 }
                 "feedback_list_interactions" => {
@@ -1310,9 +1072,9 @@ async fn mcp_handler(
                         Ok(input) => feedback_list_interactions(&state.pool, &auth, input)
                             .await
                             .map(|response| json!(response)),
-                        Err(error) => Err(ApiError::bad_request(format!(
-                            "Invalid arguments: {error}"
-                        ))),
+                        Err(error) => {
+                            Err(ApiError::bad_request(format!("Invalid arguments: {error}")))
+                        }
                     }
                 }
                 _ => Err(ApiError::not_found("Unknown MCP tool")),
@@ -1333,65 +1095,15 @@ async fn mcp_handler(
     }
 }
 
-fn mcp_tool_allowed(kind: McpKeyKind, name: &str) -> bool {
-    match kind {
-        McpKeyKind::Write => matches!(
-            name,
-            "agent_start_session" | "agent_record_event" | "agent_complete_session"
-        ),
-        McpKeyKind::Read => matches!(
-            name,
-            "feedback_list_outcomes" | "feedback_list_interactions"
-        ),
-    }
+fn mcp_tool_allowed(name: &str) -> bool {
+    matches!(
+        name,
+        "feedback_list_outcomes" | "feedback_list_interactions"
+    )
 }
 
-fn mcp_tools(kind: McpKeyKind) -> Value {
-    match kind {
-        McpKeyKind::Write => mcp_write_tools(),
-        McpKeyKind::Read => mcp_read_tools(),
-    }
-}
-
-fn mcp_write_tools() -> Value {
-    json!([
-        {
-            "name": "agent_start_session",
-            "description": "Start a metadata-only trace before doing work for a user. Returns sessionId.",
-            "inputSchema": { "type": "object", "properties": {
-                "task": { "type": "string", "description": "Short task category or goal; never include the full prompt" },
-                "customerRef": { "type": "string", "description": "Optional opaque ID from the company's existing authentication; never send an email or name" },
-                "agentName": { "type": "string", "description": "Optional observed agent client name; omit when unknown" },
-                "agentVersion": { "type": "string", "description": "Optional observed agent client version" },
-                "externalId": { "type": "string", "description": "Optional idempotency key" }
-            }, "required": ["task"] }
-        },
-        {
-            "name": "agent_record_event",
-            "description": "Record one metadata-only tool or workflow event. Never send raw input/output, prompts, transcripts, secrets, personal data, or customer content.",
-            "inputSchema": { "type": "object", "properties": {
-                "sessionId": { "type": "string" },
-                "type": { "type": "string" },
-                "name": { "type": "string" },
-                "status": { "type": "string", "enum": ["started", "succeeded", "failed", "info"] },
-                "durationMs": { "type": "integer", "minimum": 0 },
-                "summary": { "type": "string", "description": "Short outcome metadata only" },
-                "errorCode": { "type": "string" }
-            }, "required": ["sessionId", "name"] }
-        },
-        {
-            "name": "agent_complete_session",
-            "description": "Always call this once when the work ends. Completes the session and atomically stores autonomous outcome feedback so it cannot be forgotten.",
-            "inputSchema": { "type": "object", "properties": {
-                "sessionId": { "type": "string" },
-                "worked": { "type": "boolean" },
-                "summary": { "type": "string", "minLength": 8, "description": "Concise outcome review without private data" },
-                "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-                "wouldUseAgain": { "type": "boolean" },
-                "friction": { "type": "string" }
-            }, "required": ["sessionId", "worked", "summary"] }
-        }
-    ])
+fn mcp_tools() -> Value {
+    mcp_read_tools()
 }
 
 fn mcp_read_tools() -> Value {
@@ -1478,9 +1190,7 @@ fn mcp_read_tools() -> Value {
 mod page_tests {
     use axum::{body::to_bytes, http::StatusCode};
 
-    use super::{
-        ApiError, McpKeyKind, mcp_auth_error, mcp_tool_allowed, mcp_tools, reveal_auth_error,
-    };
+    use super::{ApiError, mcp_auth_error, mcp_tool_allowed, mcp_tools, reveal_auth_error};
     use serde_json::Value;
 
     #[test]
@@ -1491,8 +1201,8 @@ mod page_tests {
         assert!(!revealed.contains("auth-error\" hidden"));
     }
 
-    fn tool_names(kind: McpKeyKind) -> Vec<String> {
-        mcp_tools(kind)
+    fn tool_names() -> Vec<String> {
+        mcp_tools()
             .as_array()
             .unwrap()
             .iter()
@@ -1502,24 +1212,13 @@ mod page_tests {
     }
 
     #[test]
-    fn mcp_tool_surface_is_scoped_by_key_kind() {
+    fn mcp_tool_surface_is_read_only() {
         assert_eq!(
-            tool_names(McpKeyKind::Write),
-            [
-                "agent_start_session",
-                "agent_record_event",
-                "agent_complete_session"
-            ]
-        );
-        assert_eq!(
-            tool_names(McpKeyKind::Read),
+            tool_names(),
             ["feedback_list_outcomes", "feedback_list_interactions"]
         );
-        assert!(!mcp_tool_allowed(McpKeyKind::Read, "agent_start_session"));
-        assert!(!mcp_tool_allowed(
-            McpKeyKind::Write,
-            "feedback_list_outcomes"
-        ));
+        assert!(!mcp_tool_allowed("agent_start_session"));
+        assert!(mcp_tool_allowed("feedback_list_outcomes"));
     }
 
     #[tokio::test]

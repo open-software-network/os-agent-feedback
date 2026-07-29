@@ -32,9 +32,6 @@ const dashboard = {
     { id: "outcome-1", interactionId: "interaction-1", sessionId: "session-1", outcome: "success", note: "The result answered the question.", source: "company_relay", surface: "http_json", operation: "search", statusCode: 200, durationMs: 320, customerRef: "acct_42", classification: "confirmed", confirmationMethod: "outcome_submission", runtimeHint: "codex", runtimeHintSource: "user-agent", occurredAt: iso(-20), createdAt: iso(-18) },
     { id: "outcome-2", interactionId: "interaction-2", sessionId: "session-1", outcome: "failure", note: "The document could not be opened.", source: "mcp_tool", surface: "mcp", operation: "fetch_document", statusCode: null, durationMs: 810, customerRef: "acct_42", classification: "confirmed", confirmationMethod: "mcp", runtimeHint: "mcp-client", runtimeHintSource: "client_info", occurredAt: iso(-10), createdAt: iso(-8) },
   ],
-  legacyFeedback: [{ id: "legacy-1", worked: true, summary: "Legacy result worked.", task: "Legacy task", createdAt: iso(-60) }],
-  legacySessions: [],
-  legacyEvents: [],
   insights: {},
 };
 
@@ -142,14 +139,6 @@ test("malformed deep links and delayed searches cannot corrupt navigation state"
   await new Promise((resolve) => setTimeout(resolve, 220));
   assert.equal(vm.runInContext("currentView", context), "sessions");
   assert.equal(vm.runInContext("explorerQuery", context), "");
-});
-
-test("legacy feedback deep links remain coherent and reset when leaving feedback", async () => {
-  const { context, handlers, page } = await loadDashboard({ href: "https://app.epode.ai/?view=feedback&legacy=1&outcome=legacy-1" });
-  assert.match(page.innerHTML, /Legacy result worked/);
-  assert.equal(vm.runInContext("showingLegacy", context), true);
-  await handlers.click({ target: { closest: () => button({ view: "sessions" }) } });
-  assert.equal(vm.runInContext("showingLegacy", context), false);
 });
 
 test("a failed initial data request shows retry UI without reloading forever", async () => {

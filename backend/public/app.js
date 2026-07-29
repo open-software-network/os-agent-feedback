@@ -14,7 +14,6 @@ let explorerQuery = initialUrl.searchParams.get("q") || "";
 let explorerPrimary = initialUrl.searchParams.get("filter") || "all";
 let explorerSecondary = initialUrl.searchParams.get("surface") || "all";
 let explorerRange = initialUrl.searchParams.get("range") || "30d";
-let showingLegacy = initialUrl.searchParams.get("legacy") === "1";
 let apiSecret = "";
 let readSecret = "";
 let readKeyId = null;
@@ -119,7 +118,6 @@ function syncUrl(mode = "replace") {
     filter: explorerPrimary === "all" ? "" : explorerPrimary,
     surface: explorerSecondary === "all" ? "" : explorerSecondary,
     range: explorerRange === "30d" ? "" : explorerRange,
-    legacy: showingLegacy ? "1" : "",
     environment: "",
   };
   for (const [key, value] of Object.entries(values)) {
@@ -150,11 +148,9 @@ function normalizeDashboardState() {
     ? new Set(dashboard.sessions.map((entry) => entry.source))
     : new Set((currentView === "feedback" ? dashboard.outcomes : dashboard.interactions).map((entry) => entry.surface));
   if (explorerSecondary !== "all" && !secondaryValues.has(explorerSecondary)) explorerSecondary = "all";
-  const visibleOutcomes = showingLegacy ? dashboard.legacyFeedback : dashboard.outcomes;
-  if (selectedOutcome && !visibleOutcomes.some((entry) => entry.id === selectedOutcome)) selectedOutcome = null;
+  if (selectedOutcome && !dashboard.outcomes.some((entry) => entry.id === selectedOutcome)) selectedOutcome = null;
   if (selectedInteraction && !dashboard.interactions.some((entry) => entry.id === selectedInteraction)) selectedInteraction = null;
   if (selectedSession && !dashboard.sessions.some((entry) => entry.id === selectedSession)) selectedSession = null;
-  if (currentView !== "feedback") showingLegacy = false;
 }
 
 async function copyText(value) {
@@ -276,7 +272,6 @@ function navigate(view) {
   selectedOutcome = null;
   selectedInteraction = null;
   selectedSession = null;
-  showingLegacy = false;
   resetExplorer();
   syncUrl("push");
   render();
@@ -333,7 +328,6 @@ function renderLoadError(error) {
 }
 
 function feedbackView() {
-  if (showingLegacy) return legacyFeedbackView();
   const item = dashboard.outcomes.find((entry) => entry.id === selectedOutcome);
   if (item) {
     const interaction = dashboard.interactions.find((entry) => entry.id === item.interactionId);
@@ -351,17 +345,7 @@ function feedbackView() {
   const rows = filtered.map((entry) => `<button class="table-row feedback-columns" data-outcome="${esc(entry.id)}" aria-label="Open ${esc(entry.outcome)} feedback for ${esc(entry.operation)}"><span>${badge(entry.outcome)}</span><span class="primary-cell"><strong>${esc(entry.note)}</strong><small>${esc(title(entry.source))}</small></span><span><strong>${esc(entry.operation)}</strong><small>${esc(title(entry.surface))}</small></span><span>${esc(entry.customerRef || "Not linked")}</span><time title="${esc(date(entry.createdAt))}">${esc(relativeDate(entry.createdAt))}</time></button>`).join("");
   const toolbar = explorerToolbar({ placeholder: "Search feedback, operation, or customer", primaryLabel: "Outcome", primaryOptions: [["all", "All outcomes"], ["success", "Success"], ["partial", "Partial"], ["failure", "Failure"]], secondaryOptions: surfaces });
   const table = rows ? `<div class="explorer-table"><div class="table-head feedback-columns"><span>Outcome</span><span>Feedback</span><span>Operation</span><span>Customer</span><span>Received</span></div>${rows}</div>` : `<div class="filtered-empty"><h2>No matching feedback</h2><p>Try a wider time range or clear the filters.</p><button class="button" data-clear-filters>Clear filters</button></div>`;
-  return `${header("FEEDBACK", "Agent feedback", `${filtered.length} of ${ranged.length} reviews`, `<button class="link-button" data-toggle-legacy>Legacy data</button><button class="button" data-refresh-data>Refresh</button>`)}${metricStrip([[filtered.length, "Reviews"], [filtered.length ? `${Math.round(successes / filtered.length * 100)}%` : "—", "Success rate", "positive"], [partial, "Partial", "neutral"], [failures, "Failed", failures ? "negative" : ""]])}${toolbar}${table}`;
-}
-
-function legacyFeedbackView() {
-  const item = dashboard.legacyFeedback.find((entry) => entry.id === selectedOutcome);
-  const toggle = `<button class="button" data-toggle-legacy>Back to v2 feedback</button>`;
-  if (item) {
-    return `${header("LEGACY FEEDBACK", item.worked ? "Worked" : "Failed", date(item.createdAt), toggle)}<button class="back" data-back="feedback">← Legacy feedback</button><div class="detail-grid"><article><h2>Prototype review</h2><p class="quote">“${esc(item.summary)}”</p></article><article><h2>Legacy record</h2><p>${esc(item.task)}</p><small>Excluded from v2 metrics</small></article></div>`;
-  }
-  const rows = dashboard.legacyFeedback.map((entry) => `<button class="list-row" data-outcome="${esc(entry.id)}"><b class="${entry.worked ? "positive" : "negative"}">${entry.worked ? "WORKED" : "FAILED"}</b><span><strong>${esc(entry.summary)}</strong><small>${esc(entry.task)} · legacy prototype</small></span><time>${date(entry.createdAt)}</time></button>`).join("");
-  return `${header("LEGACY FEEDBACK", "Prototype records", `${dashboard.legacyFeedback.length} reviews`, toggle)}<p class="muted">These records are preserved but excluded from v2 metrics.</p>${rows ? `<div class="list">${rows}</div>` : empty("No legacy feedback", "There are no prototype records in this workspace.", "feedback")}`;
+  return `${header("FEEDBACK", "Agent feedback", `${filtered.length} of ${ranged.length} reviews`, `<button class="button" data-refresh-data>Refresh</button>`)}${metricStrip([[filtered.length, "Reviews"], [filtered.length ? `${Math.round(successes / filtered.length * 100)}%` : "—", "Success rate", "positive"], [partial, "Partial", "neutral"], [failures, "Failed", failures ? "negative" : ""]])}${toolbar}${table}`;
 }
 
 function insightsView() {
@@ -802,7 +786,6 @@ document.addEventListener("click", async (event) => {
       syncUrl("push");
       render();
     }
-    if (target.hasAttribute("data-toggle-legacy")) { showingLegacy = !showingLegacy; selectedOutcome = null; resetExplorer(); syncUrl("replace"); render(); }
     if (target.dataset.copy) { await copyText(target.dataset.copy); setNotice("Copied.", 1800); }
     if (target.hasAttribute("data-create-invite-link")) {
       const body = await request("/api/team/invitations", {
@@ -1010,7 +993,6 @@ window.addEventListener("popstate", () => {
   selectedOutcome = url.searchParams.get("outcome");
   selectedInteraction = url.searchParams.get("interaction");
   selectedSession = url.searchParams.get("session");
-  showingLegacy = url.searchParams.get("legacy") === "1";
   explorerQuery = url.searchParams.get("q") || "";
   explorerPrimary = url.searchParams.get("filter") || "all";
   explorerSecondary = url.searchParams.get("surface") || "all";

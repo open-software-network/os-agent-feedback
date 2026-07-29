@@ -62,9 +62,7 @@ does not receive the stored ask-once preference or treat it as an identity.
 - `examples/go-http/` — standard-library Go product example
 - `examples/rust-axum/` — Rust Axum product example
 - `examples/customer-agent-http/` — optional deterministic HTTP/HTML agent-side adapter
-- `app/` — public product site deployed with Sites
-
-Legacy Rust examples and prototype data remain for migration evidence but are not the v2 integration path.
+- `app/` — public product site
 
 ## Production
 

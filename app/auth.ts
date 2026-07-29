@@ -1,7 +1,8 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { chatGPTSignInPath, getChatGPTUser } from "./chatgpt-auth";
-import type { AppUser } from "../db/data";
+
+export type AppUser = { email: string; displayName: string };
 
 export async function getAppUser(): Promise<AppUser | null> {
   const user = await getChatGPTUser();

@@ -19,14 +19,6 @@ const landingHtml = await readFile(
   new URL("../backend/public/index.html", import.meta.url),
   "utf8",
 );
-const productMigration = await readFile(
-  new URL("../backend/migrations/0008_products_and_environments.sql", import.meta.url),
-  "utf8",
-);
-const migratedProductLabel = await readFile(
-  new URL("../backend/migrations/0009_label_migrated_products.sql", import.meta.url),
-  "utf8",
-);
 const productDeletionMigration = await readFile(
   new URL("../backend/migrations/0012_product_deletion.sql", import.meta.url),
   "utf8",
@@ -37,6 +29,10 @@ const consentModesMigration = await readFile(
 );
 const neverAskMigration = await readFile(
   new URL("../backend/migrations/0015_never_ask_mode.sql", import.meta.url),
+  "utf8",
+);
+const dropLegacyDataMigration = await readFile(
+  new URL("../backend/migrations/0016_drop_legacy_prototype_data.sql", import.meta.url),
   "utf8",
 );
 const backendMain = await readFile(
@@ -58,7 +54,7 @@ const appAuth = await readFile(
 
 test("the root URL is the canonical signed-in app", () => {
   assert.match(backendMain, /\.route\("\/", get\(root_page\)\)/);
-  assert.match(backendMain, /\.route\("\/app", get\(legacy_dashboard_redirect\)\)/);
+  assert.doesNotMatch(backendMain, /\.route\("\/app"/);
   assert.match(backendMain, /format!\("\/\?view=team&team=\{workspace_id\}"\)/);
   assert.match(dashboardScript, /location\.assign\("\/auth\/start"\)/);
   assert.match(appAuth, /requireAppUser\(returnTo = "\/"\)/);
@@ -88,7 +84,7 @@ test("dashboard action notices are ephemeral fixed toasts", () => {
 
 test("products exist before integration setup without an environment picker", () => {
   assert.match(dashboardHtml, /id="product-scope"/);
-  assert.match(dashboardHtml, /app\.js\?v=20260729-never-ask-mode/);
+  assert.match(dashboardHtml, /app\.js\?v=20260729-no-legacy/);
   assert.match(dashboardScript, /Create your first product/);
   assert.match(dashboardScript, /id="product-select"/);
   assert.match(dashboardScript, /\+ New product/);
@@ -284,11 +280,11 @@ test("every enabled setup choice has a fresh executable E2E example", async () =
   assert.match(await readFile(new URL("setup-matrix-e2e.mjs", import.meta.url), "utf8"), /expected\.size, 16/);
 });
 
-test("legacy v2 data remains linked to its migrated product", () => {
-  assert.match(productMigration, /CREATE TABLE products/);
-  assert.match(productMigration, /CREATE TABLE product_environments/);
-  assert.match(productMigration, /legacy-product/);
-  assert.match(productMigration, /legacy-production/);
-  assert.match(productMigration, /ALTER COLUMN environment_id SET NOT NULL/);
-  assert.match(migratedProductLabel, /Existing product/);
+test("legacy prototype records and UI are removed", () => {
+  for (const table of ["feedback_receipts", "feedback", "agent_events", "agent_sessions"]) {
+    assert.match(dropLegacyDataMigration, new RegExp(`DROP TABLE IF EXISTS ${table}`));
+  }
+  assert.doesNotMatch(dashboardScript, /legacyFeedback|legacySessions|legacyEvents|data-toggle-legacy/);
+  assert.doesNotMatch(backendModels, /legacy_feedback|legacy_sessions|legacy_events/);
+  assert.doesNotMatch(backendMain, /\.route\("\/api\/v1\/|V1_WRITES_ENABLED|async fn start_session_handler/);
 });
