@@ -29,7 +29,7 @@ const dashboard = {
     { id: "outcome-1", interactionId: "interaction-1", sessionId: "session-1", outcome: "success", note: "The result answered the question.", source: "company_relay", surface: "http_json", operation: "search", statusCode: 200, durationMs: 320, customerRef: "acct_42", classification: "confirmed", confirmationMethod: "outcome_submission", runtimeHint: "codex", runtimeHintSource: "user-agent", occurredAt: iso(-20), createdAt: iso(-18) },
     { id: "outcome-2", interactionId: "interaction-2", sessionId: "session-1", outcome: "failure", note: "The document could not be opened.", source: "mcp_tool", surface: "mcp", operation: "fetch_document", statusCode: null, durationMs: 810, customerRef: "acct_42", classification: "confirmed", confirmationMethod: "mcp", runtimeHint: "mcp-client", runtimeHintSource: "client_info", occurredAt: iso(-10), createdAt: iso(-8) },
   ],
-  legacyFeedback: [],
+  legacyFeedback: [{ id: "legacy-1", worked: true, summary: "Legacy result worked.", task: "Legacy task", createdAt: iso(-60) }],
   legacySessions: [],
   legacyEvents: [],
   insights: {},
@@ -39,7 +39,7 @@ function button(dataset = {}, attributes = []) {
   return { dataset, hasAttribute: (name) => attributes.includes(name) };
 }
 
-async function loadDashboard() {
+async function loadDashboard({ href = "https://app.epode.ai/?view=feedback", fetchImpl } = {}) {
   const elements = new Map([
     ["#page", { innerHTML: "", setAttribute() {} }],
     ["#notice", { textContent: "", hidden: true }],
@@ -52,8 +52,11 @@ async function loadDashboard() {
     querySelector: (selector) => elements.get(selector) || null,
     querySelectorAll: () => [],
     addEventListener: (name, handler) => { handlers[name] = handler; },
+    createElement: () => ({ value: "", style: {}, setAttribute() {}, select() {}, remove() {} }),
+    execCommand: () => true,
+    body: { appendChild() {} },
   };
-  const location = { href: "https://app.epode.ai/?view=feedback", origin: "https://app.epode.ai", assign() {} };
+  const location = { href, origin: "https://app.epode.ai", assigned: null, assign(value) { this.assigned = value; } };
   const context = vm.createContext({
     console,
     document,
@@ -62,7 +65,7 @@ async function loadDashboard() {
     history: { pushState() {}, replaceState() {} },
     navigator: { clipboard: { writeText: async () => {} } },
     sessionStorage: { getItem: () => null, setItem() {} },
-    fetch: async () => ({ ok: true, status: 200, json: async () => structuredClone(dashboard) }),
+    fetch: fetchImpl || (async () => ({ ok: true, status: 200, json: async () => structuredClone(dashboard) })),
     URL,
     URLSearchParams,
     Headers,
@@ -77,7 +80,7 @@ async function loadDashboard() {
   });
   vm.runInContext(source, context);
   await new Promise((resolve) => setTimeout(resolve, 10));
-  return { context, handlers, page: elements.get("#page") };
+  return { context, handlers, location, page: elements.get("#page") };
 }
 
 test("feedback, interaction, and session explorers render and preserve linked context", async () => {
@@ -100,6 +103,13 @@ test("feedback, interaction, and session explorers render and preserve linked co
   assert.match(page.innerHTML, /Open feedback/);
 });
 
+test("session list summarizes every outcome instead of showing an arbitrary review", async () => {
+  const { handlers, page } = await loadDashboard();
+  await handlers.click({ target: { closest: () => button({ view: "sessions" }) } });
+  assert.match(page.innerHTML, /2 reviews/);
+  assert.match(page.innerHTML, /1 success · 1 failed/);
+});
+
 test("facets and investigation shortcuts change the loaded explorer", async () => {
   const { handlers, page } = await loadDashboard();
   await handlers.change({ target: { id: "explorer-primary", value: "failure", dataset: {} } });
@@ -110,4 +120,34 @@ test("facets and investigation shortcuts change the loaded explorer", async () =
   assert.match(page.innerHTML, /Where to look next/);
   await handlers.click({ target: { closest: () => button({ investigateView: "interactions", investigateFilter: "unreviewed" }) } });
   assert.match(page.innerHTML, /Confirmed without feedback/);
+});
+
+test("malformed deep links and delayed searches cannot corrupt navigation state", async () => {
+  const { context, handlers } = await loadDashboard({ href: "https://app.epode.ai/?view=unknown&outcome=missing&filter=garbage&surface=bogus&range=forever" });
+  assert.equal(vm.runInContext("currentView", context), "feedback");
+  assert.equal(vm.runInContext("selectedOutcome", context), null);
+  assert.equal(vm.runInContext("explorerPrimary", context), "all");
+  assert.equal(vm.runInContext("explorerSecondary", context), "all");
+  assert.equal(vm.runInContext("explorerRange", context), "30d");
+
+  handlers.input({ target: { id: "explorer-search", value: "fetch" } });
+  await handlers.click({ target: { closest: () => button({ view: "sessions" }) } });
+  await new Promise((resolve) => setTimeout(resolve, 220));
+  assert.equal(vm.runInContext("currentView", context), "sessions");
+  assert.equal(vm.runInContext("explorerQuery", context), "");
+});
+
+test("legacy feedback deep links remain coherent and reset when leaving feedback", async () => {
+  const { context, handlers, page } = await loadDashboard({ href: "https://app.epode.ai/?view=feedback&legacy=1&outcome=legacy-1" });
+  assert.match(page.innerHTML, /Legacy result worked/);
+  assert.equal(vm.runInContext("showingLegacy", context), true);
+  await handlers.click({ target: { closest: () => button({ view: "sessions" }) } });
+  assert.equal(vm.runInContext("showingLegacy", context), false);
+});
+
+test("a failed initial data request shows retry UI without reloading forever", async () => {
+  const { location, page } = await loadDashboard({ fetchImpl: async () => { throw new Error("network offline"); } });
+  assert.match(page.innerHTML, /could not load/i);
+  assert.match(page.innerHTML, /Try again/);
+  assert.equal(location.assigned, null);
 });

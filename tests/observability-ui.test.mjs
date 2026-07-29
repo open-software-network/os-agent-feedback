@@ -5,6 +5,7 @@ import test from "node:test";
 const script = await readFile(new URL("../backend/public/app.js", import.meta.url), "utf8");
 const styles = await readFile(new URL("../backend/public/styles.css", import.meta.url), "utf8");
 const html = await readFile(new URL("../backend/public/app.html", import.meta.url), "utf8");
+const store = await readFile(new URL("../backend/src/store.rs", import.meta.url), "utf8");
 
 test("observability explorers share search, facets, time range, and deep links", () => {
   assert.match(script, /function explorerToolbar/);
@@ -17,6 +18,8 @@ test("observability explorers share search, facets, time range, and deep links",
   assert.match(script, /data-copy-page-link/);
   assert.match(script, /data-refresh-data/);
   assert.match(script, /document\.title = `\$\{title\(currentView\)\}/);
+  assert.match(script, /function renderLoadError/);
+  assert.match(script, /function copyText/);
   assert.match(styles, /\.explorer-toolbar/);
   assert.match(styles, /\.explorer-table/);
 });
@@ -39,6 +42,9 @@ test("sessions expose proof-based grouping, aggregate health, and a linked timel
   assert.match(script, /timeline-feedback/);
   assert.match(script, /never guesses continuity from timing or identity/);
   assert.match(styles, /\.session-timeline/);
+  assert.match(script, /function sessionOutcomeSummary/);
+  assert.doesNotMatch(script, /outcomes\.at\(-1\)\.outcome/);
+  assert.match(store, /started_at = LEAST\(sessions_v2\.started_at, EXCLUDED\.started_at\)/);
 });
 
 test("insights turn aggregate metrics into investigations", () => {

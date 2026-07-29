@@ -944,7 +944,8 @@ async fn resolve_v2_session(
         (id, workspace_id, environment_id, source, ref_hash, ref_hint, started_at, last_seen_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
         ON CONFLICT (environment_id, source, ref_hash) DO UPDATE
-        SET last_seen_at = GREATEST(sessions_v2.last_seen_at, EXCLUDED.last_seen_at)
+        SET started_at = LEAST(sessions_v2.started_at, EXCLUDED.started_at),
+            last_seen_at = GREATEST(sessions_v2.last_seen_at, EXCLUDED.last_seen_at)
         RETURNING id"#,
     )
     .bind(session_id)

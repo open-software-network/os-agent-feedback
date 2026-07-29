@@ -14,7 +14,7 @@ let explorerQuery = initialUrl.searchParams.get("q") || "";
 let explorerPrimary = initialUrl.searchParams.get("filter") || "all";
 let explorerSecondary = initialUrl.searchParams.get("surface") || "all";
 let explorerRange = initialUrl.searchParams.get("range") || "30d";
-let showingLegacy = false;
+let showingLegacy = initialUrl.searchParams.get("legacy") === "1";
 let apiSecret = "";
 let setupSurface = "mcp";
 let setupStack = "node-mcp";
@@ -23,6 +23,11 @@ let setupInstallMode = "agent";
 let setupMonitor = null;
 let noticeTimer = null;
 let explorerTimer = null;
+
+const validViews = new Set(["feedback", "insights", "interactions", "sessions", "setup", "policy", "team", "new-product"]);
+const validRanges = new Set(["24h", "7d", "30d", "all"]);
+if (!validViews.has(currentView)) currentView = "feedback";
+if (!validRanges.has(explorerRange)) explorerRange = "30d";
 
 function setupSecretKey(environmentId) {
   return `agent-feedback:product-key:${environmentId}`;
@@ -103,6 +108,7 @@ function syncUrl(mode = "replace") {
     filter: explorerPrimary === "all" ? "" : explorerPrimary,
     surface: explorerSecondary === "all" ? "" : explorerSecondary,
     range: explorerRange === "30d" ? "" : explorerRange,
+    legacy: showingLegacy ? "1" : "",
     environment: "",
   };
   for (const [key, value] of Object.entries(values)) {
@@ -113,9 +119,56 @@ function syncUrl(mode = "replace") {
 }
 
 function resetExplorer() {
+  clearTimeout(explorerTimer);
   explorerQuery = "";
   explorerPrimary = "all";
   explorerSecondary = "all";
+}
+
+function normalizeDashboardState() {
+  if (!validViews.has(currentView)) currentView = "feedback";
+  if (!validRanges.has(explorerRange)) explorerRange = "30d";
+  const primaryByView = {
+    feedback: ["all", "success", "partial", "failure"],
+    insights: ["all", "confirmed", "unclassified"],
+    interactions: ["all", "confirmed", "unclassified", "reviewed", "unreviewed"],
+    sessions: ["all", "reviewed", "unreviewed"],
+  };
+  if (primaryByView[currentView] && !primaryByView[currentView].includes(explorerPrimary)) explorerPrimary = "all";
+  const secondaryValues = currentView === "sessions"
+    ? new Set(dashboard.sessions.map((entry) => entry.source))
+    : new Set((currentView === "feedback" ? dashboard.outcomes : dashboard.interactions).map((entry) => entry.surface));
+  if (explorerSecondary !== "all" && !secondaryValues.has(explorerSecondary)) explorerSecondary = "all";
+  const visibleOutcomes = showingLegacy ? dashboard.legacyFeedback : dashboard.outcomes;
+  if (selectedOutcome && !visibleOutcomes.some((entry) => entry.id === selectedOutcome)) selectedOutcome = null;
+  if (selectedInteraction && !dashboard.interactions.some((entry) => entry.id === selectedInteraction)) selectedInteraction = null;
+  if (selectedSession && !dashboard.sessions.some((entry) => entry.id === selectedSession)) selectedSession = null;
+  if (currentView !== "feedback") showingLegacy = false;
+}
+
+async function copyText(value) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+  } catch {
+    // Fall back for browsers that drop clipboard permission after an awaited API call.
+  }
+  const field = document.createElement("textarea");
+  field.value = value;
+  field.setAttribute("readonly", "");
+  field.style.position = "fixed";
+  field.style.opacity = "0";
+  document.body.appendChild(field);
+  field.select();
+  let copied = false;
+  try {
+    copied = typeof document.execCommand === "function" && document.execCommand("copy");
+  } finally {
+    field.remove();
+  }
+  if (!copied) throw new Error("Could not copy to the clipboard");
 }
 
 async function request(path, options = {}) {
@@ -143,6 +196,7 @@ async function refresh() {
   if (dashboard.currentRole === "member" && ["setup", "policy", "new-product"].includes(currentView)) {
     currentView = "feedback";
   }
+  normalizeDashboardState();
   if (currentView === "setup" && dashboard.currentRole !== "member" && dashboard.currentEnvironment && !dashboard.apiKeys.length) {
     const body = await request("/api/settings/api-keys", {
       method: "POST",
@@ -197,10 +251,12 @@ function renderProductScope() {
 }
 
 function navigate(view) {
+  clearTimeout(explorerTimer);
   currentView = view;
   selectedOutcome = null;
   selectedInteraction = null;
   selectedSession = null;
+  showingLegacy = false;
   resetExplorer();
   syncUrl("push");
   render();
@@ -236,6 +292,24 @@ function breakdown(rows, total, fallback) {
   if (!rows.length) return `<p class="muted">${esc(fallback)}</p>`;
   const max = Math.max(...rows.map((row) => row.count), 1);
   return `<div class="breakdown">${rows.map((row) => `<div><span><b>${esc(title(row.name))}</b><small>${row.count} · ${total ? Math.round(row.count / total * 100) : 0}%</small></span><i><em style="width:${Math.round(row.count / max * 100)}%"></em></i></div>`).join("")}</div>`;
+}
+
+function sessionOutcomeSummary(outcomes) {
+  if (!outcomes.length) return "—";
+  const counts = outcomes.reduce((result, outcome) => {
+    result[outcome.outcome] = (result[outcome.outcome] || 0) + 1;
+    return result;
+  }, {});
+  const details = [["success", "success"], ["partial", "partial"], ["failure", "failed"]]
+    .filter(([key]) => counts[key])
+    .map(([key, label]) => `${counts[key]} ${label}`)
+    .join(" · ");
+  return `<span class="session-feedback-summary"><strong>${outcomes.length} review${outcomes.length === 1 ? "" : "s"}</strong><small>${esc(details)}</small></span>`;
+}
+
+function renderLoadError(error) {
+  const message = error?.message === "Authentication required" ? "Your session needs to be renewed." : "Epode could not load this product’s data.";
+  page.innerHTML = `<div class="empty load-error"><h2>${esc(message)}</h2><p>${esc(error?.message || "Check your connection and try again.")}</p><button class="button primary" data-retry-dashboard>Try again</button></div>`;
 }
 
 function feedbackView() {
@@ -362,7 +436,7 @@ function sessionsView() {
     const interactions = interactionsBySession.get(entry.id) || [];
     const outcomes = interactions.map((interaction) => outcomeByInteraction.get(interaction.id)).filter(Boolean);
     const customerRefs = [...new Set(interactions.map((interaction) => interaction.customerRef).filter(Boolean))];
-    return `<button class="table-row session-columns" data-session="${esc(entry.id)}" aria-label="Open session ${esc(entry.refHint)}"><span class="primary-cell"><strong>${esc(entry.refHint)}…</strong><small>${esc(title(entry.source))}</small></span><span>${interactions.length}</span><span>${outcomes.length ? `${outcomes.length} ${badge(outcomes.at(-1).outcome)}` : "—"}</span><span>${esc(customerRefs.length === 1 ? customerRefs[0] : customerRefs.length > 1 ? "Multiple" : "Not linked")}</span><span>${sessionDuration(entry)}</span><time title="${esc(date(entry.lastSeenAt))}">${esc(relativeDate(entry.lastSeenAt))}</time></button>`;
+    return `<button class="table-row session-columns" data-session="${esc(entry.id)}" aria-label="Open session ${esc(entry.refHint)}"><span class="primary-cell"><strong>${esc(entry.refHint)}…</strong><small>${esc(title(entry.source))}</small></span><span>${interactions.length}</span><span>${sessionOutcomeSummary(outcomes)}</span><span>${esc(customerRefs.length === 1 ? customerRefs[0] : customerRefs.length > 1 ? "Multiple" : "Not linked")}</span><span>${sessionDuration(entry)}</span><time title="${esc(date(entry.lastSeenAt))}">${esc(relativeDate(entry.lastSeenAt))}</time></button>`;
   }).join("");
   const toolbar = explorerToolbar({ placeholder: "Search session, operation, or source", primaryLabel: "Feedback", primaryOptions: [["all", "All sessions"], ["reviewed", "Has feedback"], ["unreviewed", "No feedback"]], secondaryLabel: "Proof source", secondaryOptions: sources });
   const table = rows ? `<div class="explorer-table"><div class="table-head session-columns"><span>Session</span><span>Interactions</span><span>Feedback</span><span>Customer</span><span>Duration</span><span>Last seen</span></div>${rows}</div>` : `<div class="filtered-empty"><h2>No matching sessions</h2><p>Sessions only exist when your product or MCP supplies proof of continuity.</p><button class="button" data-clear-filters>Clear filters</button></div>`;
@@ -492,7 +566,7 @@ function setupConnectionStatus(apiKeyId) {
   const interactions = dashboard.interactions.filter((entry) => entry.apiKeyId === apiKeyId);
   const interactionIds = new Set(interactions.map((entry) => entry.id));
   const outcomes = dashboard.outcomes.filter((entry) => interactionIds.has(entry.interactionId));
-  return { interactions, outcomes, firstInteraction: interactions.at(-1) || interactions[0] };
+  return { interactions, outcomes };
 }
 
 function setupAgentPrompt(integration) {
@@ -615,7 +689,7 @@ document.addEventListener("click", async (event) => {
     if (target.dataset.openInteraction) { currentView = "interactions"; selectedInteraction = target.dataset.openInteraction; selectedOutcome = null; selectedSession = null; syncUrl("push"); render(); }
     if (target.dataset.openSession) { currentView = "sessions"; selectedSession = target.dataset.openSession; selectedOutcome = null; selectedInteraction = null; syncUrl("push"); render(); }
     if (target.dataset.openFeedback) { currentView = "feedback"; selectedOutcome = target.dataset.openFeedback; selectedInteraction = null; selectedSession = null; syncUrl("push"); render(); }
-    if (target.hasAttribute("data-copy-page-link")) { await navigator.clipboard.writeText(location.href); setNotice("Link copied.", 1800); }
+    if (target.hasAttribute("data-copy-page-link")) { await copyText(location.href); setNotice("Link copied.", 1800); }
     if (target.hasAttribute("data-clear-filters")) { resetExplorer(); explorerRange = "30d"; syncUrl("replace"); render(); }
     if (target.dataset.investigateView) {
       currentView = target.dataset.investigateView;
@@ -628,15 +702,15 @@ document.addEventListener("click", async (event) => {
       syncUrl("push");
       render();
     }
-    if (target.hasAttribute("data-toggle-legacy")) { showingLegacy = !showingLegacy; selectedOutcome = null; render(); }
-    if (target.dataset.copy) { await navigator.clipboard.writeText(target.dataset.copy); setNotice("Copied.", 1800); }
+    if (target.hasAttribute("data-toggle-legacy")) { showingLegacy = !showingLegacy; selectedOutcome = null; resetExplorer(); syncUrl("replace"); render(); }
+    if (target.dataset.copy) { await copyText(target.dataset.copy); setNotice("Copied.", 1800); }
     if (target.hasAttribute("data-create-invite-link")) {
       const body = await request("/api/team/invitations", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ role: "member" }),
       });
-      await navigator.clipboard.writeText(`${location.origin}${body.joinPath}`);
+      await copyText(`${location.origin}${body.joinPath}`);
       await refresh();
       setNotice("Invite link copied.", 1800);
     }
@@ -647,6 +721,11 @@ document.addEventListener("click", async (event) => {
     if (target.hasAttribute("data-refresh-data")) {
       await refresh();
       setNotice("Data refreshed.", 1800);
+    }
+    if (target.hasAttribute("data-retry-dashboard")) {
+      target.disabled = true;
+      await refresh();
+      setNotice("Dashboard loaded.", 1800);
     }
     if (target.dataset.revokeKey) {
       if (!confirm("Create a new product key? The current key stops working immediately.")) return;
@@ -727,7 +806,7 @@ document.addEventListener("change", async (event) => {
       setNotice("Member role updated.");
     }
   } catch (error) {
-    setNotice(error.message || "Could not switch product");
+    setNotice(error.message || "Update failed");
   }
 });
 
@@ -787,10 +866,14 @@ document.addEventListener("submit", async (event) => {
 });
 
 document.querySelector("#signout").addEventListener("click", async () => {
-  await fetch("/api/auth/logout", { method: "POST" });
-  location.assign("/");
+  try {
+    await fetch("/api/auth/logout", { method: "POST" });
+  } finally {
+    location.assign("/");
+  }
 });
 window.addEventListener("popstate", () => {
+  clearTimeout(explorerTimer);
   const url = new URL(location.href);
   currentView = url.searchParams.get("view") || "feedback";
   selectedWorkspaceId = url.searchParams.get("team") || "";
@@ -798,10 +881,11 @@ window.addEventListener("popstate", () => {
   selectedOutcome = url.searchParams.get("outcome");
   selectedInteraction = url.searchParams.get("interaction");
   selectedSession = url.searchParams.get("session");
+  showingLegacy = url.searchParams.get("legacy") === "1";
   explorerQuery = url.searchParams.get("q") || "";
   explorerPrimary = url.searchParams.get("filter") || "all";
   explorerSecondary = url.searchParams.get("surface") || "all";
-  explorerRange = url.searchParams.get("range") || "30d";
-  refresh().catch(() => location.assign("/"));
+  explorerRange = validRanges.has(url.searchParams.get("range")) ? url.searchParams.get("range") : "30d";
+  refresh().catch(renderLoadError);
 });
-refresh().catch(() => location.assign("/"));
+refresh().catch(renderLoadError);

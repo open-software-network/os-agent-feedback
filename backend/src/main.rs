@@ -211,7 +211,12 @@ async fn shutdown_signal() {
     tokio::select! { _ = ctrl_c => {}, _ = terminate => {} }
 }
 
-async fn root_page(headers: HeaderMap) -> Html<String> {
+#[derive(Deserialize)]
+struct RootPageQuery {
+    auth: Option<String>,
+}
+
+async fn root_page(headers: HeaderMap, Query(query): Query<RootPageQuery>) -> Html<String> {
     let page = if cookie(&headers, ACCESS_COOKIE).is_some()
         || cookie(&headers, REFRESH_COOKIE).is_some()
     {
@@ -219,7 +224,18 @@ async fn root_page(headers: HeaderMap) -> Html<String> {
     } else {
         "public/index.html"
     };
-    Html(read_page(page, "Agent Feedback").await)
+    let mut html = read_page(page, "Agent Feedback").await;
+    if page == "public/index.html" && query.auth.as_deref() == Some("failed") {
+        html = reveal_auth_error(html);
+    }
+    Html(html)
+}
+
+fn reveal_auth_error(html: String) -> String {
+    html.replace(
+        "id=\"auth-error\" class=\"auth-error\" hidden",
+        "id=\"auth-error\" class=\"auth-error\"",
+    )
 }
 
 async fn legacy_dashboard_redirect(OriginalUri(uri): OriginalUri) -> Redirect {
@@ -384,6 +400,14 @@ async fn join_team_handler(
 fn auth_failure(state: &AppState) -> Result<Response, ApiError> {
     let mut response = Redirect::to("/?auth=failed").into_response();
     clear_flow_cookies(&mut response, state)?;
+    append_cookie(
+        &mut response,
+        clear_cookie(ACCESS_COOKIE, state.secure_cookies),
+    )?;
+    append_cookie(
+        &mut response,
+        clear_cookie(REFRESH_COOKIE, state.secure_cookies),
+    )?;
     Ok(response)
 }
 
@@ -956,6 +980,19 @@ async fn mcp_handler(
             }
         }
         _ => mcp_error(id, -32601, "Unknown method").into_response(),
+    }
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::reveal_auth_error;
+
+    #[test]
+    fn failed_authentication_message_is_revealed() {
+        let html = r#"<p id="auth-error" class="auth-error" hidden>Try again</p>"#;
+        let revealed = reveal_auth_error(html.into());
+        assert!(revealed.contains(r#"id="auth-error" class="auth-error">Try again"#));
+        assert!(!revealed.contains("auth-error\" hidden"));
     }
 }
 

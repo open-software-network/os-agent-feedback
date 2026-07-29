@@ -16,7 +16,7 @@ await app.register(agentFeedback({
 
 app.get("/health", async () => ({ status: "ok" }));
 app.get("/api/health", async () => ({ status: "ok" }));
-app.get("/", async (_request, reply) => {
+app.get("/", async () => {
   return {
     example: "company-product-fastify-website",
     agentReadablePage: "/agent-docs",
