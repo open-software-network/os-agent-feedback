@@ -5,23 +5,36 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Agent Feedback</title>
   <meta name="description" content="Collect structured outcome feedback from the customer agents using your product.">
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/static/styles.css?v=20260728-rename-20260729-shadcn">
 </head>
 <body>
-  <main class="landing">
-    <section class="landing-copy">
-      <p class="eyebrow">AGENT FEEDBACK</p>
+  <main class="auth-layout">
+    <section class="auth-brand">
+      <a class="brand-lockup" href="/">
+        <span class="brand-mark" aria-hidden="true">AF</span>
+        <span class="brand-name">Agent Feedback</span>
+      </a>
       <h1>Learn whether your product worked for your customer&apos;s agent.</h1>
       <p class="lede">Instrument your API, MCP server, or agent-readable website once in Node, Python, Go, Rust, or any stack that speaks HTTP. MCP exposes an explicit outcome tool; HTTP uses the same short-lived receipt contract everywhere.</p>
-      <div class="flow"><span>Your product responds</span><b>→</b><span>Customer agent uses it</span><b>→</b><span>Agent reviews outcome</span></div>
-      <p class="muted">No agent identity is required or claimed. Prompts, transcripts, secrets, personal data, customer content, and raw tool payloads are rejected.</p>
+      <ol class="auth-steps">
+        <li><b>1</b><span><strong>Your product responds</strong><small>A single middleware adds machine-readable feedback instructions to eligible responses.</small></span></li>
+        <li><b>2</b><span><strong>Customer agent uses it</strong><small>Every response starts as an opportunity; an MCP tool call is confirmed immediately.</small></span></li>
+        <li><b>3</b><span><strong>Agent reviews outcome</strong><small>The agent reports success, partial, or failure with one short note.</small></span></li>
+      </ol>
+      <p class="fine-print">No agent identity is required or claimed. Prompts, transcripts, secrets, personal data, customer content, and raw tool payloads are rejected.</p>
     </section>
-    <section class="auth-card">
-      <p class="eyebrow">YOUR WORKSPACE</p>
-      <h2>Sign in to Agent Feedback</h2>
-      <p class="muted">Access your products, feedback, and team.</p>
-      <p id="auth-error" class="auth-error" hidden>Sign-in could not be completed. Please try again.</p>
-      <a class="button primary" href="/auth/start">Continue</a>
+    <section class="auth-panel">
+      <div class="auth-card">
+        <span class="brand-mark" aria-hidden="true">AF</span>
+        <h2>Sign in to Agent Feedback</h2>
+        <p class="muted">Access your products, feedback, and team.</p>
+        <p id="auth-error" class="auth-error" hidden>Sign-in could not be completed. Please try again.</p>
+        <a class="button primary" href="/auth/start">Continue</a>
+        <p class="fine-print">Sign in with your OS Account to continue.</p>
+      </div>
     </section>
   </main>
 </body>

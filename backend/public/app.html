@@ -4,28 +4,34 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Agent Feedback Dashboard</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260728-rename">
-  <script src="/static/app.js?v=20260728-rename" defer></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/static/styles.css?v=20260728-rename-20260729-shadcn">
+  <script src="/static/app.js?v=20260728-rename-20260729-shadcn" defer></script>
 </head>
 <body>
   <div class="app-shell">
     <aside class="sidebar">
-      <a class="brand" href="/">AGENT FEEDBACK</a>
+      <a class="brand" href="/">
+        <span class="brand-mark" aria-hidden="true">AF</span>
+        <span class="brand-name">Agent Feedback</span>
+      </a>
       <div id="product-scope" class="product-scope"></div>
       <nav>
-        <p>FEEDBACK</p>
-        <button data-view="feedback"><span>Feedback</span><b data-nav-count="feedback">0</b></button>
-        <button data-view="insights">Insights</button>
-        <p>PRODUCT USE</p>
-        <button data-view="interactions"><span>Interactions</span><b data-nav-count="interactions">0</b></button>
-        <button data-view="sessions"><span>Sessions</span><b data-nav-count="sessions">0</b></button>
-        <p>CONFIGURATION</p>
-        <button data-view="setup" data-editor-only>Setup</button>
-        <button data-view="policy" data-editor-only>Collection policy</button>
-        <button data-view="team">Team</button>
+        <p>Feedback</p>
+        <button data-view="feedback"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span>Feedback</span><b data-nav-count="feedback">0</b></button>
+        <button data-view="insights"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><rect x="7" y="12" width="3" height="6" rx="1"/><rect x="12" y="8" width="3" height="10" rx="1"/><rect x="17" y="5" width="3" height="13" rx="1"/></svg><span>Insights</span></button>
+        <p>Product use</p>
+        <button data-view="interactions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><span>Interactions</span><b data-nav-count="interactions">0</b></button>
+        <button data-view="sessions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg><span>Sessions</span><b data-nav-count="sessions">0</b></button>
+        <p>Configuration</p>
+        <button data-view="setup" data-editor-only><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 2v6"/><path d="M15 2v6"/><path d="M5 8h14v3a7 7 0 0 1-7 7 7 7 0 0 1-7-7z"/><path d="M12 18v4"/></svg><span>Setup</span></button>
+        <button data-view="policy" data-editor-only><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg><span>Collection policy</span></button>
+        <button data-view="team"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg><span>Team</span></button>
       </nav>
       <div id="account" class="account"></div>
-      <button id="signout" class="link-button">Sign out</button>
+      <button id="signout" class="button ghost sm">Sign out</button>
     </aside>
     <main class="content">
       <div id="notice" class="notice" hidden></div>
