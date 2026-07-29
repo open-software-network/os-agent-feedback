@@ -83,17 +83,24 @@ native; **blocking is not**.
 
 | Wayfinder primitive | This tracker |
 |---|---|
-| Map | Issue, label `wayfinder-map` |
+| Map | Issue titled `Wayfinder map: …` + `<!-- wayfinder:map -->` marker |
 | Child ticket | **native** child (`fellow_create_issue_child`) |
-| Ticket type | **native** label (`wayfinder-research` etc.) |
+| Ticket type | body `Type:` line |
 | Claim | **native** assignee |
 | Blocking | **body convention** — no native support |
 
+**Labels do not work for this.** Verified live: `fellow_set_issue_labels` with a
+fresh slug fails `4201 label(s) not found in project`. Label slugs must already
+exist **on an Initiative**, and the MCP only exposes label CRUD for Initiative
+labels (`fellow_*_initiative_label`). Since a Wayfinder map need not belong to
+an Initiative, map and ticket type are carried by title and body instead. If
+this effort later gets an Initiative, revisit — labels would be nicer.
+
 ### The map
 
-One Issue, `type: other`, titled `Wayfinder map: <destination name>`, labelled
-`wayfinder-map`. Find every map with
-`fellow_list_product_issues` + `labels: "wayfinder-map"`.
+One Issue, `type: other`, titled `Wayfinder map: <destination name>`, with
+`<!-- wayfinder:map -->` as the first body line. Find every map with
+`fellow_search_product_issues` + `q: "Wayfinder map:"`.
 
 Its body is the skill's Destination / Notes / Decisions so far / Not yet
 specified / Out of scope structure. The map is a **living index**, so it is the
@@ -108,18 +115,18 @@ The map stays `todo`/`in_progress` until every ticket is closed, then
 
 Create with `fellow_create_issue_child` against the map's number — that sets
 parentage natively, so the tracker UI shows the map's children without any
-convention. `type: other`. Body is just:
+convention. `type: other`. The body opens with the header lines, then the
+question:
 
 ```
+<!-- wayfinder:ticket -->
+Type: research | prototype | grilling | task
+Blocked by: EPD-<n>, EPD-<m>     (omit the line entirely when nothing blocks it)
+
 ## Question
 
 <the decision or investigation this ticket resolves>
 ```
-
-Label each ticket with exactly one of `wayfinder-research`,
-`wayfinder-prototype`, `wayfinder-grilling`, `wayfinder-task` via
-`fellow_set_issue_labels`. Remember it is a **full replacement** — include
-every slug you want the Issue to keep.
 
 Ticket bodies stay append-only; the resolution goes in a comment.
 
@@ -172,10 +179,7 @@ No server-side query covers this. Compute it:
 `fellow_set_issue_status` → `cancelled` (not `completed`, so it never reads as
 a step on the route), then add the line to the map's **Out of scope** section.
 
-### Unverified
+### Live maps
 
-Where issue label slugs are *defined* is not yet confirmed — the MCP exposes
-label CRUD only for Initiative labels (`fellow_*_initiative_label`), while
-`fellow_set_issue_labels` takes bare slugs. If setting a `wayfinder-*` slug
-fails because the label does not exist, create it as an Initiative label first
-and re-test. Resolve this before relying on label-based map discovery.
+- [EPD-1](https://app.opensoftware.co/epode/issues/1) — Read Agent Feedback over
+  MCP with a read-scoped product key.
