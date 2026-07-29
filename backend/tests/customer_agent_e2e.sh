@@ -53,33 +53,41 @@ test_language_adapter "Python ASGI" "$python_url"
 test_language_adapter "Go net/http" "$go_url"
 test_language_adapter "Rust Axum" "$rust_url"
 
-probe_dir="$(mktemp -d)"
-trap 'test -n "$probe_dir" && test "$probe_dir" != "/" && rm -rf "$probe_dir"' EXIT
-mcp_initialize='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"independent-e2e-agent","version":"1.0.0"}}}'
-curl -sS -D "$probe_dir/headers" -o "$probe_dir/initialize" -X POST "$mcp_url" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -d "$mcp_initialize"
-mcp_session="$(awk 'BEGIN{IGNORECASE=1} /^mcp-session-id:/ {gsub("\r", "", $2); print $2}' "$probe_dir/headers")"
-test -n "$mcp_session"
-jq -e '.result.serverInfo.name == "example-company-checkout"' "$probe_dir/initialize" >/dev/null
-
 mcp_call() {
-  request POST "$mcp_url" "$1" -H 'accept: application/json, text/event-stream' -H "mcp-session-id: $mcp_session"
+  local payload method name
+  payload="$(jq -c '.params = (.params // {}) | .params._meta = {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientInfo": {"name":"independent-e2e-agent","version":"2.0.0"},
+    "io.modelcontextprotocol/clientCapabilities": {}
+  }' <<<"$1")"
+  method="$(jq -er '.method' <<<"$payload")"
+  name="$(jq -r '.params.name // empty' <<<"$payload")"
+  if test -n "$name"; then
+    request POST "$mcp_url" "$payload" -H 'accept: application/json, text/event-stream' -H 'mcp-protocol-version: 2026-07-28' -H "mcp-method: $method" -H "mcp-name: $name"
+  else
+    request POST "$mcp_url" "$payload" -H 'accept: application/json, text/event-stream' -H 'mcp-protocol-version: 2026-07-28' -H "mcp-method: $method"
+  fi
 }
+
+discovery="$(mcp_call '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}')"
+test "$(status_of "$discovery")" = "200"
+jq -e '.result.resultType == "complete" and (.result.supportedVersions | index("2026-07-28")) != null and .result._meta["io.modelcontextprotocol/serverInfo"].name == "example-company-checkout"' <<<"$(body_of "$discovery")" >/dev/null
 
 tools="$(mcp_call '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}')"
 test "$(status_of "$tools")" = "200"
-jq -e '[.result.tools[].name] | index("check_status") != null and index("report_product_outcome") != null' <<<"$(body_of "$tools")" >/dev/null
+jq -e '.result.resultType == "complete" and .result.cacheScope == "private" and ([.result.tools[].name] | index("check_status") != null and index("report_product_outcome") != null)' <<<"$(body_of "$tools")" >/dev/null
 
 mcp_product="$(mcp_call '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"check_status","arguments":{"scenario":"live"}}}')"
 test "$(status_of "$mcp_product")" = "200"
 mcp_product_body="$(body_of "$mcp_product")"
 mcp_handle="$(jq -er '.result.structuredContent._agentFeedback.feedbackHandle' <<<"$mcp_product_body")"
 [[ "$mcp_handle" == afr2_* ]]
-jq -e '.result.structuredContent.available == true and (.result.content[-1].text | contains("report_product_outcome"))' <<<"$mcp_product_body" >/dev/null
+jq -e '.result.resultType == "complete" and .result.structuredContent.available == true and (.result.content[-1].text | contains("report_product_outcome"))' <<<"$mcp_product_body" >/dev/null
 mcp_review_payload="$(jq -cn --arg handle "$mcp_handle" '{jsonrpc:"2.0",id:4,method:"tools/call",params:{name:"report_product_outcome",arguments:{feedbackHandle:$handle,outcome:"success",note:"The MCP status tool confirmed checkout availability."}}}')"
 mcp_feedback="$(mcp_call "$mcp_review_payload")"
 test "$(status_of "$mcp_feedback")" = "200"
 jq -e '.result.structuredContent.accepted == true' <<<"$(body_of "$mcp_feedback")" >/dev/null
-echo "PASS MCP: confirmed tool use, proof-based session, autonomous outcome tool"
+echo "PASS MCP: stateless 2026 transport, confirmed tool use, autonomous outcome tool"
 
 mcp_failure="$(mcp_call '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"check_status","arguments":{"scenario":"simulated_failure"}}}')"
 test "$(status_of "$mcp_failure")" = "200"

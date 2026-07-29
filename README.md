@@ -11,7 +11,7 @@ A company instruments selected API, website, or MCP surfaces once. Every SDK cre
 }
 ```
 
-Agent Feedback does not identify agents. HTTP responses are unclassified opportunities until a receipt is used; generic HTTP agents may ignore response-side instructions, while a feedback-aware runtime can submit deterministically. MCP tool calls are confirmed agent interactions and expose feedback as an explicit protocol tool. Sessions exist only when the company or MCP provides proof of continuity.
+Agent Feedback does not identify agents. HTTP responses are unclassified opportunities until a receipt is used; generic HTTP agents may ignore response-side instructions, while a feedback-aware runtime can submit deterministically. MCP `2026-07-28` tool calls are confirmed agent interactions and expose feedback as an explicit protocol tool. The MCP transport is stateless; sessions exist only when the company supplies an explicit application-level continuity handle.
 
 Dashboard data is organized as workspace → product → integration. Users choose a product once; its keys, interactions, reviews, sessions, insights, and collection policy stay scoped to that product.
 
@@ -51,7 +51,7 @@ No handler changes, primary-path network call, relay endpoint, or agent account 
 - `protocol/v1/` — language-neutral schemas, signing algorithm, and conformance vector
 - `examples/node-express/` — hosted JSON API example
 - `examples/node-fastify/` — hosted agent-readable website example
-- `examples/node-mcp/` — hosted stateful MCP example
+- `examples/node-mcp/` — hosted stateless MCP 2026-07-28 example with a 2025 compatibility fallback
 - `examples/python-asgi/` — FastAPI/ASGI product example
 - `examples/go-http/` — standard-library Go product example
 - `examples/rust-axum/` — Rust Axum product example

@@ -38,19 +38,36 @@ await app.register(agentFeedback({
 }));
 ```
 
-## MCP
+## MCP 2026-07-28
 
-Call `instrumentMcp` immediately after constructing the server, before registering business tools:
+The current MCP transport is stateless and creates a fresh server for each HTTP request. Create one process-level Epode runtime so telemetry remains batched, then instrument each server before registering business tools:
 
 ```ts
-import { instrumentMcp } from "@agent-feedback/node/mcp";
+import { createMcpInstrumentation } from "@agent-feedback/node/mcp";
+import { originValidation } from "@modelcontextprotocol/express";
+import { toNodeHandler } from "@modelcontextprotocol/node";
+import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 
-instrumentMcp(server, {
+const feedback = createMcpInstrumentation({
   apiKey: process.env.AGENT_FEEDBACK_KEY!,
 });
+
+const mcp = createMcpHandler(() => {
+  const server = new McpServer({ name: "my-product", version: "1.0.0" });
+  feedback.instrument(server);
+  // Register your product tools after instrumentation.
+  return server;
+}, { legacy: "stateless" });
+
+// [] rejects browser Origin requests; add only trusted browser client hostnames.
+app.use("/mcp", originValidation([]));
+const handleMcp = toNodeHandler(mcp);
+app.all("/mcp", (req, res) => handleMcp(req, res, req.body));
 ```
 
-Business-tool results are decorated automatically and `report_product_outcome` is registered for the customer agent. MCP tool use is a confirmed agent interaction. HTTP traffic remains unclassified until its receipt is used.
+The official handler implements `server/discover`, per-request protocol metadata, `Mcp-Method`/`Mcp-Name` validation, cache hints, and the required `resultType` field. Its legacy fallback keeps 2025-era clients working without transport-session state. Business-tool results are decorated automatically and `report_product_outcome` is registered for the customer agent. MCP tool use is a confirmed agent interaction.
+
+`instrumentMcp(server, options)` remains available for existing long-lived or legacy server objects.
 
 ## Optional feedback-aware HTTP agent adapter
 

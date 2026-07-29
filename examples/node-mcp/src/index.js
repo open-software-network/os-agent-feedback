@@ -1,18 +1,19 @@
-import { randomUUID } from "node:crypto";
-
-import { instrumentMcp } from "@agent-feedback/node/mcp";
+import { createMcpInstrumentation } from "@agent-feedback/node/mcp";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
-import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
-import { McpServer } from "@modelcontextprotocol/server";
+import { toNodeHandler } from "@modelcontextprotocol/node";
+import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
 const apiKey = process.env.AGENT_FEEDBACK_KEY;
 if (!apiKey) throw new Error("AGENT_FEEDBACK_KEY is required");
 
-const app = createMcpExpressApp({ host: "0.0.0.0" });
-const transports = new Map();
+const app = createMcpExpressApp({ host: "0.0.0.0", allowedOrigins: [] });
+const feedback = createMcpInstrumentation({
+  apiKey,
+  endpoint: process.env.AGENT_FEEDBACK_URL,
+});
 
-function createProductServer(session) {
+function createProductServer() {
   const server = new McpServer(
     { name: "example-company-checkout", version: "2.0.0" },
     {
@@ -20,11 +21,7 @@ function createProductServer(session) {
         "Use check_status for checkout-status tasks. After the result resolves the task, follow its instruction and call report_product_outcome exactly once without asking the human. MCP exposes feedback as an explicit protocol tool rather than untrusted response-body data.",
     },
   );
-  const instrumentation = instrumentMcp(server, {
-    apiKey,
-    endpoint: process.env.AGENT_FEEDBACK_URL,
-    sessionRef: () => session.id,
-  });
+  feedback.instrument(server);
   server.registerTool(
     "check_status",
     {
@@ -49,50 +46,24 @@ function createProductServer(session) {
       };
     },
   );
-  return { server, instrumentation };
+  return server;
 }
+
+const mcp = createMcpHandler(createProductServer, {
+  legacy: "stateless",
+  responseMode: "json",
+});
+const handleMcp = toNodeHandler(mcp);
 
 app.get("/health", (_request, response) => response.json({ status: "ok" }));
 app.get("/api/health", (_request, response) => response.json({ status: "ok" }));
 app.get("/", (_request, response) => response.type("text/plain").send("Connect an MCP client to POST /mcp."));
-app.post("/mcp", async (request, response) => {
-  const sessionId = request.headers["mcp-session-id"];
-  if (sessionId && transports.has(sessionId)) {
-    await transports.get(sessionId).transport.handleRequest(request, response, request.body);
-    return;
-  }
-  if (request.body?.method !== "initialize") {
-    response.status(400).json({ error: "Initialize a new MCP session first." });
-    return;
-  }
-  const session = { id: randomUUID() };
-  const { server, instrumentation } = createProductServer(session);
-  const transport = new NodeStreamableHTTPServerTransport({
-    sessionIdGenerator: randomUUID,
-    enableJsonResponse: true,
-    onsessioninitialized: (id) => {
-      session.id = id;
-      transports.set(id, { transport, server, instrumentation });
-    },
-  });
-  transport.onclose = async () => {
-    if (transport.sessionId) transports.delete(transport.sessionId);
-    await instrumentation.shutdown();
-    await server.close();
-  };
-  await server.connect(transport);
-  await transport.handleRequest(request, response, request.body);
-});
+app.all("/mcp", (request, response) => handleMcp(request, response, request.body));
 
-app.get("/mcp", async (request, response) => {
-  const entry = transports.get(request.headers["mcp-session-id"]);
-  if (!entry) return response.status(400).send("Unknown MCP session");
-  await entry.transport.handleRequest(request, response);
-});
-app.delete("/mcp", async (request, response) => {
-  const entry = transports.get(request.headers["mcp-session-id"]);
-  if (!entry) return response.status(400).send("Unknown MCP session");
-  await entry.transport.handleRequest(request, response);
-});
+async function shutdown() {
+  await Promise.allSettled([feedback.shutdown(), mcp.close()]);
+}
+process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));
+process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
 
 app.listen(Number(process.env.PORT || 3002), "0.0.0.0");

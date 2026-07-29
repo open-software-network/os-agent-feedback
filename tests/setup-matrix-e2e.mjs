@@ -161,41 +161,136 @@ async function testHttp(base, stack) {
   }
 }
 
-async function mcpPost(url, body, sessionId) {
+const MCP_PROTOCOL_VERSION = "2026-07-28";
+const MCP_CLIENT_INFO = { name: "epode-setup-matrix-agent", version: "2.0.0" };
+
+function modernMcpRequest(id, method, params = {}) {
+  return {
+    jsonrpc: "2.0",
+    id,
+    method,
+    params: {
+      ...params,
+      _meta: {
+        "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+        "io.modelcontextprotocol/clientInfo": MCP_CLIENT_INFO,
+        "io.modelcontextprotocol/clientCapabilities": {},
+      },
+    },
+  };
+}
+
+async function readMcpPayload(response) {
+  const text = await response.text();
+  if ((response.headers.get("content-type") || "").includes("text/event-stream")) {
+    const data = text
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trim())
+      .filter(Boolean)
+      .at(-1);
+    assert.ok(data, `MCP SSE response had no data event: ${text}`);
+    return JSON.parse(data);
+  }
+  return JSON.parse(text);
+}
+
+async function mcpPost(url, body, { expectedStatus = 200, headerOverrides = {} } = {}) {
+  const name = ["tools/call", "resources/read", "prompts/get"].includes(body.method)
+    ? body.params?.name || body.params?.uri
+    : undefined;
   const response = await fetch(url, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
-      ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+      "mcp-protocol-version": MCP_PROTOCOL_VERSION,
+      "mcp-method": body.method,
+      ...(name ? { "mcp-name": name } : {}),
+      ...headerOverrides,
     },
     body: JSON.stringify(body),
   });
-  const payload = await response.json();
-  assert.equal(response.status, 200, JSON.stringify(payload));
-  return { payload, sessionId: response.headers.get("mcp-session-id") || sessionId };
+  const payload = await readMcpPayload(response);
+  assert.equal(response.status, expectedStatus, JSON.stringify(payload));
+  assert.equal(response.headers.get("mcp-session-id"), null, "modern MCP must not mint transport sessions");
+  return payload;
 }
 
 async function testMcp(url, stack) {
-  let call = await mcpPost(url, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "epode-setup-matrix-agent", version: "1.0.0" } } });
-  const sessionId = call.sessionId;
-  assert.ok(sessionId);
-  call = await mcpPost(url, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, sessionId);
-  const names = call.payload.result.tools.map((tool) => tool.name);
+  let payload = await mcpPost(url, modernMcpRequest(1, "server/discover"));
+  assert.equal(payload.result.resultType, "complete");
+  assert.ok(payload.result.supportedVersions.includes(MCP_PROTOCOL_VERSION));
+  assert.equal(payload.result._meta["io.modelcontextprotocol/serverInfo"].name, stack === "node-mcp" ? "setup-matrix-node-mcp" : "setup-matrix-manual-mcp");
+  assert.ok(["public", "private"].includes(payload.result.cacheScope));
+  assert.ok(Number.isSafeInteger(payload.result.ttlMs));
+
+  const rejectedOrigin = await mcpPost(url, modernMcpRequest(100, "server/discover"), {
+    expectedStatus: 403,
+    headerOverrides: { origin: "https://untrusted-agent.example" },
+  });
+  assert.ok(rejectedOrigin.error, JSON.stringify(rejectedOrigin));
+
+  const unsupportedRequest = modernMcpRequest(101, "server/discover");
+  unsupportedRequest.params._meta["io.modelcontextprotocol/protocolVersion"] = "1900-01-01";
+  const unsupported = await mcpPost(url, unsupportedRequest, {
+    expectedStatus: 400,
+    headerOverrides: { "mcp-protocol-version": "1900-01-01" },
+  });
+  assert.equal(unsupported.error.code, -32022);
+  assert.ok(unsupported.error.data.supported.includes(MCP_PROTOCOL_VERSION));
+
+  payload = await mcpPost(url, modernMcpRequest(2, "tools/list"));
+  assert.equal(payload.result.resultType, "complete");
+  assert.equal(payload.result.cacheScope, "private");
+  assert.ok(Number.isSafeInteger(payload.result.ttlMs));
+  const names = payload.result.tools.map((tool) => tool.name);
   assert.ok(names.includes("search"));
   assert.ok(names.includes("report_product_outcome"));
-  call = await mcpPost(url, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "search", arguments: { query: "setup" } } }, sessionId);
-  const feedback = call.payload.result.structuredContent._agentFeedback;
+
+  const mismatch = await mcpPost(
+    url,
+    modernMcpRequest(3, "tools/call", { name: "search", arguments: { query: "setup" } }),
+    { expectedStatus: 400, headerOverrides: { "mcp-name": "wrong-tool" } },
+  );
+  assert.equal(mismatch.error.code, -32020);
+
+  payload = await mcpPost(url, modernMcpRequest(4, "tools/call", { name: "search", arguments: { query: "setup" } }));
+  assert.equal(payload.result.resultType, "complete");
+  const feedback = payload.result.structuredContent._agentFeedback;
   assert.equal(feedback.reliability, "protocol_tool");
   assert.equal(feedback.reportTool, "report_product_outcome");
   assert.match(feedback.feedbackHandle, /^afr2_/);
   assert.match(feedback.instruction, /autonomously/i);
   const note = `Epode ${stack} MCP setup returned the expected result.`;
-  call = await mcpPost(url, { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "report_product_outcome", arguments: { feedbackHandle: feedback.feedbackHandle, outcome: "success", note } } }, sessionId);
-  assert.equal(call.payload.result.structuredContent.accepted, true, JSON.stringify(call.payload.result));
-  assert.equal(call.payload.result.structuredContent.review.note, note);
-  expected.set(note, { surface: "mcp", operation: "search", confirmationMethod: "mcp", interactionId: call.payload.result.structuredContent.interactionId });
-  console.log(`PASS ${stack}/mcp: tool registration, confirmed interaction, autonomous review`);
+  payload = await mcpPost(url, modernMcpRequest(5, "tools/call", {
+    name: "report_product_outcome",
+    arguments: { feedbackHandle: feedback.feedbackHandle, outcome: "success", note },
+  }));
+  assert.equal(payload.result.resultType, "complete");
+  assert.equal(payload.result.structuredContent.accepted, true, JSON.stringify(payload.result));
+  assert.equal(payload.result.structuredContent.review.note, note);
+  expected.set(note, { surface: "mcp", operation: "search", confirmationMethod: "mcp", interactionId: payload.result.structuredContent.interactionId });
+
+  const legacyResponse = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 102,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-11-25",
+        capabilities: {},
+        clientInfo: { name: "epode-legacy-probe", version: "1.0.0" },
+      },
+    }),
+  });
+  const legacy = await readMcpPayload(legacyResponse);
+  assert.equal(legacyResponse.status, 200, JSON.stringify(legacy));
+  assert.equal(legacy.result.protocolVersion, "2025-11-25");
+  assert.equal(legacyResponse.headers.get("mcp-session-id"), null);
+  console.log(`PASS ${stack}/mcp: 2026 discovery, stateless headers, cache hints, confirmed interaction, autonomous review`);
 }
 
 async function prepareNode(fixtureName) {

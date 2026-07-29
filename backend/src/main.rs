@@ -15,6 +15,7 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
     routing::{delete, get, patch, post},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -43,6 +44,7 @@ struct AppState {
     secure_cookies: bool,
     accounts: OsAccountsClient,
     v1_writes_enabled: bool,
+    mcp_allowed_origins: Vec<String>,
 }
 
 const TEAM_INVITE_COOKIE: &str = "af_team_invite";
@@ -77,12 +79,23 @@ async fn main() -> anyhow::Result<()> {
     let public_base_url =
         env::var("PUBLIC_BASE_URL").unwrap_or_else(|_| format!("http://localhost:{port}"));
     let accounts = OsAccountsClient::from_env(&public_base_url)?;
+    let mcp_allowed_origins = env::var("MCP_ALLOWED_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .chain(std::iter::once(
+            public_base_url.trim_end_matches('/').to_owned(),
+        ))
+        .collect();
     let state = Arc::new(AppState {
         secure_cookies: public_base_url.starts_with("https://"),
         public_base_url,
         pool,
         accounts,
         v1_writes_enabled: env::var("V1_WRITES_ENABLED").as_deref() == Ok("true"),
+        mcp_allowed_origins,
     });
 
     let cors = CorsLayer::new()
@@ -99,6 +112,9 @@ async fn main() -> anyhow::Result<()> {
             header::CONTENT_TYPE,
             header::HeaderName::from_static("x-api-key"),
             header::HeaderName::from_static("x-workspace-id"),
+            header::HeaderName::from_static("mcp-protocol-version"),
+            header::HeaderName::from_static("mcp-method"),
+            header::HeaderName::from_static("mcp-name"),
         ]);
 
     let app = Router::new()
@@ -292,6 +308,14 @@ async fn feedback_discovery_v2(State(state): State<Arc<AppState>>) -> Json<Value
         "classification": {
             "http": "unclassified until an outcome is submitted",
             "mcp": "confirmed immediately by protocol tool use"
+        },
+        "mcp": {
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "transport": "stateless Streamable HTTP",
+            "discoveryMethod": "server/discover",
+            "requiredHeaders": ["MCP-Protocol-Version", "Mcp-Method", "Mcp-Name for named requests"],
+            "transportSessions": false,
+            "legacyCompatibility": ["2025-11-25", "2025-03-26"]
         },
         "integrations": {
             "node": format!("{}/static/agent-feedback-node-0.1.0.tgz", state.public_base_url),
@@ -884,14 +908,32 @@ async fn customer_agent_feedback_handler(
 async fn mcp_info(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({
         "name": "Agent Feedback",
-        "transport": "MCP Streamable HTTP / JSON-RPC",
+        "transport": "MCP 2026-07-28 stateless Streamable HTTP / JSON-RPC",
         "endpoint": format!("{}/mcp", state.public_base_url),
         "authentication": "Authorization: Bearer af_live_...",
         "privacy": "Metadata-only. Prompts, transcripts, secrets, personal data, and customer payloads are rejected."
     }))
 }
 
-fn mcp_tool_result(payload: Value, is_error: bool) -> Value {
+const MCP_PROTOCOL_VERSION: &str = "2026-07-28";
+const MCP_PROTOCOL_META: &str = "io.modelcontextprotocol/protocolVersion";
+const MCP_CAPABILITIES_META: &str = "io.modelcontextprotocol/clientCapabilities";
+const MCP_SERVER_INFO_META: &str = "io.modelcontextprotocol/serverInfo";
+const MCP_INSTRUCTIONS: &str = "Start an explicit product workflow before the task. Record metadata-only events. Always call agent_complete_session before finishing and include concise outcome feedback. Never send prompts, transcripts, secrets, personal data, customer data, or raw tool payloads.";
+
+fn mcp_server_info() -> Value {
+    json!({ "name": "agent-feedback", "version": "2.0.0" })
+}
+
+fn mcp_complete_result(mut value: Value, modern: bool) -> Value {
+    if modern {
+        value["resultType"] = json!("complete");
+        value["_meta"] = json!({ (MCP_SERVER_INFO_META): mcp_server_info() });
+    }
+    value
+}
+
+fn mcp_tool_result(payload: Value, is_error: bool, modern: bool) -> Value {
     let mut value = json!({
         "content": [{ "type": "text", "text": serde_json::to_string_pretty(&payload).unwrap_or_default() }],
         "structuredContent": payload,
@@ -899,7 +941,7 @@ fn mcp_tool_result(payload: Value, is_error: bool) -> Value {
     if is_error {
         value["isError"] = json!(true);
     }
-    value
+    mcp_complete_result(value, modern)
 }
 
 fn mcp_ok(id: Value, result: Value) -> Json<Value> {
@@ -911,24 +953,186 @@ fn mcp_error(id: Value, code: i32, message: impl Into<String>) -> Json<Value> {
     )
 }
 
+fn mcp_error_response(
+    id: Value,
+    status: StatusCode,
+    code: i32,
+    message: impl Into<String>,
+    data: Option<Value>,
+) -> Response {
+    let mut error = json!({ "code": code, "message": message.into() });
+    if let Some(data) = data {
+        error["data"] = data;
+    }
+    (
+        status,
+        Json(json!({ "jsonrpc": "2.0", "id": id, "error": error })),
+    )
+        .into_response()
+}
+
+fn decode_mcp_header(value: &str) -> Option<String> {
+    if let Some(encoded) = value
+        .strip_prefix("=?base64?")
+        .and_then(|value| value.strip_suffix("?="))
+    {
+        let bytes = STANDARD.decode(encoded).ok()?;
+        String::from_utf8(bytes).ok()
+    } else {
+        Some(value.to_owned())
+    }
+}
+
+fn validate_modern_mcp_request(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: &Value,
+) -> Option<Response> {
+    let id = body.get("id").cloned().unwrap_or(Value::Null);
+    if let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        && !state
+            .mcp_allowed_origins
+            .iter()
+            .any(|allowed| allowed == origin)
+    {
+        return Some(mcp_error_response(
+            id,
+            StatusCode::FORBIDDEN,
+            -32000,
+            "Origin is not allowed",
+            None,
+        ));
+    }
+    let method = body
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let params = body.get("params").filter(|value| value.is_object());
+    let meta = params.and_then(|value| value.get("_meta"));
+    let body_version = meta
+        .and_then(|value| value.get(MCP_PROTOCOL_META))
+        .and_then(Value::as_str);
+    let header_version = headers
+        .get("mcp-protocol-version")
+        .and_then(|value| value.to_str().ok());
+    if body_version.is_none() || header_version != body_version {
+        return Some(mcp_error_response(
+            id,
+            StatusCode::BAD_REQUEST,
+            -32020,
+            "Required MCP protocol version metadata is missing or mismatched",
+            None,
+        ));
+    }
+    if body_version != Some(MCP_PROTOCOL_VERSION) {
+        return Some(mcp_error_response(
+            id,
+            StatusCode::BAD_REQUEST,
+            -32022,
+            "Unsupported protocol version",
+            Some(json!({
+                "supported": [MCP_PROTOCOL_VERSION, "2025-11-25", "2025-03-26"],
+                "requested": body_version
+            })),
+        ));
+    }
+    if !meta
+        .and_then(|value| value.get(MCP_CAPABILITIES_META))
+        .is_some_and(Value::is_object)
+    {
+        return Some(mcp_error_response(
+            id,
+            StatusCode::BAD_REQUEST,
+            -32602,
+            "Client capabilities are required in request _meta",
+            None,
+        ));
+    }
+    let header_method = headers
+        .get("mcp-method")
+        .and_then(|value| value.to_str().ok());
+    if method.is_empty() || header_method != Some(method) {
+        return Some(mcp_error_response(
+            id,
+            StatusCode::BAD_REQUEST,
+            -32020,
+            "Required Mcp-Method header is missing or mismatched",
+            None,
+        ));
+    }
+    if method == "tools/call" {
+        let body_name = params
+            .and_then(|value| value.get("name"))
+            .and_then(Value::as_str);
+        let header_name = headers
+            .get("mcp-name")
+            .and_then(|value| value.to_str().ok())
+            .and_then(decode_mcp_header);
+        if header_name.as_deref() != body_name {
+            return Some(mcp_error_response(
+                id,
+                StatusCode::BAD_REQUEST,
+                -32020,
+                "Required Mcp-Name header is missing, malformed, or mismatched",
+                None,
+            ));
+        }
+    }
+    None
+}
+
 async fn mcp_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
     let id = body.get("id").cloned().unwrap_or(Value::Null);
+    let modern = headers.contains_key("mcp-protocol-version")
+        || body
+            .get("params")
+            .and_then(|value| value.get("_meta"))
+            .and_then(|value| value.get(MCP_PROTOCOL_META))
+            .is_some();
+    if modern && let Some(response) = validate_modern_mcp_request(&state, &headers, &body) {
+        return response;
+    }
     match body.get("method").and_then(Value::as_str) {
-        Some("initialize") => mcp_ok(
+        Some("initialize") if !modern => mcp_ok(
             id,
             json!({
-                "protocolVersion": "2025-03-26",
+                "protocolVersion": "2025-11-25",
                 "capabilities": { "tools": { "listChanged": false } },
-                "serverInfo": { "name": "agent-feedback", "version": "1.0.0" },
-                "instructions": "Start a session before the task. Record metadata-only events. Always call agent_complete_session before finishing and include concise outcome feedback. Never send prompts, transcripts, secrets, personal data, customer data, or raw tool payloads."
+                "serverInfo": mcp_server_info(),
+                "instructions": MCP_INSTRUCTIONS
             }),
-        ).into_response(),
-        Some("tools/list") => mcp_ok(id, json!({ "tools": mcp_tools() })).into_response(),
-        Some("notifications/initialized") => StatusCode::ACCEPTED.into_response(),
+        )
+        .into_response(),
+        Some("server/discover") if modern => mcp_ok(
+            id,
+            json!({
+                "resultType": "complete",
+                "supportedVersions": [MCP_PROTOCOL_VERSION],
+                "capabilities": { "tools": { "listChanged": false } },
+                "_meta": { (MCP_SERVER_INFO_META): mcp_server_info() },
+                "instructions": MCP_INSTRUCTIONS,
+                "ttlMs": 3_600_000,
+                "cacheScope": "private"
+            }),
+        )
+        .into_response(),
+        Some("tools/list") => {
+            let mut result = json!({ "tools": mcp_tools() });
+            if modern {
+                result["resultType"] = json!("complete");
+                result["_meta"] = json!({ (MCP_SERVER_INFO_META): mcp_server_info() });
+                result["ttlMs"] = json!(300_000);
+                result["cacheScope"] = json!("private");
+            }
+            mcp_ok(id, result).into_response()
+        }
+        Some("notifications/initialized") if !modern => StatusCode::ACCEPTED.into_response(),
         Some("tools/call") => {
             if !state.v1_writes_enabled {
                 return v1_maintenance_response();
@@ -936,7 +1140,11 @@ async fn mcp_handler(
             let workspace = match agent_workspace(&state.pool, &headers).await {
                 Ok(workspace) => workspace,
                 Err(error) => {
-                    return mcp_ok(id, mcp_tool_result(json!({ "error": error.message }), true)).into_response();
+                    return mcp_ok(
+                        id,
+                        mcp_tool_result(json!({ "error": error.message }), true, modern),
+                    )
+                    .into_response();
                 }
             };
             let name = body
@@ -948,7 +1156,11 @@ async fn mcp_handler(
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             if let Err(message) = reject_sensitive_fields(&arguments) {
-                return mcp_ok(id, mcp_tool_result(json!({ "error": message }), true)).into_response();
+                return mcp_ok(
+                    id,
+                    mcp_tool_result(json!({ "error": message }), true, modern),
+                )
+                .into_response();
             }
             let result = match name {
                 "agent_start_session" => match serde_json::from_value::<StartSessionInput>(arguments) {
@@ -975,24 +1187,18 @@ async fn mcp_handler(
                 _ => Err(ApiError::not_found("Unknown MCP tool")),
             };
             match result {
-                Ok(payload) => mcp_ok(id, mcp_tool_result(payload, false)).into_response(),
-                Err(error) => mcp_ok(id, mcp_tool_result(json!({ "error": error.message }), true)).into_response(),
+                Ok(payload) => mcp_ok(id, mcp_tool_result(payload, false, modern)).into_response(),
+                Err(error) => mcp_ok(
+                    id,
+                    mcp_tool_result(json!({ "error": error.message }), true, modern),
+                )
+                .into_response(),
             }
         }
+        _ if modern => {
+            mcp_error_response(id, StatusCode::NOT_FOUND, -32601, "Unknown method", None)
+        }
         _ => mcp_error(id, -32601, "Unknown method").into_response(),
-    }
-}
-
-#[cfg(test)]
-mod page_tests {
-    use super::reveal_auth_error;
-
-    #[test]
-    fn failed_authentication_message_is_revealed() {
-        let html = r#"<p id="auth-error" class="auth-error" hidden>Try again</p>"#;
-        let revealed = reveal_auth_error(html.into());
-        assert!(revealed.contains(r#"id="auth-error" class="auth-error">Try again"#));
-        assert!(!revealed.contains("auth-error\" hidden"));
     }
 }
 
@@ -1035,4 +1241,17 @@ fn mcp_tools() -> Value {
             }, "required": ["sessionId", "worked", "summary"] }
         }
     ])
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::reveal_auth_error;
+
+    #[test]
+    fn failed_authentication_message_is_revealed() {
+        let html = r#"<p id="auth-error" class="auth-error" hidden>Try again</p>"#;
+        let revealed = reveal_auth_error(html.into());
+        assert!(revealed.contains(r#"id="auth-error" class="auth-error">Try again"#));
+        assert!(!revealed.contains("auth-error\" hidden"));
+    }
 }

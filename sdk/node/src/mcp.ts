@@ -21,16 +21,18 @@ export interface McpInstrumentationOptions
   runtimeHint?: (arguments_: unknown, context: McpContext) => string | undefined | null;
 }
 
-export function instrumentMcp(
-  server: { registerTool: (...arguments_: unknown[]) => unknown },
+type McpServer = { registerTool: (...arguments_: unknown[]) => unknown };
+
+export interface McpInstrumentation {
+  instrument(server: McpServer): void;
+  shutdown(): Promise<void>;
+}
+
+function instrumentServer(
+  server: McpServer,
+  runtime: AgentFeedbackRuntime<McpContext>,
   options: McpInstrumentationOptions,
-): { shutdown(): Promise<void> } {
-  const runtime = new AgentFeedbackRuntime<McpContext>({
-    ...options,
-    customerRef: undefined,
-    sessionRef: undefined,
-    runtimeHint: undefined,
-  });
+): void {
   const originalRegister = server.registerTool.bind(server);
 
   server.registerTool = ((
@@ -61,9 +63,9 @@ export function instrumentMcp(
             return undefined;
           }
         };
-        const sessionRef =
-          contextValue(options.sessionRef) ||
-          (typeof context.sessionId === "string" ? context.sessionId : undefined);
+        // MCP transport sessions are not product-session proof. Only an
+        // explicit application-level extractor may group interactions.
+        const sessionRef = contextValue(options.sessionRef);
         const customerRef = contextValue(options.customerRef);
         const runtimeHint = contextValue(options.runtimeHint);
         runtime.record(prepared, {
@@ -169,5 +171,40 @@ export function instrumentMcp(
     },
   );
 
-  return { shutdown: () => runtime.shutdown() };
+}
+
+/**
+ * Creates one process-level MCP instrumentation runtime. Use this with the
+ * stateless 2026-07-28 MCP server factory so telemetry can still be batched
+ * across otherwise independent requests.
+ */
+export function createMcpInstrumentation(
+  options: McpInstrumentationOptions,
+): McpInstrumentation {
+  const runtime = new AgentFeedbackRuntime<McpContext>({
+    ...options,
+    customerRef: undefined,
+    sessionRef: undefined,
+    runtimeHint: undefined,
+  });
+  return {
+    instrument(server) {
+      instrumentServer(server, runtime, options);
+    },
+    shutdown: () => runtime.shutdown(),
+  };
+}
+
+/**
+ * Convenience API for a long-lived or legacy MCP server instance. New
+ * stateless servers should use createMcpInstrumentation() once and call
+ * feedback.instrument(server) inside their per-request server factory.
+ */
+export function instrumentMcp(
+  server: McpServer,
+  options: McpInstrumentationOptions,
+): { shutdown(): Promise<void> } {
+  const instrumentation = createMcpInstrumentation(options);
+  instrumentation.instrument(server);
+  return { shutdown: () => instrumentation.shutdown() };
 }

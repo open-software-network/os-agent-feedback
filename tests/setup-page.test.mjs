@@ -67,7 +67,7 @@ test("failed authentication clears stale sessions and presents a retry state", (
 
 test("products exist before integration setup without an environment picker", () => {
   assert.match(dashboardHtml, /id="product-scope"/);
-  assert.match(dashboardHtml, /app\.js\?v=20260728-bugfixes/);
+  assert.match(dashboardHtml, /app\.js\?v=20260728-mcp-2026/);
   assert.match(dashboardScript, /Create your first product/);
   assert.match(dashboardScript, /id="product-select"/);
   assert.match(dashboardScript, /\+ New product/);
@@ -148,6 +148,12 @@ test("setup communicates the HTTP and MCP evidence models separately", () => {
   assert.match(dashboardScript, /confirmed agent interaction/);
   assert.match(dashboardScript, /becomes confirmed when its receipt returns/);
   assert.match(dashboardScript, /product response never waits for Agent Feedback/i);
+  assert.match(dashboardScript, /MCP 2026-07-28 is stateless/);
+  assert.match(dashboardScript, /createMcpInstrumentation/);
+  assert.match(dashboardScript, /createMcpHandler/);
+  assert.match(dashboardScript, /server\/discover/);
+  assert.match(dashboardScript, /Mcp-Method/);
+  assert.match(dashboardScript, /Mcp-Name/);
 });
 
 test("every enabled setup choice has a fresh executable E2E example", async () => {

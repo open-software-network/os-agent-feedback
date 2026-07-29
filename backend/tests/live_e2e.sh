@@ -6,14 +6,26 @@ api_key="${API_KEY:?Set API_KEY to a disposable af_live_ key created through the
 
 mcp() {
   local payload="$1"
-  curl -fsS -H 'content-type: application/json' -H "authorization: Bearer $api_key" -d "$payload" "$base_url/mcp"
+  local modern method name
+  modern="$(jq -c '.params = (.params // {}) | .params._meta = {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientInfo": {"name":"live-e2e","version":"2.0.0"},
+    "io.modelcontextprotocol/clientCapabilities": {}
+  }' <<<"$payload")"
+  method="$(jq -er '.method' <<<"$modern")"
+  name="$(jq -r '.params.name // empty' <<<"$modern")"
+  if test -n "$name"; then
+    curl -fsS -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H 'mcp-protocol-version: 2026-07-28' -H "mcp-method: $method" -H "mcp-name: $name" -H "authorization: Bearer $api_key" -d "$modern" "$base_url/mcp"
+  else
+    curl -fsS -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H 'mcp-protocol-version: 2026-07-28' -H "mcp-method: $method" -H "authorization: Bearer $api_key" -d "$modern" "$base_url/mcp"
+  fi
 }
 
-initialize="$(mcp '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"live-e2e","version":"1.0.0"}}}')"
-jq -e '.result.serverInfo.name == "agent-feedback"' <<<"$initialize" >/dev/null
+discovery="$(mcp '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}')"
+jq -e '.result.resultType == "complete" and (.result.supportedVersions | index("2026-07-28")) != null and .result._meta["io.modelcontextprotocol/serverInfo"].name == "agent-feedback"' <<<"$discovery" >/dev/null
 
 tools="$(mcp '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}')"
-jq -e '[.result.tools[].name] == ["agent_start_session","agent_record_event","agent_complete_session"]' <<<"$tools" >/dev/null
+jq -e '.result.resultType == "complete" and .result.cacheScope == "private" and [.result.tools[].name] == ["agent_start_session","agent_record_event","agent_complete_session"]' <<<"$tools" >/dev/null
 
 start_payload="$(jq -n '{jsonrpc:"2.0",id:3,method:"tools/call",params:{name:"agent_start_session",arguments:{task:"Test MCP session and autonomous feedback",agentName:"rust-live-e2e",externalId:("mcp-" + (now|tostring))}}}')"
 started="$(mcp "$start_payload")"

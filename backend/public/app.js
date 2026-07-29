@@ -447,7 +447,7 @@ const setupSurfaceCopy = {
   mcp: {
     name: "MCP server",
     summary: "Reliable, protocol-backed feedback",
-    detail: "We register an explicit feedback tool. A tool call is a confirmed agent interaction.",
+    detail: "MCP 2026-07-28 is stateless. We register an explicit feedback tool, and each product tool call is a confirmed agent interaction.",
   },
   api: {
     name: "HTTP API",
@@ -500,15 +500,15 @@ function setupInstructions() {
   const instructions = {
     "node-mcp": {
       name: "Node MCP",
-      install: nodeInstall,
-      code: `import { instrumentMcp } from "@agent-feedback/node/mcp";\n\ninstrumentMcp(server, {\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n});`,
-      verify: "Call one of your MCP server's normal tools from an agent client.",
+      install: `${nodeInstall}\nnpm install @modelcontextprotocol/server @modelcontextprotocol/node @modelcontextprotocol/express`,
+      code: `import { createMcpInstrumentation } from "@agent-feedback/node/mcp";\nimport { originValidation } from "@modelcontextprotocol/express";\nimport { toNodeHandler } from "@modelcontextprotocol/node";\nimport { createMcpHandler, McpServer } from "@modelcontextprotocol/server";\n\nconst feedback = createMcpInstrumentation({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n});\n\nconst mcp = createMcpHandler(() => {\n  const server = new McpServer({ name: "your-product", version: "1.0.0" });\n  feedback.instrument(server);\n  // Register your product tools after this line.\n  return server;\n}, { legacy: "stateless" });\n\n// [] rejects browser Origin requests; add only trusted browser client hostnames.\napp.use("/mcp", originValidation([]));\nconst handleMcp = toNodeHandler(mcp);\napp.all("/mcp", (req, res) => handleMcp(req, res, req.body));`,
+      verify: "Call server/discover, then call one normal product tool from an MCP 2026-07-28 client.",
     },
     "manual-mcp": {
       name: "Language-neutral MCP protocol",
       install: `curl -O ${artifacts}/agent-feedback-protocol-v1.zip`,
-      code: `1. Emit confirmed telemetry for each business tool call.\n2. Add _agentFeedback to the business tool result.\n3. Register report_product_outcome.\n4. Submit only outcome + note with the scoped capability.`,
-      verify: "Call a normal tool and confirm the registered outcome tool is visible to the agent.",
+      code: `1. Implement stateless MCP 2026-07-28 and server/discover.\n2. Validate MCP-Protocol-Version, Mcp-Method, and Mcp-Name.\n3. Emit confirmed telemetry and add _agentFeedback to product-tool results.\n4. Register report_product_outcome and submit only outcome + note.`,
+      verify: "Verify discovery, stateless headers, cache hints, a product tool call, and one outcome-tool review.",
     },
     "node-express": {
       name: "Node · Express",

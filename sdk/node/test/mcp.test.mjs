@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { instrumentMcp } from "../dist/mcp.js";
+import { createMcpInstrumentation, instrumentMcp } from "../dist/mcp.js";
 
 const key = `af_live_2123456789abcdef0123456789abcdef_${"z".repeat(32)}`;
 
@@ -56,4 +56,41 @@ test("MCP instrumentation decorates business tools and registers outcome reporti
   assert.equal(telemetry[0].events[0].classification, "confirmed");
   assert.equal(telemetry[0].events[0].confirmationMethod, "mcp");
   assert.equal(telemetry[0].events[0].sessionSource, "mcp");
+});
+
+test("stateless MCP factories share one process-level telemetry queue", async () => {
+  const telemetry = [];
+  const feedback = createMcpInstrumentation({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    flushIntervalMs: 60_000,
+    fetch: async (_url, init) => {
+      telemetry.push(JSON.parse(init.body));
+      return new Response("{}", { status: 202 });
+    },
+  });
+
+  for (const suffix of ["one", "two"]) {
+    const tools = new Map();
+    const server = {
+      registerTool(name, configuration, handler) {
+        tools.set(name, { configuration, handler });
+        return { remove() {} };
+      },
+    };
+    feedback.instrument(server);
+    server.registerTool(`search_${suffix}`, {}, async () => ({
+      content: [{ type: "text", text: suffix }],
+      structuredContent: { answer: suffix },
+    }));
+    await tools.get(`search_${suffix}`).handler({}, {});
+  }
+
+  await feedback.shutdown();
+  assert.equal(telemetry.length, 1);
+  assert.equal(telemetry[0].events.length, 2);
+  assert.deepEqual(
+    telemetry[0].events.map((event) => event.operation),
+    ["search_one", "search_two"],
+  );
 });

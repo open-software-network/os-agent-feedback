@@ -95,6 +95,22 @@ Content-Type: application/json
 
 Only `outcome` and `note` are allowed. Unknown fields, prompts, transcripts, credentials, personal data, and raw tool or product data are rejected. Duplicate submissions return the first accepted review.
 
+## MCP 2026-07-28 binding
+
+MCP servers implement the Epode outcome contract on top of the current stateless MCP transport:
+
+- Every request is a separate `POST`; do not create or return `Mcp-Session-Id`.
+- Validate every present HTTP `Origin` against an explicit allowlist.
+- Implement `server/discover` and advertise `2026-07-28` plus the `tools` capability.
+- Require matching `MCP-Protocol-Version`, `Mcp-Method`, and, for `tools/call`, `Mcp-Name` headers.
+- Require `io.modelcontextprotocol/protocolVersion` and `io.modelcontextprotocol/clientCapabilities` in each request's `params._meta`.
+- Return `resultType: "complete"` on completed results and server identity in `_meta.io.modelcontextprotocol/serverInfo`.
+- Return deterministic `tools/list` results with `ttlMs` and `cacheScope`.
+- Register `report_product_outcome`, decorate product-tool results with `_agentFeedback`, and emit confirmed MCP telemetry for the product tool call.
+- Use an explicit product-supplied handle when application-level continuity is required. Never use a transport session as agent identity or product-session proof.
+
+Dual-era servers may continue accepting the 2025 `initialize` handshake as a compatibility fallback, but modern requests must stay stateless and must not depend on that fallback.
+
 ## Conformance requirements
 
 An adapter is conformant when it:
@@ -104,5 +120,6 @@ An adapter is conformant when it:
 - leaves excluded and unsafe responses untouched;
 - never blocks or fails a product response when telemetry is unavailable;
 - emits the normalized operation and correct initial classification;
+- passes the MCP 2026 discovery, header-consistency, statelessness, cache-hint, and result-shape checks when it exposes MCP;
 - rejects untrusted outcome destinations in agent-side helpers;
 - passes its language-specific tests plus the hosted backend acceptance suite.
