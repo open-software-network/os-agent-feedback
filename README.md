@@ -73,6 +73,7 @@ Legacy Rust examples and prototype data remain for migration evidence but are no
 - Ask-mode HTTP lab: https://epode-ask-http-production.up.railway.app
 - Ask-mode MCP lab: https://epode-ask-mcp-production.up.railway.app/mcp
 - Ask-mode effectiveness report: `.reviews/ask-mode-effectiveness-2026-07-29.md`
+- Ask-for-permission behavior report: `.reviews/ask-mode-consent-2026-07-29.md`
 
 The Fastify example and public Sites URL are assigned during the v2 rollout.
 
