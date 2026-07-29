@@ -116,4 +116,4 @@ The adapter requires an allow-listed HTTPS destination and submits only `outcome
 npx agent-feedback-doctor https://your-product.example/search?q=test
 ```
 
-In Auto mode, the doctor verifies response injection and submits a real synthetic review with the scoped receipt. In either consent mode, it validates the consent contract but does not submit a review because a diagnostic cannot impersonate user approval. Set `AGENT_FEEDBACK_ENABLED=false` as an emergency kill switch.
+In Never ask (`auto`) mode, the doctor verifies response injection and submits a real synthetic review with the scoped receipt. In either consent mode, it validates the consent contract but does not submit a review because a diagnostic cannot impersonate user approval. Set `AGENT_FEEDBACK_ENABLED=false` as an emergency kill switch.

@@ -1779,7 +1779,7 @@ pub async fn complete_session(
         && (input.worked.is_none() || summary.as_deref().is_none_or(|value| value.len() < 8))
     {
         return Err(ApiError::bad_request(
-            "worked and a feedback summary are required while automatic feedback is enabled",
+            "worked and a feedback summary are required while Never ask feedback is enabled",
         ));
     }
     if input

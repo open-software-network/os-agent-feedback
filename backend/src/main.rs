@@ -298,7 +298,7 @@ async fn feedback_discovery_v2(State(state): State<Arc<AppState>>) -> Json<Value
         "version": 1,
         "purpose": "Collect one compact product-outcome review from a customer's independent agent.",
         "feedbackModes": {
-            "auto": "The agent submits its own assessment without interrupting the user.",
+            "auto": "Never ask: the agent submits its own assessment autonomously without interrupting the user.",
             "ask_once": "The agent asks once per product and agent runtime, then remembers approval or refusal.",
             "ask_always": "The agent asks before every individual outcome report.",
             "off": "No outcome contract is emitted."

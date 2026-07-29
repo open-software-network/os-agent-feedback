@@ -84,7 +84,7 @@ test("dashboard action notices are ephemeral fixed toasts", () => {
 
 test("products exist before integration setup without an environment picker", () => {
   assert.match(dashboardHtml, /id="product-scope"/);
-  assert.match(dashboardHtml, /app\.js\?v=20260729-consent-modes/);
+  assert.match(dashboardHtml, /app\.js\?v=20260729-never-ask/);
   assert.match(dashboardScript, /Create your first product/);
   assert.match(dashboardScript, /id="product-select"/);
   assert.match(dashboardScript, /\+ New product/);
@@ -106,6 +106,8 @@ test("setup starts with the selected product integration", () => {
 });
 
 test("collection policy distinguishes remembered and per-report consent", () => {
+  assert.match(dashboardScript, /Never ask — submit autonomously/);
+  assert.doesNotMatch(dashboardScript, />Auto —/);
   assert.match(dashboardScript, /Ask once — remember this product’s permission/);
   assert.match(dashboardScript, /Ask every time — request permission for each report/);
   assert.match(dashboardScript, /one agent runtime—not a human identity/);

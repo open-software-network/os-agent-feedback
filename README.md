@@ -42,7 +42,7 @@ app.use(agentFeedback({
 
 No handler changes, primary-path network call, relay endpoint, or agent account is required.
 
-Collection has four modes. `auto` submits without interrupting the user. `ask_once` asks once per
+Collection has four modes. Never ask (`auto`) submits autonomously without interrupting the user. `ask_once` asks once per
 product and agent runtime, then remembers approval or refusal under an opaque product-scoped key.
 `ask_always` requests fresh permission for every report. `off` emits no outcome contract. Epode
 does not receive the stored ask-once preference or treat it as an identity.

@@ -88,7 +88,7 @@ async function main(): Promise<void> {
     envelope.consentScope !== undefined ||
     envelope.when !== "after_outcome_known_before_final_response"
   ) {
-    fail("Response has an invalid automatic feedback contract");
+    fail("Response has an invalid Never ask feedback contract");
   }
   const review = await fetch(envelope.submit.url, {
     method: "POST",

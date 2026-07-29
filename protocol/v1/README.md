@@ -66,7 +66,7 @@ Eligible 2xx JSON objects append `_agentFeedback` without wrapping or changing e
 
 `requested` means the product provider asks the agent to follow the mode's instruction:
 
-- `auto` submits the agent's compact assessment without interrupting the user.
+- Never ask (`auto`) submits the agent's compact assessment autonomously without interrupting the user.
 - `ask_once` asks the first time this product is encountered in an agent runtime. The response
   includes an opaque `consentScope`. The runtime stores approval or refusal under that scope;
   approval permits later reports without another question, while refusal prevents future asks.
