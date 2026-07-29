@@ -49,7 +49,7 @@ No handler changes, primary-path network call, relay endpoint, or agent account 
 - `sdk/go/` — standard-library HTTP middleware and agent helper
 - `sdk/rust/` — Axum/Tower middleware and agent helper
 - `protocol/v1/` — language-neutral schemas, signing algorithm, and conformance vector
-- `examples/node-express/` — hosted JSON API example
+- `examples/node-express/` — hosted JSON API playground with explicit agent-session continuity
 - `examples/node-fastify/` — hosted agent-readable website example
 - `examples/node-mcp/` — hosted stateless MCP 2026-07-28 example with a 2025 compatibility fallback
 - `examples/python-asgi/` — FastAPI/ASGI product example

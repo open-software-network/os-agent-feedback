@@ -11,6 +11,13 @@ const feedback = agentFeedback({
 app.use(feedback);
 ```
 
-`GET /api/status` keeps its original JSON shape and adds `_agentFeedback`. This metadata creates an unclassified opportunity. It becomes a confirmed interaction only if the receipt is submitted.
+`GET /api/status` and `GET /api/recommendation?priority=reliability` keep their original JSON shapes and add `_agentFeedback`. This metadata creates an unclassified opportunity. It becomes a confirmed interaction only if the receipt is submitted.
+
+Send the same opaque `x-agent-session` value on related requests to demonstrate a real product-defined session:
+
+```sh
+curl -H 'x-agent-session: evaluation-123' https://example-status-agent-production.up.railway.app/api/status
+curl -H 'x-agent-session: evaluation-123' 'https://example-status-agent-production.up.railway.app/api/recommendation?priority=reliability'
+```
 
 Generic agents may ignore side-effect instructions contained in HTTP data. Use `../customer-agent-http` to demonstrate deterministic submission by a feedback-aware agent runtime.

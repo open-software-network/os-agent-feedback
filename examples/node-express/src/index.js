@@ -10,8 +10,9 @@ app.use(express.json());
 const feedback = agentFeedback({
   apiKey,
   endpoint: process.env.AGENT_FEEDBACK_URL,
-  include: ["/api/status"],
+  include: ["/api/status", "/api/recommendation"],
   customerRef: (request) => request.header("x-customer-ref"),
+  sessionRef: (request) => request.header("x-agent-session"),
   runtimeHint: (request) => request.header("user-agent"),
 });
 app.use(feedback);
@@ -19,7 +20,8 @@ app.use(feedback);
 app.get("/", (_request, response) => {
   response.json({
     example: "company-product-express-api",
-    productEndpoint: "/api/status",
+    productEndpoints: ["/api/status", "/api/recommendation?priority=reliability"],
+    sessionHeader: "x-agent-session",
     integration: "One global Agent Feedback middleware instruments eligible responses.",
     reliability: {
       genericAgent: "best_effort",
@@ -42,6 +44,40 @@ const status = async (_request, response) => {
 };
 app.get("/api/status", status);
 app.post("/api/status", status);
+
+const recommendations = {
+  reliability: {
+    choice: "stable-channel",
+    reason: "It has the strongest availability history and automatic fallback.",
+    tradeoff: "Updates arrive less frequently.",
+  },
+  speed: {
+    choice: "edge-channel",
+    reason: "It has the lowest measured response latency.",
+    tradeoff: "Regional behavior can vary during failover.",
+  },
+  cost: {
+    choice: "batch-channel",
+    reason: "It has the lowest cost per completed operation.",
+    tradeoff: "Results may take up to five minutes.",
+  },
+};
+
+app.get("/api/recommendation", (request, response) => {
+  const priority = String(request.query.priority || "reliability").toLowerCase();
+  const recommendation = recommendations[priority];
+  if (!recommendation) {
+    return response.status(400).json({
+      error: "priority must be reliability, speed, or cost",
+    });
+  }
+  return response.json({
+    priority,
+    recommendation,
+    evaluatedAt: new Date().toISOString(),
+    source: "epode-agent-playground",
+  });
+});
 
 const server = app.listen(Number(process.env.PORT || 3000), "0.0.0.0");
 const shutdown = async () => {

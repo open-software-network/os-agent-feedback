@@ -7,7 +7,7 @@
     "start": "node src/index.js"
   },
   "dependencies": {
-    "@agent-feedback/node": "file:../../sdk/node",
+    "@agent-feedback/node": "https://app.epode.ai/static/agent-feedback-node-0.1.0.tgz",
     "express": "^5.2.1"
   },
   "engines": { "node": ">=20" }
