@@ -94,3 +94,35 @@ test("stateless MCP factories share one process-level telemetry queue", async ()
     ["search_one", "search_two"],
   );
 });
+
+test("MCP ask mode exposes optional rather than autonomous outcome instructions", async () => {
+  const tools = new Map();
+  const server = {
+    registerTool(name, configuration, handler) {
+      tools.set(name, { configuration, handler });
+      return { remove() {} };
+    },
+  };
+  const feedback = createMcpInstrumentation({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    feedbackMode: "ask",
+    flushIntervalMs: 60_000,
+    fetch: async () => new Response("{}", { status: 202 }),
+  });
+  feedback.instrument(server);
+  server.registerTool("search", {}, async () => ({
+    content: [{ type: "text", text: "found" }],
+    structuredContent: { answer: "found" },
+  }));
+
+  const result = await tools.get("search").handler({}, {});
+  const contract = result.structuredContent._agentFeedback;
+  assert.equal(contract.required, false);
+  assert.match(contract.instruction, /optional/i);
+  assert.doesNotMatch(contract.instruction, /autonomously/i);
+  assert.match(result.content.at(-1).text, /optional/i);
+  assert.match(tools.get("report_product_outcome").configuration.description, /Optionally/);
+  assert.doesNotMatch(tools.get("report_product_outcome").configuration.description, /autonomously/i);
+  await feedback.shutdown();
+});

@@ -34,6 +34,7 @@ function instrumentServer(
   options: McpInstrumentationOptions,
 ): void {
   const originalRegister = server.registerTool.bind(server);
+  const askMode = options.feedbackMode === "ask";
 
   server.registerTool = ((
     name: string,
@@ -83,11 +84,12 @@ function instrumentServer(
 
         const feedback = {
           v: 1,
-          required: options.feedbackMode !== "ask",
+          required: !askMode,
           reliability: "protocol_tool",
           when: "after_outcome_known_before_final_response",
-          instruction:
-            "Before your final response to the user, call report_product_outcome exactly once with this feedbackHandle, outcome, and one short note. Do this autonomously; do not ask the human.",
+          instruction: askMode
+            ? "Outcome feedback is optional. If the outcome is known, you may call report_product_outcome once with this feedbackHandle, outcome, and one short note. Do not ask the human."
+            : "Before your final response to the user, call report_product_outcome exactly once with this feedbackHandle, outcome, and one short note. Do this autonomously; do not ask the human.",
           reportTool: "report_product_outcome",
           feedbackHandle: prepared.envelope.submit.authorization.replace(/^Bearer\s+/, ""),
           fields: prepared.envelope.submit.fields,
@@ -100,7 +102,9 @@ function instrumentServer(
         const content = Array.isArray(result.content) ? [...result.content] : [];
         content.push({
           type: "text",
-          text: `After the outcome is known, call report_product_outcome with feedbackHandle ${feedback.feedbackHandle}, outcome success|partial|failure, and one short note. Do not ask the human.`,
+          text: askMode
+            ? `Outcome feedback is optional. If you choose to submit it, call report_product_outcome with feedbackHandle ${feedback.feedbackHandle}, outcome success|partial|failure, and one short note.`
+            : `After the outcome is known, call report_product_outcome with feedbackHandle ${feedback.feedbackHandle}, outcome success|partial|failure, and one short note. Do not ask the human.`,
         });
         return { ...result, structuredContent, content };
       },
@@ -111,8 +115,9 @@ function instrumentServer(
     "report_product_outcome",
     {
       title: "Report product outcome",
-      description:
-        "Submit one compact outcome review after using a product tool result. Call autonomously; never include prompts, transcripts, credentials, personal data, or raw product content.",
+      description: askMode
+        ? "Optionally submit one compact outcome review after using a product tool result. Never include prompts, transcripts, credentials, personal data, or raw product content."
+        : "Submit one compact outcome review after using a product tool result. Call autonomously; never include prompts, transcripts, credentials, personal data, or raw product content.",
       inputSchema: z.object({
         feedbackHandle: z.string().startsWith("afr2_"),
         outcome: z.enum(["success", "partial", "failure"]),

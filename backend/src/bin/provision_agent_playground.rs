@@ -29,6 +29,11 @@ async fn main() -> anyhow::Result<()> {
     let owner_email = required("PLAYGROUND_OWNER_EMAIL")?;
     let product_name =
         env::var("PLAYGROUND_PRODUCT_NAME").unwrap_or_else(|_| "Epode Agent Playground".into());
+    let feedback_mode = env::var("PLAYGROUND_FEEDBACK_MODE").unwrap_or_else(|_| "auto".into());
+    if !["auto", "ask"].contains(&feedback_mode.as_str()) {
+        anyhow::bail!("PLAYGROUND_FEEDBACK_MODE must be auto or ask");
+    }
+    let key_label = env::var("PLAYGROUND_KEY_LABEL").unwrap_or_else(|_| "Agent playground".into());
 
     let workspace_id: Uuid = sqlx::query_scalar(
         r#"SELECT w.id FROM workspaces w
@@ -53,8 +58,8 @@ async fn main() -> anyhow::Result<()> {
     if action == "status" {
         let product_id = existing_product_id
             .ok_or_else(|| anyhow::anyhow!("{product_name} has not been provisioned"))?;
-        let environment_id: Uuid = sqlx::query_scalar(
-            "SELECT id FROM product_environments WHERE product_id = $1 ORDER BY created_at LIMIT 1",
+        let (environment_id, stored_feedback_mode): (Uuid, String) = sqlx::query_as(
+            "SELECT id, feedback_mode FROM product_environments WHERE product_id = $1 ORDER BY created_at LIMIT 1",
         )
         .bind(product_id)
         .fetch_one(&pool)
@@ -107,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
                 "workspaceId": workspace_id,
                 "productId": product_id,
                 "environmentId": environment_id,
+                "feedbackMode": stored_feedback_mode,
                 "sessions": sessions,
                 "interactions": interactions,
                 "outcomes": outcomes,
@@ -153,11 +159,12 @@ async fn main() -> anyhow::Result<()> {
             sqlx::query(
                 r#"INSERT INTO product_environments
                 (id, workspace_id, product_id, name, slug, feedback_mode, retention_days)
-                VALUES ($1, $2, $3, 'Default', 'default', 'auto', 365)"#,
+                VALUES ($1, $2, $3, 'Default', 'default', $4, 365)"#,
             )
             .bind(id)
             .bind(workspace_id)
             .bind(product_id)
+            .bind(&feedback_mode)
             .execute(&mut *tx)
             .await?;
             id
@@ -165,15 +172,17 @@ async fn main() -> anyhow::Result<()> {
     };
 
     sqlx::query(
-        "UPDATE product_environments SET feedback_mode = 'auto', retention_days = 365, updated_at = NOW() WHERE id = $1",
+        "UPDATE product_environments SET feedback_mode = $2, retention_days = 365, updated_at = NOW() WHERE id = $1",
     )
     .bind(environment_id)
+    .bind(&feedback_mode)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "UPDATE api_keys SET revoked_at = NOW() WHERE environment_id = $1 AND label = 'Agent playground' AND revoked_at IS NULL",
+        "UPDATE api_keys SET revoked_at = NOW() WHERE environment_id = $1 AND label = $2 AND revoked_at IS NULL",
     )
     .bind(environment_id)
+    .bind(&key_label)
     .execute(&mut *tx)
     .await?;
 
@@ -184,11 +193,12 @@ async fn main() -> anyhow::Result<()> {
     sqlx::query(
         r#"INSERT INTO api_keys
         (id, workspace_id, environment_id, label, prefix, key_hash)
-        VALUES ($1, $2, $3, 'Agent playground', $4, $5)"#,
+        VALUES ($1, $2, $3, $4, $5, $6)"#,
     )
     .bind(key_id)
     .bind(workspace_id)
     .bind(environment_id)
+    .bind(&key_label)
     .bind(prefix)
     .bind(key_hash)
     .execute(&mut *tx)
@@ -196,7 +206,7 @@ async fn main() -> anyhow::Result<()> {
     tx.commit().await?;
 
     eprintln!(
-        "Provisioned {product_name} (workspace {workspace_id}, product {product_id}, environment {environment_id}, key {key_id})"
+        "Provisioned {product_name} in {feedback_mode} mode (workspace {workspace_id}, product {product_id}, environment {environment_id}, key {key_id}, label {key_label})"
     );
     std::io::stdout().write_all(secret.as_bytes())?;
     Ok(())

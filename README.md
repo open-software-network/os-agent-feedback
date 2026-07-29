@@ -65,6 +65,9 @@ Legacy Rust examples and prototype data remain for migration evidence but are no
 - Dashboard/API: https://agent-feedback-api-production.up.railway.app
 - Express example: https://example-status-agent-production.up.railway.app
 - MCP example: https://example-mcp-agent-production.up.railway.app/mcp
+- Ask-mode HTTP lab: https://epode-ask-http-production.up.railway.app
+- Ask-mode MCP lab: https://epode-ask-mcp-production.up.railway.app/mcp
+- Ask-mode effectiveness report: `.reviews/ask-mode-effectiveness-2026-07-29.md`
 
 The Fastify example and public Sites URL are assigned during the v2 rollout.
 

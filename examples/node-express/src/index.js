@@ -4,12 +4,17 @@ import { agentFeedback } from "@agent-feedback/node/express";
 
 const apiKey = process.env.AGENT_FEEDBACK_KEY;
 if (!apiKey) throw new Error("AGENT_FEEDBACK_KEY is required");
+const feedbackMode = process.env.AGENT_FEEDBACK_MODE || "auto";
+if (!["auto", "ask"].includes(feedbackMode)) {
+  throw new Error("AGENT_FEEDBACK_MODE must be auto or ask");
+}
 
 const app = express();
 app.use(express.json());
 const feedback = agentFeedback({
   apiKey,
   endpoint: process.env.AGENT_FEEDBACK_URL,
+  feedbackMode,
   include: ["/api/status", "/api/recommendation"],
   customerRef: (request) => request.header("x-customer-ref"),
   sessionRef: (request) => request.header("x-agent-session"),
@@ -22,6 +27,7 @@ app.get("/", (_request, response) => {
     example: "company-product-express-api",
     productEndpoints: ["/api/status", "/api/recommendation?priority=reliability"],
     sessionHeader: "x-agent-session",
+    feedbackMode,
     integration: "One global Agent Feedback middleware instruments eligible responses.",
     reliability: {
       genericAgent: "best_effort",

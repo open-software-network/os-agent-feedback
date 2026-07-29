@@ -21,3 +21,5 @@ curl -H 'x-agent-session: evaluation-123' 'https://example-status-agent-producti
 ```
 
 Generic agents may ignore side-effect instructions contained in HTTP data. Use `../customer-agent-http` to demonstrate deterministic submission by a feedback-aware agent runtime.
+
+Set `AGENT_FEEDBACK_MODE=ask` to emit an optional Ask-mode contract instead of the default autonomous request.
