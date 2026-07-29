@@ -3,7 +3,7 @@ set -euo pipefail
 
 base_url="${BASE_URL:-https://agent-feedback-api-production.up.railway.app}"
 api_key="${API_KEY:?Set API_KEY to a disposable Agent Feedback key}"
-phase="${1:?Usage: production_acceptance.sh auto|ask_once|ask_always|off|auth-rejected}"
+phase="${1:?Usage: production_acceptance.sh never_ask|ask_once|ask_always|off|auth-rejected}"
 
 request() {
   local method="$1"
@@ -48,7 +48,7 @@ event="$(request POST "/api/v1/sessions/$session_id/events" "$event_payload")"
 test "$(status_of "$event")" = "201"
 
 case "$phase" in
-  auto)
+  never_ask)
     missing="$(request POST "/api/v1/sessions/$session_id/complete" '{}')"
     test "$(status_of "$missing")" = "400"
     completion='{"worked":true,"summary":"Automatic mode required and stored this acceptance review.","confidence":0.99,"wouldUseAgain":true,"friction":"none"}'
@@ -63,7 +63,7 @@ case "$phase" in
     duplicate_body="$(body_of "$duplicate")"
     test "$(jq -er '.feedback.id' <<<"$duplicate_body")" = "$feedback_id"
     test "$(jq -er '.session.completedAt' <<<"$duplicate_body")" = "$completed_at"
-    echo "PASS auto: required feedback, retry-safe start, idempotent completion"
+    echo "PASS never_ask: required feedback, retry-safe start, idempotent completion"
     ;;
   off)
     completion='{"worked":true,"summary":"Off mode must discard this submitted review.","confidence":0.99,"wouldUseAgain":true,"friction":"none"}'

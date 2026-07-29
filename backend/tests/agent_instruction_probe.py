@@ -19,7 +19,7 @@ def handoff(port: int, variant: str) -> dict:
 
     return {
         "v": 1,
-        "mode": "auto",
+        "mode": "never_ask",
         "requested": True,
         "reliability": "best_effort_without_agent_adapter",
         "when": "after_outcome_known_before_final_response",

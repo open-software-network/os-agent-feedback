@@ -9,7 +9,7 @@ import {
 
 const envelope = {
   v: 1,
-  mode: "auto",
+  mode: "never_ask",
   requested: true,
   consentRequired: false,
   consentPolicy: "none",

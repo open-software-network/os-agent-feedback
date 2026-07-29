@@ -1053,12 +1053,9 @@ pub async fn feedback_list_interactions(
 pub async fn update_policy(
     pool: &PgPool,
     workspace_id: Uuid,
-    mut input: PolicyInput,
+    input: PolicyInput,
 ) -> Result<ProductEnvironment, ApiError> {
-    if input.feedback_mode == "ask" {
-        input.feedback_mode = "ask_always".into();
-    }
-    if !["auto", "ask_once", "ask_always", "off"].contains(&input.feedback_mode.as_str())
+    if !["never_ask", "ask_once", "ask_always", "off"].contains(&input.feedback_mode.as_str())
         || !(1..=365).contains(&input.retention_days)
     {
         return Err(ApiError::bad_request(
@@ -1775,7 +1772,7 @@ pub async fn complete_session(
         .as_deref()
         .map(|value| clean(value, 700))
         .filter(|value| !value.is_empty());
-    if workspace.feedback_mode == "auto"
+    if workspace.feedback_mode == "never_ask"
         && (input.worked.is_none() || summary.as_deref().is_none_or(|value| value.len() < 8))
     {
         return Err(ApiError::bad_request(
@@ -2425,7 +2422,7 @@ mod product_tests {
             .await
             .map_err(test_error)?;
             anyhow::ensure!(updated.feedback_mode == "ask_once");
-            anyhow::ensure!(search_settings.feedback_mode == "auto");
+            anyhow::ensure!(search_settings.feedback_mode == "never_ask");
 
             anyhow::ensure!(
                 delete_product(

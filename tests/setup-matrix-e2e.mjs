@@ -123,7 +123,7 @@ function assertEnvelope(envelope) {
     `invalid protocol envelope: ${JSON.stringify(validateEnvelopeSchema.errors)}`,
   );
   assert.equal(envelope.v, 1);
-  assert.equal(envelope.mode, "auto");
+  assert.equal(envelope.mode, "never_ask");
   assert.equal(envelope.requested, true);
   assert.equal(envelope.reliability, "best_effort_without_agent_adapter");
   assert.match(envelope.instruction, /autonomously/i);

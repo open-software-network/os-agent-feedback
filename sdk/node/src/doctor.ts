@@ -82,7 +82,7 @@ async function main(): Promise<void> {
     return;
   }
   if (
-    envelope.mode !== "auto" ||
+    envelope.mode !== "never_ask" ||
     envelope.consentRequired !== false ||
     envelope.consentPolicy !== "none" ||
     envelope.consentScope !== undefined ||

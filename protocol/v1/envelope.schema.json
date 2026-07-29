@@ -7,7 +7,7 @@
   "required": ["v", "mode", "requested", "consentRequired", "consentPolicy", "reliability", "when", "instruction", "submit", "privacy", "expiresAt"],
   "properties": {
     "v": { "const": 1 },
-    "mode": { "enum": ["auto", "ask_once", "ask_always"] },
+    "mode": { "enum": ["never_ask", "ask_once", "ask_always"] },
     "requested": { "type": "boolean" },
     "consentRequired": { "type": "boolean" },
     "consentPolicy": { "enum": ["none", "once", "always"] },
@@ -40,7 +40,7 @@
   },
   "allOf": [
     {
-      "if": { "properties": { "mode": { "const": "auto" } } },
+      "if": { "properties": { "mode": { "const": "never_ask" } } },
       "then": {
         "properties": {
           "requested": { "const": true },

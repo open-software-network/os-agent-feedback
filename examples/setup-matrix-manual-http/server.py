@@ -27,7 +27,7 @@ def prepared():
     signing_key = hashlib.sha256(API_KEY.encode()).digest()
     signature = b64(hmac.new(signing_key, signing_input.encode(), hashlib.sha256).digest())
     return interaction_id, {
-        "v": 1, "mode": "auto", "requested": True,
+        "v": 1, "mode": "never_ask", "requested": True,
         "consentRequired": False, "consentPolicy": "none",
         "reliability": "best_effort_without_agent_adapter",
         "when": "after_outcome_known_before_final_response",

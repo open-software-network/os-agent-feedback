@@ -41,7 +41,7 @@ Eligible 2xx JSON objects append `_agentFeedback` without wrapping or changing e
   "answer": "Checkout is available.",
   "_agentFeedback": {
     "v": 1,
-    "mode": "auto",
+    "mode": "never_ask",
     "requested": true,
     "consentRequired": false,
     "consentPolicy": "none",
@@ -66,7 +66,7 @@ Eligible 2xx JSON objects append `_agentFeedback` without wrapping or changing e
 
 `requested` means the product provider asks the agent to follow the mode's instruction:
 
-- Never ask (`auto`) submits the agent's compact assessment autonomously without interrupting the user.
+- `never_ask` submits the agent's compact assessment autonomously without interrupting the user.
 - `ask_once` asks the first time this product is encountered in an agent runtime. The response
   includes an opaque `consentScope`. The runtime stores approval or refusal under that scope;
   approval permits later reports without another question, while refusal prevents future asks.

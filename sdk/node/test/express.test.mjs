@@ -11,7 +11,11 @@ const key = `af_live_0123456789abcdef0123456789abcdef_${"x".repeat(32)}`;
 test("Express rejects an unknown JavaScript feedback mode", () => {
   assert.throws(
     () => agentFeedback({ apiKey: key, feedbackMode: "unexpected" }),
-    /feedbackMode must be auto, ask_once, ask_always, or off/,
+    /feedbackMode must be never_ask, ask_once, ask_always, or off/,
+  );
+  assert.throws(
+    () => agentFeedback({ apiKey: key, feedbackMode: "auto" }),
+    /feedbackMode must be never_ask, ask_once, ask_always, or off/,
   );
 });
 

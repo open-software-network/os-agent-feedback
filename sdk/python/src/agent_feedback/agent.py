@@ -23,7 +23,7 @@ def _valid(value: Any) -> bool:
         return False
     mode = value.get("mode")
     scope = value.get("consentScope")
-    if mode == "auto":
+    if mode == "never_ask":
         return (
             value.get("consentRequired") is False
             and value.get("consentPolicy") == "none"

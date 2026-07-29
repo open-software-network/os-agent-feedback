@@ -23,6 +23,13 @@ func TestCapabilityConformance(t *testing.T) {
 	}
 }
 
+func TestLegacyAutoModeIsRejected(t *testing.T) {
+	_, err := New(Options{APIKey: conformanceKey, FeedbackMode: FeedbackMode("auto")})
+	if err == nil || !strings.Contains(err.Error(), "never_ask, ask_once, ask_always, or off") {
+		t.Fatalf("expected strict mode validation, got %v", err)
+	}
+}
+
 func TestMiddlewarePreservesShapeAndQueuesOpportunity(t *testing.T) {
 	telemetry := make(chan map[string]any, 1)
 	runtime, err := New(Options{
@@ -68,7 +75,7 @@ func TestMiddlewarePreservesShapeAndQueuesOpportunity(t *testing.T) {
 
 func TestAgentHelperRejectsUntrustedOrigin(t *testing.T) {
 	envelope := &Envelope{
-		V: 1, Mode: FeedbackAuto, Requested: true, ConsentPolicy: "none",
+		V: 1, Mode: FeedbackNeverAsk, Requested: true, ConsentPolicy: "none",
 		When: "after_outcome_known_before_final_response",
 		Submit: SubmitContract{
 			URL: "https://evil.test/outcomes", Method: http.MethodPost,

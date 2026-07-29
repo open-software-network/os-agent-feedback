@@ -44,7 +44,7 @@ client then exercises every enabled permutation.
 For all 16 cases it asserts:
 
 - the product result and existing response shape remain intact;
-- auto-mode instructions and a scoped capability are present without the company key;
+- never-ask instructions and a scoped capability are present without the company key;
 - the agent submits an exact, unique success note;
 - a contradictory duplicate returns the original review;
 - PostgreSQL contains one linked review with the expected surface and operation;

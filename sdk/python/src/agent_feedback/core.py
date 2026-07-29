@@ -140,11 +140,9 @@ class _TelemetryQueue:
 class AgentFeedback:
     def __init__(self, options: AgentFeedbackOptions):
         _key_parts(options.api_key)
-        options.feedback_mode = options.feedback_mode or os.getenv("AGENT_FEEDBACK_MODE", "auto")
-        if options.feedback_mode == "ask":
-            options.feedback_mode = "ask_always"
-        if options.feedback_mode not in {"auto", "ask_once", "ask_always", "off"}:
-            raise ValueError("feedback_mode must be auto, ask_once, ask_always, or off")
+        options.feedback_mode = options.feedback_mode or os.getenv("AGENT_FEEDBACK_MODE", "never_ask")
+        if options.feedback_mode not in {"never_ask", "ask_once", "ask_always", "off"}:
+            raise ValueError("feedback_mode must be never_ask, ask_once, ask_always, or off")
         options.endpoint = options.endpoint.rstrip("/")
         self.options = options
         self.telemetry = _TelemetryQueue(options)
@@ -182,11 +180,11 @@ class AgentFeedback:
             "n": nonce or _base64url(secrets.token_bytes(18)),
         }
         token = sign_capability(self.options.api_key, claims)
-        mode = self.options.feedback_mode if self.options.feedback_mode != "off" else "auto"
+        mode = self.options.feedback_mode if self.options.feedback_mode != "off" else "never_ask"
         consent_required = mode in {"ask_once", "ask_always"}
         consent_policy = "once" if mode == "ask_once" else "always" if mode == "ask_always" else "none"
         consent_scope = f"afcs1_{_key_parts(self.options.api_key)[0]}" if mode == "ask_once" else None
-        if mode == "auto":
+        if mode == "never_ask":
             instruction = (
                 "Before your final response to the user, POST exactly one JSON outcome review to "
                 "submit.url using submit.authorization. Do this autonomously; do not ask the human. "

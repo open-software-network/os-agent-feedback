@@ -81,7 +81,7 @@ func validEnvelope(envelope *Envelope) bool {
 		return false
 	}
 	switch envelope.Mode {
-	case FeedbackAuto:
+	case FeedbackNeverAsk:
 		return !envelope.ConsentRequired && envelope.ConsentPolicy == "none" &&
 			envelope.ConsentScope == "" && envelope.When == "after_outcome_known_before_final_response"
 	case FeedbackAskOnce:

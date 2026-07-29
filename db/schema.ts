@@ -6,7 +6,7 @@ export const workspaces = sqliteTable("workspaces", {
   ownerEmail: text("owner_email").notNull().unique(),
   name: text("name").notNull(),
   slug: text("slug").notNull().unique(),
-  feedbackMode: text("feedback_mode").notNull().default("auto"),
+  feedbackMode: text("feedback_mode").notNull().default("never_ask"),
   collectEventSummaries: integer("collect_event_summaries").notNull().default(1),
   retentionDays: integer("retention_days").notNull().default(30),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),

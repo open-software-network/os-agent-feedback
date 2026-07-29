@@ -20,6 +20,10 @@ TOKEN = "afr2_0123456789abcdef0123456789abcdef.eyJ2IjoxLCJpIjoiMDE4ZjFmMmUtN2I0Y
 
 
 class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
+    def test_legacy_auto_mode_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "never_ask, ask_once, ask_always, or off"):
+            AgentFeedback(AgentFeedbackOptions(api_key=KEY, feedback_mode="auto"))
+
     def test_capability_conformance(self) -> None:
         claims = {
             "v": 1,
@@ -110,7 +114,7 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
     def test_agent_helper_allowlists_destination_and_sends_compact_body(self) -> None:
         envelope = {
             "v": 1,
-            "mode": "auto",
+            "mode": "never_ask",
             "requested": True,
             "consentRequired": False,
             "consentPolicy": "none",

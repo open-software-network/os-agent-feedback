@@ -66,7 +66,7 @@ function validConsentContract(value: Record<string, unknown>): boolean {
   const scope = value.consentScope;
   const validScope =
     typeof scope === "string" && /^afcs1_[0-9a-f]{32}$/.test(scope);
-  if (value.mode === "auto") {
+  if (value.mode === "never_ask") {
     return value.consentRequired === false &&
       value.consentPolicy === "none" &&
       value.when === "after_outcome_known_before_final_response" &&

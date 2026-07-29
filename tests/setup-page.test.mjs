@@ -35,6 +35,10 @@ const consentModesMigration = await readFile(
   new URL("../backend/migrations/0014_feedback_consent_modes.sql", import.meta.url),
   "utf8",
 );
+const neverAskMigration = await readFile(
+  new URL("../backend/migrations/0015_never_ask_mode.sql", import.meta.url),
+  "utf8",
+);
 const backendMain = await readFile(
   new URL("../backend/src/main.rs", import.meta.url),
   "utf8",
@@ -84,7 +88,7 @@ test("dashboard action notices are ephemeral fixed toasts", () => {
 
 test("products exist before integration setup without an environment picker", () => {
   assert.match(dashboardHtml, /id="product-scope"/);
-  assert.match(dashboardHtml, /app\.js\?v=20260729-never-ask/);
+  assert.match(dashboardHtml, /app\.js\?v=20260729-never-ask-mode/);
   assert.match(dashboardScript, /Create your first product/);
   assert.match(dashboardScript, /id="product-select"/);
   assert.match(dashboardScript, /\+ New product/);
@@ -111,10 +115,12 @@ test("collection policy distinguishes remembered and per-report consent", () => 
   assert.match(dashboardScript, /Ask once — remember this product’s permission/);
   assert.match(dashboardScript, /Ask every time — request permission for each report/);
   assert.match(dashboardScript, /one agent runtime—not a human identity/);
-  assert.match(backendStore, /"auto", "ask_once", "ask_always", "off"/);
+  assert.match(backendStore, /"never_ask", "ask_once", "ask_always", "off"/);
+  assert.match(neverAskMigration, /SET feedback_mode = 'never_ask'/);
+  assert.match(neverAskMigration, /SET DEFAULT 'never_ask'/);
+  assert.match(neverAskMigration, /'never_ask', 'ask_once', 'ask_always', 'off'/);
+  assert.doesNotMatch(neverAskMigration, /'ask'/);
   assert.match(consentModesMigration, /SET feedback_mode = 'ask_always'/);
-  assert.match(consentModesMigration, /'auto', 'ask', 'ask_once', 'ask_always', 'off'/);
-  assert.match(consentModesMigration, /old pod can finish a rolling/);
   assert.match(dashboardScript, /AGENT_FEEDBACK_MODE=\$\{dashboard\.currentEnvironment\?\.feedbackMode/);
 });
 

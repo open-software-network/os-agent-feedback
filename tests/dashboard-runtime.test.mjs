@@ -16,8 +16,8 @@ const dashboard = {
   teamInvitations: [],
   products: [{ id: "product-1", name: "Search API" }],
   currentProduct: { id: "product-1", name: "Search API" },
-  environments: [{ id: "environment-1", productId: "product-1", feedbackMode: "auto", retentionDays: 30 }],
-  currentEnvironment: { id: "environment-1", productId: "product-1", feedbackMode: "auto", retentionDays: 30 },
+  environments: [{ id: "environment-1", productId: "product-1", feedbackMode: "never_ask", retentionDays: 30 }],
+  currentEnvironment: { id: "environment-1", productId: "product-1", feedbackMode: "never_ask", retentionDays: 30 },
   apiKeys: [
     { id: "key-1", prefix: "af_live_1234abcd", label: "Default product key", kind: "write", createdAt: iso(-120), expiresAt: null, lastUsedAt: iso(-4) },
     { id: "key-2", prefix: "af_read_5678beef", label: "Repo read key", kind: "read", createdAt: iso(-60), expiresAt: iso(129_600), lastUsedAt: null },

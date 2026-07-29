@@ -30,12 +30,10 @@ var defaultExclude = []string{
 type FeedbackMode string
 
 const (
-	FeedbackAuto      FeedbackMode = "auto"
+	FeedbackNeverAsk  FeedbackMode = "never_ask"
 	FeedbackAskOnce   FeedbackMode = "ask_once"
 	FeedbackAskAlways FeedbackMode = "ask_always"
 	FeedbackOff       FeedbackMode = "off"
-	// FeedbackAsk is a deprecated alias that normalizes to FeedbackAskAlways.
-	FeedbackAsk FeedbackMode = "ask"
 )
 
 type Options struct {
@@ -153,14 +151,11 @@ func New(options Options) (*Runtime, error) {
 	if options.FeedbackMode == "" {
 		options.FeedbackMode = FeedbackMode(os.Getenv("AGENT_FEEDBACK_MODE"))
 		if options.FeedbackMode == "" {
-			options.FeedbackMode = FeedbackAuto
+			options.FeedbackMode = FeedbackNeverAsk
 		}
 	}
-	if options.FeedbackMode == FeedbackAsk {
-		options.FeedbackMode = FeedbackAskAlways
-	}
-	if options.FeedbackMode != FeedbackAuto && options.FeedbackMode != FeedbackAskOnce && options.FeedbackMode != FeedbackAskAlways && options.FeedbackMode != FeedbackOff {
-		return nil, errors.New("feedback mode must be auto, ask_once, ask_always, or off")
+	if options.FeedbackMode != FeedbackNeverAsk && options.FeedbackMode != FeedbackAskOnce && options.FeedbackMode != FeedbackAskAlways && options.FeedbackMode != FeedbackOff {
+		return nil, errors.New("feedback mode must be never_ask, ask_once, ask_always, or off")
 	}
 	if options.FlushInterval <= 0 {
 		options.FlushInterval = 500 * time.Millisecond

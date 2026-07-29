@@ -6,7 +6,7 @@ export type Workspace = {
   owner_email: string;
   name: string;
   slug: string;
-  feedback_mode: "auto" | "ask_once" | "ask_always" | "off";
+  feedback_mode: "never_ask" | "ask_once" | "ask_always" | "off";
   collect_event_summaries: number;
   retention_days: number;
   created_at: string;
@@ -32,7 +32,7 @@ export async function ensureSchema() {
       owner_email TEXT NOT NULL UNIQUE,
       name TEXT NOT NULL,
       slug TEXT NOT NULL UNIQUE,
-      feedback_mode TEXT NOT NULL DEFAULT 'auto',
+      feedback_mode TEXT NOT NULL DEFAULT 'never_ask',
       collect_event_summaries INTEGER NOT NULL DEFAULT 1,
       retention_days INTEGER NOT NULL DEFAULT 30,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -110,7 +110,7 @@ export async function getOrCreateWorkspace(user: AppUser): Promise<Workspace> {
   const workspaceSlug = `${slug(user.email.split("@")[0])}-${workspaceId.slice(-6)}`;
   await db.prepare(`INSERT INTO workspaces
     (id, owner_email, name, slug, feedback_mode, collect_event_summaries, retention_days, created_at, updated_at)
-    VALUES (?, ?, ?, ?, 'auto', 1, 30, ?, ?)`)
+    VALUES (?, ?, ?, ?, 'never_ask', 1, 30, ?, ?)`)
     .bind(workspaceId, user.email, workspaceName(user), workspaceSlug, now(), now()).run();
   return (await db.prepare("SELECT * FROM workspaces WHERE id = ?").bind(workspaceId).first<Workspace>())!;
 }
@@ -154,10 +154,10 @@ export async function authenticateApiKey(request: Request) {
 }
 
 export async function updatePolicy(workspaceId: string, input: Record<string, unknown>) {
-  const requestedMode = input.feedbackMode === "ask" ? "ask_always" : input.feedbackMode;
-  const mode = ["auto", "ask_once", "ask_always", "off"].includes(String(requestedMode))
-    ? requestedMode
-    : "auto";
+  if (!["never_ask", "ask_once", "ask_always", "off"].includes(String(input.feedbackMode))) {
+    throw new Error("feedbackMode must be never_ask, ask_once, ask_always, or off");
+  }
+  const mode = input.feedbackMode;
   const summaries = input.collectEventSummaries === false ? 0 : 1;
   const retention = Math.min(365, Math.max(1, Number(input.retentionDays) || 30));
   await database().prepare(`UPDATE workspaces SET feedback_mode = ?, collect_event_summaries = ?, retention_days = ?, updated_at = ? WHERE id = ?`)
@@ -213,7 +213,7 @@ export async function completeSession(workspace: Workspace, sessionId: string, i
   if (!session) throw new Error("session not found");
   const hasWorked = typeof input.worked === "boolean";
   const summary = text(input.summary, 700);
-  if (workspace.feedback_mode === "auto" && (!hasWorked || summary.length < 8)) {
+  if (workspace.feedback_mode === "never_ask" && (!hasWorked || summary.length < 8)) {
     throw new Error("worked and a feedback summary are required while automatic feedback is enabled");
   }
   const completedAt = now();

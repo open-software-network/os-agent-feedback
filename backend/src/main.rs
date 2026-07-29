@@ -298,7 +298,7 @@ async fn feedback_discovery_v2(State(state): State<Arc<AppState>>) -> Json<Value
         "version": 1,
         "purpose": "Collect one compact product-outcome review from a customer's independent agent.",
         "feedbackModes": {
-            "auto": "Never ask: the agent submits its own assessment autonomously without interrupting the user.",
+            "never_ask": "The agent submits its own assessment autonomously without interrupting the user.",
             "ask_once": "The agent asks once per product and agent runtime, then remembers approval or refusal.",
             "ask_always": "The agent asks before every individual outcome report.",
             "off": "No outcome contract is emitted."
@@ -878,7 +878,7 @@ fn feedback_handoff(
     session: &AgentSession,
     receipt: IssuedFeedbackReceipt,
 ) -> Value {
-    let instruction = if workspace.feedback_mode == "auto" {
+    let instruction = if workspace.feedback_mode == "never_ask" {
         "After using this product result, submit exactly one outcome review before finishing."
     } else {
         "If you can evaluate this product result, submit one concise outcome review."
@@ -1245,7 +1245,7 @@ async fn mcp_handler(
             if key_kind == McpKeyKind::Write
                 && matches!(
                     auth.workspace.feedback_mode.as_str(),
-                    "ask" | "ask_once" | "ask_always"
+                    "ask_once" | "ask_always"
                 )
                 && matches!(
                     name,

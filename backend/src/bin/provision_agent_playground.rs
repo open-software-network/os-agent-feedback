@@ -29,12 +29,9 @@ async fn main() -> anyhow::Result<()> {
     let owner_email = required("PLAYGROUND_OWNER_EMAIL")?;
     let product_name =
         env::var("PLAYGROUND_PRODUCT_NAME").unwrap_or_else(|_| "Epode Agent Playground".into());
-    let mut feedback_mode = env::var("PLAYGROUND_FEEDBACK_MODE").unwrap_or_else(|_| "auto".into());
-    if feedback_mode == "ask" {
-        feedback_mode = "ask_always".into();
-    }
-    if !["auto", "ask_once", "ask_always", "off"].contains(&feedback_mode.as_str()) {
-        anyhow::bail!("PLAYGROUND_FEEDBACK_MODE must be auto, ask_once, ask_always, or off");
+    let feedback_mode = env::var("PLAYGROUND_FEEDBACK_MODE").unwrap_or_else(|_| "never_ask".into());
+    if !["never_ask", "ask_once", "ask_always", "off"].contains(&feedback_mode.as_str()) {
+        anyhow::bail!("PLAYGROUND_FEEDBACK_MODE must be never_ask, ask_once, ask_always, or off");
     }
     let key_label = env::var("PLAYGROUND_KEY_LABEL").unwrap_or_else(|_| "Agent playground".into());
 
