@@ -132,6 +132,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/auth/logout", post(logout_handler))
         .route("/api/dashboard", get(dashboard_handler))
         .route("/api/products", post(create_product_handler))
+        .route("/api/products/{product_id}", patch(rename_product_handler))
+        .route("/api/team", patch(rename_team_handler))
         .route(
             "/api/team/invitations",
             post(create_team_invitation_handler),
@@ -608,6 +610,31 @@ async fn create_product_handler(
         ),
         tokens,
     )
+}
+
+async fn rename_product_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(product_id): Path<Uuid>,
+    Json(input): Json<UpdateNameInput>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let product = rename_product(&state.pool, context.workspace.id, product_id, input).await?;
+    dashboard_response(&state, Json(json!({ "product": product })), tokens)
+}
+
+async fn rename_team_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateNameInput>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let workspace = rename_workspace(&state.pool, context.workspace.id, input).await?;
+    dashboard_response(&state, Json(json!({ "workspace": workspace })), tokens)
 }
 
 async fn create_api_key_handler(

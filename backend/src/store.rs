@@ -69,6 +69,16 @@ fn database_conflict(error: sqlx::Error, message: &str) -> ApiError {
     }
 }
 
+fn validated_name(value: &str, entity: &str) -> Result<String, ApiError> {
+    let name = clean(value, 80);
+    if name.chars().count() < 2 {
+        return Err(ApiError::bad_request(format!(
+            "{entity} name must contain at least 2 characters"
+        )));
+    }
+    Ok(name)
+}
+
 pub async fn get_or_create_workspace(
     pool: &PgPool,
     os_user: &OsUser,
@@ -530,12 +540,7 @@ pub async fn create_product(
     workspace_id: Uuid,
     input: CreateProductInput,
 ) -> Result<(Product, ProductEnvironment), ApiError> {
-    let name = clean(&input.name, 80);
-    if name.len() < 2 {
-        return Err(ApiError::bad_request(
-            "Product name must contain at least 2 characters",
-        ));
-    }
+    let name = validated_name(&input.name, "Product")?;
     let product_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM products WHERE workspace_id = $1")
             .bind(workspace_id)
@@ -571,6 +576,46 @@ pub async fn create_product(
     .map_err(|error| database_conflict(error, "This product already exists"))?;
     tx.commit().await?;
     Ok((product, environment))
+}
+
+pub async fn rename_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    input: UpdateNameInput,
+) -> Result<Workspace, ApiError> {
+    let name = validated_name(&input.name, "Team")?;
+    let updated = sqlx::query_as::<_, Workspace>(
+        r#"UPDATE workspaces SET name = $1, slug = $2, updated_at = NOW()
+        WHERE id = $3 RETURNING *"#,
+    )
+    .bind(&name)
+    .bind(slug(&name))
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| database_conflict(error, "A team with this name already exists"))?;
+    updated.ok_or_else(|| ApiError::not_found("Team not found"))
+}
+
+pub async fn rename_product(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    input: UpdateNameInput,
+) -> Result<Product, ApiError> {
+    let name = validated_name(&input.name, "Product")?;
+    let updated = sqlx::query_as::<_, Product>(
+        r#"UPDATE products SET name = $1, slug = $2, updated_at = NOW()
+        WHERE id = $3 AND workspace_id = $4 RETURNING *"#,
+    )
+    .bind(&name)
+    .bind(slug(&name))
+    .bind(product_id)
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| database_conflict(error, "A product with this name already exists"))?;
+    updated.ok_or_else(|| ApiError::not_found("Product not found"))
 }
 
 pub async fn create_api_key(
@@ -1607,6 +1652,43 @@ mod product_tests {
             .await
             .map_err(test_error)?;
 
+            let renamed_workspace = rename_workspace(
+                &pool,
+                workspace_id,
+                UpdateNameInput {
+                    name: "Platform team".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(renamed_workspace.id == workspace_id);
+            anyhow::ensure!(renamed_workspace.name == "Platform team");
+
+            let renamed_search = rename_product(
+                &pool,
+                workspace_id,
+                search.id,
+                UpdateNameInput {
+                    name: "Search v2".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(renamed_search.id == search.id);
+            anyhow::ensure!(renamed_search.name == "Search v2");
+            anyhow::ensure!(
+                rename_product(
+                    &pool,
+                    Uuid::new_v4(),
+                    search.id,
+                    UpdateNameInput {
+                        name: "Wrong workspace".into(),
+                    },
+                )
+                .await
+                .is_err()
+            );
+
             let context = || DashboardContext {
                 user: CurrentUser {
                     id: "usr_test".into(),
@@ -1614,7 +1696,7 @@ mod product_tests {
                     email: None,
                     display_name: "Test".into(),
                 },
-                workspace: workspace.clone(),
+                workspace: renamed_workspace.clone(),
                 role: "owner".into(),
                 workspace_memberships: vec![],
             };
@@ -1622,7 +1704,9 @@ mod product_tests {
                 .await
                 .map_err(test_error)?;
             anyhow::ensure!(search_dashboard.products.len() == 2);
-            anyhow::ensure!(search_dashboard.current_product.unwrap().id == search.id);
+            let current_product = search_dashboard.current_product.unwrap();
+            anyhow::ensure!(current_product.id == search.id);
+            anyhow::ensure!(current_product.name == "Search v2");
             anyhow::ensure!(search_dashboard.interactions.len() == 1);
             anyhow::ensure!(search_dashboard.api_keys.len() == 1);
 
@@ -1666,6 +1750,22 @@ mod product_tests {
         );
         anyhow::ensure!(normalize_invitee_email("@teammate").is_err());
         anyhow::ensure!(normalize_invitee_email("not an email").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn team_and_product_names_are_normalized_and_validated() -> anyhow::Result<()> {
+        anyhow::ensure!(
+            validated_name("  Search   API  ", "Product").map_err(test_error)? == "Search API"
+        );
+        anyhow::ensure!(validated_name("x", "Team").is_err());
+        anyhow::ensure!(validated_name("   ", "Product").is_err());
+        anyhow::ensure!(
+            validated_name(&"a".repeat(100), "Product")
+                .map_err(test_error)?
+                .len()
+                == 80
+        );
         Ok(())
     }
 

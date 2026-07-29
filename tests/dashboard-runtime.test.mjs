@@ -39,7 +39,7 @@ function button(dataset = {}, attributes = []) {
   return { dataset, hasAttribute: (name) => attributes.includes(name) };
 }
 
-async function loadDashboard({ href = "https://app.epode.ai/?view=feedback", fetchImpl } = {}) {
+async function loadDashboard({ href = "https://app.epode.ai/?view=feedback", fetchImpl, promptImpl } = {}) {
   const elements = new Map([
     ["#page", { innerHTML: "", setAttribute() {} }],
     ["#notice", { textContent: "", hidden: true }],
@@ -73,6 +73,7 @@ async function loadDashboard({ href = "https://app.epode.ai/?view=feedback", fet
     Intl,
     Date,
     confirm: () => true,
+    prompt: promptImpl || (() => null),
     setTimeout,
     clearTimeout,
     setInterval,
@@ -80,7 +81,7 @@ async function loadDashboard({ href = "https://app.epode.ai/?view=feedback", fet
   });
   vm.runInContext(source, context);
   await new Promise((resolve) => setTimeout(resolve, 10));
-  return { context, handlers, location, page: elements.get("#page") };
+  return { context, handlers, location, page: elements.get("#page"), productScope: elements.get("#product-scope") };
 }
 
 test("feedback, interaction, and session explorers render and preserve linked context", async () => {
@@ -150,4 +151,41 @@ test("a failed initial data request shows retry UI without reloading forever", a
   assert.match(page.innerHTML, /could not load/i);
   assert.match(page.innerHTML, /Try again/);
   assert.equal(location.assigned, null);
+});
+
+test("owners can rename the team and current product in place", async () => {
+  const state = structuredClone(dashboard);
+  const calls = [];
+  const prompts = ["Platform", "Search v2"];
+  const fetchImpl = async (path, options = {}) => {
+    if (path === "/api/team" && options.method === "PATCH") {
+      const { name } = JSON.parse(options.body);
+      state.workspace.name = name;
+      state.workspaceMemberships[0].workspaceName = name;
+      calls.push([path, name]);
+      return { ok: true, status: 200, json: async () => ({ workspace: structuredClone(state.workspace) }) };
+    }
+    if (path === "/api/products/product-1" && options.method === "PATCH") {
+      const { name } = JSON.parse(options.body);
+      state.currentProduct.name = name;
+      state.products[0].name = name;
+      calls.push([path, name]);
+      return { ok: true, status: 200, json: async () => ({ product: structuredClone(state.currentProduct) }) };
+    }
+    return { ok: true, status: 200, json: async () => structuredClone(state) };
+  };
+  const { handlers, page, productScope } = await loadDashboard({
+    fetchImpl,
+    promptImpl: () => prompts.shift(),
+  });
+
+  await handlers.click({ target: { closest: () => button({ view: "team" }) } });
+  assert.match(page.innerHTML, /Rename team/);
+  await handlers.click({ target: { closest: () => button({}, ["data-rename-team"]) } });
+  assert.match(page.innerHTML, /Platform/);
+
+  assert.match(productScope.innerHTML, /Rename product/);
+  await handlers.click({ target: { closest: () => button({}, ["data-rename-product"]) } });
+  assert.match(productScope.innerHTML, /Search v2/);
+  assert.deepEqual(calls, [["/api/team", "Platform"], ["/api/products/product-1", "Search v2"]]);
 });

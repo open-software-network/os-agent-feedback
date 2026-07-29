@@ -32,6 +32,7 @@ button:disabled { cursor:not-allowed; opacity:.5; }
 .product-scope select { padding:8px; font-size:13px; font-weight:700; }
 .product-scope>div { display:flex; justify-content:space-between; gap:8px; }
 .product-scope .link-button { font-size:12px; }
+.scope-links { display:flex; align-items:center; gap:10px; }
 .scope-state { display:flex; align-items:center; gap:6px; color:var(--muted); font-size:11px; }
 .scope-state i { width:7px; height:7px; border-radius:50%; background:#aaa; }
 .scope-state.connected { color:var(--good); }.scope-state.connected i { background:var(--good); }

@@ -247,7 +247,8 @@ function renderProductScope() {
   const product = dashboard.currentProduct;
   const productOptions = dashboard.products.map((entry) => `<option value="${esc(entry.id)}" ${entry.id === product?.id ? "selected" : ""}>${esc(entry.name)}</option>`).join("");
   const connectionState = dashboard.interactions.length ? `<span class="scope-state connected"><i></i>Receiving data</span>` : `<span class="scope-state"><i></i>No data yet</span>`;
-  productScope.innerHTML = `${teamSelect}<label><span>Product</span><select id="product-select">${productOptions}</select></label><div>${connectionState}${canEdit ? `<button class="link-button" data-new-product>+ New product</button>` : ""}</div>`;
+  const productActions = canEdit ? `<span class="scope-links"><button class="link-button" data-rename-product>Rename product</button><button class="link-button" data-new-product>+ New product</button></span>` : "";
+  productScope.innerHTML = `${teamSelect}<label><span>Product</span><select id="product-select">${productOptions}</select></label><div>${connectionState}${productActions}</div>`;
 }
 
 function navigate(view) {
@@ -628,7 +629,8 @@ function teamView() {
   }).join("");
   const roleChoices = `${isOwner ? `<option value="admin">Admin</option>` : ""}<option value="member" selected>Member</option>`;
   const inviteForm = canInvite ? `<section class="team-invite"><h2>Invite teammates</h2><form id="team-invite-email-form"><label><span>Email address</span><input name="invitee" type="email" autocomplete="email" placeholder="teammate@example.com" maxlength="160" required></label><label><span>Role</span><select name="role">${roleChoices}</select></label><button class="button primary">Invite</button></form><button class="link-button team-invite-secondary" data-create-invite-link>Copy member invite link</button></section>` : `<p class="muted">Your ${esc(dashboard.currentRole)} role can view this team. An owner or admin manages membership.</p>`;
-  return `${header("TEAM", dashboard.workspace.name, `${dashboard.teamMembers.length} member${dashboard.teamMembers.length === 1 ? "" : "s"}`)}${inviteForm}<section class="team-section"><h2>Members</h2><div class="team-list">${memberRows}</div></section>${canInvite ? `<section class="team-section"><h2>Pending invitations</h2>${invitationRows ? `<div class="team-list">${invitationRows}</div>` : `<p class="muted">No pending invitations.</p>`}</section>` : ""}`;
+  const renameAction = canInvite ? `<button class="button" data-rename-team>Rename team</button>` : "";
+  return `${header("TEAM", dashboard.workspace.name, `${dashboard.teamMembers.length} member${dashboard.teamMembers.length === 1 ? "" : "s"}`, renameAction)}${inviteForm}<section class="team-section"><h2>Members</h2><div class="team-list">${memberRows}</div></section>${canInvite ? `<section class="team-section"><h2>Pending invitations</h2>${invitationRows ? `<div class="team-list">${invitationRows}</div>` : `<p class="muted">No pending invitations.</p>`}</section>` : ""}`;
 }
 
 function policyView() {
@@ -669,6 +671,32 @@ document.addEventListener("click", async (event) => {
       if (target.dataset.view === "setup") await refresh();
     }
     if (target.hasAttribute("data-new-product")) navigate("new-product");
+    if (target.hasAttribute("data-rename-team")) {
+      const proposed = prompt("Team name", dashboard.workspace.name);
+      if (proposed === null) return;
+      const name = proposed.trim();
+      if (name === dashboard.workspace.name) return;
+      await request("/api/team", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      await refresh();
+      setNotice("Team renamed.");
+    }
+    if (target.hasAttribute("data-rename-product")) {
+      const proposed = prompt("Product name", dashboard.currentProduct.name);
+      if (proposed === null) return;
+      const name = proposed.trim();
+      if (name === dashboard.currentProduct.name) return;
+      await request(`/api/products/${encodeURIComponent(dashboard.currentProduct.id)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      await refresh();
+      setNotice("Product renamed.");
+    }
     if (target.dataset.setupSurface) {
       setupSurface = target.dataset.setupSurface;
       setupStack = setupStackOptions[setupSurface][0][0];
