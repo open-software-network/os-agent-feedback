@@ -618,6 +618,37 @@ pub async fn rename_product(
     updated.ok_or_else(|| ApiError::not_found("Product not found"))
 }
 
+pub async fn delete_product(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    input: DeleteProductInput,
+) -> Result<Product, ApiError> {
+    let mut tx = pool.begin().await?;
+    let product = sqlx::query_as::<_, Product>(
+        "SELECT * FROM products WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
+    )
+    .bind(product_id)
+    .bind(workspace_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| ApiError::not_found("Product not found"))?;
+    if input.confirmation.trim() != product.name {
+        return Err(ApiError::bad_request(
+            "Type the exact product name to confirm deletion",
+        ));
+    }
+    let deleted = sqlx::query_as::<_, Product>(
+        "DELETE FROM products WHERE id = $1 AND workspace_id = $2 RETURNING *",
+    )
+    .bind(product_id)
+    .bind(workspace_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(deleted)
+}
+
 pub async fn create_api_key(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -1731,6 +1762,76 @@ mod product_tests {
             .map_err(test_error)?;
             anyhow::ensure!(updated.feedback_mode == "ask");
             anyhow::ensure!(search_settings.feedback_mode == "auto");
+
+            anyhow::ensure!(
+                delete_product(
+                    &pool,
+                    workspace_id,
+                    search.id,
+                    DeleteProductInput {
+                        confirmation: "wrong name".into(),
+                    },
+                )
+                .await
+                .is_err()
+            );
+            anyhow::ensure!(
+                delete_product(
+                    &pool,
+                    Uuid::new_v4(),
+                    search.id,
+                    DeleteProductInput {
+                        confirmation: "Search v2".into(),
+                    },
+                )
+                .await
+                .is_err()
+            );
+            let deleted_search = delete_product(
+                &pool,
+                workspace_id,
+                search.id,
+                DeleteProductInput {
+                    confirmation: "Search v2".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(deleted_search.id == search.id);
+            let interaction_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM interactions_v2 WHERE environment_id = $1",
+            )
+            .bind(search_settings.id)
+            .fetch_one(&pool)
+            .await?;
+            let key_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM api_keys WHERE environment_id = $1")
+                    .bind(search_settings.id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(interaction_count == 0);
+            anyhow::ensure!(key_count == 0);
+            let remaining = dashboard(&pool, context(), Some(search.id), None)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(remaining.products.len() == 1);
+            anyhow::ensure!(remaining.current_product.unwrap().id == docs.id);
+
+            delete_product(
+                &pool,
+                workspace_id,
+                docs.id,
+                DeleteProductInput {
+                    confirmation: "Documentation".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let empty_dashboard = dashboard(&pool, context(), None, None)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(empty_dashboard.products.is_empty());
+            anyhow::ensure!(empty_dashboard.current_product.is_none());
             Ok::<(), anyhow::Error>(())
         }
         .await;

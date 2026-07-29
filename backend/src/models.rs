@@ -133,6 +133,12 @@ pub struct UpdateNameInput {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteProductInput {
+    pub confirmation: String,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PolicyInput {
     pub environment_id: Uuid,

@@ -27,6 +27,10 @@ const migratedProductLabel = await readFile(
   new URL("../backend/migrations/0009_label_migrated_products.sql", import.meta.url),
   "utf8",
 );
+const productDeletionMigration = await readFile(
+  new URL("../backend/migrations/0012_product_deletion.sql", import.meta.url),
+  "utf8",
+);
 const backendMain = await readFile(
   new URL("../backend/src/main.rs", import.meta.url),
   "utf8",
@@ -67,7 +71,7 @@ test("failed authentication clears stale sessions and presents a retry state", (
 
 test("products exist before integration setup without an environment picker", () => {
   assert.match(dashboardHtml, /id="product-scope"/);
-  assert.match(dashboardHtml, /app\.js\?v=20260728-rename/);
+  assert.match(dashboardHtml, /app\.js\?v=20260729-delete-product/);
   assert.match(dashboardScript, /Create your first product/);
   assert.match(dashboardScript, /id="product-select"/);
   assert.match(dashboardScript, /\+ New product/);
@@ -111,7 +115,7 @@ test("setup warns about legacy keys and keeps rotation visible", () => {
   assert.match(dashboardScript, /\/\^af_live_\[0-9a-f\]\{8\}\$\//);
   assert.match(dashboardScript, /class="secret-callout warning"/);
   assert.match(dashboardStyles, /\.secret-callout\.warning/);
-  assert.match(dashboardHtml, /styles\.css\?v=20260728-rename/);
+  assert.match(dashboardHtml, /styles\.css\?v=20260729-delete-product/);
   assert.match(dashboardScript, /legacy key and cannot produce valid afr2 capabilities/i);
   assert.match(dashboardScript, /V2 integrations will fail boot validation/);
   assert.match(dashboardScript, /The current key stops working immediately/);
@@ -141,6 +145,18 @@ test("owners and admins can rename teams and products without replacing their ID
   assert.match(backendStore, /UPDATE products SET name = \$1, slug = \$2/);
   assert.match(dashboardScript, /data-rename-team/);
   assert.match(dashboardScript, /data-rename-product/);
+});
+
+test("owners and admins can permanently delete a product with exact-name confirmation", () => {
+  assert.match(backendMain, /patch\(rename_product_handler\)\.delete\(delete_product_handler\)/);
+  assert.match(backendMain, /async fn delete_product_handler[\s\S]*require_workspace_editor/);
+  assert.match(backendStore, /pub async fn delete_product/);
+  assert.match(backendStore, /input\.confirmation\.trim\(\) != product\.name/);
+  assert.match(backendStore, /DELETE FROM products WHERE id = \$1 AND workspace_id = \$2 RETURNING \*/);
+  assert.equal((productDeletionMigration.match(/ON DELETE CASCADE/g) || []).length, 3);
+  assert.match(dashboardScript, /data-delete-product/);
+  assert.match(dashboardScript, /permanently delete this product and all of its data/);
+  assert.match(dashboardScript, /method: "DELETE"/);
 });
 
 test("routes stay in code and key expiration stays out of onboarding", () => {

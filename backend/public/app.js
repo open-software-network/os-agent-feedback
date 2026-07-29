@@ -247,7 +247,7 @@ function renderProductScope() {
   const product = dashboard.currentProduct;
   const productOptions = dashboard.products.map((entry) => `<option value="${esc(entry.id)}" ${entry.id === product?.id ? "selected" : ""}>${esc(entry.name)}</option>`).join("");
   const connectionState = dashboard.interactions.length ? `<span class="scope-state connected"><i></i>Receiving data</span>` : `<span class="scope-state"><i></i>No data yet</span>`;
-  const productActions = canEdit ? `<span class="scope-links"><button class="link-button" data-rename-product>Rename product</button><button class="link-button" data-new-product>+ New product</button></span>` : "";
+  const productActions = canEdit ? `<span class="scope-links"><button class="link-button" data-rename-product>Rename product</button><button class="link-button danger" data-delete-product>Delete product</button><button class="link-button" data-new-product>+ New product</button></span>` : "";
   productScope.innerHTML = `${teamSelect}<label><span>Product</span><select id="product-select">${productOptions}</select></label><div>${connectionState}${productActions}</div>`;
 }
 
@@ -696,6 +696,29 @@ document.addEventListener("click", async (event) => {
       });
       await refresh();
       setNotice("Product renamed.");
+    }
+    if (target.hasAttribute("data-delete-product")) {
+      const product = dashboard.currentProduct;
+      const confirmation = prompt(`Type "${product.name}" to permanently delete this product and all of its data.`);
+      if (confirmation === null) return;
+      if (confirmation.trim() !== product.name) {
+        setNotice("Product name did not match. Nothing was deleted.");
+        return;
+      }
+      await request(`/api/products/${encodeURIComponent(product.id)}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirmation }),
+      });
+      selectedProductId = "";
+      selectedOutcome = null;
+      selectedInteraction = null;
+      selectedSession = null;
+      apiSecret = "";
+      setupConnectionId = null;
+      currentView = "feedback";
+      await refresh();
+      setNotice(`${product.name} and its data were deleted.`);
     }
     if (target.dataset.setupSurface) {
       setupSurface = target.dataset.setupSurface;

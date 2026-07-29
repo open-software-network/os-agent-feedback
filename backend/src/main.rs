@@ -132,7 +132,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/auth/logout", post(logout_handler))
         .route("/api/dashboard", get(dashboard_handler))
         .route("/api/products", post(create_product_handler))
-        .route("/api/products/{product_id}", patch(rename_product_handler))
+        .route(
+            "/api/products/{product_id}",
+            patch(rename_product_handler).delete(delete_product_handler),
+        )
         .route("/api/team", patch(rename_team_handler))
         .route(
             "/api/team/invitations",
@@ -635,6 +638,23 @@ async fn rename_team_handler(
     require_workspace_editor(&context)?;
     let workspace = rename_workspace(&state.pool, context.workspace.id, input).await?;
     dashboard_response(&state, Json(json!({ "workspace": workspace })), tokens)
+}
+
+async fn delete_product_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(product_id): Path<Uuid>,
+    Json(input): Json<DeleteProductInput>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let product = delete_product(&state.pool, context.workspace.id, product_id, input).await?;
+    dashboard_response(
+        &state,
+        Json(json!({ "deleted": true, "product": product })),
+        tokens,
+    )
 }
 
 async fn create_api_key_handler(

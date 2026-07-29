@@ -189,3 +189,64 @@ test("owners can rename the team and current product in place", async () => {
   assert.match(productScope.innerHTML, /Search v2/);
   assert.deepEqual(calls, [["/api/team", "Platform"], ["/api/products/product-1", "Search v2"]]);
 });
+
+test("product deletion requires the exact name and switches to the next product", async () => {
+  const state = structuredClone(dashboard);
+  state.products.push({ id: "product-2", name: "Documentation" });
+  const calls = [];
+  const prompts = ["wrong name", "Search API"];
+  const fetchImpl = async (path, options = {}) => {
+    if (path === "/api/products/product-1" && options.method === "DELETE") {
+      const { confirmation } = JSON.parse(options.body);
+      calls.push([path, confirmation]);
+      state.products = state.products.filter((product) => product.id !== "product-1");
+      state.currentProduct = state.products[0];
+      state.currentEnvironment = { ...state.currentEnvironment, id: "environment-2", productId: "product-2" };
+      state.environments = [state.currentEnvironment];
+      state.apiKeys = [];
+      state.sessions = [];
+      state.interactions = [];
+      state.outcomes = [];
+      return { ok: true, status: 200, json: async () => ({ deleted: true }) };
+    }
+    return { ok: true, status: 200, json: async () => structuredClone(state) };
+  };
+  const { handlers, productScope } = await loadDashboard({
+    fetchImpl,
+    promptImpl: () => prompts.shift(),
+  });
+
+  assert.match(productScope.innerHTML, /Delete product/);
+  await handlers.click({ target: { closest: () => button({}, ["data-delete-product"]) } });
+  assert.equal(calls.length, 0);
+  await handlers.click({ target: { closest: () => button({}, ["data-delete-product"]) } });
+  assert.deepEqual(calls, [["/api/products/product-1", "Search API"]]);
+  assert.match(productScope.innerHTML, /Documentation/);
+  assert.doesNotMatch(productScope.innerHTML, /Search API/);
+});
+
+test("deleting the last product returns owners to first-product onboarding", async () => {
+  const state = structuredClone(dashboard);
+  const fetchImpl = async (path, options = {}) => {
+    if (path === "/api/products/product-1" && options.method === "DELETE") {
+      state.products = [];
+      state.currentProduct = null;
+      state.currentEnvironment = null;
+      state.environments = [];
+      state.apiKeys = [];
+      state.sessions = [];
+      state.interactions = [];
+      state.outcomes = [];
+      return { ok: true, status: 200, json: async () => ({ deleted: true }) };
+    }
+    return { ok: true, status: 200, json: async () => structuredClone(state) };
+  };
+  const { context, handlers, page } = await loadDashboard({
+    fetchImpl,
+    promptImpl: () => "Search API",
+  });
+
+  await handlers.click({ target: { closest: () => button({}, ["data-delete-product"]) } });
+  assert.equal(vm.runInContext("currentView", context), "feedback");
+  assert.match(page.innerHTML, /Create your first product/);
+});
