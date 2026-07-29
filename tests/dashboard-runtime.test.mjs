@@ -42,7 +42,7 @@ function button(dataset = {}, attributes = []) {
 async function loadDashboard({ href = "https://app.epode.ai/?view=feedback", fetchImpl, promptImpl } = {}) {
   const elements = new Map([
     ["#page", { innerHTML: "", setAttribute() {} }],
-    ["#notice", { textContent: "", hidden: true }],
+    ["#notice", { textContent: "", hidden: true, setAttribute(name, value) { this[name] = value; } }],
     ["#account", { innerHTML: "" }],
     ["#product-scope", { innerHTML: "" }],
     ["#signout", { addEventListener() {} }],
@@ -81,7 +81,7 @@ async function loadDashboard({ href = "https://app.epode.ai/?view=feedback", fet
   });
   vm.runInContext(source, context);
   await new Promise((resolve) => setTimeout(resolve, 10));
-  return { context, handlers, location, page: elements.get("#page"), productScope: elements.get("#product-scope") };
+  return { context, handlers, location, notice: elements.get("#notice"), page: elements.get("#page"), productScope: elements.get("#product-scope") };
 }
 
 test("feedback, interaction, and session explorers render and preserve linked context", async () => {
@@ -151,6 +151,21 @@ test("a failed initial data request shows retry UI without reloading forever", a
   assert.match(page.innerHTML, /could not load/i);
   assert.match(page.innerHTML, /Try again/);
   assert.equal(location.assigned, null);
+});
+
+test("action notices render as ephemeral accessible toasts", async () => {
+  const { context, notice } = await loadDashboard();
+  vm.runInContext('setNotice("Member role updated.", 5)', context);
+  assert.equal(notice.hidden, false);
+  assert.equal(notice.textContent, "Member role updated.");
+  assert.equal(notice.role, "status");
+  assert.match(notice.className, /notice-info/);
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.equal(notice.hidden, true);
+
+  vm.runInContext('setNotice("Update failed", 5, "error")', context);
+  assert.equal(notice.role, "alert");
+  assert.match(notice.className, /notice-error/);
 });
 
 test("owners can rename the team and current product in place", async () => {

@@ -59,15 +59,18 @@ function recalledSetupSecret(environmentId) {
 const esc = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
 const date = (value) => value ? new Date(value).toLocaleString() : "—";
 const title = (value) => String(value || "unknown").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
-const setNotice = (message, timeoutMs = 0) => {
+const setNotice = (message, timeoutMs = 2800, tone = "info") => {
   clearTimeout(noticeTimer);
   notice.textContent = message;
+  notice.className = `notice notice-${tone}`;
+  notice.setAttribute("role", tone === "error" ? "alert" : "status");
   notice.hidden = !message;
-  if (message && timeoutMs) {
+  if (message && timeoutMs > 0) {
     noticeTimer = setTimeout(() => {
       notice.textContent = "";
       notice.hidden = true;
     }, timeoutMs);
+    noticeTimer?.unref?.();
   }
 };
 const outcomeClass = (value) => value === "success" ? "positive" : value === "failure" ? "negative" : "neutral";
@@ -231,7 +234,7 @@ async function refresh() {
   if (url.searchParams.get("invite") === "invalid") {
     url.searchParams.delete("invite");
     history.replaceState({}, "", url);
-    setNotice("That invitation is expired, revoked, or was created for a different email address.");
+    setNotice("That invitation is expired, revoked, or was created for a different email address.", 6000, "error");
   }
   render();
 }
@@ -702,7 +705,7 @@ document.addEventListener("click", async (event) => {
       const confirmation = prompt(`Type "${product.name}" to permanently delete this product and all of its data.`);
       if (confirmation === null) return;
       if (confirmation.trim() !== product.name) {
-        setNotice("Product name did not match. Nothing was deleted.");
+        setNotice("Product name did not match. Nothing was deleted.", 4500, "error");
         return;
       }
       await request(`/api/products/${encodeURIComponent(product.id)}`, {
@@ -790,7 +793,7 @@ document.addEventListener("click", async (event) => {
       setupConnectionId = body.apiKey.id;
       rememberSetupSecret(dashboard.currentEnvironment.id, body.secret);
       await refresh();
-      setNotice("Product key rotated. Save the new server-side key shown above.");
+      setNotice("Product key rotated. Save the new server-side key shown above.", 6000);
     }
     if (target.dataset.removeMember) {
       if (!confirm("Remove this member from the team?")) return;
@@ -805,7 +808,7 @@ document.addEventListener("click", async (event) => {
       setNotice("Invitation revoked.");
     }
   } catch (error) {
-    setNotice(error.message || "Request failed");
+    setNotice(error.message || "Request failed", 6000, "error");
   }
 });
 
@@ -857,7 +860,7 @@ document.addEventListener("change", async (event) => {
       setNotice("Member role updated.");
     }
   } catch (error) {
-    setNotice(error.message || "Update failed");
+    setNotice(error.message || "Update failed", 6000, "error");
   }
 });
 
@@ -890,7 +893,7 @@ document.addEventListener("submit", async (event) => {
       currentView = "setup";
       await refresh();
       navigate("setup");
-      setNotice(`${body.product.name} created. Choose its first integration.`);
+      setNotice(`${body.product.name} created. Choose its first integration.`, 4500);
     }
     if (event.target.id === "policy-form") {
       await request("/api/settings/policy", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ environmentId: dashboard.currentEnvironment.id, feedbackMode: form.get("feedbackMode"), collectEventSummaries: false, retentionDays: Number(form.get("retentionDays")) }) });
@@ -912,7 +915,7 @@ document.addEventListener("submit", async (event) => {
       location.assign(emailHref);
     }
   } catch (error) {
-    setNotice(error.message || "Request failed");
+    setNotice(error.message || "Request failed", 6000, "error");
   }
 });
 

@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Agent Feedback Dashboard</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260729-delete-product">
-  <script src="/static/app.js?v=20260729-delete-product" defer></script>
+  <link rel="stylesheet" href="/static/styles.css?v=20260729-toasts">
+  <script src="/static/app.js?v=20260729-toasts" defer></script>
 </head>
 <body>
   <div class="app-shell">
@@ -28,7 +28,7 @@
       <button id="signout" class="link-button">Sign out</button>
     </aside>
     <main class="content">
-      <div id="notice" class="notice" hidden></div>
+      <div id="notice" class="notice notice-info" role="status" aria-live="polite" aria-atomic="true" hidden></div>
       <div id="page" aria-live="polite"><p>Loading…</p></div>
     </main>
   </div>
