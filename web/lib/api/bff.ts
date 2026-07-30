@@ -75,6 +75,8 @@ function machineAuthorization(headers: Headers, upstreamPath: string): string | 
 
   const allowed =
     (upstreamPath === "/api/v2/telemetry/batches" && token.startsWith("af_live_")) ||
+    (upstreamPath === "/api/v2/consent/state" && token.startsWith("af_live_")) ||
+    (upstreamPath === "/api/v2/consent/decisions" && token.startsWith("afr2_")) ||
     (upstreamPath === "/api/v2/reports" && token.startsWith("afr2_")) ||
     (upstreamPath === "/mcp" && token.startsWith("af_read_"));
 
