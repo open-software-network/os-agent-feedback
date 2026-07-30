@@ -31,3 +31,6 @@ npm-debug.log*
 **/dist/
 **/outputs/
 **/work/
+**/*.tsbuildinfo
+web/.next/
+web/out/

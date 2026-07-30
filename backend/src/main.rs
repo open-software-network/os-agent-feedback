@@ -1,3 +1,4 @@
+mod api_types;
 mod error;
 mod models;
 mod os_accounts;
@@ -13,7 +14,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     middleware::{Next, from_fn},
     response::{Html, IntoResponse, Redirect, Response},
-    routing::{delete, get, patch, post},
+    routing::get,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, de::DeserializeOwned};
@@ -33,16 +34,23 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use uuid::Uuid;
 
 use crate::{
+    api_types::{
+        ApiKeyCreatedResponse, ApiKeyRotatedResponse, AuthenticationStateResponse,
+        DashboardInteractionResponse, DashboardReportResponse, EnvironmentResponse,
+        McpInfoResponse, OpaqueJsonObject, ProductCreatedResponse, ProductDeletedResponse,
+        ProductResponse, RemovedResponse, RevokedResponse, TeamInvitationCreatedResponse,
+        TeamMemberResponse, TransferredResponse, UpdatedResponse, WorkspaceResponse,
+    },
     error::{ApiError, ApiErrorEnvelope},
     models::{
         ClassificationDiscovery, CreateApiKeyInput, CreateProductInput, CreateTeamInvitationInput,
-        CurrentUser, DashboardContext, DeleteProductInput, FeedbackConsentDiscovery,
-        FeedbackDiscoveryResponse, FeedbackListInteractionsInput, FeedbackListReportsInput,
-        FeedbackModesDiscovery, FeedbackRequiredFieldsDiscovery, FeedbackSubmissionDiscovery,
-        HealthResponse, IntegrationsDiscovery, McpDiscovery, PolicyInput, ProductAuth,
-        ProductFeedbackAcceptedResponse, ProductFeedbackReportInput, ReliabilityDiscovery,
-        TelemetryBatchInput, TelemetryBatchResult, TelemetryDiscovery, UpdateFeedbackWorkflowInput,
-        UpdateNameInput, UpdateTeamMemberInput,
+        CurrentUser, DashboardContext, DashboardData, DashboardSessionDetail, DeleteProductInput,
+        FeedbackConsentDiscovery, FeedbackDiscoveryResponse, FeedbackListInteractionsInput,
+        FeedbackListReportsInput, FeedbackModesDiscovery, FeedbackRequiredFieldsDiscovery,
+        FeedbackSubmissionDiscovery, HealthResponse, IntegrationsDiscovery, McpDiscovery,
+        PolicyInput, ProductAuth, ProductFeedbackAcceptedResponse, ProductFeedbackReportInput,
+        ReliabilityDiscovery, TelemetryBatchInput, TelemetryBatchResult, TelemetryDiscovery,
+        UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput,
     },
     os_accounts::{
         ACCESS_COOKIE, OsAccountsClient, PKCE_COOKIE, REFRESH_COOKIE, STATE_COOKIE, TokenPair,
@@ -139,58 +147,34 @@ fn build_app_router() -> OpenApiRouter<Arc<AppState>> {
         .merge(non_api_routes.into())
         .routes(routes!(health))
         .routes(routes!(feedback_discovery_v2))
-        .route("/auth/start", get(auth_start))
-        .route("/auth/callback", get(auth_callback))
-        .route("/join/{invitation_id}", get(join_team_handler))
-        .route("/api/auth/logout", post(logout_handler))
-        .route("/api/dashboard", get(dashboard_handler))
-        .route(
-            "/api/dashboard/reports/{report_id}",
-            get(dashboard_report_handler).patch(update_feedback_workflow_handler),
-        )
-        .route(
-            "/api/dashboard/interactions/{interaction_id}",
-            get(dashboard_interaction_handler),
-        )
-        .route(
-            "/api/dashboard/sessions/{session_id}",
-            get(dashboard_session_handler),
-        )
-        .route("/api/products", post(create_product_handler))
-        .route(
-            "/api/products/{product_id}",
-            patch(rename_product_handler).delete(delete_product_handler),
-        )
-        .route("/api/team", patch(rename_team_handler))
-        .route(
-            "/api/team/invitations",
-            post(create_team_invitation_handler),
-        )
-        .route(
-            "/api/team/invitations/{invitation_id}",
-            delete(revoke_team_invitation_handler),
-        )
-        .route(
-            "/api/team/members/{os_user_id}",
-            patch(update_team_member_handler).delete(remove_team_member_handler),
-        )
-        .route(
-            "/api/team/ownership/{os_user_id}",
-            post(transfer_team_ownership_handler),
-        )
-        .route("/api/settings/api-keys", post(create_api_key_handler))
-        .route(
-            "/api/settings/api-keys/{key_id}",
-            delete(revoke_api_key_handler),
-        )
-        .route(
-            "/api/settings/api-keys/{key_id}/rotate",
-            post(rotate_api_key_handler),
-        )
-        .route("/api/settings/policy", post(update_policy_handler))
+        .routes(routes!(auth_start))
+        .routes(routes!(auth_callback))
+        .routes(routes!(join_team_handler))
+        .routes(routes!(logout_handler))
+        .routes(routes!(dashboard_handler))
+        .routes(routes!(
+            dashboard_report_handler,
+            update_feedback_workflow_handler
+        ))
+        .routes(routes!(dashboard_interaction_handler))
+        .routes(routes!(dashboard_session_handler))
+        .routes(routes!(create_product_handler))
+        .routes(routes!(rename_product_handler, delete_product_handler))
+        .routes(routes!(rename_team_handler))
+        .routes(routes!(create_team_invitation_handler))
+        .routes(routes!(revoke_team_invitation_handler))
+        .routes(routes!(
+            update_team_member_handler,
+            remove_team_member_handler
+        ))
+        .routes(routes!(transfer_team_ownership_handler))
+        .routes(routes!(create_api_key_handler))
+        .routes(routes!(revoke_api_key_handler))
+        .routes(routes!(rotate_api_key_handler))
+        .routes(routes!(update_policy_handler))
         .routes(routes!(telemetry_batch_handler))
         .routes(routes!(product_feedback_handler))
-        .route("/mcp", get(mcp_info).post(mcp_handler))
+        .routes(routes!(mcp_info, mcp_handler))
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(cors)
         .layer(CompressionLayer::new())
@@ -544,6 +528,22 @@ fn feedback_discovery(public_base_url: &str) -> FeedbackDiscoveryResponse {
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/auth/start",
+    tag = "auth",
+    responses(
+        (
+            status = 303,
+            description = "Redirect to OS Accounts to begin authentication",
+            headers(
+                ("Location" = String, description = "OS Accounts authorization URL"),
+                ("Set-Cookie" = String, description = "Short-lived PKCE verifier and OAuth state cookies")
+            )
+        ),
+        (status = 500, description = "Authentication flow setup failed", body = ApiErrorEnvelope)
+    )
+)]
 async fn auth_start(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
     let (verifier, oauth_state, login_url) =
         state.accounts.new_flow().map_err(ApiError::internal)?;
@@ -559,12 +559,32 @@ async fn auth_start(State(state): State<Arc<AppState>>) -> Result<Response, ApiE
     Ok(response)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct AuthCallbackQuery {
+    /// Authorization code returned by OS Accounts.
     code: Option<String>,
+    /// OAuth state returned by OS Accounts.
     state: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/auth/callback",
+    tag = "auth",
+    params(AuthCallbackQuery),
+    responses(
+        (
+            status = 303,
+            description = "Authentication completed or failed; redirect to the dashboard or login page",
+            headers(
+                ("Location" = String, description = "Dashboard or authentication-failure URL"),
+                ("Set-Cookie" = String, description = "Dashboard session cookies and cleared OAuth flow cookies")
+            )
+        ),
+        (status = 500, description = "Authentication callback processing failed", body = ApiErrorEnvelope)
+    )
+)]
 async fn auth_callback(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -614,6 +634,26 @@ async fn auth_callback(
     Ok(response)
 }
 
+#[utoipa::path(
+    get,
+    path = "/join/{invitation_id}",
+    tag = "auth",
+    params(
+        ("invitation_id" = Uuid, Path, description = "Team invitation identifier")
+    ),
+    responses(
+        (
+            status = 303,
+            description = "Remember the invitation and redirect to authentication",
+            headers(
+                ("Location" = String, description = "Authentication start URL"),
+                ("Set-Cookie" = String, description = "Short-lived team invitation cookie")
+            )
+        ),
+        (status = 400, description = "Invitation identifier is not a UUID", body = String, content_type = "text/plain"),
+        (status = 500, description = "Invitation redirect setup failed", body = ApiErrorEnvelope)
+    )
+)]
 async fn join_team_handler(
     State(state): State<Arc<AppState>>,
     Path(invitation_id): Path<Uuid>,
@@ -750,13 +790,32 @@ fn dashboard_response(
     Ok(response)
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/logout",
+    tag = "auth",
+    responses(
+        (
+            status = 200,
+            description = "Dashboard session cleared",
+            body = AuthenticationStateResponse,
+            headers(
+                ("Set-Cookie" = String, description = "Cleared dashboard session cookies")
+            )
+        ),
+        (status = 500, description = "Session cookie cleanup failed", body = ApiErrorEnvelope)
+    )
+)]
 async fn logout_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let refresh = cookie(&headers, REFRESH_COOKIE);
     state.accounts.logout(refresh.as_deref()).await;
-    let mut response = Json(json!({ "authenticated": false })).into_response();
+    let mut response = Json(AuthenticationStateResponse {
+        authenticated: false,
+    })
+    .into_response();
     append_cookie(
         &mut response,
         &clear_cookie(ACCESS_COOKIE, state.secure_cookies),
@@ -768,24 +827,51 @@ async fn logout_handler(
     Ok(response)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
 struct DashboardQuery {
+    /// Team to open. Defaults to the caller's personal team.
     workspace_id: Option<Uuid>,
+    /// Product to select. Defaults to the first product.
     product_id: Option<Uuid>,
     // Kept during rollout so old dashboard links continue to resolve.
+    /// Legacy environment selection used by existing dashboard links.
     environment_id: Option<Uuid>,
+    /// Maximum interactions returned.
+    #[param(default = 250)]
     interaction_limit: Option<i64>,
+    /// Maximum feedback reports returned.
+    #[param(default = 250)]
     report_limit: Option<i64>,
+    /// Maximum sessions returned.
+    #[param(default = 100)]
     session_limit: Option<i64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
 struct DashboardDetailQuery {
+    /// Product that owns the requested dashboard record.
     product_id: Uuid,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/dashboard",
+    tag = "dashboard",
+    params(DashboardQuery),
+    responses(
+        (status = 200, description = "Dashboard state", body = DashboardData),
+        (status = 400, description = "Malformed dashboard query parameters", body = String, content_type = "text/plain"),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot access the requested team", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "Dashboard state could not be loaded", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
 async fn dashboard_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -805,6 +891,33 @@ async fn dashboard_handler(
     dashboard_response(&state, Json(data), tokens)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/dashboard/reports/{report_id}",
+    tag = "dashboard",
+    params(
+        ("report_id" = Uuid, Path, description = "Feedback report identifier"),
+        DashboardDetailQuery,
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Feedback report with interaction and workflow context", body = DashboardReportResponse),
+        (
+            status = 400,
+            description = "Invalid path, query, or team header",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot access the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Feedback report not found for the product", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "Feedback report could not be loaded", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
 async fn dashboard_report_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -820,9 +933,39 @@ async fn dashboard_report_handler(
         report_id,
     )
     .await?;
-    dashboard_response(&state, Json(json!({ "report": report })), tokens)
+    dashboard_response(&state, Json(DashboardReportResponse { report }), tokens)
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/dashboard/reports/{report_id}",
+    tag = "dashboard",
+    params(
+        ("report_id" = Uuid, Path, description = "Feedback report identifier"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
+    ),
+    request_body = UpdateFeedbackWorkflowInput,
+    responses(
+        (status = 200, description = "Feedback workflow updated", body = UpdatedResponse),
+        (
+            status = 400,
+            description = "Invalid path, team header, workflow update, or malformed JSON body",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot edit the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Feedback report not found for the product", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 413, description = "Request body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "Request body is not JSON", body = String, content_type = "text/plain"),
+        (status = 422, description = "JSON body does not match the workflow update schema", body = String, content_type = "text/plain"),
+        (status = 500, description = "Feedback workflow could not be updated", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
 async fn update_feedback_workflow_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -833,9 +976,36 @@ async fn update_feedback_workflow_handler(
         dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
     require_workspace_editor(&context)?;
     update_feedback_workflow(&state.pool, &context, report_id, input).await?;
-    dashboard_response(&state, Json(json!({ "updated": true })), tokens)
+    dashboard_response(&state, Json(UpdatedResponse { updated: true }), tokens)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/dashboard/interactions/{interaction_id}",
+    tag = "dashboard",
+    params(
+        ("interaction_id" = Uuid, Path, description = "Interaction identifier"),
+        DashboardDetailQuery,
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Product interaction", body = DashboardInteractionResponse),
+        (
+            status = 400,
+            description = "Invalid path, query, or team header",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot access the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Interaction not found for the product", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "Interaction could not be loaded", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
 async fn dashboard_interaction_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -851,9 +1021,40 @@ async fn dashboard_interaction_handler(
         interaction_id,
     )
     .await?;
-    dashboard_response(&state, Json(json!({ "interaction": interaction })), tokens)
+    dashboard_response(
+        &state,
+        Json(DashboardInteractionResponse { interaction }),
+        tokens,
+    )
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/dashboard/sessions/{session_id}",
+    tag = "dashboard",
+    params(
+        ("session_id" = Uuid, Path, description = "Session identifier"),
+        DashboardDetailQuery,
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Session with its interactions and feedback reports", body = DashboardSessionDetail),
+        (
+            status = 400,
+            description = "Invalid path, query, or team header",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot access the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Session not found for the product", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "Session could not be loaded", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
 async fn dashboard_session_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -872,6 +1073,36 @@ async fn dashboard_session_handler(
     dashboard_response(&state, Json(detail), tokens)
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/products",
+    tag = "products",
+    params(
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    request_body = CreateProductInput,
+    responses(
+        (status = 201, description = "Product, default environment, and one-time API key secret created", body = ProductCreatedResponse),
+        (
+            status = 400,
+            description = "Invalid team header, product data, or malformed JSON body",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Team not found", body = ApiErrorEnvelope),
+        (status = 409, description = "Product name conflicts or the team product limit was reached", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 413, description = "Request body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "Request body is not JSON", body = String, content_type = "text/plain"),
+        (status = 422, description = "JSON body does not match the product schema", body = String, content_type = "text/plain"),
+        (status = 500, description = "Product could not be created", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
 async fn create_product_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -886,18 +1117,49 @@ async fn create_product_handler(
         &state,
         (
             StatusCode::CREATED,
-            Json(json!({
-                "product": product,
-                "environment": environment,
-                "apiKey": api_key,
-                "secret": secret,
-                "shownOnce": true
-            })),
+            Json(ProductCreatedResponse {
+                product,
+                environment,
+                api_key,
+                secret,
+                shown_once: true,
+            }),
         ),
         tokens,
     )
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/products/{product_id}",
+    tag = "products",
+    params(
+        ("product_id" = Uuid, Path, description = "Product identifier"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    request_body = UpdateNameInput,
+    responses(
+        (status = 200, description = "Renamed product", body = ProductResponse),
+        (
+            status = 400,
+            description = "Invalid path, team header, product name, or malformed JSON body",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Product not found", body = ApiErrorEnvelope),
+        (status = 409, description = "A product with this name already exists", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 413, description = "Request body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "Request body is not JSON", body = String, content_type = "text/plain"),
+        (status = 422, description = "JSON body does not match the product update schema", body = String, content_type = "text/plain"),
+        (status = 500, description = "Product could not be renamed", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
 async fn rename_product_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -908,9 +1170,39 @@ async fn rename_product_handler(
         dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
     require_workspace_editor(&context)?;
     let product = rename_product(&state.pool, context.workspace.id, product_id, input).await?;
-    dashboard_response(&state, Json(json!({ "product": product })), tokens)
+    dashboard_response(&state, Json(ProductResponse { product }), tokens)
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/team",
+    tag = "team",
+    params(
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    request_body = UpdateNameInput,
+    responses(
+        (status = 200, description = "Renamed team", body = WorkspaceResponse),
+        (
+            status = 400,
+            description = "Invalid team header, team name, or malformed JSON body",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Team not found", body = ApiErrorEnvelope),
+        (status = 409, description = "A team with this name already exists", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 413, description = "Request body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "Request body is not JSON", body = String, content_type = "text/plain"),
+        (status = 422, description = "JSON body does not match the team update schema", body = String, content_type = "text/plain"),
+        (status = 500, description = "Team could not be renamed", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
 async fn rename_team_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -920,9 +1212,39 @@ async fn rename_team_handler(
         dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
     require_workspace_editor(&context)?;
     let workspace = rename_workspace(&state.pool, context.workspace.id, input).await?;
-    dashboard_response(&state, Json(json!({ "workspace": workspace })), tokens)
+    dashboard_response(&state, Json(WorkspaceResponse { workspace }), tokens)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/products/{product_id}",
+    tag = "products",
+    params(
+        ("product_id" = Uuid, Path, description = "Product identifier"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    request_body = DeleteProductInput,
+    responses(
+        (status = 200, description = "Deleted product", body = ProductDeletedResponse),
+        (
+            status = 400,
+            description = "Invalid path, team header, confirmation, or malformed JSON body",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Product not found", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 413, description = "Request body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "Request body is not JSON", body = String, content_type = "text/plain"),
+        (status = 422, description = "JSON body does not match the product deletion schema", body = String, content_type = "text/plain"),
+        (status = 500, description = "Product could not be deleted", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
 async fn delete_product_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -935,11 +1257,44 @@ async fn delete_product_handler(
     let product = delete_product(&state.pool, context.workspace.id, product_id, input).await?;
     dashboard_response(
         &state,
-        Json(json!({ "deleted": true, "product": product })),
+        Json(ProductDeletedResponse {
+            deleted: true,
+            product,
+        }),
         tokens,
     )
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/settings/api-keys",
+    tag = "settings",
+    params(
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    request_body = CreateApiKeyInput,
+    responses(
+        (status = 201, description = "API key and one-time secret created", body = ApiKeyCreatedResponse),
+        (
+            status = 400,
+            description = "Invalid team header, API key configuration, or malformed JSON body",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Product environment not found", body = ApiErrorEnvelope),
+        (status = 409, description = "Environment already has the maximum number of active keys", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 413, description = "Request body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "Request body is not JSON", body = String, content_type = "text/plain"),
+        (status = 422, description = "JSON body does not match the API key schema", body = String, content_type = "text/plain"),
+        (status = 500, description = "API key could not be created", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
 async fn create_api_key_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -961,12 +1316,42 @@ async fn create_api_key_handler(
         &state,
         (
             StatusCode::CREATED,
-            Json(json!({ "apiKey": api_key, "secret": secret, "shownOnce": true })),
+            Json(ApiKeyCreatedResponse {
+                api_key,
+                secret,
+                shown_once: true,
+            }),
         ),
         tokens,
     )
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/settings/api-keys/{key_id}",
+    tag = "settings",
+    params(
+        ("key_id" = Uuid, Path, description = "API key identifier"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "API key revoked", body = RevokedResponse),
+        (
+            status = 400,
+            description = "Invalid key identifier or team header",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Active API key not found", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "API key could not be revoked", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
 async fn revoke_api_key_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -976,9 +1361,35 @@ async fn revoke_api_key_handler(
         dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
     require_workspace_editor(&context)?;
     revoke_api_key(&state.pool, context.workspace.id, key_id).await?;
-    dashboard_response(&state, Json(json!({ "revoked": true })), tokens)
+    dashboard_response(&state, Json(RevokedResponse { revoked: true }), tokens)
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/settings/api-keys/{key_id}/rotate",
+    tag = "settings",
+    params(
+        ("key_id" = Uuid, Path, description = "API key identifier"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Successor API key and one-time secret created", body = ApiKeyRotatedResponse),
+        (
+            status = 400,
+            description = "Invalid key identifier or team header",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Active API key not found", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "API key could not be rotated", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
 async fn rotate_api_key_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -991,16 +1402,45 @@ async fn rotate_api_key_handler(
         rotate_api_key(&state.pool, context.workspace.id, key_id).await?;
     dashboard_response(
         &state,
-        Json(json!({
-            "apiKey": api_key,
-            "secret": secret,
-            "shownOnce": true,
-            "predecessorExpiresAt": predecessor_expires_at
-        })),
+        Json(ApiKeyRotatedResponse {
+            api_key,
+            secret,
+            shown_once: true,
+            predecessor_expires_at,
+        }),
         tokens,
     )
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/settings/policy",
+    tag = "settings",
+    params(
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    request_body = PolicyInput,
+    responses(
+        (status = 200, description = "Updated product environment policy", body = EnvironmentResponse),
+        (
+            status = 400,
+            description = "Invalid team header, policy values, or malformed JSON body",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Product environment not found", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 413, description = "Request body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "Request body is not JSON", body = String, content_type = "text/plain"),
+        (status = 422, description = "JSON body does not match the policy schema", body = String, content_type = "text/plain"),
+        (status = 500, description = "Policy could not be updated", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
 async fn update_policy_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1010,9 +1450,38 @@ async fn update_policy_handler(
         dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
     require_workspace_editor(&context)?;
     let environment = update_policy(&state.pool, context.workspace.id, input).await?;
-    dashboard_response(&state, Json(json!({ "environment": environment })), tokens)
+    dashboard_response(&state, Json(EnvironmentResponse { environment }), tokens)
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/team/invitations",
+    tag = "team",
+    params(
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    request_body = CreateTeamInvitationInput,
+    responses(
+        (status = 201, description = "Team invitation created", body = TeamInvitationCreatedResponse),
+        (
+            status = 400,
+            description = "Invalid team header, invitation values, or malformed JSON body",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot invite this role to the requested team", body = ApiErrorEnvelope),
+        (status = 409, description = "Invitee is already a member or has an active invitation", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 413, description = "Request body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "Request body is not JSON", body = String, content_type = "text/plain"),
+        (status = 422, description = "JSON body does not match the invitation schema", body = String, content_type = "text/plain"),
+        (status = 500, description = "Invitation could not be created", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
 async fn create_team_invitation_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1026,12 +1495,45 @@ async fn create_team_invitation_handler(
         &state,
         (
             StatusCode::CREATED,
-            Json(json!({ "invitation": invitation, "joinPath": join_path })),
+            Json(TeamInvitationCreatedResponse {
+                invitation,
+                join_path,
+            }),
         ),
         tokens,
     )
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/team/members/{os_user_id}",
+    tag = "team",
+    params(
+        ("os_user_id" = String, Path, description = "OS Accounts user identifier"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    request_body = UpdateTeamMemberInput,
+    responses(
+        (status = 200, description = "Updated team member", body = TeamMemberResponse),
+        (
+            status = 400,
+            description = "Invalid team header, member role, or malformed JSON body",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot change this member's role", body = ApiErrorEnvelope),
+        (status = 404, description = "Team member not found", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 413, description = "Request body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "Request body is not JSON", body = String, content_type = "text/plain"),
+        (status = 422, description = "JSON body does not match the member update schema", body = String, content_type = "text/plain"),
+        (status = 500, description = "Team member could not be updated", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
 async fn update_team_member_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1041,9 +1543,28 @@ async fn update_team_member_handler(
     let (context, tokens) =
         dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
     let member = update_team_member_role(&state.pool, &context, &os_user_id, input).await?;
-    dashboard_response(&state, Json(json!({ "member": member })), tokens)
+    dashboard_response(&state, Json(TeamMemberResponse { member }), tokens)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/team/members/{os_user_id}",
+    tag = "team",
+    params(
+        ("os_user_id" = String, Path, description = "OS Accounts user identifier"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Team member removed", body = RemovedResponse),
+        (status = 400, description = "Invalid team header", body = ApiErrorEnvelope),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot remove this team member", body = ApiErrorEnvelope),
+        (status = 404, description = "Team member not found", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "Team member could not be removed", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
 async fn remove_team_member_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1052,9 +1573,29 @@ async fn remove_team_member_handler(
     let (context, tokens) =
         dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
     remove_team_member(&state.pool, &context, &os_user_id).await?;
-    dashboard_response(&state, Json(json!({ "removed": true })), tokens)
+    dashboard_response(&state, Json(RemovedResponse { removed: true }), tokens)
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/team/ownership/{os_user_id}",
+    tag = "team",
+    params(
+        ("os_user_id" = String, Path, description = "OS Accounts user identifier for the new owner"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Team ownership transferred", body = TransferredResponse),
+        (status = 400, description = "Invalid team header or the caller selected themself", body = ApiErrorEnvelope),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Only the current owner can transfer ownership", body = ApiErrorEnvelope),
+        (status = 404, description = "New owner is not a team member", body = ApiErrorEnvelope),
+        (status = 409, description = "Team ownership changed or is already held by the selected member", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "Team ownership could not be transferred", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
 async fn transfer_team_ownership_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1063,9 +1604,39 @@ async fn transfer_team_ownership_handler(
     let (context, tokens) =
         dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
     transfer_team_ownership(&state.pool, &context, &os_user_id).await?;
-    dashboard_response(&state, Json(json!({ "transferred": true })), tokens)
+    dashboard_response(
+        &state,
+        Json(TransferredResponse { transferred: true }),
+        tokens,
+    )
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/team/invitations/{invitation_id}",
+    tag = "team",
+    params(
+        ("invitation_id" = Uuid, Path, description = "Team invitation identifier"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Team invitation revoked", body = RevokedResponse),
+        (
+            status = 400,
+            description = "Invalid invitation identifier or team header",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot revoke this invitation", body = ApiErrorEnvelope),
+        (status = 404, description = "Active invitation not found", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "Invitation could not be revoked", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
 async fn revoke_team_invitation_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1074,7 +1645,7 @@ async fn revoke_team_invitation_handler(
     let (context, tokens) =
         dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
     revoke_team_invitation(&state.pool, &context, invitation_id).await?;
-    dashboard_response(&state, Json(json!({ "revoked": true })), tokens)
+    dashboard_response(&state, Json(RevokedResponse { revoked: true }), tokens)
 }
 
 fn safe_input<T: DeserializeOwned>(value: Value) -> Result<T, ApiError> {
@@ -1186,14 +1757,22 @@ async fn product_feedback_handler(
     Ok(response)
 }
 
-async fn mcp_info(State(state): State<Arc<AppState>>) -> Json<Value> {
-    Json(json!({
-        "name": "Agent Feedback",
-        "transport": "MCP 2026-07-28 stateless Streamable HTTP / JSON-RPC",
-        "endpoint": format!("{}/mcp", state.public_base_url),
-        "authentication": "Authorization: Bearer af_read_...",
-        "privacy": "Metadata-only. Prompts, transcripts, secrets, personal data, and customer payloads are rejected."
-    }))
+#[utoipa::path(
+    get,
+    path = "/mcp",
+    tag = "mcp",
+    responses(
+        (status = 200, description = "MCP transport metadata", body = McpInfoResponse)
+    )
+)]
+async fn mcp_info(State(state): State<Arc<AppState>>) -> Json<McpInfoResponse> {
+    Json(McpInfoResponse {
+        name: "Agent Feedback".to_owned(),
+        transport: "MCP 2026-07-28 stateless Streamable HTTP / JSON-RPC".to_owned(),
+        endpoint: format!("{}/mcp", state.public_base_url),
+        authentication: "Authorization: Bearer af_read_...".to_owned(),
+        privacy: "Metadata-only. Prompts, transcripts, secrets, personal data, and customer payloads are rejected.".to_owned(),
+    })
 }
 
 const MCP_PROTOCOL_VERSION: &str = "2026-07-28";
@@ -1352,6 +1931,45 @@ fn validate_modern_mcp_request(headers: &HeaderMap, body: &Value) -> Option<Resp
     None
 }
 
+#[utoipa::path(
+    post,
+    path = "/mcp",
+    tag = "mcp",
+    description = "Processes stateless MCP requests. Request and response bodies are opaque JSON objects because their exact JSON-RPC shape depends on the MCP method.",
+    params(
+        ("MCP-Protocol-Version" = Option<String>, Header, description = "MCP protocol version; required and matched against request metadata for modern requests"),
+        ("Mcp-Method" = Option<String>, Header, description = "MCP method; required and matched against the JSON-RPC body for modern requests"),
+        ("Mcp-Name" = Option<String>, Header, description = "MCP tool name; required and matched for modern tools/call requests"),
+        ("Origin" = Option<String>, Header, description = "Request origin, when sent, must be allow-listed")
+    ),
+    request_body(
+        content = OpaqueJsonObject,
+        description = "Opaque MCP JSON-RPC request object; fields depend on the requested method"
+    ),
+    responses(
+        (status = 200, description = "MCP JSON-RPC response object", body = OpaqueJsonObject),
+        (status = 202, description = "Legacy initialized notification accepted"),
+        (
+            status = 400,
+            description = "Invalid MCP metadata, protocol version, or malformed JSON body",
+            content(
+                (OpaqueJsonObject = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Missing, invalid, or expired read API key", body = OpaqueJsonObject),
+        (status = 403, description = "Request origin is not allowed", body = OpaqueJsonObject),
+        (status = 404, description = "Unknown modern MCP method", body = OpaqueJsonObject),
+        (status = 413, description = "Request body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "Request body is not JSON", body = String, content_type = "text/plain"),
+        (status = 500, description = "MCP authentication or request processing failed", body = OpaqueJsonObject)
+    ),
+    security(
+        (),
+        ("bearer_auth" = []),
+        ("api_key" = [])
+    )
+)]
 async fn mcp_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1623,36 +2241,8 @@ mod page_tests {
     };
     use serde_json::{Value, json};
 
-    // Chunk 1b route ledger; this must be empty when chunk 1b is complete.
-    const KNOWN_UNANNOTATED: &[&str] = &[
-        "GET /api/dashboard",
-        "GET /api/dashboard/interactions/{interaction_id}",
-        "GET /api/dashboard/reports/{report_id}",
-        "GET /api/dashboard/sessions/{session_id}",
-        "GET /auth/callback",
-        "GET /auth/start",
-        "GET /join/{invitation_id}",
-        "GET /mcp",
-        "POST /api/auth/logout",
-        "POST /api/products",
-        "POST /api/settings/api-keys",
-        "POST /api/settings/api-keys/{key_id}/rotate",
-        "POST /api/settings/policy",
-        "POST /api/team/invitations",
-        "POST /api/team/ownership/{os_user_id}",
-        "POST /mcp",
-        "PATCH /api/dashboard/reports/{report_id}",
-        "PATCH /api/products/{product_id}",
-        "PATCH /api/team",
-        "PATCH /api/team/members/{os_user_id}",
-        "DELETE /api/products/{product_id}",
-        "DELETE /api/settings/api-keys/{key_id}",
-        "DELETE /api/team/invitations/{invitation_id}",
-        "DELETE /api/team/members/{os_user_id}",
-    ];
-
     const NON_API_ROUTES: &[&str] = &["GET /"];
-    const COVERAGE_GUARD_GUIDANCE: &str = "route registration form not understood by the coverage guard — teach `served_operations` about it or register the route with `.route(`";
+    const COVERAGE_GUARD_GUIDANCE: &str = "route registration form not understood by the coverage guard — teach `served_operations` about it or register API handlers with `.routes(routes!(handler))`";
 
     #[test]
     fn failed_authentication_message_is_revealed() {
@@ -2069,25 +2659,11 @@ mod page_tests {
             .map(|(operation, _)| operation.clone())
             .collect::<BTreeSet<_>>();
         let served = served_operations(&documented);
-        let known_unannotated = KNOWN_UNANNOTATED
-            .iter()
-            .map(|operation| (*operation).to_owned())
-            .collect::<BTreeSet<_>>();
         let non_api = NON_API_ROUTES
             .iter()
             .map(|operation| (*operation).to_owned())
             .collect::<BTreeSet<_>>();
 
-        assert!(
-            known_unannotated.is_subset(&served),
-            "KNOWN_UNANNOTATED contains operations the router does not serve: {:?}",
-            known_unannotated.difference(&served).collect::<Vec<_>>()
-        );
-        assert!(
-            known_unannotated.is_disjoint(&spec),
-            "KNOWN_UNANNOTATED contains operations that are already documented: {:?}",
-            known_unannotated.intersection(&spec).collect::<Vec<_>>()
-        );
         assert!(
             non_api.is_subset(&served),
             "NON_API_ROUTES contains operations the router does not serve: {:?}",
@@ -2095,7 +2671,7 @@ mod page_tests {
         );
 
         let served_that_require_spec = served
-            .difference(&known_unannotated)
+            .iter()
             .filter(|operation| !non_api.contains(*operation))
             .cloned()
             .collect::<BTreeSet<_>>();

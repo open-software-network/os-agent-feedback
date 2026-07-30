@@ -1,4 +1,4 @@
-.PHONY: help install node-install backend-install node-version-check backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test landing-check sdk-node-test docs-validate docs-a11y types check
+.PHONY: help install node-install backend-install node-version-check backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test landing-check sdk-node-test web-install web-check web-typecheck web-test web-build docs-validate docs-a11y types check
 
 .DEFAULT_GOAL := help
 
@@ -64,6 +64,22 @@ landing-check:  ## Check landing-page CSS formatting and the HTML markup + conte
 sdk-node-test:  ## Build and test the Node SDK
 	cd sdk/node && pnpm test
 
+# --- Web ---
+web-install: node-version-check  ## Install the web workspace dependencies from the lockfile
+	pnpm --filter @epode/web install --frozen-lockfile
+
+web-check: node-version-check  ## Check web formatting and linting
+	pnpm --filter @epode/web check
+
+web-typecheck: node-version-check  ## Typecheck the web workspace
+	pnpm --filter @epode/web typecheck
+
+web-test: node-version-check  ## Run the web unit and component tests
+	pnpm --filter @epode/web test
+
+web-build: node-version-check  ## Build the standalone Next.js web artifact
+	pnpm --filter @epode/web build
+
 # --- Docs ---
 docs-validate: node-version-check  ## Validate the Mintlify documentation
 	pnpm run docs:validate
@@ -82,4 +98,6 @@ types: node-version-check backend-openapi  ## Regenerate OpenAPI TypeScript type
 # Do not run this with `make -j`: the backend targets serialize on cargo's build
 # directory lock anyway, and concurrent pnpm targets can race on node_modules if
 # the tree is stale.
-check: node-version-check backend-fmt-check backend-clippy backend-test backend-openapi-check biome-check node-test landing-check sdk-node-test docs-validate docs-a11y  ## Run all backend, OpenAPI, Node, SDK, landing-page, and docs checks
+# The production web build stays separate: it is an artifact-producing, slower
+# gate, while formatting, types, and tests provide the cheap feedback loop here.
+check: node-version-check backend-fmt-check backend-clippy backend-test backend-openapi-check biome-check node-test landing-check sdk-node-test web-check web-typecheck web-test docs-validate docs-a11y  ## Run all backend, OpenAPI, Node, SDK, web, landing-page, and docs checks
