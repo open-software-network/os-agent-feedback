@@ -68,8 +68,12 @@ func TestMiddlewarePreservesShapeAndQueuesOpportunity(t *testing.T) {
 	select {
 	case batch := <-telemetry:
 		events := batch["events"].([]any)
-		if events[0].(map[string]any)["classification"] != "unclassified" {
+		event := events[0].(map[string]any)
+		if event["classification"] != "unclassified" {
 			t.Fatal("wrong classification")
+		}
+		if event["sequence"] != float64(1) {
+			t.Fatalf("wrong client sequence: %#v", event["sequence"])
 		}
 	case <-time.After(time.Second):
 		t.Fatal("telemetry was not flushed")

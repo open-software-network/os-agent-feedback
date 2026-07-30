@@ -61,6 +61,7 @@
             "group": "Operate",
             "pages": [
               "guides/verify",
+              "guides/real-world-patterns",
               "guides/read-the-data",
               "guides/troubleshooting"
             ]

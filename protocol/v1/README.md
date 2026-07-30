@@ -107,7 +107,10 @@ Authorization: Bearer <company product key>
 Content-Type: application/json
 ```
 
-See `telemetry-batch.schema.json`. Queues must be bounded; telemetry may be dropped rather than delaying or failing the product response.
+See `telemetry-batch.schema.json`. Emit the optional monotonic `sequence` field when a process can do so;
+the backend uses it to order very fast calls that share a wall-clock timestamp. Queues must be bounded,
+retry transient delivery failures with a bounded backoff, and stop retrying at a bounded graceful-shutdown
+deadline. Telemetry may ultimately be dropped rather than delaying or failing the product response.
 
 ## Feedback report submission
 

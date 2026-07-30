@@ -22,6 +22,11 @@ Use HTTP instrumentation to measure opportunities and returned feedback. Use a
 [feedback-aware agent adapter](/reference/http-envelope#feedback-aware-runtimes) when you control
 the customer-agent runtime and need deterministic submission.
 
+HTTP responses with an explicit shared cache policy are skipped by the Node SDK's safe default. This
+prevents an observability plugin from unexpectedly disabling a CDN. If agent callers can identify
+themselves at request time, `cacheMode: "request"` instruments only requests with
+`Agent-Feedback-Request: 1`.
+
 ## Why MCP is stronger
 
 MCP exposes tools to a tool-capable client. Epode registers `report_product_feedback` alongside your
@@ -33,3 +38,13 @@ Confirmed interaction does not mean identified agent. MCP client information is 
 hint, not an identity.
 </Note>
 
+## Delivery and ordering
+
+Product responses never wait for telemetry. Supported SDKs batch metadata in a bounded queue, add a
+process-local sequence, retry transient failures with bounded exponential backoff, and flush within a bounded
+graceful-shutdown window. If a queue fills, metadata is dropped rather than degrading the customer's product;
+the Node SDK logs the first drop and delivery failure.
+
+Feedback may arrive before its background interaction metadata. Epode creates an idempotent placeholder,
+then reconciles the exact surface, operation, customer, session, timing, and client sequence when telemetry
+arrives. A retry with the same feedback handle returns the original report.

@@ -17,6 +17,10 @@ test("Express rejects an unknown JavaScript feedback mode", () => {
     () => agentFeedback({ apiKey: key, feedbackMode: "auto" }),
     /feedbackMode must be never_ask, ask_once, ask_always, or off/,
   );
+  assert.throws(
+    () => agentFeedback({ apiKey: key, cacheMode: "surprise" }),
+    /cacheMode must be safe, private, or request/,
+  );
 });
 
 async function serve(app) {
@@ -152,6 +156,111 @@ test("Express uses headers for arrays and leaves failures untouched", async () =
   await server.close();
 });
 
+test("Express does not silently destroy an explicit shared cache policy", async () => {
+  const warnings = [];
+  const telemetry = [];
+  const middleware = agentFeedback({
+    apiKey: key,
+    include: ["/search"],
+    flushIntervalMs: 1,
+    logger: { debug() {}, warn(message) { warnings.push(message); } },
+    fetch: async (_url, init) => {
+      telemetry.push(JSON.parse(init.body));
+      return new Response("{}", { status: 202 });
+    },
+  });
+  const app = express();
+  app.use(middleware);
+  app.get("/search", (_request, response) => {
+    response.set("Cache-Control", "public, s-maxage=600, stale-while-revalidate=60");
+    response.json({ answer: "cached" });
+  });
+  const server = await serve(app);
+
+  const response = await fetch(`${server.url}/search`);
+  const body = await response.json();
+  assert.equal(body._agentFeedback, undefined);
+  assert.equal(response.headers.get("cache-control"), "public, s-maxage=600, stale-while-revalidate=60");
+  await middleware.shutdown();
+  assert.equal(telemetry.length, 0);
+  assert.equal(warnings.filter((message) => message.includes("cacheable response")).length, 1);
+  await server.close();
+});
+
+test("Express request cache mode instruments only explicit agent requests", async () => {
+  const middleware = agentFeedback({
+    apiKey: key,
+    cacheMode: "request",
+    include: ["/search"],
+    flushIntervalMs: 1,
+    fetch: async () => new Response("{}", { status: 202 }),
+  });
+  const app = express();
+  app.use(middleware);
+  app.get("/search", (_request, response) => {
+    response.set("Cache-Control", "public, max-age=300");
+    response.json({ answer: "cached" });
+  });
+  const server = await serve(app);
+
+  const ordinary = await fetch(`${server.url}/search`);
+  assert.equal((await ordinary.json())._agentFeedback, undefined);
+  assert.equal(ordinary.headers.get("cache-control"), "public, max-age=300");
+  const agent = await fetch(`${server.url}/search`, {
+    headers: { "agent-feedback-request": "1" },
+  });
+  assert.equal((await agent.json())._agentFeedback.v, 1);
+  assert.equal(agent.headers.get("cache-control"), "private, no-store");
+  await middleware.shutdown();
+  await server.close();
+});
+
+test("Express instruments only terminal async-job responses when configured", async () => {
+  const middleware = agentFeedback({
+    apiKey: key,
+    include: ["/crawl/*"],
+    shouldInstrument: (_request, { body }) => body?.status === "completed",
+    flushIntervalMs: 1,
+    fetch: async () => new Response("{}", { status: 202 }),
+  });
+  const app = express();
+  app.use(middleware);
+  app.get("/crawl/:id", (request, response) => response.json({
+    id: request.params.id,
+    status: request.query.done === "1" ? "completed" : "running",
+  }));
+  const server = await serve(app);
+
+  const running = await (await fetch(`${server.url}/crawl/job_1`)).json();
+  assert.equal(running._agentFeedback, undefined);
+  const completed = await (await fetch(`${server.url}/crawl/job_1?done=1`)).json();
+  assert.equal(completed._agentFeedback.v, 1);
+  await middleware.shutdown();
+  await server.close();
+});
+
+test("Express warns when bounded telemetry drops an old event", async () => {
+  const warnings = [];
+  const middleware = agentFeedback({
+    apiKey: key,
+    include: ["/status/*"],
+    maxQueueSize: 1,
+    flushIntervalMs: 60_000,
+    logger: { debug() {}, warn(message) { warnings.push(message); } },
+    fetch: async () => new Response("{}", { status: 202 }),
+  });
+  const app = express();
+  app.use(middleware);
+  app.get("/status/:id", (request, response) => response.json({ id: request.params.id }));
+  const server = await serve(app);
+
+  await fetch(`${server.url}/status/one`);
+  await fetch(`${server.url}/status/two`);
+  assert.equal(warnings.filter((message) => message.includes("oldest event was dropped")).length, 1);
+  await middleware.shutdown();
+  await server.close();
+});
+
 test("backend downtime never fails or delays the product response", async () => {
   const middleware = agentFeedback({
     apiKey: key,
@@ -171,5 +280,31 @@ test("backend downtime never fails or delays the product response", async () => 
   assert.equal(response.status, 200);
   assert.equal((await response.json()).available, true);
   assert.ok(performance.now() - started < 1_000);
+  await server.close();
+});
+
+test("graceful shutdown has a hard telemetry deadline", async () => {
+  const warnings = [];
+  const middleware = agentFeedback({
+    apiKey: key,
+    include: ["/status"],
+    flushIntervalMs: 60_000,
+    telemetryTimeoutMs: 60_000,
+    shutdownTimeoutMs: 25,
+    logger: { debug() {}, warn(message) { warnings.push(message); } },
+    fetch: async (_url, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+    }),
+  });
+  const app = express();
+  app.use(middleware);
+  app.get("/status", (_request, response) => response.json({ available: true }));
+  const server = await serve(app);
+  await fetch(`${server.url}/status`);
+
+  const started = performance.now();
+  await middleware.shutdown();
+  assert.ok(performance.now() - started < 250);
+  assert.ok(warnings.some((message) => message.includes("Telemetry delivery failed")));
   await server.close();
 });

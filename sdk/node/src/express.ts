@@ -43,13 +43,25 @@ export function agentFeedback(
       return `${request.baseUrl || ""}${path || request.path || "/"}`;
     };
 
-    const attach = (surface: ProductSurface): Instrumentation | undefined => {
+    const attach = (surface: ProductSurface, body?: unknown): Instrumentation | undefined => {
       if (instrumentation) return instrumentation;
       if (
         response.statusCode < 200 ||
         response.statusCode >= 300 ||
         request.method === "HEAD" ||
         !runtime.matches(request.originalUrl || request.url)
+      ) {
+        return undefined;
+      }
+      if (
+        !runtime.shouldInstrumentHttp({
+          request,
+          surface: surface as Exclude<ProductSurface, "mcp">,
+          statusCode: response.statusCode,
+          body,
+          requestOptIn: request.get("agent-feedback-request") === "1",
+          cacheControl: String(response.getHeader("cache-control") || ""),
+        })
       ) {
         return undefined;
       }
@@ -82,12 +94,12 @@ export function agentFeedback(
           );
           return originalJson(body);
         }
-        const current = attach("http_json");
+        const current = attach("http_json", body);
         return originalJson(
           current ? { ...body, _agentFeedback: current.prepared.envelope } : body,
         );
       }
-      const current = attach("http_headers");
+      const current = attach("http_headers", body);
       if (current) attachHeaders(current);
       return originalJson(body);
     }) as Response["json"];
@@ -95,7 +107,7 @@ export function agentFeedback(
     response.send = ((body?: unknown) => {
       const contentType = String(response.getHeader("content-type") || "");
       if (typeof body === "string" && contentType.includes("text/html")) {
-        const current = attach("http_html");
+        const current = attach("http_html", body);
         return originalSend(
           current ? injectHtml(body, current.prepared.envelope) : body,
         );
@@ -105,7 +117,7 @@ export function agentFeedback(
         contentType.includes("application/json") &&
         (typeof body === "string" || body === null)
       ) {
-        const current = attach("http_headers");
+        const current = attach("http_headers", body);
         if (current) attachHeaders(current);
       }
       return originalSend(body);

@@ -82,10 +82,20 @@ test("Mintlify navigation exposes the complete new-customer journey", async () =
   for (const integration of [...httpIntegrations, ...mcpIntegrations]) {
     assert.ok(pages.has(integration.page.replace(/^docs\//, "").replace(/\.mdx$/, "")), `${integration.id} is missing from navigation`);
   }
-  for (const required of ["index", "quickstart", "concepts/reliability", "concepts/feedback-modes", "guides/verify", "guides/troubleshooting", "reference/privacy-security"]) {
+  for (const required of ["index", "quickstart", "concepts/reliability", "concepts/feedback-modes", "guides/verify", "guides/real-world-patterns", "guides/troubleshooting", "reference/privacy-security"]) {
     assert.ok(pages.has(required), `${required} is missing from navigation`);
   }
   assert.ok(![...pages].some((page) => page === "api" || page.startsWith("api/")), "Mintlify reserves the /api path");
+});
+
+test("real-world guidance covers the initial ICP outcome boundaries", async () => {
+  const content = await read("docs/guides/real-world-patterns.mdx");
+  for (const pattern of ["Search or retrieval API", "Async crawl or export", "Browser automation MCP", "Documentation MCP", "Email, payments, or issue MCP"]) {
+    assert.ok(content.includes(pattern), `real-world guidance omits ${pattern}`);
+  }
+  assert.match(content, /Agent-Feedback-Request: 1/);
+  assert.match(content, /feedbackTools/);
+  assert.match(content, /verified API or OAuth context/);
 });
 
 test("Mintlify excludes internal engineering notes from publishing", () => {

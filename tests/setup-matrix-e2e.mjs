@@ -94,18 +94,28 @@ async function waitFor(url, child, timeoutMs = 120_000) {
 }
 
 function database(action) {
-  return run("cargo", ["run", "--quiet", "--bin", "setup_matrix_db", "--", action], {
-    cwd: join(repo, "backend"),
-    env: {
-      DATABASE_URL: databaseUrl,
-      SETUP_MATRIX_WORKSPACE_ID: workspaceId,
-      SETUP_MATRIX_PRODUCT_ID: productId,
-      SETUP_MATRIX_ENVIRONMENT_ID: environmentId,
-      SETUP_MATRIX_KEY_ID: keyId,
-      SETUP_MATRIX_API_KEY: apiKey,
-    },
-    timeout: 30_000,
-  });
+  let lastError;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      return run("cargo", ["run", "--quiet", "--bin", "setup_matrix_db", "--", action], {
+        cwd: join(repo, "backend"),
+        env: {
+          DATABASE_URL: databaseUrl,
+          SETUP_MATRIX_WORKSPACE_ID: workspaceId,
+          SETUP_MATRIX_PRODUCT_ID: productId,
+          SETUP_MATRIX_ENVIRONMENT_ID: environmentId,
+          SETUP_MATRIX_KEY_ID: keyId,
+          SETUP_MATRIX_API_KEY: apiKey,
+        },
+        timeout: 30_000,
+      });
+    } catch (error) {
+      lastError = error;
+      if (!String(error).includes("pool timed out") || attempt === 4) throw error;
+      spawnSync("sleep", [String(attempt + 1)]);
+    }
+  }
+  throw lastError;
 }
 
 function envelopeFrom(response, body) {
@@ -391,7 +401,7 @@ async function runHttpApp(label, command, args, cwd, port) {
   const child = start(command, args, { cwd, label, env: { PORT: String(port), AGENT_FEEDBACK_KEY: apiKey, AGENT_FEEDBACK_URL: backendUrl } });
   await waitFor(`http://127.0.0.1:${port}/health`, child);
   await testHttp(`http://127.0.0.1:${port}`, label);
-  await new Promise((resolveWait) => setTimeout(resolveWait, 3_500));
+  await waitForPersistedExpected();
   await stop(child);
 }
 
@@ -399,8 +409,26 @@ async function runMcpApp(label, command, args, cwd, port) {
   const child = start(command, args, { cwd, label, env: { PORT: String(port), AGENT_FEEDBACK_KEY: apiKey, AGENT_FEEDBACK_URL: backendUrl } });
   await waitFor(`http://127.0.0.1:${port}/health`, child);
   await testMcp(`http://127.0.0.1:${port}/mcp`, label);
-  await new Promise((resolveWait) => setTimeout(resolveWait, 5_000));
+  await waitForPersistedExpected();
   await stop(child);
+}
+
+async function waitForPersistedExpected() {
+  let lastRows = [];
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const raw = database("read").split("\n").findLast((line) => line.trim().startsWith("["));
+    const rows = JSON.parse(raw || "[]");
+    lastRows = rows;
+    if (
+      rows.length === expected.size
+      && rows.every((row) => row.surface !== "unknown" && row.operation !== "pending")
+    ) return;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 2_000));
+  }
+  const unresolved = lastRows.filter((row) => row.surface === "unknown" || row.operation === "pending");
+  throw new Error(
+    `Timed out waiting for ${expected.size} fully reconciled Setup interactions: ${JSON.stringify(unresolved)}`,
+  );
 }
 
 const workspaceId = randomUUID();
@@ -428,7 +456,7 @@ try {
         OS_ACCOUNTS_URL: "https://accounts.example.test",
         OS_ACCOUNTS_API_URL: "https://accounts-api.example.test",
         OS_ACCOUNTS_CLIENT_ID: "ocl_setup_matrix",
-        DATABASE_MAX_CONNECTIONS: "4",
+        DATABASE_MAX_CONNECTIONS: "2",
         PORT: "3180",
       },
     });

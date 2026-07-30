@@ -189,7 +189,7 @@ class Handler(BaseHTTPRequestHandler):
         name = params.get("name")
         arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
         if method == "tools/call" and name == "search":
-            interaction_id, envelope = prepared()
+            interaction_id, sequence, envelope = prepared()
             handle = envelope["submit"]["authorization"].removeprefix("Bearer ")
             feedback = {
                 "v": 1,
@@ -208,6 +208,7 @@ class Handler(BaseHTTPRequestHandler):
                 occurred_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                 payload = json.dumps({"events": [{
                     "interactionId": interaction_id,
+                    "sequence": sequence,
                     "surface": "mcp",
                     "operation": "search",
                     "durationMs": 1,
@@ -225,13 +226,13 @@ class Handler(BaseHTTPRequestHandler):
                         "user-agent": "epode-manual-mcp/2.0",
                     },
                 )
-                for attempt in range(3):
+                for attempt in range(5):
                     try:
-                        urllib.request.urlopen(req, timeout=3).read()
+                        urllib.request.urlopen(req, timeout=10).read()
                         return
                     except Exception:
-                        if attempt < 2:
-                            time.sleep(0.5 * (attempt + 1))
+                        if attempt < 4:
+                            time.sleep(min(8, 0.5 * (2 ** attempt)))
 
             threading.Thread(target=confirmed, daemon=True).start()
             result = {
@@ -269,7 +270,7 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
             try:
-                accepted = json.loads(urllib.request.urlopen(req, timeout=5).read())
+                accepted = json.loads(urllib.request.urlopen(req, timeout=10).read())
                 result = {
                     "content": [{"type": "text", "text": "Product feedback accepted."}],
                     "structuredContent": accepted,
@@ -278,7 +279,13 @@ class Handler(BaseHTTPRequestHandler):
                 result = {
                     "isError": True,
                     "content": [{"type": "text", "text": f"Feedback submission failed: {error.code}"}],
-                    "structuredContent": {"accepted": False, "status": error.code},
+                    "structuredContent": {"accepted": False, "status": error.code, "retryable": error.code >= 500},
+                }
+            except Exception:
+                result = {
+                    "isError": True,
+                    "content": [{"type": "text", "text": "Feedback submission is temporarily unavailable. Retry exactly once."}],
+                    "structuredContent": {"accepted": False, "retryable": True},
                 }
             if modern:
                 result.update({"resultType": "complete", "_meta": {SERVER_INFO_META: SERVER_INFO}})

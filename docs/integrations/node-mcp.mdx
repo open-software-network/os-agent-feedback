@@ -30,6 +30,10 @@ const app = createMcpExpressApp({ host: "0.0.0.0", allowedOrigins: [] });
 
 const feedback = createMcpInstrumentation({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
+  includeTools: ["search", "fetch_result"],
+  feedbackTools: ["fetch_result"],
+  sessionRef: (args, _context, result) =>
+    args.runId || result?.structuredContent?.runId,
 });
 
 function productServer() {
@@ -62,6 +66,33 @@ Do not create or depend on `Mcp-Session-Id` for modern requests. MCP 2026-07-28 
 explicit application-level handle if your product has a meaningful multi-tool journey.
 </Warning>
 
+## Multi-tool journeys
+
+Epode should observe the whole journey without asking for micro-feedback after every low-level action:
+
+```ts
+const feedback = createMcpInstrumentation({
+  apiKey: process.env.AGENT_FEEDBACK_KEY,
+  includeTools: ["browser_*"],
+  feedbackTools: ["browser_close"],
+  sessionRef: (args, _context, result) =>
+    args.sessionId || result?.structuredContent?.sessionId,
+  customerRef: (_args, context) =>
+    context.authInfo?.extra?.accountId,
+});
+```
+
+- `includeTools` selects the product calls shown in Sessions.
+- `excludeTools` removes health, admin, or internal tools.
+- `feedbackTools` selects outcome boundaries that receive feedback instructions. An empty array records
+  interactions without asking for feedback.
+- `shouldRequestFeedback` can inspect a completed result when the boundary is dynamic.
+- `sessionRef` may inspect both arguments and the completed result, so a session-creation call can use the
+  identifier it returns.
+
+Epode adds a monotonic client sequence to preserve rapid tool order. The backend also reconciles a report
+that arrives before its background interaction metadata.
+
 ## Verify
 
 From an MCP 2026-07-28 client:
@@ -76,7 +107,15 @@ Call the feedback tool once under normal conditions. If it returns `retryable: t
 the same `feedbackHandle` and identical report. Capabilities are idempotent, so a lost success response cannot
 create a second report.
 
+The report tool allows 10 seconds by default; set `reportTimeoutMs` only for unusually slow private
+deployments. Background telemetry uses bounded exponential retry and a longer timeout, but never blocks the
+product tool result.
+
 The `legacy: "stateless"` option retains a 2025-11-25 compatibility handshake without introducing
 transport-session state.
 
 [View the runnable Node MCP example](https://github.com/open-software-network/os-epode/tree/main/examples/setup-matrix-node-mcp)
+
+[Browser journey example](https://github.com/open-software-network/os-epode/tree/main/examples/icp-browser-mcp) ·
+[Documentation MCP example](https://github.com/open-software-network/os-epode/tree/main/examples/icp-docs-mcp) ·
+[Authenticated operations example](https://github.com/open-software-network/os-epode/tree/main/examples/icp-operations-mcp)

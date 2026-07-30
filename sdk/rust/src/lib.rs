@@ -4,7 +4,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context, Poll},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -187,6 +187,7 @@ struct PreparedInteraction {
 #[serde(rename_all = "camelCase")]
 struct TelemetryEvent {
     interaction_id: Uuid,
+    sequence: u64,
     surface: String,
     operation: String,
     status_code: u16,
@@ -211,6 +212,7 @@ struct Runtime {
     sender: mpsc::Sender<Box<TelemetryEvent>>,
     shutdown_sender: mpsc::Sender<oneshot::Sender<Result<(), ShutdownError>>>,
     stopping: Arc<AtomicBool>,
+    sequence: Arc<AtomicU64>,
 }
 
 impl Runtime {
@@ -241,6 +243,7 @@ impl Runtime {
             sender,
             shutdown_sender,
             stopping: Arc::new(AtomicBool::new(false)),
+            sequence: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -362,7 +365,10 @@ impl Runtime {
         })
     }
 
-    fn record(&self, event: TelemetryEvent) {
+    fn record(&self, mut event: TelemetryEvent) {
+        if event.sequence == 0 {
+            event.sequence = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
+        }
         if !self.stopping.load(Ordering::Acquire) {
             let _ = self.sender.try_send(Box::new(event));
         }
@@ -392,7 +398,7 @@ async fn telemetry_worker(
     mut shutdown_receiver: mpsc::Receiver<oneshot::Sender<Result<(), ShutdownError>>>,
 ) {
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(10))
         .build()
         .unwrap_or_default();
     let mut pending = VecDeque::new();
@@ -643,6 +649,7 @@ async fn instrument_response(
     }
     runtime.record(TelemetryEvent {
         interaction_id: prepared.interaction_id,
+        sequence: 0,
         surface: surface.into(),
         operation: normalize_operation(&path),
         status_code: status.as_u16(),
@@ -1398,6 +1405,7 @@ mod tests {
     fn telemetry_event(index: usize) -> TelemetryEvent {
         TelemetryEvent {
             interaction_id: Uuid::new_v4(),
+            sequence: 0,
             surface: "http_json".into(),
             operation: format!("/test/{index}"),
             status_code: 200,

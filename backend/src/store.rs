@@ -1899,7 +1899,8 @@ pub async fn dashboard_session_by_id(
         r#"SELECT id, workspace_id, environment_id, api_key_id, session_id, surface,
         operation, status_code, duration_ms, customer_ref, classification,
         confirmation_method, runtime_hint, runtime_hint_source, occurred_at, created_at, updated_at
-        FROM interactions_v2 WHERE session_id = $1 ORDER BY occurred_at, id"#,
+        FROM interactions_v2 WHERE session_id = $1
+        ORDER BY occurred_at, client_sequence NULLS LAST, id"#,
     )
     .bind(session_id)
     .fetch_all(pool)
@@ -2011,6 +2012,12 @@ fn validate_telemetry(input: &InteractionTelemetryInput) -> Result<(), ApiError>
     {
         return Err(ApiError::bad_request("Invalid response status or duration"));
     }
+    if input
+        .sequence
+        .is_some_and(|value| !(1..=9_007_199_254_740_991).contains(&value))
+    {
+        return Err(ApiError::bad_request("Invalid client interaction sequence"));
+    }
     let classification = input.classification.as_deref().unwrap_or("unclassified");
     if !["unclassified", "confirmed"].contains(&classification) {
         return Err(ApiError::bad_request("Invalid classification"));
@@ -2087,8 +2094,8 @@ async fn ingest_telemetry_event(
         r#"INSERT INTO interactions_v2
         (id, workspace_id, environment_id, api_key_id, session_id, surface, operation, status_code,
          duration_ms, customer_ref, classification, confirmation_method, runtime_hint,
-         runtime_hint_source, occurred_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         runtime_hint_source, client_sequence, occurred_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         ON CONFLICT (id) DO UPDATE SET
           api_key_id = COALESCE(interactions_v2.api_key_id, EXCLUDED.api_key_id),
           session_id = COALESCE(interactions_v2.session_id, EXCLUDED.session_id),
@@ -2102,7 +2109,12 @@ async fn ingest_telemetry_event(
             ELSE COALESCE(interactions_v2.confirmation_method, EXCLUDED.confirmation_method) END,
           runtime_hint = COALESCE(interactions_v2.runtime_hint, EXCLUDED.runtime_hint),
           runtime_hint_source = COALESCE(interactions_v2.runtime_hint_source, EXCLUDED.runtime_hint_source),
-          occurred_at = LEAST(interactions_v2.occurred_at, EXCLUDED.occurred_at),
+          client_sequence = COALESCE(interactions_v2.client_sequence, EXCLUDED.client_sequence),
+          occurred_at = CASE
+            WHEN interactions_v2.surface = 'unknown' AND interactions_v2.operation = 'pending'
+              THEN EXCLUDED.occurred_at
+            ELSE LEAST(interactions_v2.occurred_at, EXCLUDED.occurred_at)
+          END,
           updated_at = NOW()
         WHERE interactions_v2.environment_id = EXCLUDED.environment_id
         RETURNING id, workspace_id, environment_id, api_key_id, session_id, surface, operation,
@@ -2123,6 +2135,7 @@ async fn ingest_telemetry_event(
     .bind(confirmation_method)
     .bind(event.runtime_hint.map(|value| clean(&value, 120)))
     .bind(event.runtime_hint_source.map(|value| clean(&value, 60)))
+    .bind(event.sequence)
     .bind(occurred_at)
     .fetch_optional(&mut *tx)
     .await?;
@@ -2483,6 +2496,7 @@ mod product_tests {
         let event = |surface: &str, classification: Option<&str>, method: Option<&str>| {
             InteractionTelemetryInput {
                 interaction_id: Uuid::new_v4(),
+                sequence: Some(1),
                 surface: surface.into(),
                 operation: "/search/:id".into(),
                 status_code: Some(200),
@@ -3095,6 +3109,7 @@ mod product_tests {
                 TelemetryBatchInput {
                     events: vec![InteractionTelemetryInput {
                         interaction_id,
+                        sequence: Some(1),
                         surface: "http_json".into(),
                         operation: "/search".into(),
                         status_code: Some(200),

@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,9 +26,9 @@ const DefaultEndpoint = "https://app.epode.ai"
 
 const (
 	defaultMaxResponseBodyBytes = 1 << 20
-	telemetryAttemptTimeout     = 3 * time.Second
-	telemetryMaxAttempts        = 3
-	telemetryRetryDelay         = 50 * time.Millisecond
+	telemetryAttemptTimeout     = 10 * time.Second
+	telemetryMaxAttempts        = 5
+	telemetryRetryDelay         = 500 * time.Millisecond
 )
 
 var defaultExclude = []string{
@@ -102,6 +103,7 @@ type preparedInteraction struct {
 
 type TelemetryEvent struct {
 	InteractionID     string `json:"interactionId"`
+	Sequence          int64  `json:"sequence,omitempty"`
 	Surface           string `json:"surface"`
 	Operation         string `json:"operation"`
 	StatusCode        int    `json:"statusCode,omitempty"`
@@ -155,6 +157,7 @@ type Runtime struct {
 	once             sync.Once
 	telemetryErrorMu sync.Mutex
 	telemetryError   error
+	sequence         atomic.Int64
 }
 
 func New(options Options) (*Runtime, error) {
@@ -184,7 +187,7 @@ func New(options Options) (*Runtime, error) {
 		options.MaxResponseBodyBytes = defaultMaxResponseBodyBytes
 	}
 	if options.HTTPClient == nil {
-		options.HTTPClient = &http.Client{Timeout: 3 * time.Second}
+		options.HTTPClient = &http.Client{Timeout: telemetryAttemptTimeout}
 	}
 	runtime := &Runtime{
 		options: options,
@@ -318,6 +321,9 @@ func randomUUID() (string, error) {
 }
 
 func (r *Runtime) record(event TelemetryEvent) {
+	if event.Sequence == 0 {
+		event.Sequence = r.sequence.Add(1)
+	}
 	select {
 	case r.events <- event:
 	default:
@@ -380,7 +386,7 @@ drain:
 			break
 		}
 		if attempt+1 < telemetryMaxAttempts {
-			time.Sleep(telemetryRetryDelay * time.Duration(attempt+1))
+			time.Sleep(telemetryRetryDelay * time.Duration(1<<attempt))
 		}
 	}
 	r.telemetryErrorMu.Lock()

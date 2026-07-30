@@ -381,6 +381,7 @@ pub struct TelemetryBatchResult {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InteractionTelemetryInput {
     pub interaction_id: Uuid,
+    pub sequence: Option<i64>,
     pub surface: String,
     pub operation: String,
     pub status_code: Option<i32>,
