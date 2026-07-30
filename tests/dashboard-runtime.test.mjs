@@ -32,7 +32,32 @@ const dashboard = {
     { id: "report-1", interactionId: "interaction-1", sessionId: "session-1", summary: "The result answered the question with a small pagination detour.", impact: "helped_with_friction", confidence: 0.92, findings: [{ kind: "strength", topic: "relevance", detail: "The result answered the question." }, { kind: "friction", topic: "pagination", severity: "minor", detail: "A second page was required." }], workaround: { used: true, detail: "The agent requested the next page." }, source: "customer_agent", surface: "http_json", operation: "search", statusCode: 200, durationMs: 320, customerRef: "acct_42", classification: "confirmed", confirmationMethod: "feedback_report", runtimeHint: "codex", runtimeHintSource: "user-agent", occurredAt: iso(-20), createdAt: iso(-18) },
     { id: "report-2", interactionId: "interaction-2", sessionId: "session-1", summary: "The document could not be opened and no fallback was available.", impact: "blocked", confidence: 0.99, findings: [{ kind: "defect", topic: "document_access", severity: "blocking", detail: "The document could not be opened." }], workaround: { used: false }, source: "customer_agent", surface: "mcp", operation: "fetch_document", statusCode: null, durationMs: 810, customerRef: "acct_42", classification: "confirmed", confirmationMethod: "mcp", runtimeHint: "mcp-client", runtimeHintSource: "client_info", occurredAt: iso(-10), createdAt: iso(-8) },
   ],
-  insights: {},
+  insights: {
+    windowDays: 30,
+    comparisonDays: 7,
+    opportunities: 3,
+    confirmedInteractions: 2,
+    reports: 2,
+    recentOpportunities: 3,
+    recentConfirmedInteractions: 2,
+    recentReports: 2,
+    previousOpportunities: 0,
+    previousConfirmedInteractions: 0,
+    previousReports: 0,
+    confirmationRate: 67,
+    reviewRate: 100,
+    reportsWithBlockers: 1,
+    reportsWithWorkarounds: 1,
+    p50DurationMs: 320,
+    p95DurationMs: 810,
+    topOperations: [{ name: "search", count: 2 }, { name: "fetch_document", count: 1 }],
+    surfaces: [{ name: "http_json", count: 2 }, { name: "mcp", count: 1 }],
+    impacts: [{ name: "helped_with_friction", count: 1 }, { name: "blocked", count: 1 }],
+    findingKinds: [{ name: "strength", count: 1 }, { name: "friction", count: 1 }, { name: "defect", count: 1 }],
+    topics: [{ name: "relevance", count: 1 }, { name: "pagination", count: 1 }, { name: "document_access", count: 1 }],
+    blockingTopics: [{ name: "document_access", count: 1 }],
+  },
+  listState: { interactionsTotal: 3, reportsTotal: 2, sessionsTotal: 1, interactionsLoaded: 3, reportsLoaded: 2, sessionsLoaded: 1 },
 };
 
 function button(dataset = {}, attributes = []) {
@@ -40,8 +65,9 @@ function button(dataset = {}, attributes = []) {
 }
 
 async function loadDashboard({ href = "https://app.epode.ai/?view=feedback", fetchImpl, promptImpl } = {}) {
+  const heading = { focused: false, setAttribute() {}, focus() { this.focused = true; } };
   const elements = new Map([
-    ["#page", { innerHTML: "", setAttribute() {} }],
+    ["#page", { innerHTML: "", setAttribute() {}, querySelector: () => heading }],
     ["#notice", { textContent: "", hidden: true, setAttribute(name, value) { this[name] = value; } }],
     ["#account", { innerHTML: "" }],
     ["#product-scope", { innerHTML: "" }],
@@ -84,16 +110,17 @@ async function loadDashboard({ href = "https://app.epode.ai/?view=feedback", fet
   });
   vm.runInContext(source, context);
   await new Promise((resolve) => setTimeout(resolve, 10));
-  return { context, handlers, location, notice: elements.get("#notice"), page: elements.get("#page"), productScope: elements.get("#product-scope") };
+  return { context, handlers, heading, location, notice: elements.get("#notice"), page: elements.get("#page"), productScope: elements.get("#product-scope") };
 }
 
 test("feedback, interaction, and session explorers render and preserve linked context", async () => {
-  const { handlers, page } = await loadDashboard();
+  const { handlers, heading, page } = await loadDashboard();
   assert.match(page.innerHTML, /Agent feedback/);
   assert.match(page.innerHTML, /The result answered the question/);
-  assert.match(page.innerHTML, /Search summaries, findings, topics, operation, or customer/);
+  assert.match(page.innerHTML, /Search summaries, findings, tags, operation, or customer/);
 
   await handlers.click({ target: { closest: () => button({ report: "report-1" }) } });
+  assert.equal(heading.focused, true);
   assert.match(page.innerHTML, /Linked product context/);
   assert.match(page.innerHTML, /Open session/);
 
@@ -107,6 +134,50 @@ test("feedback, interaction, and session explorers render and preserve linked co
   assert.match(page.innerHTML, /Open feedback/);
 });
 
+test("the latest team navigation wins when dashboard responses arrive out of order", async () => {
+  const pending = new Map();
+  const stateFor = (id) => ({
+    ...structuredClone(dashboard),
+    workspace: { id, name: id },
+    workspaceMemberships: ["workspace-1", "workspace-b", "workspace-c"].map((workspaceId) => ({ workspaceId, workspaceName: workspaceId })),
+  });
+  let initial = true;
+  const fetchImpl = async (path) => {
+    if (initial) {
+      initial = false;
+      return { ok: true, status: 200, json: async () => stateFor("workspace-1") };
+    }
+    const workspace = new URL(path, "https://app.epode.ai").searchParams.get("workspaceId");
+    return await new Promise((resolve) => pending.set(workspace, resolve));
+  };
+  const { context, handlers } = await loadDashboard({ fetchImpl });
+  const older = handlers.change({ target: { id: "workspace-select", value: "workspace-b", dataset: {} } });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const latest = handlers.change({ target: { id: "workspace-select", value: "workspace-c", dataset: {} } });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  pending.get("workspace-c")({ ok: true, status: 200, json: async () => stateFor("workspace-c") });
+  await latest;
+  pending.get("workspace-b")({ ok: true, status: 200, json: async () => stateFor("workspace-b") });
+  await older;
+  assert.equal(vm.runInContext("selectedWorkspaceId", context), "workspace-c");
+  assert.equal(vm.runInContext("dashboard.workspace.id", context), "workspace-c");
+});
+
+test("retained records outside the first page are disclosed and loadable", async () => {
+  const state = structuredClone(dashboard);
+  state.listState.reportsTotal = 302;
+  let requestedLimit = null;
+  const fetchImpl = async (path) => {
+    const url = new URL(path, "https://app.epode.ai");
+    requestedLimit = url.searchParams.get("reportLimit");
+    return { ok: true, status: 200, json: async () => structuredClone(state) };
+  };
+  const { handlers, page } = await loadDashboard({ fetchImpl });
+  assert.match(page.innerHTML, /newest 2 of 302 retained reports/);
+  await handlers.click({ target: { closest: () => button({ loadMore: "reports" }) } });
+  assert.equal(requestedLimit, "500");
+});
+
 test("session list summarizes every report instead of showing an arbitrary report", async () => {
   const { handlers, page } = await loadDashboard();
   await handlers.click({ target: { closest: () => button({ view: "sessions" }) } });
@@ -116,7 +187,7 @@ test("session list summarizes every report instead of showing an arbitrary repor
 
 test("facets and investigation shortcuts change the loaded explorer", async () => {
   const { handlers, page } = await loadDashboard();
-  await handlers.change({ target: { id: "explorer-primary", value: "blocked", dataset: {} } });
+  await handlers.change({ target: { id: "explorer-secondary", value: "blocked", dataset: {} } });
   assert.doesNotMatch(page.innerHTML, /The result answered the question/);
   assert.match(page.innerHTML, /The document could not be opened/);
 
@@ -165,20 +236,17 @@ test("action notices render as ephemeral accessible toasts", async () => {
 
 test("setup lists key kinds with expiry and last-used, and rotating a read key keeps it a read key", async () => {
   const state = structuredClone(dashboard);
-  const created = [];
+  const rotated = [];
   const fetchImpl = async (path, options = {}) => {
-    if (path.startsWith("/api/settings/api-keys/") && options.method === "DELETE") {
-      return { ok: true, status: 200, json: async () => ({ revoked: true }) };
-    }
-    if (path === "/api/settings/api-keys" && options.method === "POST") {
-      const body = JSON.parse(options.body);
-      created.push(body);
+    if (path.endsWith("/rotate") && options.method === "POST") {
+      const old = path.includes("key-2") ? state.apiKeys[1] : state.apiKeys[0];
+      rotated.push(old);
       return {
         ok: true,
         status: 200,
         json: async () => ({
-          secret: "af_read_9999aaaa9999aaaa9999aaaa9999aaaa_rotated_secret_value",
-          apiKey: { id: "key-3", prefix: "af_read_9999aaaa", label: body.label, kind: body.kind || "write", createdAt: iso(0), expiresAt: iso(129_600), lastUsedAt: null },
+          secret: old.kind === "read" ? "af_read_9999aaaa9999aaaa9999aaaa9999aaaa_rotated_secret_value" : "af_live_9999aaaa9999aaaa9999aaaa9999aaaa_rotated_secret_value",
+          apiKey: { id: `key-${rotated.length + 2}`, prefix: old.kind === "read" ? "af_read_9999aaaa" : "af_live_9999aaaa", label: old.label, kind: old.kind, createdAt: iso(0), expiresAt: old.kind === "read" ? iso(129_600) : null, lastUsedAt: null },
         }),
       };
     }
@@ -198,16 +266,14 @@ test("setup lists key kinds with expiry and last-used, and rotating a read key k
   assert.match(page.innerHTML, /&quot;servers&quot;/);
 
   await handlers.click({ target: { closest: () => button({ revokeKey: "key-2" }) } });
-  assert.equal(created.length, 1);
-  assert.equal(created[0].kind, "read");
-  assert.equal(created[0].label, "Repo read key");
-  assert.equal(created[0].expiresInSeconds, 7776000);
+  assert.equal(rotated.length, 1);
+  assert.equal(rotated[0].kind, "read");
+  assert.equal(rotated[0].label, "Repo read key");
   assert.match(page.innerHTML, /Save this read key now/);
 
   await handlers.click({ target: { closest: () => button({ revokeKey: "key-1" }) } });
-  assert.equal(created.length, 2);
-  assert.equal(created[1].kind, "write");
-  assert.equal(created[1].expiresInSeconds, undefined);
+  assert.equal(rotated.length, 2);
+  assert.equal(rotated[1].kind, "write");
 });
 
 test("creating a read key posts kind and expiry and shows the shown-once secret", async () => {

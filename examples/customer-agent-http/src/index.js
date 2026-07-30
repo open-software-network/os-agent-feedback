@@ -54,7 +54,7 @@ if (consentAction === "ask") {
 
 const trustedFeedbackOrigin = new URL(
   process.env.TRUSTED_FEEDBACK_ORIGIN ||
-    "https://agent-feedback-api-production.up.railway.app",
+    "https://app.epode.ai",
 ).origin;
 const result = await submitProductFeedback(
   feedback,

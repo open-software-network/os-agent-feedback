@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = env::var("AGENT_FEEDBACK_KEY")?;
     let endpoint = env::var("AGENT_FEEDBACK_URL")
-        .unwrap_or_else(|_| "https://agent-feedback-api-production.up.railway.app".into());
+        .unwrap_or_else(|_| "https://app.epode.ai".into());
     let feedback = AgentFeedbackLayer::new(
         Options::new(api_key)
             .endpoint(endpoint)

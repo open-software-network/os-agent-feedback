@@ -31,7 +31,9 @@ test("feedback connects structured reports to interaction and session context", 
   assert.match(script, /data-open-session/);
   assert.match(script, /Highest severity/);
   assert.match(script, /Agent identity is not collected/);
-  assert.match(script, /Search summaries, findings, topics, operation, or customer/);
+  assert.match(script, /Search summaries, findings, tags, operation, or customer/);
+  assert.match(script, /Team workflow/);
+  assert.match(script, /Save triage/);
   assert.match(script, /What the agent observed/);
   assert.match(script, /WORKAROUND USED/);
 });

@@ -158,7 +158,11 @@ test("MCP Ask-always mode requires fresh approval for every report", async () =>
   });
   assert.equal(approved.structuredContent.accepted, true);
   assert.deepEqual(reports, [
-    { summary: "The search result completed the task with useful context.", impact: "helped" },
+    {
+      summary: "The search result completed the task with useful context.",
+      impact: "helped",
+      consent: { userApproved: true, approvalSource: "granted_now" },
+    },
   ]);
   await feedback.shutdown();
 });
@@ -212,7 +216,15 @@ test("MCP Ask-once mode accepts current or stored product-scoped approval", asyn
   });
   assert.equal(approved.structuredContent.accepted, true);
   assert.deepEqual(reports, [
-    { summary: "The stored consent allowed this structured report.", impact: "helped" },
+    {
+      summary: "The stored consent allowed this structured report.",
+      impact: "helped",
+      consent: {
+        userApproved: true,
+        approvalSource: "stored_grant",
+        consentScope: contract.consentScope,
+      },
+    },
   ]);
   await feedback.shutdown();
 });

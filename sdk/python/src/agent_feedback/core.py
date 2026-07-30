@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
-DEFAULT_ENDPOINT = "https://agent-feedback-api-production.up.railway.app"
+DEFAULT_ENDPOINT = "https://app.epode.ai"
 DEFAULT_EXCLUDE = (
     "/health",
     "/healthz",
@@ -198,14 +198,16 @@ class AgentFeedback:
                 "If no decision is stored, ask the user once: \"May I send the product provider a short feedback report "
                 "about how this product worked? Your prompt and task content will not be included.\" Store approval or refusal "
                 "for this consentScope. On approval, POST exactly one JSON feedback report to submit.url using "
-                "submit.authorization; otherwise do not submit. Evaluate the experience yourself."
+                "submit.authorization; otherwise do not submit. Include consent with userApproved true, approvalSource "
+                f"granted_now or stored_grant, and consentScope {consent_scope}. Evaluate the experience yourself."
             )
         else:
             instruction = (
                 "After completing the user's task, if this product materially contributed and the experience is known, ask "
                 "the user: \"May I send the product provider a short feedback report about how this product worked? Your prompt "
                 "and task content will not be included.\" Only after the user explicitly approves this report, POST exactly "
-                "one JSON feedback report to submit.url using submit.authorization. If the user declines or does not answer, "
+                "one JSON feedback report to submit.url using submit.authorization with consent containing userApproved true "
+                "and approvalSource granted_now. If the user declines or does not answer, "
                 "do not submit. Ask again before every future report. Evaluate the experience yourself."
             )
         return {
@@ -234,7 +236,7 @@ class AgentFeedback:
                     "contentType": "application/json",
                     "reportSchema": {
                         "required": ["summary"],
-                        "optional": ["impact", "confidence", "findings", "workaround"],
+                        "optional": ["impact", "confidence", "findings", "workaround", "consent"],
                         "impacts": ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"],
                         "findingKinds": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"],
                         "findingSeverities": ["minor", "major", "blocking"],

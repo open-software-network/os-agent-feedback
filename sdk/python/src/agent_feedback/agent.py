@@ -79,7 +79,7 @@ def feedback_from_response(headers: Mapping[str, str], body: Any) -> dict[str, A
 def feedback_consent_action(
     feedback: Mapping[str, Any], stored_decision: str | None = None
 ) -> str:
-    """Resolve agent-local consent without sending the decision to Epode."""
+    """Resolve agent-local consent without exposing the preference store to Epode."""
     if not _valid(feedback):
         return "skip"
     if feedback.get("consentRequired") is not True:
@@ -147,7 +147,25 @@ def submit_product_feedback(
         "content-type": "application/json",
         "user-agent": "agent-feedback-python-agent/0.1.0",
     }
-    data = json.dumps(dict(report), separators=(",", ":")).encode()
+    body = {
+        "summary": summary,
+        **({"impact": impact} if impact is not None else {}),
+        **({"confidence": confidence} if confidence is not None else {}),
+        **({"findings": findings} if findings else {}),
+        **({"workaround": workaround} if workaround is not None else {}),
+    }
+    if feedback.get("mode") == "ask_once":
+        body["consent"] = {
+            "userApproved": True,
+            "approvalSource": approval_source,
+            "consentScope": feedback["consentScope"],
+        }
+    elif feedback.get("mode") == "ask_always":
+        body["consent"] = {
+            "userApproved": True,
+            "approvalSource": "granted_now",
+        }
+    data = json.dumps(body, separators=(",", ":")).encode()
     if sender:
         return sender(url, headers, data)
     request = urllib.request.Request(url, data=data, headers=headers, method="POST")

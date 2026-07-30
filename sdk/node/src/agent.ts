@@ -55,13 +55,13 @@ export interface ProductFeedbackSubmission {
 }
 
 const DEFAULT_SUBMIT_ORIGIN =
-  "https://agent-feedback-api-production.up.railway.app";
+  "https://app.epode.ai";
 
 export type StoredFeedbackConsent = "approved" | "refused";
 export type FeedbackConsentAction = "submit" | "ask" | "skip";
 
 /**
- * Resolves an agent-runtime consent preference without sending it to Epode.
+ * Resolves an agent-runtime consent preference without exposing the preference store to Epode.
  * Persist `stored` under feedback.consentScope in the agent's own preference store.
  */
 export function feedbackConsentAction(
@@ -232,6 +232,22 @@ export async function submitProductFeedback(
       ...(report.confidence !== undefined ? { confidence: report.confidence } : {}),
       ...(report.findings ? { findings: report.findings } : {}),
       ...(report.workaround ? { workaround: report.workaround } : {}),
+      ...(parsed.mode === "ask_once"
+        ? {
+            consent: {
+              userApproved: true,
+              approvalSource: options.approvalSource,
+              consentScope: parsed.consentScope,
+            },
+          }
+        : parsed.mode === "ask_always"
+          ? {
+              consent: {
+                userApproved: true,
+                approvalSource: "granted_now",
+              },
+            }
+          : {}),
     }),
     signal: AbortSignal.timeout(options.timeoutMs ?? 5_000),
   });

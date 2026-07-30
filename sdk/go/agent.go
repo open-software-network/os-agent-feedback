@@ -36,8 +36,14 @@ type FeedbackReport struct {
 	ApprovalSource string              `json:"-"`
 }
 
+type ConsentAttestation struct {
+	UserApproved   bool   `json:"userApproved"`
+	ApprovalSource string `json:"approvalSource"`
+	ConsentScope   string `json:"consentScope,omitempty"`
+}
+
 // FeedbackConsentAction resolves a preference stored by the agent runtime.
-// Epode never receives the stored decision or uses it as an identity.
+// Epode never receives the preference store or uses this consent as an identity.
 func FeedbackConsentAction(envelope *Envelope, storedDecision string) string {
 	if !validEnvelope(envelope) {
 		return "skip"
@@ -111,6 +117,34 @@ func validEnvelope(envelope *Envelope) bool {
 	}
 }
 
+func feedbackSubmissionBody(envelope *Envelope, report FeedbackReport) []byte {
+	bodyValue := map[string]any{"summary": report.Summary}
+	if report.Impact != "" {
+		bodyValue["impact"] = report.Impact
+	}
+	if report.Confidence != nil {
+		bodyValue["confidence"] = report.Confidence
+	}
+	if len(report.Findings) > 0 {
+		bodyValue["findings"] = report.Findings
+	}
+	if report.Workaround != nil {
+		bodyValue["workaround"] = report.Workaround
+	}
+	if envelope.Mode == FeedbackAskOnce {
+		bodyValue["consent"] = ConsentAttestation{
+			UserApproved: true, ApprovalSource: report.ApprovalSource,
+			ConsentScope: envelope.ConsentScope,
+		}
+	} else if envelope.Mode == FeedbackAskAlways {
+		bodyValue["consent"] = ConsentAttestation{
+			UserApproved: true, ApprovalSource: "granted_now",
+		}
+	}
+	body, _ := json.Marshal(bodyValue)
+	return body
+}
+
 func SubmitProductFeedback(ctx context.Context, envelope *Envelope, report FeedbackReport, allowedOrigins []string, client *http.Client) (map[string]any, error) {
 	if !validEnvelope(envelope) {
 		return nil, errors.New("invalid Agent Feedback submission contract")
@@ -175,7 +209,7 @@ func SubmitProductFeedback(ctx context.Context, envelope *Envelope, report Feedb
 	if !trusted {
 		return nil, fmt.Errorf("refusing to submit feedback to untrusted origin %s://%s", submitURL.Scheme, submitURL.Host)
 	}
-	body, _ := json.Marshal(report)
+	body := feedbackSubmissionBody(envelope, report)
 	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, envelope.Submit.URL, bytes.NewReader(body))
 	request.Header.Set("Authorization", envelope.Submit.Authorization)
 	request.Header.Set("Content-Type", "application/json")

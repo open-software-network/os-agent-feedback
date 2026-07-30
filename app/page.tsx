@@ -22,7 +22,7 @@ export default function Home() {
   return (
     <main>
       <nav className="topbar">
-        <a className="wordmark" href="#top">AGENT FEEDBACK</a>
+        <a className="wordmark" href="#top">EPODE</a>
         <div>
           <a href={`${dashboard}/.well-known/agent-feedback-v1.json`}>Protocol</a>
           <a className="button" href={`${dashboard}/auth/start`}>Open dashboard</a>
@@ -98,7 +98,7 @@ export default function Home() {
       </section>
 
       <footer>
-        <span>AGENT FEEDBACK</span>
+        <span>EPODE</span>
         <a href={`${dashboard}/auth/start`}>Sign in →</a>
       </footer>
     </main>

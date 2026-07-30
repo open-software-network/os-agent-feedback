@@ -46,7 +46,7 @@ def header(scope, name: bytes):
 app = AgentFeedbackASGI(
     product,
     api_key=os.environ["AGENT_FEEDBACK_KEY"],
-    endpoint=os.getenv("AGENT_FEEDBACK_URL", "https://agent-feedback-api-production.up.railway.app"),
+    endpoint=os.getenv("AGENT_FEEDBACK_URL", "https://app.epode.ai"),
     include=("/api/status",),
     customer_ref=lambda scope: header(scope, b"x-customer-ref"),
     runtime_hint=lambda scope: header(scope, b"user-agent"),

@@ -160,7 +160,14 @@ pub fn reject_sensitive_fields(value: &serde_json::Value) -> Result<(), &'static
     ];
     match value {
         serde_json::Value::Object(object) => {
-            if object.keys().any(|key| FORBIDDEN.contains(&key.as_str())) {
+            if object.keys().any(|key| {
+                let normalized = key
+                    .chars()
+                    .flat_map(char::to_lowercase)
+                    .map(|character| if character == '-' { '_' } else { character })
+                    .collect::<String>();
+                FORBIDDEN.contains(&normalized.as_str())
+            }) {
                 return Err(
                     "Raw prompts, transcripts, secrets, customer data, and tool payloads are not accepted",
                 );

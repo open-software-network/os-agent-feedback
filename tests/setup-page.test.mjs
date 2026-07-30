@@ -133,7 +133,7 @@ test("setup offers one guided install with a manual fallback", () => {
 test("installation is ready without a setup generation step", () => {
   assert.match(dashboardScript, /Installation ready/);
   assert.match(dashboardScript, /Default product key/);
-  assert.match(dashboardScript, /currentView === "setup" && dashboard\.currentRole !== "member" && dashboard\.currentEnvironment && !dashboard\.apiKeys\.length/);
+  assert.match(dashboardScript, /!dashboard\.apiKeys\.some\(\(key\) => keyKind\(key\) === "write"\)/);
   assert.doesNotMatch(dashboardScript, /Generate installation/);
   assert.doesNotMatch(dashboardScript, /data-create-key/);
   assert.doesNotMatch(dashboardScript, /Choose an integration and generate its installation first/);
@@ -145,21 +145,21 @@ test("setup warns about legacy keys and keeps rotation visible", () => {
   assert.match(dashboardScript, /\/\^af_\(live\|read\)_\[0-9a-f\]\{8\}\$\//);
   assert.match(dashboardScript, /class="secret-callout warning"/);
   assert.match(dashboardStyles, /\.secret-callout\.warning/);
-  assert.match(dashboardHtml, /styles\.css\?v=20260729-home/);
+  assert.match(dashboardHtml, /styles\.css\?v=20260730-quality/);
   assert.match(dashboardScript, /legacy key and cannot produce valid afr2 capabilities/i);
   assert.match(dashboardScript, /V2 integrations will fail boot validation/);
-  assert.match(dashboardScript, /The current \$\{kind\} key stops working immediately/);
+  assert.match(dashboardScript, /current key will keep working for one hour/);
   assert.match(dashboardScript, /update the <code>AGENT_FEEDBACK_KEY<\/code> server environment variable/);
   assert.match(dashboardScript, /Create new key[\s\S]*<details class="existing-connections">/);
   assert.doesNotMatch(dashboardScript, /<details class="existing-connections">[\s\S]*Create new key/);
 });
 
-test("rotating a key preserves its kind instead of minting a write key", () => {
+test("rotating a key uses the atomic overlap endpoint", () => {
   assert.match(dashboardScript, /const rotated = dashboard\.apiKeys\.find\(\(key\) => key\.id === target\.dataset\.revokeKey\)/);
   assert.match(dashboardScript, /const kind = keyKind\(rotated\)/);
-  assert.match(dashboardScript, /Create a new \$\{kind\} key\?/);
-  assert.match(dashboardScript, /environmentId: dashboard\.currentEnvironment\.id, kind \}/);
-  assert.doesNotMatch(dashboardScript, /revokeKey[\s\S]{0,600}JSON\.stringify\(\{ label: "Default product key", environmentId/);
+  assert.match(dashboardScript, /api\/settings\/api-keys\/\$\{target\.dataset\.revokeKey\}\/rotate/);
+  assert.doesNotMatch(dashboardScript, /target\.dataset\.revokeKey\}.*method: "DELETE"/);
+  assert.match(dashboardScript, /within one hour/);
 });
 
 test("key rows surface kind, expiry, and last-used", () => {
@@ -194,8 +194,8 @@ test("read keys ship per-client MCP config snippets, not a server env variable",
 });
 
 test("new products receive their product key automatically", () => {
-  const defaultKeyCreations = backendMain.match(/Some\("Default product key"\.into\(\)\),\s+None,/g) || [];
-  assert.equal(defaultKeyCreations.length, 1);
+  assert.match(backendMain, /create_product_with_default_key/);
+  assert.match(backendStore, /'Default product key'[\s\S]*'write'/);
   assert.match(backendMain, /"apiKey": api_key/);
   assert.match(backendMain, /"secret": secret/);
   assert.match(backendStore, /None => None/);

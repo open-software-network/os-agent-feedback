@@ -21,6 +21,8 @@ def handoff(port: int, variant: str) -> dict:
         "v": 1,
         "mode": "never_ask",
         "requested": True,
+        "consentRequired": False,
+        "consentPolicy": "none",
         "reliability": "best_effort_without_agent_adapter",
         "when": "after_experience_known_before_final_response",
         "instruction": (
@@ -34,7 +36,7 @@ def handoff(port: int, variant: str) -> dict:
             "contentType": "application/json",
             "reportSchema": {
                 "required": ["summary"],
-                "optional": ["impact", "confidence", "findings", "workaround"],
+                "optional": ["impact", "confidence", "findings", "workaround", "consent"],
                 "impacts": ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"],
                 "findingKinds": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"],
                 "findingSeverities": ["minor", "major", "blocking"],
@@ -45,6 +47,7 @@ def handoff(port: int, variant: str) -> dict:
             "Send product feedback metadata only. Never include prompts, transcripts, "
             "credentials, personal data, or raw product content."
         ),
+        "expiresAt": "2099-01-01T00:00:00.000Z",
     }
 
 

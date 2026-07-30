@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"regexp"
@@ -20,7 +21,14 @@ import (
 	"time"
 )
 
-const DefaultEndpoint = "https://agent-feedback-api-production.up.railway.app"
+const DefaultEndpoint = "https://app.epode.ai"
+
+const (
+	defaultMaxResponseBodyBytes = 1 << 20
+	telemetryAttemptTimeout     = 3 * time.Second
+	telemetryMaxAttempts        = 3
+	telemetryRetryDelay         = 50 * time.Millisecond
+)
 
 var defaultExclude = []string{
 	"/health", "/healthz", "/metrics", "/favicon.ico", "/robots.txt",
@@ -47,8 +55,11 @@ type Options struct {
 	RuntimeHint   func(*http.Request) string
 	FlushInterval time.Duration
 	MaxQueueSize  int
-	HTTPClient    *http.Client
-	Sender        func(context.Context, string, http.Header, []byte) error
+	// MaxResponseBodyBytes bounds middleware buffering. Larger responses are
+	// passed through unchanged and are not instrumented.
+	MaxResponseBodyBytes int
+	HTTPClient           *http.Client
+	Sender               func(context.Context, string, http.Header, []byte) error
 }
 
 type SubmitContract struct {
@@ -137,11 +148,13 @@ func keyParts(apiKey string) (string, []byte, error) {
 }
 
 type Runtime struct {
-	options Options
-	events  chan TelemetryEvent
-	stop    chan struct{}
-	done    chan struct{}
-	once    sync.Once
+	options          Options
+	events           chan TelemetryEvent
+	stop             chan struct{}
+	done             chan struct{}
+	once             sync.Once
+	telemetryErrorMu sync.Mutex
+	telemetryError   error
 }
 
 func New(options Options) (*Runtime, error) {
@@ -166,6 +179,9 @@ func New(options Options) (*Runtime, error) {
 	}
 	if options.MaxQueueSize <= 0 {
 		options.MaxQueueSize = 1_000
+	}
+	if options.MaxResponseBodyBytes <= 0 {
+		options.MaxResponseBodyBytes = defaultMaxResponseBodyBytes
 	}
 	if options.HTTPClient == nil {
 		options.HTTPClient = &http.Client{Timeout: 3 * time.Second}
@@ -251,12 +267,12 @@ func (r *Runtime) prepare(now time.Time) (preparedInteraction, error) {
 	if mode == FeedbackAskOnce {
 		keyID, _, _ := keyParts(r.options.APIKey)
 		consentScope = "afcs1_" + keyID
-		instruction = fmt.Sprintf("After completing the user's task, check durable agent preferences for consentScope %s. If approved, submit without asking again. If refused or unanswered, do not submit and do not ask again. If no decision is stored, ask the user once: \"May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.\" Store approval or refusal for this consentScope. On approval, POST exactly one JSON feedback report to submit.url using submit.authorization; otherwise do not submit. Evaluate the experience yourself.", consentScope)
+		instruction = fmt.Sprintf("After completing the user's task, check durable agent preferences for consentScope %s. If approved, submit without asking again. If refused or unanswered, do not submit and do not ask again. If no decision is stored, ask the user once: \"May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.\" Store approval or refusal for this consentScope. On approval, POST exactly one JSON feedback report to submit.url using submit.authorization; otherwise do not submit. Include consent with userApproved true, approvalSource granted_now or stored_grant, and consentScope %s. Evaluate the experience yourself.", consentScope, consentScope)
 		when = "after_experience_known_and_consent_resolved"
 		consentRequired = true
 		consentPolicy = "once"
 	} else if mode == FeedbackAskAlways {
-		instruction = "After completing the user's task, if this product materially contributed and the experience is known, ask the user: \"May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.\" Only after the user explicitly approves this report, POST exactly one JSON feedback report to submit.url using submit.authorization. If the user declines or does not answer, do not submit. Ask again before every future report. Evaluate the experience yourself."
+		instruction = "After completing the user's task, if this product materially contributed and the experience is known, ask the user: \"May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.\" Only after the user explicitly approves this report, POST exactly one JSON feedback report to submit.url using submit.authorization with consent containing userApproved true and approvalSource granted_now. If the user declines or does not answer, do not submit. Ask again before every future report. Evaluate the experience yourself."
 		when = "after_experience_known_and_explicit_user_approval"
 		consentRequired = true
 		consentPolicy = "always"
@@ -277,7 +293,7 @@ func (r *Runtime) prepare(now time.Time) (preparedInteraction, error) {
 				ContentType:   "application/json",
 				ReportSchema: ReportSchema{
 					Required:          []string{"summary"},
-					Optional:          []string{"impact", "confidence", "findings", "workaround"},
+					Optional:          []string{"impact", "confidence", "findings", "workaround", "consent"},
 					Impacts:           []string{"helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"},
 					FindingKinds:      []string{"strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"},
 					FindingSeverities: []string{"minor", "major", "blocking"},
@@ -354,60 +370,141 @@ drain:
 		"User-Agent":    []string{"agent-feedback-go/0.1.0"},
 	}
 	url := r.options.Endpoint + "/api/v2/telemetry/batches"
+	var deliveryError error
+	for attempt := 0; attempt < telemetryMaxAttempts; attempt++ {
+		deliveryError = r.sendTelemetryAttempt(url, headers, body)
+		if deliveryError == nil {
+			return
+		}
+		if !isTransientTelemetryError(deliveryError) {
+			break
+		}
+		if attempt+1 < telemetryMaxAttempts {
+			time.Sleep(telemetryRetryDelay * time.Duration(attempt+1))
+		}
+	}
+	r.telemetryErrorMu.Lock()
+	r.telemetryError = deliveryError
+	r.telemetryErrorMu.Unlock()
+}
+
+type telemetryHTTPError struct{ status int }
+
+func (err telemetryHTTPError) Error() string {
+	return fmt.Sprintf("telemetry endpoint returned HTTP %d", err.status)
+}
+
+func isTransientTelemetryError(err error) bool {
+	var statusError telemetryHTTPError
+	if errors.As(err, &statusError) {
+		return statusError.status == http.StatusRequestTimeout ||
+			statusError.status == http.StatusTooManyRequests || statusError.status >= 500
+	}
+	return true
+}
+
+func (r *Runtime) sendTelemetryAttempt(url string, headers http.Header, body []byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), telemetryAttemptTimeout)
+	defer cancel()
 	if r.options.Sender != nil {
-		_ = r.options.Sender(context.Background(), url, headers, body)
-		return
+		return r.options.Sender(ctx, url, headers.Clone(), body)
 	}
-	request, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
-	request.Header = headers
-	if response, err := r.options.HTTPClient.Do(request); err == nil {
-		_ = response.Body.Close()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
 	}
+	request.Header = headers.Clone()
+	response, err := r.options.HTTPClient.Do(request)
+	if err != nil {
+		return err
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
+	_ = response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return telemetryHTTPError{status: response.StatusCode}
+	}
+	return nil
 }
 
 func (r *Runtime) Shutdown(ctx context.Context) error {
 	r.once.Do(func() { close(r.stop) })
 	select {
 	case <-r.done:
-		return nil
+		r.telemetryErrorMu.Lock()
+		defer r.telemetryErrorMu.Unlock()
+		return r.telemetryError
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
 
 type captureWriter struct {
-	target   http.ResponseWriter
-	header   http.Header
-	status   int
-	body     bytes.Buffer
-	streamed bool
+	target      http.ResponseWriter
+	header      http.Header
+	status      int
+	body        bytes.Buffer
+	limit       int
+	wroteHeader bool
+	streamed    bool
 }
 
-func newCaptureWriter(target http.ResponseWriter) *captureWriter {
-	return &captureWriter{target: target, header: make(http.Header), status: http.StatusOK}
+func newCaptureWriter(target http.ResponseWriter, limit int) *captureWriter {
+	return &captureWriter{target: target, header: make(http.Header), status: http.StatusOK, limit: limit}
 }
 
 func (writer *captureWriter) Header() http.Header { return writer.header }
 
-func (writer *captureWriter) WriteHeader(status int) { writer.status = status }
+func (writer *captureWriter) WriteHeader(status int) {
+	if writer.wroteHeader {
+		return
+	}
+	writer.wroteHeader = true
+	writer.status = status
+}
 
 func (writer *captureWriter) Write(value []byte) (int, error) {
 	if writer.streamed {
 		return writer.target.Write(value)
 	}
+	if !writer.wroteHeader {
+		writer.wroteHeader = true
+	}
+	if writer.body.Len() > writer.limit-len(value) {
+		if err := writer.commit(); err != nil {
+			return 0, err
+		}
+		return writer.target.Write(value)
+	}
 	return writer.body.Write(value)
 }
 
-func (writer *captureWriter) Flush() {
+func (writer *captureWriter) commit() error {
 	if !writer.streamed {
 		writer.streamed = true
 		copyHeaders(writer.target.Header(), writer.header)
 		writer.target.WriteHeader(writer.status)
-		_, _ = writer.target.Write(writer.body.Bytes())
+		if writer.body.Len() > 0 {
+			_, err := writer.target.Write(writer.body.Bytes())
+			writer.body.Reset()
+			return err
+		}
 	}
-	if flusher, ok := writer.target.(http.Flusher); ok {
-		flusher.Flush()
+	return nil
+}
+
+// Unwrap lets http.ResponseController reach optional interfaces implemented by
+// the customer's writer without forcing this middleware to advertise them.
+func (writer *captureWriter) Unwrap() http.ResponseWriter { return writer.target }
+
+func (writer *captureWriter) FlushError() error {
+	if err := writer.commit(); err != nil {
+		return err
 	}
+	return http.NewResponseController(writer.target).Flush()
+}
+
+func (writer *captureWriter) Flush() {
+	_ = writer.FlushError()
 }
 
 func copyHeaders(target, source http.Header) {
@@ -428,7 +525,7 @@ func (r *Runtime) Middleware(next http.Handler) http.Handler {
 			return
 		}
 		started := time.Now()
-		captured := newCaptureWriter(response)
+		captured := newCaptureWriter(response, r.options.MaxResponseBodyBytes)
 		next.ServeHTTP(captured, request)
 		if captured.streamed {
 			return

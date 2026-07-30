@@ -196,6 +196,14 @@ function instrumentServer(
         };
       }
       try {
+        const keyId = /^afr2_([0-9a-fA-F]{32})\./.exec(feedbackHandle)?.[1]?.toLowerCase();
+        if (askOnce && !keyId) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: "Feedback not submitted. The feedback handle is invalid." }],
+            structuredContent: { accepted: false, retryable: false },
+          };
+        }
         const response = await (options.fetch || globalThis.fetch)(
           `${runtime.endpoint}/api/v2/reports`,
           {
@@ -205,7 +213,29 @@ function instrumentServer(
               "content-type": "application/json",
               "user-agent": "@agent-feedback/node/0.1.0",
             },
-            body: JSON.stringify({ summary, impact, confidence, findings, workaround }),
+            body: JSON.stringify({
+              summary,
+              impact,
+              confidence,
+              findings,
+              workaround,
+              ...(askOnce
+                ? {
+                    consent: {
+                      userApproved: true,
+                      approvalSource,
+                      consentScope: `afcs1_${keyId}`,
+                    },
+                  }
+                : askAlways
+                  ? {
+                      consent: {
+                        userApproved: true,
+                        approvalSource: "granted_now",
+                      },
+                    }
+                  : {}),
+            }),
             signal: AbortSignal.timeout(5_000),
           },
         );

@@ -5,7 +5,9 @@ const account = document.querySelector("#account");
 const productScope = document.querySelector("#product-scope");
 let dashboard;
 let currentView = initialUrl.searchParams.get("view") || "home";
-let selectedWorkspaceId = initialUrl.searchParams.get("team") || "";
+let selectedWorkspaceId = initialUrl.searchParams.get("team") || (() => {
+  try { return globalThis.localStorage?.getItem("epode:last-team") || ""; } catch { return ""; }
+})();
 let selectedProductId = initialUrl.searchParams.get("product") || "";
 let selectedReport = initialUrl.searchParams.get("report");
 let selectedInteraction = initialUrl.searchParams.get("interaction");
@@ -25,6 +27,11 @@ let setupInstallMode = "agent";
 let setupMonitor = null;
 let noticeTimer = null;
 let explorerTimer = null;
+let refreshGeneration = 0;
+let interactionLimit = 250;
+let reportLimit = 250;
+let sessionLimit = 100;
+let pendingHeadingFocus = false;
 
 const validViews = new Set(["home", "feedback", "interactions", "sessions", "setup", "policy", "team", "new-product"]);
 const validRanges = new Set(["24h", "7d", "30d", "all"]);
@@ -85,6 +92,7 @@ const reportImpact = (report) => report.impact || "unspecified";
 const reportFindings = (report) => Array.isArray(report.findings) ? report.findings : [];
 const reportTopics = (report) => reportFindings(report).map((finding) => finding.topic);
 const reportSeverity = (report) => reportFindings(report).some((finding) => finding.severity === "blocking") ? "blocking" : reportFindings(report).some((finding) => finding.severity === "major") ? "major" : reportFindings(report).some((finding) => finding.severity === "minor") ? "minor" : "none";
+const workflowStatus = (report) => report.workflowStatus || "new";
 const findingBadge = (finding) => `<span class="status-pill status-${esc(finding.severity || finding.kind)}">${esc(title(finding.kind))}${finding.severity ? ` · ${esc(title(finding.severity))}` : ""}</span>`;
 const customer = (value) => value ? `Customer ${value}` : "Customer not linked";
 const relativeDate = (value) => {
@@ -143,7 +151,7 @@ function normalizeDashboardState() {
   if (!validViews.has(currentView)) currentView = "home";
   if (!validRanges.has(explorerRange)) explorerRange = "30d";
   const primaryByView = {
-    feedback: ["all", "helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown", "unspecified"],
+    feedback: ["all", "new", "investigating", "planned", "resolved", "wont_act"],
     interactions: ["all", "confirmed", "unclassified", "reviewed", "unreviewed"],
     sessions: ["all", "reviewed", "unreviewed"],
   };
@@ -151,7 +159,9 @@ function normalizeDashboardState() {
   if (primaryByView[currentView] && !primaryByView[currentView].includes(explorerPrimary)) explorerPrimary = "all";
   const secondaryValues = currentView === "sessions"
     ? new Set(dashboard.sessions.map((entry) => entry.source))
-    : new Set((currentView === "feedback" ? dashboard.reports : dashboard.interactions).map((entry) => entry.surface));
+    : currentView === "feedback"
+      ? new Set(dashboard.reports.map(reportImpact))
+      : new Set(dashboard.interactions.map((entry) => entry.surface));
   if (explorerSecondary !== "all" && !secondaryValues.has(explorerSecondary)) explorerSecondary = "all";
   if (selectedReport && !dashboard.reports.some((entry) => entry.id === selectedReport)) selectedReport = null;
   if (selectedInteraction && !dashboard.interactions.some((entry) => entry.id === selectedInteraction)) selectedInteraction = null;
@@ -159,6 +169,7 @@ function normalizeDashboardState() {
 }
 
 async function copyText(value) {
+  const previousFocus = document.activeElement;
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(value);
@@ -179,6 +190,7 @@ async function copyText(value) {
     copied = typeof document.execCommand === "function" && document.execCommand("copy");
   } finally {
     field.remove();
+    previousFocus?.focus?.();
   }
   if (!copied) throw new Error("Could not copy to the clipboard");
 }
@@ -199,17 +211,23 @@ async function request(path, options = {}) {
 }
 
 async function refresh() {
+  const generation = ++refreshGeneration;
   const query = new URLSearchParams();
   if (selectedWorkspaceId) query.set("workspaceId", selectedWorkspaceId);
   if (selectedProductId) query.set("productId", selectedProductId);
-  dashboard = await request(`/api/dashboard${query.size ? `?${query}` : ""}`);
+  query.set("interactionLimit", String(interactionLimit));
+  query.set("reportLimit", String(reportLimit));
+  query.set("sessionLimit", String(sessionLimit));
+  const nextDashboard = await request(`/api/dashboard${query.size ? `?${query}` : ""}`);
+  if (generation !== refreshGeneration) return false;
+  dashboard = nextDashboard;
   selectedWorkspaceId = dashboard.workspace.id;
+  try { globalThis.localStorage?.setItem("epode:last-team", selectedWorkspaceId); } catch { /* Browser storage is optional. */ }
   selectedProductId = dashboard.currentProduct?.id || "";
   if (dashboard.currentRole === "member" && ["setup", "policy", "new-product"].includes(currentView)) {
     currentView = "home";
   }
-  normalizeDashboardState();
-  if (currentView === "setup" && dashboard.currentRole !== "member" && dashboard.currentEnvironment && !dashboard.apiKeys.length) {
+  if (currentView === "setup" && dashboard.currentRole !== "member" && dashboard.currentEnvironment && !dashboard.apiKeys.some((key) => keyKind(key) === "write")) {
     const body = await request("/api/settings/api-keys", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -218,8 +236,13 @@ async function refresh() {
     apiSecret = body.secret;
     setupConnectionId = body.apiKey.id;
     rememberSetupSecret(dashboard.currentEnvironment.id, body.secret);
-    dashboard = await request(`/api/dashboard?environmentId=${encodeURIComponent(dashboard.currentEnvironment.id)}`);
+    const updatedDashboard = await request(`/api/dashboard?productId=${encodeURIComponent(selectedProductId)}`);
+    if (generation !== refreshGeneration) return false;
+    dashboard = updatedDashboard;
   }
+  await hydrateSelectedDetails(generation);
+  if (generation !== refreshGeneration) return false;
+  normalizeDashboardState();
   const setupKey = dashboard.apiKeys.find((key) => key.id === setupConnectionId && keyKind(key) === "write") || dashboard.apiKeys.find((key) => keyKind(key) === "write");
   if (setupKey) {
     setupConnectionId = setupKey.id;
@@ -238,7 +261,10 @@ async function refresh() {
   }
   account.innerHTML = `<strong>${esc(dashboard.user.displayName)}</strong>${dashboard.user.email ? `<small>${esc(dashboard.user.email)}</small>` : ""}<small>${esc(title(dashboard.currentRole))} · ${esc(dashboard.workspace.name)}</small>`;
   renderProductScope();
-  const navigationCounts = { feedback: dashboard.reports.length, sessions: dashboard.sessions.length };
+  const navigationCounts = {
+    feedback: dashboard.listState?.reportsTotal ?? dashboard.reports.length,
+    sessions: dashboard.listState?.sessionsTotal ?? dashboard.sessions.length,
+  };
   for (const [view, count] of Object.entries(navigationCounts)) {
     const element = document.querySelector(`[data-nav-count="${view}"]`);
     if (element) element.textContent = String(count);
@@ -254,6 +280,46 @@ async function refresh() {
     setNotice("That invitation is expired, revoked, or was created for a different email address.", 6000, "error");
   }
   render();
+  return true;
+}
+
+function appendUnique(items, value) {
+  if (value && !items.some((entry) => entry.id === value.id)) items.push(value);
+}
+
+async function hydrateSelectedDetails(generation) {
+  if (!selectedProductId) return;
+  const product = `?productId=${encodeURIComponent(selectedProductId)}`;
+  try {
+    if (selectedReport && !dashboard.reports.some((entry) => entry.id === selectedReport)) {
+      const detail = await request(`/api/dashboard/reports/${encodeURIComponent(selectedReport)}${product}`);
+      if (generation !== refreshGeneration) return;
+      appendUnique(dashboard.reports, detail.report);
+      if (!dashboard.interactions.some((entry) => entry.id === detail.report.interactionId)) {
+        const linked = await request(`/api/dashboard/interactions/${encodeURIComponent(detail.report.interactionId)}${product}`);
+        if (generation !== refreshGeneration) return;
+        appendUnique(dashboard.interactions, linked.interaction);
+      }
+    }
+    if (selectedInteraction && !dashboard.interactions.some((entry) => entry.id === selectedInteraction)) {
+      const detail = await request(`/api/dashboard/interactions/${encodeURIComponent(selectedInteraction)}${product}`);
+      if (generation !== refreshGeneration) return;
+      appendUnique(dashboard.interactions, detail.interaction);
+    }
+    if (selectedSession && !dashboard.sessions.some((entry) => entry.id === selectedSession)) {
+      const detail = await request(`/api/dashboard/sessions/${encodeURIComponent(selectedSession)}${product}`);
+      if (generation !== refreshGeneration) return;
+      appendUnique(dashboard.sessions, detail.session);
+      detail.interactions.forEach((entry) => appendUnique(dashboard.interactions, entry));
+      detail.reports.forEach((entry) => appendUnique(dashboard.reports, entry));
+    }
+  } catch (error) {
+    if (generation !== refreshGeneration) return;
+    if (selectedReport && !dashboard.reports.some((entry) => entry.id === selectedReport)) selectedReport = null;
+    if (selectedInteraction && !dashboard.interactions.some((entry) => entry.id === selectedInteraction)) selectedInteraction = null;
+    if (selectedSession && !dashboard.sessions.some((entry) => entry.id === selectedSession)) selectedSession = null;
+    setNotice(error.message || "The requested detail could not be loaded.", 4000, "error");
+  }
 }
 
 function renderProductScope() {
@@ -266,7 +332,7 @@ function renderProductScope() {
   }
   const product = dashboard.currentProduct;
   const productOptions = dashboard.products.map((entry) => `<option value="${esc(entry.id)}" ${entry.id === product?.id ? "selected" : ""}>${esc(entry.name)}</option>`).join("");
-  const connectionState = dashboard.interactions.length ? `<span class="scope-state connected"><i></i>Receiving data</span>` : `<span class="scope-state"><i></i>No data yet</span>`;
+  const connectionState = dashboard.insights.opportunities ? `<span class="scope-state connected"><i></i>Receiving data</span>` : `<span class="scope-state"><i></i>No data yet</span>`;
   const productActions = canEdit ? `<span class="scope-links"><button class="link-button" data-rename-product>Rename product</button><button class="link-button danger" data-delete-product>Delete product</button><button class="link-button" data-new-product>+ New product</button></span>` : "";
   productScope.innerHTML = `${teamSelect}<label><span>Product</span><select id="product-select">${productOptions}</select></label><div>${connectionState}${productActions}</div>`;
 }
@@ -278,6 +344,8 @@ function navigate(view) {
   selectedInteraction = null;
   selectedSession = null;
   resetExplorer();
+  explorerRange = "30d";
+  pendingHeadingFocus = true;
   syncUrl("push");
   render();
 }
@@ -314,6 +382,11 @@ function breakdown(rows, total, fallback) {
   return `<div class="breakdown">${rows.map((row) => `<div><span><b>${esc(title(row.name))}</b><small>${row.count} · ${total ? Math.round(row.count / total * 100) : 0}%</small></span><i><em style="width:${Math.round(row.count / max * 100)}%"></em></i></div>`).join("")}</div>`;
 }
 
+function listContinuation(kind, loaded, total) {
+  if (loaded >= total) return "";
+  return `<div class="list-continuation"><p>Showing the newest ${loaded.toLocaleString()} of ${total.toLocaleString()} retained ${esc(kind)}.</p><button class="button" data-load-more="${esc(kind)}">Load older</button></div>`;
+}
+
 function sessionFeedbackSummary(reports) {
   if (!reports.length) return "—";
   const findings = reports.flatMap(reportFindings);
@@ -337,56 +410,51 @@ function feedbackView() {
     const findings = reportFindings(item);
     const findingRows = findings.length ? findings.map((finding) => `<article class="finding-card"><div>${findingBadge(finding)}<code>${esc(finding.topic)}</code></div><p>${esc(finding.detail)}</p></article>`).join("") : `<div class="inline-empty"><p>No individual findings were supplied.</p></div>`;
     const workaround = item.workaround?.used ? `<section class="detail-section"><p class="eyebrow">WORKAROUND USED</p><h2>How the agent got unstuck</h2><p>${esc(item.workaround.detail)}</p></section>` : "";
-    return `${header("FEEDBACK", title(reportImpact(item)), date(item.createdAt), detailActions())}<button class="back" data-back="feedback">← All feedback</button><div class="detail-layout"><div class="detail-main"><article class="review-card ${impactClass(item.impact)}"><div>${badge(reportImpact(item))}<small>Submitted by the customer’s agent</small></div><p class="quote">“${esc(item.summary)}”</p></article><section class="detail-section"><div class="section-heading"><div><p class="eyebrow">FINDINGS</p><h2>What the agent observed</h2></div><span>${findings.length} finding${findings.length === 1 ? "" : "s"}</span></div><div class="finding-list">${findingRows}</div></section>${workaround}<section class="detail-section"><h2>Linked product context</h2><div class="context-row"><span><small>Operation</small><strong>${esc(item.operation)}</strong></span><span><small>Surface</small><strong>${esc(title(item.surface))}</strong></span><span><small>Duration</small><strong>${duration(item.durationMs)}</strong></span><span><small>Status</small><strong>${esc(item.statusCode || "—")}</strong></span></div>${contextActions}</section></div><aside class="detail-sidebar"><section><h2>Properties</h2>${propertyList([["Received", esc(date(item.createdAt))], ["Impact", esc(title(reportImpact(item)))], ["Confidence", item.confidence == null ? "Not provided" : `${Math.round(item.confidence * 100)}%`], ["Highest severity", esc(title(reportSeverity(item)))], ["Workaround", item.workaround?.used ? "Used" : "Not used"], ["Customer", esc(customer(item.customerRef))], ["Confirmation", esc(title(item.confirmationMethod || "none"))], ["Runtime hint", esc(item.runtimeHint || "Not provided")]])}</section><p class="privacy-note"><b>Agent identity is not collected.</b> Runtime values are unverified hints, not identities.</p>${interaction ? `<code class="object-id">${esc(interaction.id)}</code>` : ""}</aside></div>`;
+    const canManage = dashboard.currentRole !== "member";
+    const assigneeOptions = dashboard.teamMembers.map((member) => `<option value="${esc(member.osUserId)}" ${item.assigneeOsUserId === member.osUserId ? "selected" : ""}>${esc(member.displayName)}</option>`).join("");
+    const triage = `<section class="detail-section"><div class="section-heading"><div><p class="eyebrow">TRIAGE</p><h2>Team workflow</h2></div>${badge(workflowStatus(item))}</div>${canManage ? `<form id="feedback-workflow-form" data-report-id="${esc(item.id)}" class="workflow-form"><label><span>Status</span><select name="status"><option value="new" ${workflowStatus(item) === "new" ? "selected" : ""}>New</option><option value="investigating" ${workflowStatus(item) === "investigating" ? "selected" : ""}>Investigating</option><option value="planned" ${workflowStatus(item) === "planned" ? "selected" : ""}>Planned</option><option value="resolved" ${workflowStatus(item) === "resolved" ? "selected" : ""}>Resolved</option><option value="wont_act" ${workflowStatus(item) === "wont_act" ? "selected" : ""}>Won’t act</option></select></label><label><span>Assignee</span><select name="assignee"><option value="">Unassigned</option>${assigneeOptions}</select></label><label><span>Tags</span><input name="tags" value="${esc((item.tags || []).join(", "))}" placeholder="docs, latency" maxlength="260"></label><label class="workflow-note"><span>Internal note</span><textarea name="internalNote" rows="4" maxlength="1000" placeholder="What should the team do next?">${esc(item.internalNote || "")}</textarea></label><button class="button primary">Save triage</button></form>` : `<p class="muted">An owner or admin manages status, assignment, tags, and internal notes.</p>`}</section>`;
+    return `${header("FEEDBACK", title(reportImpact(item)), date(item.createdAt), detailActions())}<button class="back" data-back="feedback">← All feedback</button><div class="detail-layout"><div class="detail-main"><article class="review-card ${impactClass(item.impact)}"><div>${badge(reportImpact(item))}<small>Submitted by the customer’s agent</small></div><p class="quote">“${esc(item.summary)}”</p></article><section class="detail-section"><div class="section-heading"><div><p class="eyebrow">FINDINGS</p><h2>What the agent observed</h2></div><span>${findings.length} finding${findings.length === 1 ? "" : "s"}</span></div><div class="finding-list">${findingRows}</div></section>${workaround}${triage}<section class="detail-section"><h2>Linked product context</h2><div class="context-row"><span><small>Operation</small><strong>${esc(item.operation)}</strong></span><span><small>Surface</small><strong>${esc(title(item.surface))}</strong></span><span><small>Duration</small><strong>${duration(item.durationMs)}</strong></span><span><small>Status</small><strong>${esc(item.statusCode || "—")}</strong></span></div>${contextActions}</section></div><aside class="detail-sidebar"><section><h2>Properties</h2>${propertyList([["Received", esc(date(item.createdAt))], ["Workflow", esc(title(workflowStatus(item)))], ["Impact", esc(title(reportImpact(item)))], ["Confidence", item.confidence == null ? "Not provided" : `${Math.round(item.confidence * 100)}%`], ["Highest severity", esc(title(reportSeverity(item)))], ["Workaround", item.workaround?.used ? "Used" : "Not used"], ["Customer", esc(customer(item.customerRef))], ["Confirmation", esc(title(item.confirmationMethod || "none"))], ["Runtime hint", esc(item.runtimeHint || "Not provided")]])}</section><p class="privacy-note"><b>Agent identity is not collected.</b> Runtime values are unverified hints, not identities.</p>${interaction ? `<code class="object-id">${esc(interaction.id)}</code>` : ""}</aside></div>`;
   }
   if (!dashboard.reports.length) return `${header("FEEDBACK", "Agent feedback", "0 reports", `<button class="button" data-refresh-data>Refresh</button>`)}${empty("No feedback yet", "Install Epode on an agent-usable product route, then send one real interaction.")}`;
   const ranged = dashboard.reports.filter((entry) => inTimeRange(entry.createdAt));
-  const surfaces = [...new Set(dashboard.reports.map((entry) => entry.surface))].sort().map((value) => [value, title(value)]);
-  const filtered = ranged.filter((entry) => (explorerPrimary === "all" || reportImpact(entry) === explorerPrimary) && (explorerSecondary === "all" || entry.surface === explorerSecondary) && matchesQuery(entry.summary, entry.operation, entry.surface, entry.customerRef, entry.runtimeHint, ...reportTopics(entry), ...reportFindings(entry).map((finding) => finding.detail)));
+  const impacts = [...new Set(dashboard.reports.map(reportImpact))].sort().map((value) => [value, title(value)]);
+  const filtered = ranged.filter((entry) => (explorerPrimary === "all" || workflowStatus(entry) === explorerPrimary) && (explorerSecondary === "all" || reportImpact(entry) === explorerSecondary) && matchesQuery(entry.summary, entry.operation, entry.surface, entry.customerRef, entry.runtimeHint, workflowStatus(entry), ...(entry.tags || []), ...reportTopics(entry), ...reportFindings(entry).map((finding) => finding.detail)));
   const blockers = filtered.filter((entry) => reportSeverity(entry) === "blocking").length;
   const workarounds = filtered.filter((entry) => entry.workaround?.used).length;
   const findings = filtered.reduce((count, entry) => count + reportFindings(entry).length, 0);
-  const rows = filtered.map((entry) => `<button class="table-row feedback-columns" data-report="${esc(entry.id)}" aria-label="Open feedback for ${esc(entry.operation)}"><span>${badge(reportImpact(entry))}</span><span class="primary-cell"><strong>${esc(entry.summary)}</strong><small>${reportFindings(entry).length} finding${reportFindings(entry).length === 1 ? "" : "s"}${reportSeverity(entry) !== "none" ? ` · ${esc(title(reportSeverity(entry)))}` : ""}</small></span><span><strong>${esc(entry.operation)}</strong><small>${esc(title(entry.surface))}</small></span><span>${esc(entry.customerRef || "Not linked")}</span><time title="${esc(date(entry.createdAt))}">${esc(relativeDate(entry.createdAt))}</time></button>`).join("");
-  const toolbar = explorerToolbar({ placeholder: "Search summaries, findings, topics, operation, or customer", primaryLabel: "Impact", primaryOptions: [["all", "All impacts"], ["helped", "Helped"], ["helped_with_friction", "Helped with friction"], ["neutral", "Neutral"], ["hindered", "Hindered"], ["blocked", "Blocked"], ["unknown", "Unknown"], ["unspecified", "Not specified"]], secondaryOptions: surfaces });
-  const table = rows ? `<div class="explorer-table"><div class="table-head feedback-columns"><span>Impact</span><span>Report</span><span>Operation</span><span>Customer</span><span>Received</span></div>${rows}</div>` : `<div class="filtered-empty"><h2>No matching feedback</h2><p>Try a wider time range or clear the filters.</p><button class="button" data-clear-filters>Clear filters</button></div>`;
-  return `${header("FEEDBACK", "Agent feedback", `${filtered.length} of ${ranged.length} reports`, `<button class="button" data-refresh-data>Refresh</button>`)}${metricStrip([[filtered.length, "Reports"], [findings, "Findings"], [blockers, "With blockers", blockers ? "negative" : ""], [workarounds, "With workarounds"]])}${toolbar}${table}`;
+  const rows = filtered.map((entry) => `<button class="table-row feedback-columns" data-report="${esc(entry.id)}" aria-label="Open ${esc(title(workflowStatus(entry)))} ${esc(title(reportImpact(entry)))} feedback: ${esc(entry.summary)}. Operation ${esc(entry.operation)}. ${esc(customer(entry.customerRef))}. Received ${esc(date(entry.createdAt))}."><span>${badge(workflowStatus(entry))}<small>${esc(title(reportImpact(entry)))}</small></span><span class="primary-cell"><strong>${esc(entry.summary)}</strong><small>${reportFindings(entry).length} finding${reportFindings(entry).length === 1 ? "" : "s"}${reportSeverity(entry) !== "none" ? ` · ${esc(title(reportSeverity(entry)))}` : ""}</small></span><span><strong>${esc(entry.operation)}</strong><small>${esc(title(entry.surface))}</small></span><span>${esc(entry.customerRef || "Not linked")}</span><time title="${esc(date(entry.createdAt))}">${esc(relativeDate(entry.createdAt))}</time></button>`).join("");
+  const toolbar = explorerToolbar({ placeholder: "Search summaries, findings, tags, operation, or customer", primaryLabel: "Status", primaryOptions: [["all", "All statuses"], ["new", "New"], ["investigating", "Investigating"], ["planned", "Planned"], ["resolved", "Resolved"], ["wont_act", "Won’t act"]], secondaryLabel: "Impact", secondaryOptions: impacts });
+  const table = rows ? `<div class="explorer-table"><div class="table-head feedback-columns"><span>Status</span><span>Report</span><span>Operation</span><span>Customer</span><span>Received</span></div>${rows}</div>` : `<div class="filtered-empty"><h2>No matching feedback</h2><p>Try a wider time range or clear the filters.</p><button class="button" data-clear-filters>Clear filters</button></div>`;
+  const total = dashboard.listState?.reportsTotal ?? dashboard.reports.length;
+  return `${header("FEEDBACK", "Agent feedback", `${filtered.length} matching · ${total} retained`, `<button class="button" data-refresh-data>Refresh</button>`)}${metricStrip([[filtered.length, "Loaded matches"], [findings, "Findings"], [blockers, "With blockers", blockers ? "negative" : ""], [workarounds, "With workarounds"]])}${toolbar}${table}${listContinuation("reports", dashboard.reports.length, total)}`;
 }
 
 function homeView() {
   const canConfigure = dashboard.currentRole !== "member";
   const actions = `<button class="button" data-refresh-data>Refresh</button>`;
   const context = `<p class="page-context">A current view of what customer agents are using, what they reported, and where your team should look next.</p>`;
-  if (!dashboard.interactions.length) {
+  if (!dashboard.insights.opportunities) {
     return `${header("HOME", dashboard.currentProduct.name, "Product overview", actions)}${context}${metricStrip([[0, "Opportunities"], [0, "Confirmed"], ["—", "Report rate"], [0, "Reports with blockers"]])}${empty("No product activity yet", "Finish setup and send one real product request or MCP tool call.", canConfigure ? "setup" : "team")}`;
   }
   const homeCutoff = Date.now() - rangeMs["30d"];
   const interactions = dashboard.interactions.filter((entry) => new Date(entry.occurredAt).getTime() >= homeCutoff);
   const ids = new Set(interactions.map((entry) => entry.id));
   const reports = dashboard.reports.filter((entry) => ids.has(entry.interactionId));
-  const confirmed = interactions.filter((entry) => entry.classification === "confirmed").length;
-  const countBy = (items, field) => [...items.reduce((map, item) => map.set(item[field] || "unknown", (map.get(item[field] || "unknown") || 0) + 1), new Map())].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, 8);
-  const operationRows = countBy(interactions, "operation");
-  const surfaceRows = countBy(interactions, "surface");
-  const impactRows = countBy(reports.map((report) => ({ impact: reportImpact(report) })), "impact");
-  const findingRows = countBy(reports.flatMap(reportFindings), "kind");
-  const topicRows = countBy(reports.flatMap(reportFindings), "topic");
-  const blockerRows = countBy(reports.filter((report) => reportSeverity(report) === "blocking").flatMap(reportFindings).filter((finding) => finding.severity === "blocking"), "topic");
-  const durations = interactions.filter((entry) => entry.durationMs != null).reduce((map, entry) => {
-    const value = map.get(entry.operation) || { sum: 0, count: 0 };
-    value.sum += entry.durationMs;
-    value.count += 1;
-    map.set(entry.operation, value);
-    return map;
-  }, new Map());
-  const slowest = [...durations].map(([name, value]) => ({ name, average: Math.round(value.sum / value.count) })).sort((a, b) => b.average - a.average)[0];
-  const gap = Math.max(confirmed - reports.length, 0);
-  const blockers = reports.filter((report) => reportSeverity(report) === "blocking").length;
-  const workarounds = reports.filter((report) => report.workaround?.used).length;
+  const confirmed = dashboard.insights.confirmedInteractions;
+  const operationRows = dashboard.insights.topOperations;
+  const impactRows = dashboard.insights.impacts;
+  const findingRows = dashboard.insights.findingKinds;
+  const topicRows = dashboard.insights.topics;
+  const blockerRows = dashboard.insights.blockingTopics;
+  const slowest = dashboard.insights.p95DurationMs == null ? null : { name: "All operations", average: dashboard.insights.p95DurationMs };
+  const gap = Math.max(confirmed - dashboard.insights.reports, 0);
+  const blockers = dashboard.insights.reportsWithBlockers;
+  const workarounds = dashboard.insights.reportsWithWorkarounds;
   const investigations = `<section class="investigations"><div><p class="eyebrow">INVESTIGATE</p><h2>Where to look next</h2></div><div class="investigation-grid">${blockerRows[0] ? `<button data-investigate-view="feedback" data-investigate-query="${esc(blockerRows[0].name)}"><span>Most common blocker</span><strong>${esc(title(blockerRows[0].name))}</strong><small>${blockerRows[0].count} blocking finding${blockerRows[0].count === 1 ? "" : "s"} →</small></button>` : `<article><span>Blockers</span><strong>None reported</strong><small>No blocking findings in this view.</small></article>`}${gap ? `<button data-investigate-view="interactions" data-investigate-filter="unreviewed"><span>Feedback gap</span><strong>${gap} confirmed</strong><small>Interactions without feedback →</small></button>` : `<article><span>Feedback gap</span><strong>Fully covered</strong><small>Every confirmed interaction has feedback.</small></article>`}${slowest ? `<button data-investigate-view="interactions" data-investigate-query="${esc(slowest.name)}"><span>Slowest operation</span><strong>${esc(slowest.name)}</strong><small>${duration(slowest.average)} average →</small></button>` : `<article><span>Latency</span><strong>No timing data</strong><small>Duration appears when integrations provide it.</small></article>`}</div></section>`;
   const recentReports = [...reports].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 5);
   const recentFeedback = recentReports.length ? recentReports.map((report) => `<button class="home-feedback-row" data-open-feedback="${esc(report.id)}"><span>${badge(reportImpact(report))}<strong>${esc(report.summary)}</strong></span><small>${esc(report.operation)} · ${esc(relativeDate(report.createdAt))}</small></button>`).join("") : `<div class="inline-empty"><p>No feedback in the last 30 days.</p><small>Confirmed interactions can exist without a submitted report.</small></div>`;
   const activity = `<div class="home-grid"><section class="home-panel"><div class="section-heading"><div><p class="eyebrow">RECENT FEEDBACK</p><h2>What agents reported</h2></div><button class="link-button" data-view="feedback">View all</button></div><div class="home-feedback-list">${recentFeedback}</div></section><section class="home-panel"><div class="section-heading"><div><p class="eyebrow">USAGE</p><h2>Top operations</h2></div><button class="link-button" data-view="interactions">View all</button></div>${breakdown(operationRows, interactions.length, "No operations in the last 30 days.")}</section></div>`;
-  return `${header("HOME", dashboard.currentProduct.name, "Last 30 days", actions)}${context}${metricStrip([[interactions.length, "Opportunities"], [confirmed, "Confirmed"], [confirmed ? `${Math.round(reports.length / confirmed * 100)}%` : "—", "Report rate"], [blockers, "Reports with blockers", blockers ? "negative" : ""], [workarounds, "Workarounds used"]])}${investigations}${activity}<section class="funnel"><div><p class="eyebrow">CONVERSION</p><h2>From product response to feedback</h2></div><div class="funnel-steps"><button data-investigate-view="interactions"><strong>${interactions.length}</strong><span>Opportunities</span></button><i>→</i><button data-investigate-view="interactions" data-investigate-filter="confirmed"><strong>${confirmed}</strong><span>Confirmed</span></button><i>→</i><button data-investigate-view="feedback"><strong>${reports.length}</strong><span>Reported</span></button></div></section><div class="three-col breakdown-grid"><article><h2>Impacts</h2>${breakdown(impactRows, reports.length, "No impact data yet.")}</article><article><h2>Finding types</h2>${breakdown(findingRows, findingRows.reduce((sum, row) => sum + row.count, 0), "No findings yet.")}</article><article><h2>Topics</h2>${breakdown(topicRows, topicRows.reduce((sum, row) => sum + row.count, 0), "No topics yet.")}</article></div><section class="explanation compact"><h2>How Epode counts activity</h2><p>HTTP responses begin as opportunities—not assumed agent traffic. A submitted report confirms the interaction. MCP tool calls are confirmed immediately because the protocol proves a tool-capable client used them.</p></section>`;
+  return `${header("HOME", dashboard.currentProduct.name, "Last 30 days", actions)}${context}${metricStrip([[dashboard.insights.opportunities, "Opportunities"], [confirmed, "Confirmed"], [confirmed ? `${dashboard.insights.reviewRate}%` : "—", "Feedback rate"], [blockers, "Reports with blockers", blockers ? "negative" : ""], [workarounds, "Workarounds used"]])}<p class="comparison-note">Recent ${dashboard.insights.comparisonDays}-day activity: ${dashboard.insights.recentOpportunities} opportunities · ${dashboard.insights.recentConfirmedInteractions} confirmed · ${dashboard.insights.recentReports} reports. Previous ${dashboard.insights.comparisonDays} days: ${dashboard.insights.previousOpportunities} · ${dashboard.insights.previousConfirmedInteractions} · ${dashboard.insights.previousReports}.</p>${investigations}${activity}<section class="funnel"><div><p class="eyebrow">CONVERSION</p><h2>From product response to feedback</h2></div><div class="funnel-steps"><button data-investigate-view="interactions"><strong>${dashboard.insights.opportunities}</strong><span>Opportunities</span></button><i>→</i><button data-investigate-view="interactions" data-investigate-filter="confirmed"><strong>${confirmed}</strong><span>Confirmed</span></button><i>→</i><button data-investigate-view="feedback"><strong>${dashboard.insights.reports}</strong><span>Reported</span></button></div></section><div class="three-col breakdown-grid"><article><h2>Impacts</h2>${breakdown(impactRows, dashboard.insights.reports, "No impact data yet.")}</article><article><h2>Finding types</h2>${breakdown(findingRows, findingRows.reduce((sum, row) => sum + row.count, 0), "No findings yet.")}</article><article><h2>Topics</h2>${breakdown(topicRows, topicRows.reduce((sum, row) => sum + row.count, 0), "No topics yet.")}</article></div><section class="explanation compact"><h2>How Epode counts activity</h2><p>HTTP responses begin as opportunities—not assumed agent traffic. A submitted report confirms the interaction. MCP tool calls are confirmed immediately because the protocol proves a tool-capable client used them.</p><p>Latency is reported as p50 ${duration(dashboard.insights.p50DurationMs)} and p95 ${duration(dashboard.insights.p95DurationMs)} across responses that supplied timing.</p></section>`;
 }
 
 function interactionsView() {
@@ -411,11 +479,12 @@ function interactionsView() {
   const average = durations.length ? Math.round(durations.reduce((sum, entry) => sum + entry.durationMs, 0) / durations.length) : null;
   const rows = filtered.map((entry) => {
     const report = reportByInteraction.get(entry.id);
-    return `<button class="table-row interaction-columns" data-interaction="${esc(entry.id)}" aria-label="Open ${esc(entry.operation)} interaction"><span>${badge(entry.classification)}</span><span class="primary-cell"><strong>${esc(entry.operation)}</strong><small>${esc(entry.customerRef || "Customer not linked")}</small></span><span>${esc(title(entry.surface))}</span><span>${esc(entry.statusCode || "—")}</span><span>${duration(entry.durationMs)}</span><span>${report ? badge(reportImpact(report)) : "—"}</span><time title="${esc(date(entry.occurredAt))}">${esc(relativeDate(entry.occurredAt))}</time></button>`;
+    return `<button class="table-row interaction-columns" data-interaction="${esc(entry.id)}" aria-label="Open ${esc(title(entry.classification))} interaction ${esc(entry.operation)}. Surface ${esc(title(entry.surface))}. Status ${esc(entry.statusCode || "not supplied")}. Duration ${esc(duration(entry.durationMs))}. Feedback ${esc(report ? title(reportImpact(report)) : "not submitted")}. Occurred ${esc(date(entry.occurredAt))}."><span>${badge(entry.classification)}</span><span class="primary-cell"><strong>${esc(entry.operation)}</strong><small>${esc(entry.customerRef || "Customer not linked")}</small></span><span>${esc(title(entry.surface))}</span><span>${esc(entry.statusCode || "—")}</span><span>${duration(entry.durationMs)}</span><span>${report ? badge(reportImpact(report)) : "—"}</span><time title="${esc(date(entry.occurredAt))}">${esc(relativeDate(entry.occurredAt))}</time></button>`;
   }).join("");
   const toolbar = explorerToolbar({ placeholder: "Search operation, customer, status, or runtime", primaryLabel: "Evidence", primaryOptions: [["all", "All interactions"], ["confirmed", "Confirmed"], ["unclassified", "Unclassified"], ["reviewed", "Has feedback"], ["unreviewed", "Confirmed without feedback"]], secondaryOptions: surfaces });
   const table = rows ? `<div class="explorer-table"><div class="table-head interaction-columns"><span>Evidence</span><span>Operation</span><span>Surface</span><span>Status</span><span>Duration</span><span>Feedback</span><span>Occurred</span></div>${rows}</div>` : `<div class="filtered-empty"><h2>No matching interactions</h2><p>Try a wider time range or clear the filters.</p><button class="button" data-clear-filters>Clear filters</button></div>`;
-  return `${header("INTERACTIONS", "Product activity", `${filtered.length} of ${ranged.length} interactions`, `<button class="button" data-refresh-data>Refresh</button>`)}${metricStrip([[filtered.length, "Interactions"], [confirmed, "Confirmed", "positive"], [reviewed, "With feedback"], [duration(average), "Average duration"]])}${toolbar}${table}`;
+  const total = dashboard.listState?.interactionsTotal ?? dashboard.interactions.length;
+  return `${header("INTERACTIONS", "Product activity", `${filtered.length} matching · ${total} retained`, `<button class="button" data-refresh-data>Refresh</button>`)}${metricStrip([[filtered.length, "Loaded matches"], [confirmed, "Confirmed", "positive"], [reviewed, "With feedback"], [duration(average), "Average duration"]])}${toolbar}${table}${listContinuation("interactions", dashboard.interactions.length, total)}`;
 }
 
 function sessionsView() {
@@ -454,11 +523,12 @@ function sessionsView() {
     const interactions = interactionsBySession.get(entry.id) || [];
     const reports = interactions.map((interaction) => reportByInteraction.get(interaction.id)).filter(Boolean);
     const customerRefs = [...new Set(interactions.map((interaction) => interaction.customerRef).filter(Boolean))];
-    return `<button class="table-row session-columns" data-session="${esc(entry.id)}" aria-label="Open session ${esc(entry.refHint)}"><span class="primary-cell"><strong>${esc(entry.refHint)}…</strong><small>${esc(title(entry.source))}</small></span><span>${interactions.length}</span><span>${sessionFeedbackSummary(reports)}</span><span>${esc(customerRefs.length === 1 ? customerRefs[0] : customerRefs.length > 1 ? "Multiple" : "Not linked")}</span><span>${sessionDuration(entry)}</span><time title="${esc(date(entry.lastSeenAt))}">${esc(relativeDate(entry.lastSeenAt))}</time></button>`;
+    return `<button class="table-row session-columns" data-session="${esc(entry.id)}" aria-label="Open session ${esc(entry.refHint)}. Source ${esc(title(entry.source))}. ${interactions.length} interactions and ${reports.length} feedback reports. Duration ${esc(sessionDuration(entry))}. Last seen ${esc(date(entry.lastSeenAt))}."><span class="primary-cell"><strong>${esc(entry.refHint)}…</strong><small>${esc(title(entry.source))}</small></span><span>${interactions.length}</span><span>${sessionFeedbackSummary(reports)}</span><span>${esc(customerRefs.length === 1 ? customerRefs[0] : customerRefs.length > 1 ? "Multiple" : "Not linked")}</span><span>${sessionDuration(entry)}</span><time title="${esc(date(entry.lastSeenAt))}">${esc(relativeDate(entry.lastSeenAt))}</time></button>`;
   }).join("");
   const toolbar = explorerToolbar({ placeholder: "Search session, operation, or source", primaryLabel: "Feedback", primaryOptions: [["all", "All sessions"], ["reviewed", "Has feedback"], ["unreviewed", "No feedback"]], secondaryLabel: "Proof source", secondaryOptions: sources });
   const table = rows ? `<div class="explorer-table"><div class="table-head session-columns"><span>Session</span><span>Interactions</span><span>Feedback</span><span>Customer</span><span>Duration</span><span>Last seen</span></div>${rows}</div>` : `<div class="filtered-empty"><h2>No matching sessions</h2><p>Sessions only exist when your product or MCP supplies proof of continuity.</p><button class="button" data-clear-filters>Clear filters</button></div>`;
-  return `${header("SESSIONS", "Agent journeys", `${filtered.length} of ${ranged.length} sessions`, `<button class="button" data-refresh-data>Refresh</button>`)}<p class="page-context">Sessions connect interactions only when your product or MCP supplies a stable reference. Epode never guesses continuity from timing or identity.</p>${metricStrip([[filtered.length, "Sessions"], [totalInteractions, "Interactions"], [reviewedSessions, "With feedback"], [filtered.length ? (totalInteractions / filtered.length).toFixed(1) : "—", "Interactions per session"]])}${toolbar}${table}`;
+  const total = dashboard.listState?.sessionsTotal ?? dashboard.sessions.length;
+  return `${header("SESSIONS", "Agent journeys", `${filtered.length} matching · ${total} retained`, `<button class="button" data-refresh-data>Refresh</button>`)}<p class="page-context">Sessions connect interactions only when your product or MCP supplies a stable reference. Epode never guesses continuity from timing or identity.</p>${metricStrip([[filtered.length, "Loaded matches"], [totalInteractions, "Loaded interactions"], [reviewedSessions, "With feedback"], [filtered.length ? (totalInteractions / filtered.length).toFixed(1) : "—", "Interactions per session"]])}${toolbar}${table}${listContinuation("sessions", dashboard.sessions.length, total)}`;
 }
 
 const setupSurfaceCopy = {
@@ -519,7 +589,7 @@ function setupInstructions() {
     "node-mcp": {
       name: "Node MCP",
       install: `${nodeInstall}\nnpm install @modelcontextprotocol/server @modelcontextprotocol/node @modelcontextprotocol/express`,
-      code: `import { createMcpInstrumentation } from "@agent-feedback/node/mcp";\nimport { originValidation } from "@modelcontextprotocol/express";\nimport { toNodeHandler } from "@modelcontextprotocol/node";\nimport { createMcpHandler, McpServer } from "@modelcontextprotocol/server";\n\nconst feedback = createMcpInstrumentation({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n});\n\nconst mcp = createMcpHandler(() => {\n  const server = new McpServer({ name: "your-product", version: "1.0.0" });\n  feedback.instrument(server);\n  // Register your product tools after this line.\n  return server;\n}, { legacy: "stateless" });\n\n// [] rejects browser Origin requests; add only trusted browser client hostnames.\napp.use("/mcp", originValidation([]));\nconst handleMcp = toNodeHandler(mcp);\napp.all("/mcp", (req, res) => handleMcp(req, res, req.body));`,
+      code: `import { createMcpInstrumentation } from "@agent-feedback/node/mcp";\nimport { createMcpExpressApp } from "@modelcontextprotocol/express";\nimport { toNodeHandler } from "@modelcontextprotocol/node";\nimport { createMcpHandler, McpServer } from "@modelcontextprotocol/server";\nimport { z } from "zod";\n\n// [] rejects browser Origin requests. Add only trusted browser client hostnames.\nconst app = createMcpExpressApp({ host: "0.0.0.0", allowedOrigins: [] });\nconst feedback = createMcpInstrumentation({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n});\n\nfunction productServer() {\n  const server = new McpServer({ name: "your-product", version: "1.0.0" });\n  feedback.instrument(server);\n  server.registerTool("search", {\n    description: "Search your product",\n    inputSchema: z.object({ query: z.string() }),\n  }, async ({ query }) => ({\n    content: [{ type: "text", text: await search(query) }],\n  }));\n  return server;\n}\n\nconst mcp = createMcpHandler(productServer, { legacy: "stateless", responseMode: "json" });\nconst handleMcp = toNodeHandler(mcp);\napp.all("/mcp", (req, res) => handleMcp(req, res, req.body));\napp.listen(Number(process.env.PORT || 3000), "0.0.0.0");`,
       verify: "Call server/discover, then call one normal product tool from an MCP 2026-07-28 client.",
     },
     "manual-mcp": {
@@ -665,8 +735,9 @@ function teamView() {
   const memberRows = dashboard.teamMembers.map((member) => {
     const isSelf = member.osUserId === dashboard.user.id;
     const canRemove = !isSelf && member.role !== "owner" && (isOwner || (isAdmin && member.role === "member"));
+    const canTransfer = isOwner && !isSelf && member.role !== "owner";
     const roleControl = isOwner && member.role !== "owner" ? `<select class="compact-select" data-member-role="${esc(member.osUserId)}" aria-label="Role for ${esc(member.displayName)}">${roleOptions(member.role)}</select>` : `<b>${esc(title(member.role))}</b>`;
-    return `<div class="team-row"><span><strong>${esc(member.displayName)}${isSelf ? " (you)" : ""}</strong>${member.email ? `<small>${esc(member.email)}</small>` : ""}</span>${roleControl}<span>${canRemove ? `<button class="link-button danger" data-remove-member="${esc(member.osUserId)}">Remove</button>` : ""}</span></div>`;
+    return `<div class="team-row"><span><strong>${esc(member.displayName)}${isSelf ? " (you)" : ""}</strong>${member.email ? `<small>${esc(member.email)}</small>` : ""}</span>${roleControl}<span class="team-actions">${canTransfer ? `<button class="link-button" data-transfer-owner="${esc(member.osUserId)}" data-member-name="${esc(member.displayName)}">Transfer ownership</button>` : ""}${canRemove ? `<button class="link-button danger" data-remove-member="${esc(member.osUserId)}">Remove</button>` : ""}</span></div>`;
   }).join("");
   const pendingInvitations = dashboard.teamInvitations.filter((invitation) => invitation.inviteeKind !== "link");
   const invitationRows = pendingInvitations.map((invitation) => {
@@ -676,14 +747,14 @@ function teamView() {
     return `<div class="team-row"><span><strong>${esc(recipient)}</strong><small>${esc(title(invitation.role))} · expires ${date(invitation.expiresAt)}</small></span><button class="link-button" data-copy="${esc(link)}">Copy link</button><span>${canRevoke ? `<button class="link-button danger" data-revoke-invitation="${esc(invitation.id)}">Revoke</button>` : ""}</span></div>`;
   }).join("");
   const roleChoices = `${isOwner ? `<option value="admin">Admin</option>` : ""}<option value="member" selected>Member</option>`;
-  const inviteForm = canInvite ? `<section class="team-invite"><h2>Invite teammates</h2><form id="team-invite-email-form"><label><span>Email address</span><input name="invitee" type="email" autocomplete="email" placeholder="teammate@example.com" maxlength="160" required></label><label><span>Role</span><select name="role">${roleChoices}</select></label><button class="button primary">Invite</button></form><button class="link-button team-invite-secondary" data-create-invite-link>Copy member invite link</button></section>` : `<p class="muted">Your ${esc(dashboard.currentRole)} role can view this team. An owner or admin manages membership.</p>`;
+  const inviteForm = canInvite ? `<section class="team-invite"><h2>Invite teammates</h2><form id="team-invite-email-form"><label><span>Email address</span><input name="invitee" type="email" autocomplete="email" placeholder="teammate@example.com" maxlength="160" required></label><label><span>Role</span><select name="role">${roleChoices}</select></label><button class="button primary">Open email draft</button></form><button class="link-button team-invite-secondary" data-create-invite-link>Copy member invite link</button></section>` : `<p class="muted">Your ${esc(dashboard.currentRole)} role can view this team. An owner or admin manages membership.</p>`;
   const renameAction = canInvite ? `<button class="button" data-rename-team>Rename team</button>` : "";
   return `${header("TEAM", dashboard.workspace.name, `${dashboard.teamMembers.length} member${dashboard.teamMembers.length === 1 ? "" : "s"}`, renameAction)}${inviteForm}<section class="team-section"><h2>Members</h2><div class="team-list">${memberRows}</div></section>${canInvite ? `<section class="team-section"><h2>Pending invitations</h2>${invitationRows ? `<div class="team-list">${invitationRows}</div>` : `<p class="muted">No pending invitations.</p>`}</section>` : ""}`;
 }
 
 function policyView() {
   const settings = dashboard.currentEnvironment;
-  return `${header("COLLECTION POLICY", "Data controls", dashboard.currentProduct.name)}<p class="page-context">These controls apply to this product. Product traffic stays available even if Epode is unavailable.</p><form id="policy-form" class="policy"><section><div><p class="eyebrow">FEEDBACK</p><h2>Feedback collection</h2><p>Choose how customer agents submit structured feedback after using your product.</p></div><label><span>Feedback mode</span><select name="feedbackMode"><option value="never_ask" ${settings.feedbackMode === "never_ask" ? "selected" : ""}>Never ask — submit autonomously</option><option value="ask_once" ${settings.feedbackMode === "ask_once" ? "selected" : ""}>Ask once — remember this product’s permission</option><option value="ask_always" ${settings.feedbackMode === "ask_always" ? "selected" : ""}>Ask every time — request permission for each report</option><option value="off" ${settings.feedbackMode === "off" ? "selected" : ""}>Off — do not request feedback</option></select><small>Never ask submits autonomously without interrupting the user. Ask once is scoped to this product in one agent runtime—not a human identity. Generic HTTP agents may not preserve the decision. Independent agents cannot be forced to comply.</small></label></section><input type="hidden" name="collectEventSummaries" value="off"><section class="guardrails"><div><p class="eyebrow">PRIVACY</p><h2>Always rejected</h2><p>These fields cannot be enabled.</p></div><ul><li>Prompts and transcripts</li><li>Secrets and authentication payloads</li><li>Personal data and raw customer content</li><li>Raw tool inputs or outputs</li><li>Unknown report fields</li></ul></section><div class="form-footer"><span>Current mode: <b>${esc(feedbackModeLabel(settings.feedbackMode))}</b></span><button class="button primary">Save changes</button></div></form>`;
+  return `${header("COLLECTION POLICY", "Data controls", dashboard.currentProduct.name)}<p class="page-context">These controls are enforced when a report reaches Epode. Product traffic stays available even if Epode is unavailable.</p><form id="policy-form" class="policy"><section><div><p class="eyebrow">FEEDBACK</p><h2>Feedback collection</h2><p>Choose how customer agents submit structured feedback after using your product.</p></div><label><span>Feedback mode</span><select name="feedbackMode"><option value="never_ask" ${settings.feedbackMode === "never_ask" ? "selected" : ""}>Never ask — submit autonomously</option><option value="ask_once" ${settings.feedbackMode === "ask_once" ? "selected" : ""}>Ask once — remember this product’s permission</option><option value="ask_always" ${settings.feedbackMode === "ask_always" ? "selected" : ""}>Ask every time — request permission for each report</option><option value="off" ${settings.feedbackMode === "off" ? "selected" : ""}>Off — do not request feedback</option></select><small>Never ask submits autonomously without interrupting the user. Ask once is scoped to this product in one agent runtime—not a human identity. Ask modes require a matching consent attestation, and Off rejects reports immediately. Independent agents cannot be forced to comply.</small></label></section><input type="hidden" name="collectEventSummaries" value="off"><section class="guardrails"><div><p class="eyebrow">PRIVACY</p><h2>Outside the feedback protocol</h2><p>Integrations must never submit these values. Epode rejects unknown fields and common secret patterns, but your product remains responsible for keeping personal or customer content out of summaries.</p></div><ul><li>Prompts and transcripts</li><li>Secrets and authentication payloads</li><li>Personal data and raw customer content</li><li>Raw tool inputs or outputs</li><li>Unknown report fields</li></ul></section><div class="form-footer"><span>Current mode: <b>${esc(feedbackModeLabel(settings.feedbackMode))}</b></span><button class="button primary">Save changes</button></div></form>`;
 }
 
 function render() {
@@ -694,6 +765,14 @@ function render() {
     page.innerHTML = dashboard.currentRole === "member" ? empty("No product yet", "An owner or admin needs to create the first product.", "team") : productCreateView(true);
   } else {
     page.innerHTML = ({ home: homeView, feedback: feedbackView, interactions: interactionsView, sessions: sessionsView, setup: setupView, policy: policyView, team: teamView, "new-product": productCreateView }[currentView] || homeView)();
+  }
+  if (pendingHeadingFocus) {
+    const heading = page.querySelector("h1, h2");
+    if (heading) {
+      heading.setAttribute("tabindex", "-1");
+      heading.focus();
+    }
+    pendingHeadingFocus = false;
   }
   if (currentView !== "setup" || !setupConnectionId || setupConnectionStatus(setupConnectionId).reports.length) {
     clearInterval(setupMonitor);
@@ -781,15 +860,23 @@ document.addEventListener("click", async (event) => {
       setupInstallMode = target.dataset.installMode;
       render();
     }
-    if (target.dataset.report) { selectedReport = target.dataset.report; syncUrl("push"); render(); }
-    if (target.dataset.interaction) { selectedInteraction = target.dataset.interaction; selectedSession = null; currentView = "interactions"; syncUrl("push"); render(); }
-    if (target.dataset.session) { selectedSession = target.dataset.session; syncUrl("push"); render(); }
-    if (target.dataset.back) { selectedReport = null; selectedInteraction = null; selectedSession = null; syncUrl("push"); render(); }
-    if (target.dataset.openInteraction) { currentView = "interactions"; selectedInteraction = target.dataset.openInteraction; selectedReport = null; selectedSession = null; syncUrl("push"); render(); }
-    if (target.dataset.openSession) { currentView = "sessions"; selectedSession = target.dataset.openSession; selectedReport = null; selectedInteraction = null; syncUrl("push"); render(); }
-    if (target.dataset.openFeedback) { currentView = "feedback"; selectedReport = target.dataset.openFeedback; selectedInteraction = null; selectedSession = null; syncUrl("push"); render(); }
+    if (target.dataset.report) { selectedReport = target.dataset.report; pendingHeadingFocus = true; syncUrl("push"); render(); }
+    if (target.dataset.interaction) { selectedInteraction = target.dataset.interaction; selectedSession = null; currentView = "interactions"; pendingHeadingFocus = true; syncUrl("push"); render(); }
+    if (target.dataset.session) { selectedSession = target.dataset.session; pendingHeadingFocus = true; syncUrl("push"); render(); }
+    if (target.dataset.back) { selectedReport = null; selectedInteraction = null; selectedSession = null; pendingHeadingFocus = true; syncUrl("push"); render(); }
+    if (target.dataset.openInteraction) { currentView = "interactions"; selectedInteraction = target.dataset.openInteraction; selectedReport = null; selectedSession = null; pendingHeadingFocus = true; syncUrl("push"); render(); }
+    if (target.dataset.openSession) { currentView = "sessions"; selectedSession = target.dataset.openSession; selectedReport = null; selectedInteraction = null; pendingHeadingFocus = true; syncUrl("push"); render(); }
+    if (target.dataset.openFeedback) { currentView = "feedback"; selectedReport = target.dataset.openFeedback; selectedInteraction = null; selectedSession = null; pendingHeadingFocus = true; syncUrl("push"); render(); }
     if (target.hasAttribute("data-copy-page-link")) { await copyText(location.href); setNotice("Link copied.", 1800); }
     if (target.hasAttribute("data-clear-filters")) { resetExplorer(); explorerRange = "30d"; syncUrl("replace"); render(); }
+    if (target.dataset.loadMore) {
+      target.disabled = true;
+      if (target.dataset.loadMore === "reports") reportLimit = Math.min(reportLimit + 250, 10_000);
+      if (target.dataset.loadMore === "interactions") interactionLimit = Math.min(interactionLimit + 250, 10_000);
+      if (target.dataset.loadMore === "sessions") sessionLimit = Math.min(sessionLimit + 100, 10_000);
+      await refresh();
+      setNotice("Older data loaded.", 1800);
+    }
     if (target.dataset.investigateView) {
       currentView = target.dataset.investigateView;
       selectedReport = null;
@@ -821,32 +908,36 @@ document.addEventListener("click", async (event) => {
     }
     if (target.hasAttribute("data-retry-dashboard")) {
       target.disabled = true;
-      await refresh();
-      setNotice("Dashboard loaded.", 1800);
+      try {
+        await refresh();
+        setNotice("Dashboard loaded.", 1800);
+      } finally {
+        target.disabled = false;
+      }
     }
     if (target.dataset.revokeKey) {
       const rotated = dashboard.apiKeys.find((key) => key.id === target.dataset.revokeKey);
       const kind = keyKind(rotated);
-      if (!confirm(`Create a new ${kind} key? The current ${kind} key stops working immediately.`)) return;
-      await request(`/api/settings/api-keys/${target.dataset.revokeKey}`, { method: "DELETE" });
-      const payload = { label: rotated?.label || (kind === "read" ? "Read key" : "Default product key"), environmentId: dashboard.currentEnvironment.id, kind };
-      if (kind === "read" && rotated?.expiresAt) payload.expiresInSeconds = 7776000;
-      const body = await request("/api/settings/api-keys", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (kind === "read") {
-        readSecret = body.secret;
-        readKeyId = body.apiKey.id;
-        rememberSetupSecret(dashboard.currentEnvironment.id, body.secret, "read");
-      } else {
-        apiSecret = body.secret;
-        setupConnectionId = body.apiKey.id;
-        rememberSetupSecret(dashboard.currentEnvironment.id, body.secret);
+      if (!confirm(`Rotate this ${kind} key? The current key will keep working for one hour so you can deploy the replacement safely.`)) return;
+      target.disabled = true;
+      try {
+        const body = await request(`/api/settings/api-keys/${target.dataset.revokeKey}/rotate`, {
+          method: "POST",
+        });
+        if (kind === "read") {
+          readSecret = body.secret;
+          readKeyId = body.apiKey.id;
+          rememberSetupSecret(dashboard.currentEnvironment.id, body.secret, "read");
+        } else {
+          apiSecret = body.secret;
+          setupConnectionId = body.apiKey.id;
+          rememberSetupSecret(dashboard.currentEnvironment.id, body.secret);
+        }
+        await refresh();
+        setNotice(kind === "read" ? "Read key rotated. Update AGENT_FEEDBACK_READ_KEY within one hour." : "Product key rotated. Deploy the new server-side key within one hour.", 6000);
+      } finally {
+        if (target.isConnected) target.disabled = false;
       }
-      await refresh();
-      setNotice(kind === "read" ? "Read key rotated. Save the new key and update AGENT_FEEDBACK_READ_KEY in your MCP client environment." : "Product key rotated. Save the new server-side key shown above.", 6000);
     }
     if (target.dataset.readClient) {
       readSnippetClient = target.dataset.readClient;
@@ -857,6 +948,12 @@ document.addEventListener("click", async (event) => {
       await request(`/api/team/members/${encodeURIComponent(target.dataset.removeMember)}`, { method: "DELETE" });
       await refresh();
       setNotice("Team member removed.");
+    }
+    if (target.dataset.transferOwner) {
+      if (!confirm(`Transfer team ownership to ${target.dataset.memberName}? You will become an admin.`)) return;
+      await request(`/api/team/ownership/${encodeURIComponent(target.dataset.transferOwner)}`, { method: "POST" });
+      await refresh();
+      setNotice("Team ownership transferred.", 4500);
     }
     if (target.dataset.revokeInvitation) {
       if (!confirm("Revoke this invitation?")) return;
@@ -897,6 +994,9 @@ document.addEventListener("change", async (event) => {
       setupConnectionId = null;
       readSecret = "";
       readKeyId = null;
+      interactionLimit = 250;
+      reportLimit = 250;
+      sessionLimit = 100;
       await refresh();
     }
     if (event.target.id === "product-select") {
@@ -909,16 +1009,29 @@ document.addEventListener("change", async (event) => {
       setupConnectionId = null;
       readSecret = "";
       readKeyId = null;
+      interactionLimit = 250;
+      reportLimit = 250;
+      sessionLimit = 100;
       await refresh();
     }
     if (event.target.dataset.memberRole) {
-      await request(`/api/team/members/${encodeURIComponent(event.target.dataset.memberRole)}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ role: event.target.value }),
-      });
-      await refresh();
-      setNotice("Member role updated.");
+      const member = dashboard.teamMembers.find((entry) => entry.osUserId === event.target.dataset.memberRole);
+      const previousRole = member?.role || "member";
+      event.target.disabled = true;
+      try {
+        await request(`/api/team/members/${encodeURIComponent(event.target.dataset.memberRole)}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ role: event.target.value }),
+        });
+        await refresh();
+        setNotice("Member role updated.");
+      } catch (error) {
+        event.target.value = previousRole;
+        throw error;
+      } finally {
+        if (event.target.isConnected) event.target.disabled = false;
+      }
     }
   } catch (error) {
     setNotice(error.message || "Update failed", 6000, "error");
@@ -941,10 +1054,27 @@ document.addEventListener("input", (event) => {
 });
 
 document.addEventListener("submit", async (event) => {
-  if (!["product-form", "policy-form", "team-invite-email-form", "read-key-form"].includes(event.target.id)) return;
+  if (!["product-form", "policy-form", "team-invite-email-form", "read-key-form", "feedback-workflow-form"].includes(event.target.id)) return;
   event.preventDefault();
   const form = new FormData(event.target);
+  const submitButton = event.target.querySelector?.('[type="submit"], button');
+  if (submitButton) submitButton.disabled = true;
   try {
+    if (event.target.id === "feedback-workflow-form") {
+      await request(`/api/dashboard/reports/${encodeURIComponent(event.target.dataset.reportId)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          productId: dashboard.currentProduct.id,
+          status: form.get("status"),
+          assigneeOsUserId: form.get("assignee") || null,
+          tags: String(form.get("tags") || "").split(",").map((tag) => tag.trim()).filter(Boolean),
+          internalNote: String(form.get("internalNote") || "").trim() || null,
+        }),
+      });
+      await refresh();
+      setNotice("Feedback triage updated.", 2200);
+    }
     if (event.target.id === "product-form") {
       const body = await request("/api/products", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: form.get("name") }) });
       selectedProductId = body.product.id;
@@ -959,7 +1089,7 @@ document.addEventListener("submit", async (event) => {
     if (event.target.id === "policy-form") {
       await request("/api/settings/policy", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ environmentId: dashboard.currentEnvironment.id, feedbackMode: form.get("feedbackMode"), collectEventSummaries: false, retentionDays: dashboard.currentEnvironment.retentionDays }) });
       await refresh();
-      setNotice("Policy saved. Setup now shows the matching AGENT_FEEDBACK_MODE value.", 4500);
+      setNotice("Policy enforced. Update AGENT_FEEDBACK_MODE in deployed integrations so their instructions stay in sync.", 6000);
     }
     if (event.target.id === "read-key-form") {
       const expiresIn = String(form.get("expiresIn") || "7776000");
@@ -988,6 +1118,8 @@ document.addEventListener("submit", async (event) => {
     }
   } catch (error) {
     setNotice(error.message || "Request failed", 6000, "error");
+  } finally {
+    if (submitButton?.isConnected) submitButton.disabled = false;
   }
 });
 
@@ -1011,6 +1143,7 @@ window.addEventListener("popstate", () => {
   explorerPrimary = url.searchParams.get("filter") || "all";
   explorerSecondary = url.searchParams.get("surface") || "all";
   explorerRange = validRanges.has(url.searchParams.get("range")) ? url.searchParams.get("range") : "30d";
+  pendingHeadingFocus = true;
   refresh().catch(renderLoadError);
 });
 refresh().catch(renderLoadError);

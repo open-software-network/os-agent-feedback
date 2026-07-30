@@ -64,6 +64,29 @@ async fn main() -> anyhow::Result<()> {
         tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
+    let port = env::var("PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(8080);
+    let public_base_url =
+        env::var("PUBLIC_BASE_URL").unwrap_or_else(|_| format!("http://localhost:{port}"));
+    if production {
+        let accounts_url = env::var("OS_ACCOUNTS_URL")?;
+        let accounts_api_url = env::var("OS_ACCOUNTS_API_URL")?;
+        for (name, value) in [
+            ("PUBLIC_BASE_URL", public_base_url.as_str()),
+            ("OS_ACCOUNTS_URL", accounts_url.as_str()),
+            ("OS_ACCOUNTS_API_URL", accounts_api_url.as_str()),
+        ] {
+            let parsed = reqwest::Url::parse(value)
+                .map_err(|error| anyhow::anyhow!("{name} is invalid: {error}"))?;
+            anyhow::ensure!(
+                parsed.scheme() == "https",
+                "{name} must use HTTPS in production"
+            );
+        }
+    }
+    let accounts = OsAccountsClient::from_env(&public_base_url)?;
     let database_url =
         env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL is required"))?;
     let pool = PgPoolOptions::new()
@@ -71,13 +94,6 @@ async fn main() -> anyhow::Result<()> {
         .connect(&database_url)
         .await?;
     sqlx::migrate!().run(&pool).await?;
-    let port = env::var("PORT")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(8080);
-    let public_base_url =
-        env::var("PUBLIC_BASE_URL").unwrap_or_else(|_| format!("http://localhost:{port}"));
-    let accounts = OsAccountsClient::from_env(&public_base_url)?;
     let mcp_allowed_origins = env::var("MCP_ALLOWED_ORIGINS")
         .unwrap_or_default()
         .split(',')
@@ -95,6 +111,7 @@ async fn main() -> anyhow::Result<()> {
         accounts,
         mcp_allowed_origins,
     });
+    spawn_retention_worker(state.pool.clone());
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -127,6 +144,18 @@ async fn main() -> anyhow::Result<()> {
         .route("/join/{invitation_id}", get(join_team_handler))
         .route("/api/auth/logout", post(logout_handler))
         .route("/api/dashboard", get(dashboard_handler))
+        .route(
+            "/api/dashboard/reports/{report_id}",
+            get(dashboard_report_handler).patch(update_feedback_workflow_handler),
+        )
+        .route(
+            "/api/dashboard/interactions/{interaction_id}",
+            get(dashboard_interaction_handler),
+        )
+        .route(
+            "/api/dashboard/sessions/{session_id}",
+            get(dashboard_session_handler),
+        )
         .route("/api/products", post(create_product_handler))
         .route(
             "/api/products/{product_id}",
@@ -145,10 +174,18 @@ async fn main() -> anyhow::Result<()> {
             "/api/team/members/{os_user_id}",
             patch(update_team_member_handler).delete(remove_team_member_handler),
         )
+        .route(
+            "/api/team/ownership/{os_user_id}",
+            post(transfer_team_ownership_handler),
+        )
         .route("/api/settings/api-keys", post(create_api_key_handler))
         .route(
             "/api/settings/api-keys/{key_id}",
             delete(revoke_api_key_handler),
+        )
+        .route(
+            "/api/settings/api-keys/{key_id}/rotate",
+            post(rotate_api_key_handler),
         )
         .route("/api/settings/policy", post(update_policy_handler))
         .route("/api/v2/telemetry/batches", post(telemetry_batch_handler))
@@ -169,6 +206,26 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+fn spawn_retention_worker(pool: PgPool) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3_600));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            loop {
+                match purge_expired_product_data(&pool, 2_000).await {
+                    Ok(0) => break,
+                    Ok(removed) => tracing::info!(removed, "purged expired product telemetry"),
+                    Err(error) => {
+                        tracing::warn!(?error, "product telemetry retention pass failed");
+                        break;
+                    }
+                }
+            }
+        }
+    });
 }
 
 async fn security_headers(request: Request<Body>, next: Next) -> Response {
@@ -226,7 +283,7 @@ async fn root_page(headers: HeaderMap, Query(query): Query<RootPageQuery>) -> Ht
     } else {
         "public/index.html"
     };
-    let mut html = read_page(page, "Agent Feedback").await;
+    let mut html = read_page(page, "Epode").await;
     if page == "public/index.html" && query.auth.as_deref() == Some("failed") {
         html = reveal_auth_error(html);
     }
@@ -297,7 +354,7 @@ async fn feedback_discovery_v2(State(state): State<Arc<AppState>>) -> Json<Value
             "discoveryMethod": "server/discover",
             "requiredHeaders": ["MCP-Protocol-Version", "Mcp-Method", "Mcp-Name for named requests"],
             "transportSessions": false,
-            "legacyCompatibility": ["2025-11-25", "2025-03-26"]
+            "legacyCompatibility": ["2025-11-25"]
         },
         "integrations": {
             "node": format!("{}/static/agent-feedback-node-0.1.0.tgz", state.public_base_url),
@@ -547,6 +604,15 @@ struct DashboardQuery {
     product_id: Option<Uuid>,
     // Kept during rollout so old dashboard links continue to resolve.
     environment_id: Option<Uuid>,
+    interaction_limit: Option<i64>,
+    report_limit: Option<i64>,
+    session_limit: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DashboardDetailQuery {
+    product_id: Uuid,
 }
 
 async fn dashboard_handler(
@@ -555,8 +621,84 @@ async fn dashboard_handler(
     Query(query): Query<DashboardQuery>,
 ) -> Result<Response, ApiError> {
     let (context, tokens) = dashboard_auth(&state, &headers, query.workspace_id).await?;
-    let data = dashboard(&state.pool, context, query.product_id, query.environment_id).await?;
+    let data = dashboard_with_limits(
+        &state.pool,
+        context,
+        query.product_id,
+        query.environment_id,
+        query.interaction_limit.unwrap_or(250),
+        query.report_limit.unwrap_or(250),
+        query.session_limit.unwrap_or(100),
+    )
+    .await?;
     dashboard_response(&state, Json(data), tokens)
+}
+
+async fn dashboard_report_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(report_id): Path<Uuid>,
+    Query(query): Query<DashboardDetailQuery>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    let report = dashboard_report_by_id(
+        &state.pool,
+        context.workspace.id,
+        query.product_id,
+        report_id,
+    )
+    .await?;
+    dashboard_response(&state, Json(json!({ "report": report })), tokens)
+}
+
+async fn update_feedback_workflow_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(report_id): Path<Uuid>,
+    Json(input): Json<UpdateFeedbackWorkflowInput>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    update_feedback_workflow(&state.pool, &context, report_id, input).await?;
+    dashboard_response(&state, Json(json!({ "updated": true })), tokens)
+}
+
+async fn dashboard_interaction_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(interaction_id): Path<Uuid>,
+    Query(query): Query<DashboardDetailQuery>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    let interaction = dashboard_interaction_by_id(
+        &state.pool,
+        context.workspace.id,
+        query.product_id,
+        interaction_id,
+    )
+    .await?;
+    dashboard_response(&state, Json(json!({ "interaction": interaction })), tokens)
+}
+
+async fn dashboard_session_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(session_id): Path<Uuid>,
+    Query(query): Query<DashboardDetailQuery>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    let detail = dashboard_session_by_id(
+        &state.pool,
+        context.workspace.id,
+        query.product_id,
+        session_id,
+    )
+    .await?;
+    dashboard_response(&state, Json(detail), tokens)
 }
 
 async fn create_product_handler(
@@ -567,16 +709,8 @@ async fn create_product_handler(
     let (context, tokens) =
         dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
     require_workspace_editor(&context)?;
-    let (product, environment) = create_product(&state.pool, context.workspace.id, input).await?;
-    let (api_key, secret) = create_api_key(
-        &state.pool,
-        context.workspace.id,
-        environment.id,
-        Some("Default product key".into()),
-        None,
-        None,
-    )
-    .await?;
+    let (product, environment, api_key, secret) =
+        create_product_with_default_key(&state.pool, context.workspace.id, input).await?;
     dashboard_response(
         &state,
         (
@@ -674,6 +808,28 @@ async fn revoke_api_key_handler(
     dashboard_response(&state, Json(json!({ "revoked": true })), tokens)
 }
 
+async fn rotate_api_key_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(key_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let (api_key, secret, predecessor_expires_at) =
+        rotate_api_key(&state.pool, context.workspace.id, key_id).await?;
+    dashboard_response(
+        &state,
+        Json(json!({
+            "apiKey": api_key,
+            "secret": secret,
+            "shownOnce": true,
+            "predecessorExpiresAt": predecessor_expires_at
+        })),
+        tokens,
+    )
+}
+
 async fn update_policy_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -728,6 +884,17 @@ async fn remove_team_member_handler(
     dashboard_response(&state, Json(json!({ "removed": true })), tokens)
 }
 
+async fn transfer_team_ownership_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(os_user_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    transfer_team_ownership(&state.pool, &context, &os_user_id).await?;
+    dashboard_response(&state, Json(json!({ "transferred": true })), tokens)
+}
+
 async fn revoke_team_invitation_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -751,7 +918,7 @@ async fn telemetry_batch_handler(
     Json(value): Json<Value>,
 ) -> Result<Response, ApiError> {
     let auth = agent_product_auth(&state.pool, &headers).await?;
-    let accepted = ingest_telemetry_batch(
+    let result = ingest_telemetry_batch(
         &state.pool,
         &auth,
         safe_input::<TelemetryBatchInput>(value)?,
@@ -759,7 +926,7 @@ async fn telemetry_batch_handler(
     .await?;
     Ok((
         StatusCode::ACCEPTED,
-        Json(json!({ "accepted": accepted, "dropped": 0 })),
+        Json(json!({ "accepted": result.accepted, "dropped": result.dropped })),
     )
         .into_response())
 }
@@ -877,28 +1044,8 @@ fn decode_mcp_header(value: &str) -> Option<String> {
     }
 }
 
-fn validate_modern_mcp_request(
-    state: &AppState,
-    headers: &HeaderMap,
-    body: &Value,
-) -> Option<Response> {
+fn validate_modern_mcp_request(headers: &HeaderMap, body: &Value) -> Option<Response> {
     let id = body.get("id").cloned().unwrap_or(Value::Null);
-    if let Some(origin) = headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        && !state
-            .mcp_allowed_origins
-            .iter()
-            .any(|allowed| allowed == origin)
-    {
-        return Some(mcp_error_response(
-            id,
-            StatusCode::FORBIDDEN,
-            -32000,
-            "Origin is not allowed",
-            None,
-        ));
-    }
     let method = body
         .get("method")
         .and_then(Value::as_str)
@@ -927,7 +1074,7 @@ fn validate_modern_mcp_request(
             -32022,
             "Unsupported protocol version",
             Some(json!({
-                "supported": [MCP_PROTOCOL_VERSION, "2025-11-25", "2025-03-26"],
+                "supported": [MCP_PROTOCOL_VERSION, "2025-11-25"],
                 "requested": body_version
             })),
         ));
@@ -983,13 +1130,47 @@ async fn mcp_handler(
     Json(body): Json<Value>,
 ) -> Response {
     let id = body.get("id").cloned().unwrap_or(Value::Null);
-    let modern = headers.contains_key("mcp-protocol-version")
-        || body
-            .get("params")
-            .and_then(|value| value.get("_meta"))
-            .and_then(|value| value.get(MCP_PROTOCOL_META))
-            .is_some();
-    if modern && let Some(response) = validate_modern_mcp_request(&state, &headers, &body) {
+    if let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        && !state
+            .mcp_allowed_origins
+            .iter()
+            .any(|allowed| allowed == origin)
+    {
+        return mcp_error_response(
+            id,
+            StatusCode::FORBIDDEN,
+            -32000,
+            "Origin is not allowed",
+            None,
+        );
+    }
+    let header_version = headers
+        .get("mcp-protocol-version")
+        .and_then(|value| value.to_str().ok());
+    let body_version = body
+        .get("params")
+        .and_then(|value| value.get("_meta"))
+        .and_then(|value| value.get(MCP_PROTOCOL_META))
+        .and_then(Value::as_str);
+    let requested_version = body_version.or(header_version);
+    if requested_version
+        .is_some_and(|version| version != MCP_PROTOCOL_VERSION && version != "2025-11-25")
+    {
+        return mcp_error_response(
+            id,
+            StatusCode::BAD_REQUEST,
+            -32022,
+            "Unsupported protocol version",
+            Some(json!({
+                "supported": [MCP_PROTOCOL_VERSION, "2025-11-25"],
+                "requested": requested_version
+            })),
+        );
+    }
+    let modern = requested_version == Some(MCP_PROTOCOL_VERSION);
+    if modern && let Some(response) = validate_modern_mcp_request(&headers, &body) {
         return response;
     }
     match body.get("method").and_then(Value::as_str) {

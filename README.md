@@ -1,6 +1,6 @@
-# Agent Feedback
+# Epode
 
-Agent Feedback tells companies whether their product actually worked for the independent customer agents using it.
+Epode tells companies whether their product actually worked for the independent customer agents using it.
 
 A company instruments selected API, website, or MCP surfaces once. Every SDK creates the same short-lived, write-only interaction receipt locally and adds the same feedback contract to eligible successful responses. The product response never waits for Agent Feedback. After the customer agent understands the product's contribution, it can submit:
 
@@ -72,7 +72,7 @@ does not receive the stored ask-once preference or treat it as an identity.
 
 ## Production
 
-- Dashboard/API: https://agent-feedback-api-production.up.railway.app
+- Dashboard/API: https://app.epode.ai
 - Express example: https://example-status-agent-production.up.railway.app
 - MCP example: https://example-mcp-agent-production.up.railway.app/mcp
 - Ask-mode HTTP lab: https://epode-ask-http-production.up.railway.app

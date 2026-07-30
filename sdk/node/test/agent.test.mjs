@@ -23,7 +23,7 @@ const envelope = {
     contentType: "application/json",
     reportSchema: {
       required: ["summary"],
-      optional: ["impact", "confidence", "findings", "workaround"],
+      optional: ["impact", "confidence", "findings", "workaround", "consent"],
       impacts: ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"],
       findingKinds: ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"],
       findingSeverities: ["minor", "major", "blocking"],
@@ -114,20 +114,24 @@ test("feedback-aware adapter resolves and enforces both consent modes", async ()
   assert.equal(feedbackConsentAction(askOnceEnvelope, "approved"), "submit");
   assert.equal(feedbackConsentAction(askOnceEnvelope, "refused"), "skip");
 
-  let submitted = false;
+  let submitted;
   await submitProductFeedback(askOnceEnvelope, report, {
     allowedSubmitOrigins: ["https://feedback.test"],
     userApproved: true,
     approvalSource: "stored_grant",
-    fetch: async () => {
-      submitted = true;
+    fetch: async (_url, init) => {
+      submitted = JSON.parse(init.body);
       return new Response('{"accepted":true}', {
         status: 200,
         headers: { "content-type": "application/json" },
       });
     },
   });
-  assert.equal(submitted, true);
+  assert.deepEqual(submitted.consent, {
+    userApproved: true,
+    approvalSource: "stored_grant",
+    consentScope: askOnceEnvelope.consentScope,
+  });
 
   const askAlwaysEnvelope = {
     ...askOnceEnvelope,
@@ -145,6 +149,24 @@ test("feedback-aware adapter resolves and enforces both consent modes", async ()
     }),
     /fresh approval/,
   );
+
+  let alwaysSubmitted;
+  await submitProductFeedback(askAlwaysEnvelope, report, {
+    allowedSubmitOrigins: ["https://feedback.test"],
+    userApproved: true,
+    approvalSource: "granted_now",
+    fetch: async (_url, init) => {
+      alwaysSubmitted = JSON.parse(init.body);
+      return new Response('{"accepted":true}', {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  assert.deepEqual(alwaysSubmitted.consent, {
+    userApproved: true,
+    approvalSource: "granted_now",
+  });
 });
 
 test("feedback-aware adapter rejects malformed consent contracts", () => {

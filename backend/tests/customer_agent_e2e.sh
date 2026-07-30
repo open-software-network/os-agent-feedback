@@ -4,7 +4,7 @@ set -euo pipefail
 rest_url="${REST_PRODUCT_URL:-https://example-status-agent-production.up.railway.app}"
 website_url="${WEBSITE_PRODUCT_URL:-https://example-fastify-agent-production.up.railway.app}"
 mcp_url="${MCP_PRODUCT_URL:-https://example-mcp-agent-production.up.railway.app/mcp}"
-feedback_origin="${TRUSTED_FEEDBACK_ORIGIN:-https://agent-feedback-api-production.up.railway.app}"
+feedback_origin="${TRUSTED_FEEDBACK_ORIGIN:-https://app.epode.ai}"
 python_url="${PYTHON_PRODUCT_URL:-}"
 go_url="${GO_PRODUCT_URL:-}"
 rust_url="${RUST_PRODUCT_URL:-}"

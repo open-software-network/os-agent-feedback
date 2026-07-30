@@ -3,9 +3,12 @@ package agentfeedback
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -168,6 +171,30 @@ func TestAskModesExposeDistinctConsentPolicies(t *testing.T) {
 	if FeedbackConsentAction(&alwaysPrepared.Envelope, "approved") != "ask" {
 		t.Fatal("ask-always incorrectly reused stored approval")
 	}
+
+	askOnceBody := map[string]any{}
+	_ = json.Unmarshal(feedbackSubmissionBody(&envelope, FeedbackReport{
+		Summary: "The product completed the task.", UserApproved: true,
+		ApprovalSource: "stored_grant",
+	}), &askOnceBody)
+	askOnceConsent := askOnceBody["consent"].(map[string]any)
+	if askOnceConsent["userApproved"] != true ||
+		askOnceConsent["approvalSource"] != "stored_grant" ||
+		askOnceConsent["consentScope"] != envelope.ConsentScope {
+		t.Fatalf("wrong ask-once attestation: %#v", askOnceConsent)
+	}
+
+	askAlwaysBody := map[string]any{}
+	_ = json.Unmarshal(feedbackSubmissionBody(&alwaysPrepared.Envelope, FeedbackReport{
+		Summary: "The product completed the task.", UserApproved: true,
+		ApprovalSource: "granted_now",
+	}), &askAlwaysBody)
+	askAlwaysConsent := askAlwaysBody["consent"].(map[string]any)
+	if askAlwaysConsent["userApproved"] != true ||
+		askAlwaysConsent["approvalSource"] != "granted_now" ||
+		askAlwaysConsent["consentScope"] != nil {
+		t.Fatalf("wrong ask-always attestation: %#v", askAlwaysConsent)
+	}
 }
 
 type flushingRecorder struct {
@@ -195,5 +222,107 @@ func TestMiddlewareLeavesFlushedStreamsUntouched(t *testing.T) {
 	}
 	if base.Header().Get("Agent-Feedback") != "" {
 		t.Fatal("stream was instrumented")
+	}
+}
+
+func TestMiddlewareBypassesBeforeResponseBufferLimit(t *testing.T) {
+	body := `{"payload":"` + strings.Repeat("x", 128) + `"}`
+	runtime, err := New(Options{
+		APIKey: conformanceKey, Include: []string{"/large"}, MaxResponseBodyBytes: 32,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Shutdown(context.Background())
+	handler := runtime.Middleware(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		response.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		_, _ = response.Write([]byte(body[:16]))
+		_, _ = response.Write([]byte(body[16:]))
+	}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/large", nil))
+	if response.Body.String() != body {
+		t.Fatalf("large customer response changed: got %d bytes, want %d", response.Body.Len(), len(body))
+	}
+	if response.Header().Get("Content-Length") != strconv.Itoa(len(body)) {
+		t.Fatalf("customer content length changed: %q", response.Header().Get("Content-Length"))
+	}
+	if strings.Contains(response.Body.String(), "_agentFeedback") || response.Header().Get("Agent-Feedback") != "" {
+		t.Fatal("response larger than the capture limit was instrumented")
+	}
+}
+
+func TestTelemetryRetriesTransientHTTPStatus(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		attempt := attempts.Add(1)
+		if attempt < 3 {
+			response.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		response.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	runtime, err := New(Options{
+		APIKey: conformanceKey, Endpoint: server.URL, FlushInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.record(TelemetryEvent{InteractionID: "retry-test", Surface: "http_json"})
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("telemetry attempts = %d, want 3", attempts.Load())
+	}
+}
+
+func TestTelemetryDoesNotRetryPermanentHTTPStatus(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		response.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+	runtime, err := New(Options{
+		APIKey: conformanceKey, Endpoint: server.URL, FlushInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.record(TelemetryEvent{InteractionID: "no-retry-test", Surface: "http_json"})
+	if err := runtime.Shutdown(context.Background()); err == nil || !strings.Contains(err.Error(), "HTTP 400") {
+		t.Fatalf("permanent telemetry failure was not reported: %v", err)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("telemetry attempts = %d, want 1", attempts.Load())
+	}
+}
+
+func TestTelemetrySenderReceivesBoundedContext(t *testing.T) {
+	deadlineSeen := make(chan time.Duration, 1)
+	runtime, err := New(Options{
+		APIKey: conformanceKey, FlushInterval: time.Hour,
+		Sender: func(ctx context.Context, _ string, _ http.Header, _ []byte) error {
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				return errors.New("missing deadline")
+			}
+			deadlineSeen <- time.Until(deadline)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.record(TelemetryEvent{InteractionID: "deadline-test", Surface: "http_json"})
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	deadline := <-deadlineSeen
+	if deadline <= 0 || deadline > telemetryAttemptTimeout {
+		t.Fatalf("unexpected telemetry deadline: %s", deadline)
 	}
 }

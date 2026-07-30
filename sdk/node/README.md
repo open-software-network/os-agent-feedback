@@ -7,6 +7,7 @@ There are two reliability levels:
 - **MCP is protocol-backed.** The SDK registers an explicit `report_product_feedback` tool, which compatible agents can call autonomously.
 - **Ask once remembers product consent.** Set `feedbackMode: "ask_once"`; the agent runtime stores approval or refusal under the returned `consentScope`. Approved future reports use `approvalSource: "stored_grant"` without asking again.
 - **Ask every time requires fresh consent.** Set `feedbackMode: "ask_always"`; every report requires `userApproved: true` and `approvalSource: "granted_now"`.
+- **Consent is enforced end to end.** Agent helpers add a nested `consent` attestation to every ask-mode submission; never-ask reports omit it.
 - **HTTP and HTML are best-effort by default.** Generic agents may treat response metadata as untrusted and ignore its side-effect instruction. A feedback-aware agent adapter can make submission deterministic.
 
 ## Express
@@ -14,7 +15,7 @@ There are two reliability levels:
 Until the npm registry release is connected, install the signed build directly from the production service:
 
 ```sh
-npm install https://agent-feedback-api-production.up.railway.app/static/agent-feedback-node-0.1.0.tgz
+npm install https://app.epode.ai/static/agent-feedback-node-0.1.0.tgz
 ```
 
 ```ts
@@ -105,7 +106,7 @@ if (feedback) {
       workaround: { used: true, detail: "The agent retried once." },
     },
     {
-      allowedSubmitOrigins: ["https://agent-feedback-api-production.up.railway.app"],
+      allowedSubmitOrigins: ["https://app.epode.ai"],
       userApproved: feedback.consentRequired ? true : undefined,
       approvalSource,
     },

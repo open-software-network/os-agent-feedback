@@ -225,6 +225,22 @@ pub struct ProductFeedbackReportWithInteraction {
     pub runtime_hint: Option<String>,
     pub runtime_hint_source: Option<String>,
     pub occurred_at: DateTime<Utc>,
+    pub workflow_status: String,
+    pub assignee_os_user_id: Option<String>,
+    pub tags: Vec<String>,
+    pub internal_note: Option<String>,
+    pub workflow_updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateFeedbackWorkflowInput {
+    pub product_id: Uuid,
+    pub status: String,
+    pub assignee_os_user_id: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub internal_note: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -354,6 +370,13 @@ pub struct TelemetryBatchInput {
     pub events: Vec<InteractionTelemetryInput>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryBatchResult {
+    pub accepted: usize,
+    pub dropped: usize,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InteractionTelemetryInput {
@@ -397,6 +420,15 @@ pub struct ProductFeedbackReportInput {
     #[serde(default)]
     pub findings: Vec<FeedbackFindingInput>,
     pub workaround: Option<FeedbackWorkaroundInput>,
+    pub consent: Option<FeedbackConsentInput>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FeedbackConsentInput {
+    pub user_approved: bool,
+    pub approval_source: String,
+    pub consent_scope: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -409,18 +441,48 @@ pub struct InsightCount {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Insights {
-    pub opportunities: usize,
-    pub confirmed_interactions: usize,
-    pub reports: usize,
+    pub window_days: i32,
+    pub comparison_days: i32,
+    pub opportunities: i64,
+    pub confirmed_interactions: i64,
+    pub reports: i64,
+    pub recent_opportunities: i64,
+    pub recent_confirmed_interactions: i64,
+    pub recent_reports: i64,
+    pub previous_opportunities: i64,
+    pub previous_confirmed_interactions: i64,
+    pub previous_reports: i64,
     pub confirmation_rate: i64,
     pub review_rate: i64,
-    pub reports_with_blockers: usize,
-    pub reports_with_workarounds: usize,
+    pub reports_with_blockers: i64,
+    pub reports_with_workarounds: i64,
+    pub p50_duration_ms: Option<i64>,
+    pub p95_duration_ms: Option<i64>,
     pub top_operations: Vec<InsightCount>,
     pub surfaces: Vec<InsightCount>,
     pub impacts: Vec<InsightCount>,
     pub finding_kinds: Vec<InsightCount>,
     pub topics: Vec<InsightCount>,
+    pub blocking_topics: Vec<InsightCount>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardListState {
+    pub interactions_total: i64,
+    pub reports_total: i64,
+    pub sessions_total: i64,
+    pub interactions_loaded: usize,
+    pub reports_loaded: usize,
+    pub sessions_loaded: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardSessionDetail {
+    pub session: ProductSession,
+    pub interactions: Vec<ProductInteraction>,
+    pub reports: Vec<ProductFeedbackReportWithInteraction>,
 }
 
 #[derive(Debug, Serialize)]
@@ -441,6 +503,7 @@ pub struct DashboardData {
     pub reports: Vec<ProductFeedbackReportWithInteraction>,
     pub sessions: Vec<ProductSession>,
     pub insights: Insights,
+    pub list_state: DashboardListState,
 }
 
 #[derive(Debug, Clone)]
