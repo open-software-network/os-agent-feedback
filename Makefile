@@ -1,4 +1,4 @@
-.PHONY: help install node-install backend-install node-version-check backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test landing-check sdk-node-test web-install web-check web-typecheck web-test web-build docs-validate docs-a11y types check
+.PHONY: help install node-install backend-install node-version-check backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test landing-check sdk-node-test web-install web-types-check web-check web-typecheck web-test web-build docs-validate docs-a11y types check
 
 .DEFAULT_GOAL := help
 
@@ -67,6 +67,13 @@ sdk-node-test:  ## Build and test the Node SDK
 # --- Web ---
 web-install: node-version-check  ## Install the web workspace dependencies from the lockfile
 	pnpm --filter @epode/web install --frozen-lockfile
+
+web-types-check: node-version-check  ## Check committed web API types for drift
+	@pnpm run gen:types
+	@git diff --exit-code -- web/lib/api/types.ts || { \
+		echo "Generated web API types are stale. Run 'pnpm run gen:types' and commit web/lib/api/types.ts." >&2; \
+		exit 1; \
+	}
 
 web-check: node-version-check  ## Check web formatting and linting
 	pnpm --filter @epode/web check

@@ -10,6 +10,7 @@ on:
         type: choice
         options:
           - api
+          - web
           - landing
           - all
       from-tag:
@@ -48,9 +49,9 @@ jobs:
         run: |
           set -euo pipefail
           case "$ARTIFACT" in
-            api|landing|all) ;;
+            api|web|landing|all) ;;
             *)
-              echo "::error::artifact must be 'api', 'landing', or 'all'."
+              echo "::error::artifact must be 'api', 'web', 'landing', or 'all'."
               exit 1
               ;;
           esac
@@ -70,6 +71,11 @@ jobs:
               "artifact": "api",
               "image": "os-epode-api",
               "service": "epode-api"
+            },
+            {
+              "artifact": "web",
+              "image": "os-epode-web",
+              "service": "epode-web"
             },
             {
               "artifact": "landing",
