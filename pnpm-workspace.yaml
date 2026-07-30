@@ -2,6 +2,7 @@ packages:
   - "."
   - "landing-page"
   - "sdk/node"
+  - "web"
 
 minimumReleaseAge: 10080
 minimumReleaseAgeIgnoreMissingTime: false

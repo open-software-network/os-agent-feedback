@@ -9,8 +9,16 @@
       "sdk/node/src/**/*.ts",
       "sdk/node/test/**/*.mjs",
       "sdk/node/**/*.json",
+      "web/**/*.css",
+      "web/**/*.json",
+      "web/**/*.mjs",
+      "web/**/*.ts",
+      "web/**/*.tsx",
       "!**/node_modules",
-      "!sdk/node/dist"
+      "!sdk/node/dist",
+      "!web/.next",
+      "!web/coverage",
+      "!web/lib/api/types.ts"
     ],
     "ignoreUnknown": true
   },

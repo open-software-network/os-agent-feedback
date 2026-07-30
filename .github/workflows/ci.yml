@@ -21,6 +21,7 @@ jobs:
       node: ${{ steps.filter.outputs.node }}
       landing: ${{ steps.filter.outputs.landing }}
       sdk-node: ${{ steps.filter.outputs.sdk-node }}
+      web: ${{ steps.filter.outputs.web }}
       docs: ${{ steps.filter.outputs.docs }}
       workflows: ${{ steps.filter.outputs.workflows }}
     steps:
@@ -62,6 +63,15 @@ jobs:
               - "biome.json"
               - "Makefile"
               - "sdk/node/**"
+              - ".github/workflows/ci.yml"
+            web:
+              - "web/**"
+              - "package.json"
+              - "pnpm-lock.yaml"
+              - "pnpm-workspace.yaml"
+              - "biome.json"
+              - "Makefile"
+              - "backend/openapi.json"
               - ".github/workflows/ci.yml"
             docs:
               - "package.json"
@@ -161,6 +171,28 @@ jobs:
       - name: Test Node SDK
         run: make sdk-node-test
 
+  web:
+    name: Web
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Install dependencies
+        run: make node-install
+      - name: Check web formatting and linting
+        run: make web-check
+      - name: Typecheck web
+        run: make web-typecheck
+      - name: Test web
+        run: make web-test
+
   docs:
     name: Documentation
     needs: changes
@@ -183,7 +215,7 @@ jobs:
 
   # Single required status check. Every job above is path-filtered, so a PR that
   # touches only docs or briefs skips all of them; branch protection should name
-  # this job alone rather than five names that must be edited whenever a job is
+  # this job alone rather than six names that must be edited whenever a job is
   # added or renamed. `always()` makes it run even when a dependency is skipped
   # or failed — without it, one skipped dependency would skip the gate too.
   workflows:
@@ -208,7 +240,7 @@ jobs:
 
   ci-ok:
     name: CI
-    needs: [backend, node, landing, sdk-node, docs, workflows]
+    needs: [backend, node, landing, sdk-node, web, docs, workflows]
     if: always()
     runs-on: ubuntu-latest
     steps:
