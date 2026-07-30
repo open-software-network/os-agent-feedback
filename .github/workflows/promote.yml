@@ -34,16 +34,17 @@ jobs:
   plan:
     name: Plan promotion
     runs-on: ubuntu-latest
-    permissions: {}
+    permissions:
+      contents: read
+      packages: read
     outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
-      from_tag: ${{ steps.plan.outputs.from_tag }}
+      matrix: ${{ steps.resolve.outputs.matrix }}
     env:
       ARTIFACT: ${{ inputs.artifact }}
       FROM_TAG: ${{ inputs.from-tag }}
     steps:
-      - name: Validate inputs and build matrix
-        id: plan
+      - name: Validate inputs and select artifacts
+        id: select
         run: |
           set -euo pipefail
           case "$ARTIFACT" in
@@ -77,33 +78,22 @@ jobs:
             }
           ]'
           if [[ "$ARTIFACT" == "all" ]]; then
-            matrix=$(jq -cn --argjson include "$artifact_rows" '{include: $include}')
+            selected_rows=$(jq -c . <<< "$artifact_rows")
           else
-            matrix=$(jq -cn \
+            selected_rows=$(jq -cn \
               --argjson rows "$artifact_rows" \
               --arg artifact "$ARTIFACT" \
-              '{include: [$rows[] | select(.artifact == $artifact)]}')
+              '[$rows[] | select(.artifact == $artifact)]')
           fi
 
           {
-            echo "matrix=$matrix"
+            echo "FROM_TAG=$FROM_TAG"
+          } >> "$GITHUB_ENV"
+          {
+            echo "rows=$selected_rows"
             echo "from_tag=$FROM_TAG"
           } >> "$GITHUB_OUTPUT"
 
-  resolve:
-    name: Resolve ${{ matrix.artifact }} source image
-    needs: plan
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: read
-    strategy:
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    env:
-      ARTIFACT: ${{ matrix.artifact }}
-      FROM_TAG: ${{ needs.plan.outputs.from_tag }}
-      IMAGE: ghcr.io/open-software-network/${{ matrix.image }}
-    steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
@@ -114,75 +104,102 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve source to immutable SHA tag
-        id: source
+      - name: Resolve source images
+        id: resolve
+        env:
+          ARTIFACT_ROWS: ${{ steps.select.outputs.rows }}
+          FROM_TAG: ${{ steps.select.outputs.from_tag }}
         run: |
           set -euo pipefail
-          if [[ "$FROM_TAG" != "staging" && ! "$FROM_TAG" =~ ^[0-9a-f]{7}$ ]]; then
-            echo "::error::Resolved from-tag must be 'staging' or a 7-character lowercase hexadecimal SHA tag."
+          resolved_rows='[]'
+          while IFS= read -r row; do
+            artifact=$(jq -r '.artifact' <<< "$row")
+            image_name=$(jq -r '.image' <<< "$row")
+            IMAGE="${REGISTRY}/open-software-network/${image_name}"
+            source="${IMAGE}:${FROM_TAG}"
+            if ! docker buildx imagetools inspect "$source" --raw > /dev/null 2>&1; then
+              echo "::error::Image $source does not exist."
+              exit 1
+            fi
+
+            digest=$(docker buildx imagetools inspect "$source" \
+              --format '{{ json .Manifest }}' | jq -r '.digest')
+            revision=$(docker buildx imagetools inspect "$source" \
+              --format '{{ json .Image }}' \
+              | jq -r 'first(.. | objects | select(.config?.Labels?["org.opencontainers.image.revision"] != null) | .config.Labels["org.opencontainers.image.revision"]) // empty')
+
+            if [[ -z "$revision" && "$FROM_TAG" =~ ^[0-9a-f]{7}$ ]]; then
+              revision="$FROM_TAG"
+            fi
+            if [[ ! "$revision" =~ ^[0-9a-f]{7,40}$ ]]; then
+              echo "::error::Could not resolve a commit SHA from $source."
+              exit 1
+            fi
+
+            sha_short="${revision:0:7}"
+            sha_ref="${IMAGE}:${sha_short}"
+            if ! docker buildx imagetools inspect "$sha_ref" --raw > /dev/null 2>&1; then
+              echo "::error::Concrete SHA image $sha_ref does not exist."
+              exit 1
+            fi
+            sha_digest=$(docker buildx imagetools inspect "$sha_ref" \
+              --format '{{ json .Manifest }}' | jq -r '.digest')
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Unresolved digest for $source."
+              exit 1
+            fi
+            if [[ ! "$sha_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Unresolved digest for $sha_ref."
+              exit 1
+            fi
+            if [[ "$sha_digest" != "$digest" ]]; then
+              echo "::error::$source and $sha_ref do not resolve to the same digest."
+              exit 1
+            fi
+
+            resolved_rows=$(jq -cn \
+              --argjson rows "$resolved_rows" \
+              --argjson row "$row" \
+              --arg digest "$digest" \
+              --arg sha_short "$sha_short" \
+              '$rows + [$row + {digest: $digest, sha_short: $sha_short}]')
+
+            {
+              echo "### ${artifact^^} promotion source"
+              echo "- **Source tag:** \`${FROM_TAG}\`"
+              echo "- **SHA tag:** \`${sha_ref}\`"
+              echo "- **Digest:** \`${digest}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          done < <(jq -c '.[]' <<< "$ARTIFACT_ROWS")
+
+          selected_count=$(jq 'length' <<< "$ARTIFACT_ROWS")
+          resolved_count=$(jq 'length' <<< "$resolved_rows")
+          if [[ "$resolved_count" -ne "$selected_count" ]]; then
+            echo "::error::Resolved $resolved_count of $selected_count requested artifacts."
             exit 1
           fi
 
-          source="${IMAGE}:${FROM_TAG}"
-          if ! docker buildx imagetools inspect "$source" --raw > /dev/null 2>&1; then
-            echo "::error::Image $source does not exist."
-            exit 1
-          fi
-
-          digest=$(docker buildx imagetools inspect "$source" \
-            --format '{{ json .Manifest }}' | jq -r '.digest')
-          revision=$(docker buildx imagetools inspect "$source" \
-            --format '{{ json .Image }}' \
-            | jq -r 'first(.. | objects | select(.config?.Labels?["org.opencontainers.image.revision"] != null) | .config.Labels["org.opencontainers.image.revision"]) // empty')
-
-          if [[ -z "$revision" && "$FROM_TAG" =~ ^[0-9a-f]{7}$ ]]; then
-            revision="$FROM_TAG"
-          fi
-          if [[ ! "$revision" =~ ^[0-9a-f]{7,40}$ ]]; then
-            echo "::error::Could not resolve a commit SHA from $source."
-            exit 1
-          fi
-
-          sha_short="${revision:0:7}"
-          sha_ref="${IMAGE}:${sha_short}"
-          if ! docker buildx imagetools inspect "$sha_ref" --raw > /dev/null 2>&1; then
-            echo "::error::Concrete SHA image $sha_ref does not exist."
-            exit 1
-          fi
-          sha_digest=$(docker buildx imagetools inspect "$sha_ref" \
-            --format '{{ json .Manifest }}' | jq -r '.digest')
-          if [[ "$sha_digest" != "$digest" ]]; then
-            echo "::error::$source and $sha_ref do not resolve to the same digest."
-            exit 1
-          fi
-
-          # Step-local summary values only; never promote these to job outputs.
-          {
-            echo "digest=$digest"
-            echo "sha_short=$sha_short"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Summarize resolution
-        run: |
-          {
-            echo "### ${ARTIFACT^^} promotion source"
-            echo "- **Requested tag:** \`${FROM_TAG}\`"
-            echo "- **SHA tag:** \`${IMAGE}:${{ steps.source.outputs.sha_short }}\`"
-            echo "- **Digest:** \`${{ steps.source.outputs.digest }}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          matrix=$(jq -cn --argjson include "$resolved_rows" '{include: $include}')
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   deploy:
     name: Deploy ${{ matrix.artifact }} production
-    needs: [plan, resolve]
+    needs: plan
     runs-on: ubuntu-latest
+    # One GitHub approval covers all jobs queued for this environment in a run;
+    # only an individually re-run matrix leg gets its own approval.
     environment: production
     strategy:
+      # Each leg performs an independent irreversible Railway mutation; do not
+      # cancel a sibling mid-poll after its mutation has fired.
+      fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     env:
       ARTIFACT: ${{ matrix.artifact }}
-      FROM_TAG: ${{ needs.plan.outputs.from_tag }}
       IMAGE: ghcr.io/open-software-network/${{ matrix.image }}
       SERVICE: ${{ matrix.service }}
+      IMAGE_REF: ghcr.io/open-software-network/${{ matrix.image }}:${{ matrix.sha_short }}
+      IMAGE_DIGEST_REF: ghcr.io/open-software-network/${{ matrix.image }}@${{ matrix.digest }}
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
     steps:
       - name: Set up Docker Buildx
@@ -194,47 +211,6 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Prepare verified image references
-        run: |
-          set -euo pipefail
-          source="${IMAGE}:${FROM_TAG}"
-          if ! docker buildx imagetools inspect "$source" --raw > /dev/null 2>&1; then
-            echo "::error::Image $source does not exist."
-            exit 1
-          fi
-
-          digest=$(docker buildx imagetools inspect "$source" \
-            --format '{{ json .Manifest }}' | jq -r '.digest')
-          revision=$(docker buildx imagetools inspect "$source" \
-            --format '{{ json .Image }}' \
-            | jq -r 'first(.. | objects | select(.config?.Labels?["org.opencontainers.image.revision"] != null) | .config.Labels["org.opencontainers.image.revision"]) // empty')
-
-          if [[ -z "$revision" && "$FROM_TAG" =~ ^[0-9a-f]{7}$ ]]; then
-            revision="$FROM_TAG"
-          fi
-          if [[ ! "$revision" =~ ^[0-9a-f]{7,40}$ ]]; then
-            echo "::error::Could not resolve a commit SHA from $source."
-            exit 1
-          fi
-
-          sha_short="${revision:0:7}"
-          sha_ref="${IMAGE}:${sha_short}"
-          if ! docker buildx imagetools inspect "$sha_ref" --raw > /dev/null 2>&1; then
-            echo "::error::Concrete SHA image $sha_ref does not exist."
-            exit 1
-          fi
-          sha_digest=$(docker buildx imagetools inspect "$sha_ref" \
-            --format '{{ json .Manifest }}' | jq -r '.digest')
-          if [[ "$sha_digest" != "$digest" ]]; then
-            echo "::error::$source and $sha_ref do not resolve to the same digest."
-            exit 1
-          fi
-
-          {
-            echo "IMAGE_REF=${IMAGE}:${sha_short}"
-            echo "IMAGE_DIGEST_REF=${IMAGE}@${digest}"
-          } >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
