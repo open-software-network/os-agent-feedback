@@ -1,0 +1,210 @@
+name: Build landing page
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "landing-page/**"
+      - ".github/workflows/build-landing.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-landing-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/open-software-network/os-epode-landing
+  RAILWAY_CLI_VERSION: 5.30.1
+
+jobs:
+  build:
+    name: Build and push
+    runs-on: ubuntu-latest
+    outputs:
+      sha_short: ${{ steps.meta.outputs.sha_short }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Compute image metadata
+        id: meta
+        run: |
+          echo "sha_short=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "created=$(git log -1 --pretty=%cI)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ./landing-page
+          file: ./landing-page/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.meta.outputs.sha_short }}
+            ${{ env.IMAGE }}:staging
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.meta.outputs.created }}
+          cache-from: type=gha,scope=os-epode-landing
+          cache-to: type=gha,mode=max,scope=os-epode-landing
+
+      - name: Summarize image
+        run: |
+          {
+            echo "### Landing page image built"
+            echo "- **SHA tag:** \`${{ env.IMAGE }}:${{ steps.meta.outputs.sha_short }}\`"
+            echo "- **Staging tag:** \`${{ env.IMAGE }}:staging\`"
+            echo "- **Digest:** \`${{ steps.build.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Requires the control pane-provisioned `epode` service in the staging environment.
+  deploy-staging:
+    name: Deploy staging
+    needs: build
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      contents: read
+    env:
+      RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+      IMAGE_REF: ghcr.io/open-software-network/os-epode-landing:${{ needs.build.outputs.sha_short }}
+    steps:
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      - name: Install Railway CLI
+        run: npm install --global "@railway/cli@${RAILWAY_CLI_VERSION}"
+
+      - name: Pin SHA image and wait for staging
+        # RAILWAY_TOKEN is step-scoped so the npm install above never sees it.
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$RAILWAY_TOKEN" ]]; then
+            echo "::error::The staging environment secret RAILWAY_TOKEN is not configured."
+            exit 1
+          fi
+          if [[ -z "$RAILWAY_PROJECT_ID" ]]; then
+            echo "::error::The RAILWAY_PROJECT_ID variable is not configured."
+            exit 1
+          fi
+
+          previous_id=$(railway deployment list \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment staging \
+            --service epode \
+            --limit 1 \
+            --json | jq -r '.[0].id // empty')
+          current_image=$(railway service list \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment staging \
+            --json \
+            | jq -r '.[] | select(.name == "epode") | .source.image // empty')
+          mutation_started_at=$(node --eval 'process.stdout.write(new Date().toISOString())')
+
+          if [[ "$current_image" == "$IMAGE_REF" ]]; then
+            railway redeploy \
+              --project "$RAILWAY_PROJECT_ID" \
+              --environment staging \
+              --service epode \
+              --from-source \
+              --yes \
+              --json
+          else
+            # Railway CLI 5.30 reads non-TTY stdin as JSON configuration.
+            # Allocate a PTY so the explicit --service-config flags are used.
+            script --quiet --return --command \
+              "railway environment edit --project \"$RAILWAY_PROJECT_ID\" --environment staging --service-config epode source.image \"$IMAGE_REF\" --message \"Deploy $GITHUB_SHA to staging\" --json" \
+              /dev/null
+          fi
+
+          # Neither mutation returns a deployment ID for these modes (verified against
+          # CLI 5.30.1). Discovery requires id != previous AND image match AND
+          # createdAt after the mutation; a deployment passing all three that we
+          # did not initiate is the same image on the same service seconds apart —
+          # its outcome is the outcome this gate exists to report. Discover
+          # the matching deployment once, then freeze and poll that exact ID.
+          deployment_id=""
+          for _ in $(seq 1 60); do
+            deployments=$(railway deployment list \
+              --project "$RAILWAY_PROJECT_ID" \
+              --environment staging \
+              --service epode \
+              --limit 100 \
+              --json)
+
+            if [[ -z "$deployment_id" ]]; then
+              deployment_id=$(jq -r \
+                --arg previous_id "$previous_id" \
+                --arg image "$IMAGE_REF" \
+                --arg started_at "$mutation_started_at" \
+                'first(.[] | select(
+                  .id != $previous_id
+                  and .meta.image == $image
+                  and .createdAt > $started_at
+                ) | .id) // empty' <<< "$deployments")
+              if [[ -z "$deployment_id" ]]; then
+                sleep 10
+                continue
+              fi
+              echo "Tracking staging deployment $deployment_id."
+            fi
+
+            deployment=$(jq -c \
+              --arg deployment_id "$deployment_id" \
+              'first(.[] | select(.id == $deployment_id)) // empty' <<< "$deployments")
+            if [[ -z "$deployment" ]]; then
+              sleep 10
+              continue
+            fi
+            status=$(jq -r '.status // empty' <<< "$deployment")
+            deployment_image=$(jq -r '.meta.image // empty' <<< "$deployment")
+            if [[ "$deployment_image" != "$IMAGE_REF" ]]; then
+              echo "::error::Staging deployment $deployment_id uses $deployment_image instead of $IMAGE_REF."
+              exit 1
+            fi
+
+            case "$status" in
+              SUCCESS)
+                echo "Staging deployment $deployment_id succeeded."
+                exit 0
+                ;;
+              FAILED|CRASHED|REMOVED)
+                echo "::error::Staging deployment $deployment_id finished with status $status."
+                exit 1
+                ;;
+              *)
+                sleep 10
+                ;;
+            esac
+          done
+
+          echo "::error::Timed out waiting for the staging deployment."
+          exit 1
+
+      - name: Summarize staging deployment
+        run: |
+          {
+            echo "### Railway staging deployment"
+            echo "- **Service:** \`epode\`"
+            echo "- **Environment:** \`staging\`"
+            echo "- **Image:** \`${IMAGE_REF}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
