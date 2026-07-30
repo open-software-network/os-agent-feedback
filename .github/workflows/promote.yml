@@ -159,20 +159,20 @@ jobs:
           previous_id=$(railway deployment list \
             --project "$RAILWAY_PROJECT_ID" \
             --environment production \
-            --service agent-feedback-api \
+            --service epode-api \
             --limit 1 \
             --json | jq -r '.[0].id // empty')
           current_image=$(railway service list \
             --project "$RAILWAY_PROJECT_ID" \
             --environment production \
             --json \
-            | jq -r '.[] | select(.name == "agent-feedback-api") | .source.image // empty')
+            | jq -r '.[] | select(.name == "epode-api") | .source.image // empty')
 
           if [[ "$current_image" == "$IMAGE_REF" ]]; then
             railway redeploy \
               --project "$RAILWAY_PROJECT_ID" \
               --environment production \
-              --service agent-feedback-api \
+              --service epode-api \
               --from-source \
               --yes \
               --json
@@ -180,7 +180,7 @@ jobs:
             # Railway CLI 5.30 reads non-TTY stdin as JSON configuration.
             # Allocate a PTY so the explicit --service-config flags are used.
             script --quiet --return --command \
-              "railway environment edit --project \"$RAILWAY_PROJECT_ID\" --environment production --service-config agent-feedback-api source.image \"$IMAGE_REF\" --message \"Deploy $IMAGE_REF to production\" --json" \
+              "railway environment edit --project \"$RAILWAY_PROJECT_ID\" --environment production --service-config epode-api source.image \"$IMAGE_REF\" --message \"Deploy $IMAGE_REF to production\" --json" \
               /dev/null
           fi
 
@@ -188,7 +188,7 @@ jobs:
             deployment=$(railway deployment list \
               --project "$RAILWAY_PROJECT_ID" \
               --environment production \
-              --service agent-feedback-api \
+              --service epode-api \
               --limit 1 \
               --json)
             deployment_id=$(jq -r '.[0].id // empty' <<< "$deployment")
@@ -228,7 +228,7 @@ jobs:
         run: |
           {
             echo "### Railway production deployment"
-            echo "- **Service:** \`agent-feedback-api\`"
+            echo "- **Service:** \`epode-api\`"
             echo "- **Environment:** \`production\`"
             echo "- **Image:** \`${IMAGE_REF}\`"
             echo "- **Production tag:** \`${IMAGE}:production\`"
