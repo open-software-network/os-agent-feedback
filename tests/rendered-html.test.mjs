@@ -31,5 +31,6 @@ test("links to the canonical app origin", async () => {
   const response = await render();
   const html = await response.text();
   assert.match(html, /https:\/\/app\.epode\.ai\/auth\/start/);
+  assert.match(html, /https:\/\/docs\.epode\.ai/);
   assert.doesNotMatch(html, /agent-feedback-api-production\.up\.railway\.app/);
 });

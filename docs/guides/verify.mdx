@@ -1,0 +1,49 @@
+---
+title: "Verify an integration"
+description: "Prove response safety, telemetry delivery, classification, and feedback persistence."
+---
+
+Verification should test the whole loop, not only whether a field appeared in one response.
+
+## HTTP and server-rendered HTML
+
+<Steps>
+  <Step title="Check the product result">
+    Confirm the response status, original fields/body, cache behavior, and latency remain correct.
+  </Step>
+  <Step title="Check the handoff">
+    Find `_agentFeedback`, the HTML script, or the `Agent-Feedback` header. Confirm the submit URL is HTTPS,
+    the capability starts with `afr2_`, and no `af_live_` product key appears.
+  </Step>
+  <Step title="Check the evidence state">
+    The response creates an opportunity, not a confirmed interaction.
+  </Step>
+  <Step title="Submit one bounded report">
+    Use the capability once. Confirm the linked interaction becomes confirmed and the report is visible.
+  </Step>
+  <Step title="Check idempotency">
+    Submit a contradictory duplicate and confirm Epode returns the original accepted report.
+  </Step>
+</Steps>
+
+For Node:
+
+```bash
+npx agent-feedback-doctor https://your-product.example/search?q=epode-test
+```
+
+## MCP
+
+Call `server/discover`, `tools/list`, one normal product tool, and `report_product_feedback`. Confirm the product
+tool creates a confirmed MCP interaction even before feedback returns.
+
+If the feedback tool returns `retryable: true`, retry it once with the identical handle and report. A second
+successful response must resolve to the same stored report.
+
+## Failure tests
+
+- Disable Epode connectivity and confirm your product response still succeeds promptly.
+- Send an expired or forged capability and expect rejection.
+- Include a prompt, transcript, credential, raw payload, or unknown field and expect rejection.
+- Test an excluded route, error, stream, binary, JSON array, and scalar response.
+- Gracefully stop the process and check whether the SDK reports any terminal telemetry flush error.

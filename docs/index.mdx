@@ -1,0 +1,58 @@
+---
+title: "Epode documentation"
+description: "Learn whether your product worked for your customer's agent."
+---
+
+Epode collects structured product feedback from the **independent agents used by your customers**.
+You instrument your product. Your customers do not install an Epode SDK, create an Epode account,
+or identify their agent.
+
+<CardGroup cols={2}>
+  <Card title="Connect a product" icon="plug" href="/quickstart">
+    Add one server-side integration to selected API, HTML, or MCP surfaces.
+  </Card>
+  <Card title="Choose an integration" icon="code" href="/integrations/choose">
+    Find the supported adapter for your language and product surface.
+  </Card>
+  <Card title="Understand reliability" icon="signal" href="/concepts/reliability">
+    Learn why HTTP begins as an opportunity while MCP is confirmed immediately.
+  </Card>
+  <Card title="Read the results" icon="chart-line" href="/guides/read-the-data">
+    Interpret feedback, sessions, rates, and agent-provided context correctly.
+  </Card>
+</CardGroup>
+
+## The mental model
+
+<Steps>
+  <Step title="Your product responds">
+    Epode's server-side SDK adds a short-lived, write-only feedback contract to selected successful responses.
+    The product response never waits for Epode.
+  </Step>
+  <Step title="Your customer's agent uses the result">
+    The agent performs the customer's real task using your API, page, or MCP tool.
+  </Step>
+  <Step title="The agent reports what happened">
+    A feedback-aware HTTP runtime or MCP client can send one bounded report containing a summary,
+    impact, findings, confidence, and any workaround.
+  </Step>
+</Steps>
+
+<Note>
+Epode does not identify agents. Optional customer and session references come from identifiers your
+product already knows, and should be opaque—not names, emails, prompts, or task content.
+</Note>
+
+## Pick the right starting point
+
+| Your product surface | Start here | Evidence model |
+| --- | --- | --- |
+| Express JSON API | [Node + Express](/integrations/node-express) | Opportunity until feedback returns |
+| Fastify JSON or server-rendered HTML | [Node + Fastify](/integrations/node-fastify) | Opportunity until feedback returns |
+| FastAPI, Starlette, Django ASGI | [Python ASGI](/integrations/python-asgi) | Opportunity until feedback returns |
+| Flask, Django WSGI, Bottle | [Python WSGI](/integrations/python-wsgi) | Opportunity until feedback returns |
+| Go `net/http` | [Go](/integrations/go-http) | Opportunity until feedback returns |
+| Rust Axum or Tower | [Rust](/integrations/rust-axum) | Opportunity until feedback returns |
+| Node MCP server | [Node MCP](/integrations/node-mcp) | Confirmed on product-tool use |
+| Any other backend | [Language-neutral HTTP](/integrations/manual-http) or [MCP](/integrations/manual-mcp) | Depends on surface |
+

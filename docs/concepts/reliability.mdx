@@ -1,0 +1,35 @@
+---
+title: "Reliability and evidence"
+description: "Understand opportunities, confirmed interactions, and why MCP is different."
+---
+
+Epode does not label ordinary HTTP traffic as agent traffic without evidence.
+
+| Surface | Initial state | Becomes confirmed when |
+| --- | --- | --- |
+| JSON API | Opportunity | Its scoped feedback capability is used |
+| Server-rendered HTML | Opportunity | Its scoped feedback capability is used |
+| Header-only handoff | Opportunity | Its scoped feedback capability is used |
+| MCP product tool | Confirmed | The tool call completes |
+
+## Why HTTP is best-effort
+
+An HTTP response can be read by a browser, script, service, or agent. The response metadata cannot
+prove which one used it. Generic agents may also ignore a response-side request to perform a second
+network action.
+
+Use HTTP instrumentation to measure opportunities and returned feedback. Use a
+[feedback-aware agent adapter](/reference/http-envelope#feedback-aware-runtimes) when you control
+the customer-agent runtime and need deterministic submission.
+
+## Why MCP is stronger
+
+MCP exposes tools to a tool-capable client. Epode registers `report_product_feedback` alongside your
+business tools and decorates the result with a scoped feedback handle. A business-tool call is therefore
+a confirmed interaction even if no report follows.
+
+<Note>
+Confirmed interaction does not mean identified agent. MCP client information is a self-reported runtime
+hint, not an identity.
+</Note>
+

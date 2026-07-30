@@ -89,8 +89,21 @@ async fn main() -> anyhow::Result<()> {
     let accounts = OsAccountsClient::from_env(&public_base_url)?;
     let database_url =
         env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL is required"))?;
+    let database_max_connections = match env::var("DATABASE_MAX_CONNECTIONS") {
+        Ok(value) => value
+            .parse::<u32>()
+            .map_err(|_| anyhow::anyhow!("DATABASE_MAX_CONNECTIONS must be an integer"))?,
+        Err(env::VarError::NotPresent) => 10,
+        Err(env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("DATABASE_MAX_CONNECTIONS must be valid Unicode")
+        }
+    };
+    anyhow::ensure!(
+        (1..=100).contains(&database_max_connections),
+        "DATABASE_MAX_CONNECTIONS must be between 1 and 100"
+    );
     let pool = PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(database_max_connections)
         .connect(&database_url)
         .await?;
     sqlx::migrate!().run(&pool).await?;

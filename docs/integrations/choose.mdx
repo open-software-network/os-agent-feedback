@@ -1,0 +1,40 @@
+---
+title: "Choose an integration"
+description: "Select a product surface first, then the server framework that already owns the response."
+---
+
+Choose the **surface your customer's agent uses**, not the framework the agent itself was built with.
+
+<CardGroup cols={2}>
+  <Card title="HTTP API" icon="brackets-curly" href="/integrations/node-express">
+    Instrument selected successful JSON responses. They begin as opportunities.
+  </Card>
+  <Card title="Server-rendered website" icon="browser" href="/integrations/node-fastify">
+    Instrument HTML returned by your server without changing what people see.
+  </Card>
+  <Card title="MCP server" icon="plug" href="/integrations/node-mcp">
+    Register an explicit feedback tool. Product-tool calls are confirmed immediately.
+  </Card>
+  <Card title="Static site or CMS" icon="cloud">
+    Direct integration is not yet supported. If you already control a trusted edge response, use the language-neutral protocol there—not in browser code.
+  </Card>
+</CardGroup>
+
+## Supported adapters
+
+| Stack | HTTP API | Server HTML | MCP |
+| --- | --- | --- | --- |
+| Node + Express | [Supported](/integrations/node-express) | [Supported](/integrations/node-express#server-rendered-html) | — |
+| Node + Fastify | [Supported](/integrations/node-fastify) | [Supported](/integrations/node-fastify#server-rendered-html) | — |
+| Python ASGI | [Supported](/integrations/python-asgi) | [Supported](/integrations/python-asgi#server-rendered-html) | — |
+| Python WSGI | [Supported](/integrations/python-wsgi) | Header handoff | — |
+| Go `net/http` | [Supported](/integrations/go-http) | [Supported](/integrations/go-http#server-rendered-html) | — |
+| Rust Axum/Tower | [Supported](/integrations/rust-axum) | [Supported](/integrations/rust-axum#server-rendered-html) | — |
+| Node MCP | — | — | [Supported](/integrations/node-mcp) |
+| Other backend | [Protocol](/integrations/manual-http) | [Protocol](/integrations/manual-http#html) | [Protocol](/integrations/manual-mcp) |
+
+<Note>
+Static-site and CMS integration is not yet a supported Setup path. Never add `AGENT_FEEDBACK_KEY` to a
+static bundle. A team that already owns a trusted server or edge response can implement the advanced
+[language-neutral HTTP protocol](/integrations/manual-http) there.
+</Note>

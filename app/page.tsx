@@ -24,6 +24,7 @@ export default function Home() {
       <nav className="topbar">
         <a className="wordmark" href="#top">EPODE</a>
         <div>
+          <a href="https://docs.epode.ai">Docs</a>
           <a href={`${dashboard}/.well-known/agent-feedback-v1.json`}>Protocol</a>
           <a className="button" href={`${dashboard}/auth/start`}>Open dashboard</a>
         </div>

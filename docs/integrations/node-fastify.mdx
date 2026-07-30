@@ -1,0 +1,55 @@
+---
+title: "Node + Fastify"
+description: "Instrument selected Fastify JSON and HTML responses with one registered plugin."
+---
+
+## Install
+
+```bash
+npm install https://app.epode.ai/static/agent-feedback-node-0.1.0.tgz fastify
+```
+
+## Configure once
+
+```ts
+import Fastify from "fastify";
+import { agentFeedback } from "@agent-feedback/node/fastify";
+
+const app = Fastify();
+
+await app.register(agentFeedback({
+  apiKey: process.env.AGENT_FEEDBACK_KEY,
+  include: ["/search", "/docs/*"],
+  customerRef: req => req.user?.accountId, // optional opaque ID
+}));
+
+app.get("/search", async request => ({
+  results: await search(request.query.q),
+}));
+
+await app.listen({ port: Number(process.env.PORT || 3000) });
+```
+
+## Server-rendered HTML
+
+Include your server HTML path. JSON objects receive `_agentFeedback`; HTML receives an embedded machine
+contract; arrays and scalars use headers.
+
+```ts
+await app.register(agentFeedback({
+  apiKey: process.env.AGENT_FEEDBACK_KEY,
+  include: ["/agent-docs", "/docs/*"],
+}));
+```
+
+## Verify
+
+```bash
+npx agent-feedback-doctor https://your-product.example/search?q=epode-test
+```
+
+<Tip>
+Keep the plugin global and narrow `include` to product surfaces that customer agents actually use.
+</Tip>
+
+[View the runnable Fastify example](https://github.com/open-software-network/os-epode/tree/main/examples/setup-matrix-node-fastify)

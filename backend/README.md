@@ -82,3 +82,4 @@ bash tests/customer_agent_e2e.sh
 ```
 
 Required production environment variables remain `DATABASE_URL`, `PUBLIC_BASE_URL`, the OS Accounts URLs/client ID, and `PORT`.
+`DATABASE_MAX_CONNECTIONS` is optional and defaults to `10`; lower it for disposable validation environments that share a small PostgreSQL connection budget.

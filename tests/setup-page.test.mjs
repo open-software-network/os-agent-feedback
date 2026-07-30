@@ -130,6 +130,11 @@ test("setup offers one guided install with a manual fallback", () => {
   assert.match(dashboardScript, /Send one real interaction/);
 });
 
+test("setup links to the public Mintlify documentation", () => {
+  assert.match(dashboardScript, /https:\/\/docs\.epode\.ai/);
+  assert.match(dashboardScript, /Read the integration docs/);
+});
+
 test("installation is ready without a setup generation step", () => {
   assert.match(dashboardScript, /Installation ready/);
   assert.match(dashboardScript, /Default product key/);

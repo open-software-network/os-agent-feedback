@@ -1,0 +1,79 @@
+---
+title: "Quickstart"
+description: "Connect one product and verify the complete feedback loop."
+---
+
+This quickstart assumes you already created a product in the Epode dashboard. The dashboard creates
+its server-side product key automatically.
+
+<Warning>
+Keep `AGENT_FEEDBACK_KEY` on your server. Never place it in browser JavaScript, a mobile app,
+a public repository, or an MCP client configuration.
+</Warning>
+
+<Steps>
+  <Step title="Open Setup">
+    In [Epode](https://app.epode.ai), choose your product and open **Setup**. Pick the surface and
+    framework that match your deployed product.
+  </Step>
+  <Step title="Save the product key">
+    A newly created product redirects to Setup and shows its key once. Add it to your server environment:
+
+    ```bash
+    AGENT_FEEDBACK_KEY=af_live_...
+    AGENT_FEEDBACK_MODE=never_ask
+    ```
+
+    `never_ask` asks the agent to submit its own assessment without interrupting the human.
+    [Compare all feedback modes](/concepts/feedback-modes).
+
+    If you already left the page or lost the value, choose **Create new key**. Existing secret values cannot
+    be recovered from Epode.
+  </Step>
+  <Step title="Install one server-side adapter">
+    Follow the dedicated page for your framework. For Express:
+
+    ```bash
+    npm install https://app.epode.ai/static/agent-feedback-node-0.1.0.tgz
+    ```
+
+    ```ts
+    import { agentFeedback } from "@agent-feedback/node/express";
+
+    app.use(agentFeedback({
+      apiKey: process.env.AGENT_FEEDBACK_KEY,
+      include: ["/search", "/docs/*"],
+    }));
+    ```
+  </Step>
+  <Step title="Send one real product request">
+    Call an included route and confirm the original response still works. An eligible JSON object
+    has an additional `_agentFeedback` field; HTML and immutable JSON shapes use the documented
+    HTML/header handoff.
+  </Step>
+  <Step title="Verify the loop">
+    For Node HTTP integrations, run:
+
+    ```bash
+    npx agent-feedback-doctor https://your-product.example/search?q=epode-test
+    ```
+
+    In `never_ask` mode, the doctor submits a real synthetic report. In an ask mode, it validates
+    the contract but never impersonates user permission. MCP integrations should call
+    `server/discover`, one normal product tool, and then `report_product_feedback`. If that tool returns
+    `retryable: true`, retry it exactly once with the same handle and report.
+  </Step>
+</Steps>
+
+<Tip>
+Use `AGENT_FEEDBACK_ENABLED=false` as an emergency server-side kill switch. Your normal product
+response continues to work either way.
+</Tip>
+
+## What success looks like
+
+- **Setup** says telemetry is connected.
+- HTTP/HTML produces an opportunity; returning feedback confirms it.
+- An MCP product-tool call is confirmed immediately.
+- **Feedback** shows the structured report and links it to the product interaction.
+- If you supplied a stable session reference, **Sessions** shows the linked journey.

@@ -1,0 +1,38 @@
+---
+title: "Configuration"
+description: "Server environment variables and adapter options."
+---
+
+## Environment variables
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `AGENT_FEEDBACK_KEY` | Yes | Server-side product write key |
+| `AGENT_FEEDBACK_MODE` | No | `never_ask` (default), `ask_once`, `ask_always`, or `off` |
+| `AGENT_FEEDBACK_ENABLED` | No | Set to `false` for the emergency kill switch |
+| `AGENT_FEEDBACK_URL` | No | Override the Epode origin for local/canary testing only |
+
+Do not use `AGENT_FEEDBACK_READ_KEY` in a product integration. Read keys are for the optional Epode dashboard MCP
+client and cannot sign feedback capabilities.
+
+## Common adapter options
+
+| Option | Purpose |
+| --- | --- |
+| `apiKey` / `api_key` | Product key, normally read from the environment |
+| `include` | Route patterns that receive feedback contracts |
+| `feedbackMode` / `feedback_mode` | Explicit mode override |
+| `customerRef` / `customer_ref` | Optional opaque product-auth account or tenant ID |
+| `endpoint` | Override Epode origin in tests |
+
+## Route patterns
+
+Configure routes in code so configuration is reviewed and deployed with the product. Use exact paths for narrow
+surfaces and framework-supported wildcards for related routes. Do not instrument the entire application unless all
+successful responses are intended for customer agents.
+
+## Key rotation
+
+Rotate a key from Setup. The previous key remains valid for one hour so you can deploy the replacement without
+dropping product traffic. A rotated key changes the Ask once consent scope.
+

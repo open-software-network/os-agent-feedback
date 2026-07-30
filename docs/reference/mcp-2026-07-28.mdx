@@ -1,0 +1,45 @@
+---
+title: "MCP 2026-07-28 binding"
+description: "The stateless MCP transport, discovery, feedback tool, and evidence contract."
+---
+
+## Transport
+
+- Every request is a separate `POST`.
+- Do not mint or require `Mcp-Session-Id` for modern requests.
+- Validate every present HTTP `Origin` against an explicit allowlist.
+- Require the matching `MCP-Protocol-Version` and `Mcp-Method` headers.
+- Require `Mcp-Name` for named requests such as `tools/call`.
+- Require protocol version, client info, and client capabilities in `params._meta`.
+
+## Discovery and result shape
+
+Implement `server/discover` and advertise `2026-07-28` plus the `tools` capability. Completed results return:
+
+- `resultType: "complete"`;
+- `_meta.io.modelcontextprotocol/serverInfo`;
+- deterministic `ttlMs` and `cacheScope` where required.
+
+## Feedback binding
+
+The server registers `report_product_feedback` and decorates product-tool results with:
+
+```json
+{
+  "_agentFeedback": {
+    "reliability": "protocol_tool",
+    "reportTool": "report_product_feedback",
+    "feedbackHandle": "afr2_...",
+    "instruction": "Submit one structured product report after the experience is known."
+  }
+}
+```
+
+The product-tool call is confirmed immediately with confirmation method `mcp`. The later report enriches that
+same interaction.
+
+## 2025 compatibility
+
+A server may accept the `2025-11-25` initialize handshake as a stateless compatibility fallback. Modern requests
+must never depend on that fallback or introduce transport-session state.
+

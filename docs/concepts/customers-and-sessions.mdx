@@ -1,0 +1,32 @@
+---
+title: "Customers and sessions"
+description: "Add optional product context without identifying agents or guessing journeys."
+---
+
+You do not need to know who the customer's agent is.
+
+## Customer grouping
+
+`customerRef` is an optional opaque identifier derived from authentication your product already has.
+Good values are internal account or tenant IDs. Do not send names, email addresses, prompts, or task text.
+
+```ts
+app.use(agentFeedback({
+  apiKey: process.env.AGENT_FEEDBACK_KEY,
+  include: ["/search"],
+  customerRef: req => req.user?.accountId,
+}));
+```
+
+## Session continuity
+
+Sessions exist only when your product or MCP integration supplies a stable, application-level reference.
+Epode does not group requests by timing, IP address, user agent, or inferred identity.
+
+Use a session reference when your product already has a meaningful journey—such as a checkout attempt,
+support workflow, or research run. If no stable reference exists, leave it out and use interactions instead.
+
+<Note>
+An MCP transport session is not product-session proof. MCP 2026-07-28 transport is stateless; application
+continuity must be explicit.
+</Note>

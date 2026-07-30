@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, time::Duration};
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -32,7 +32,8 @@ async fn main() -> anyhow::Result<()> {
         .nth(1)
         .ok_or_else(|| anyhow::anyhow!("seed, read, or delete is required"))?;
     let pool: PgPool = PgPoolOptions::new()
-        .max_connections(2)
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(10))
         .connect(&required("DATABASE_URL")?)
         .await?;
     if action == "delete-all-tests" {

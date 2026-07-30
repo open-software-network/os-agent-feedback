@@ -41,6 +41,7 @@ function run(command, args, options = {}) {
     input: options.input,
     encoding: "utf8",
     maxBuffer: 20 * 1024 * 1024,
+    timeout: options.timeout,
   });
   if (result.status !== 0) {
     throw new Error(`${command} ${args.join(" ")} failed\n${result.stdout || ""}\n${result.stderr || ""}`);
@@ -103,6 +104,7 @@ function database(action) {
       SETUP_MATRIX_KEY_ID: keyId,
       SETUP_MATRIX_API_KEY: apiKey,
     },
+    timeout: 30_000,
   });
 }
 
@@ -291,20 +293,25 @@ async function testMcp(url, stack) {
   assert.match(feedback.feedbackHandle, /^afr2_/);
   assert.match(feedback.instruction, /autonomously/i);
   const summary = `Epode ${stack} MCP setup returned the expected result.`;
-  payload = await mcpPost(url, modernMcpRequest(5, "tools/call", {
-    name: "report_product_feedback",
-    arguments: {
-      feedbackHandle: feedback.feedbackHandle,
-      summary,
-      impact: "helped_with_friction",
-      confidence: 0.91,
-      findings: [
-        { kind: "strength", topic: "integration", detail: "The MCP tool returned the expected result." },
-        { kind: "friction", topic: "verification", severity: "minor", detail: "The agent performed one additional verification step." },
-      ],
-      workaround: { used: true, detail: "The agent verified the result through the setup harness." },
-    },
-  }));
+  const reportArguments = {
+    feedbackHandle: feedback.feedbackHandle,
+    summary,
+    impact: "helped_with_friction",
+    confidence: 0.91,
+    findings: [
+      { kind: "strength", topic: "integration", detail: "The MCP tool returned the expected result." },
+      { kind: "friction", topic: "verification", severity: "minor", detail: "The agent performed one additional verification step." },
+    ],
+    workaround: { used: true, detail: "The agent verified the result through the setup harness." },
+  };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    payload = await mcpPost(url, modernMcpRequest(5 + attempt, "tools/call", {
+      name: "report_product_feedback",
+      arguments: reportArguments,
+    }));
+    if (payload.result.structuredContent.accepted || !payload.result.structuredContent.retryable) break;
+    if (attempt === 0) await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+  }
   assert.equal(payload.result.resultType, "complete");
   assert.equal(payload.result.structuredContent.accepted, true, JSON.stringify(payload.result));
   assert.equal(payload.result.structuredContent.report.summary, summary);
@@ -404,8 +411,12 @@ const apiKey = `af_live_${keyId.replaceAll("-", "")}_${randomBytes(30).toString(
 
 try {
   if (process.env.SETUP_MATRIX_SKIP_BUILD !== "true") run("bash", ["tests/build-hosted-artifacts.sh"]);
-  const railwayVariables = JSON.parse(run("railway", ["variables", "--service", "Postgres", "--environment", databaseEnvironment, "--json"]));
-  databaseUrl = railwayVariables.DATABASE_PUBLIC_URL;
+  if (process.env.SETUP_MATRIX_DATABASE_URL) {
+    databaseUrl = process.env.SETUP_MATRIX_DATABASE_URL;
+  } else {
+    const railwayVariables = JSON.parse(run("railway", ["variables", "--service", "Postgres", "--environment", databaseEnvironment, "--json"]));
+    databaseUrl = railwayVariables.DATABASE_PUBLIC_URL;
+  }
   if (!databaseUrl) throw new Error(`Postgres in ${databaseEnvironment} has no DATABASE_PUBLIC_URL`);
   if (localBackend) {
     const backend = start("cargo", ["run", "--quiet", "--bin", "agent-feedback"], {
@@ -417,6 +428,7 @@ try {
         OS_ACCOUNTS_URL: "https://accounts.example.test",
         OS_ACCOUNTS_API_URL: "https://accounts-api.example.test",
         OS_ACCOUNTS_CLIENT_ID: "ocl_setup_matrix",
+        DATABASE_MAX_CONNECTIONS: "4",
         PORT: "3180",
       },
     });

@@ -1,0 +1,38 @@
+---
+title: "Feedback modes"
+description: "Choose when customer agents submit feedback and when they must ask permission."
+---
+
+Configure the product's mode in **Collection policy**, then deploy the matching
+`AGENT_FEEDBACK_MODE` value so the emitted instruction stays in sync.
+
+| Dashboard label | Environment value | Agent behavior |
+| --- | --- | --- |
+| Never ask | `never_ask` | Submit the agent's own bounded assessment without interrupting the user |
+| Ask once | `ask_once` | Ask once for this product in this agent runtime; remember approval or refusal locally |
+| Ask every time | `ask_always` | Ask before each report |
+| Off | `off` | Emit no feedback contract and reject reports |
+
+## Ask once
+
+The response includes an opaque `consentScope`. The agent runtime—not Epode—stores approval or
+refusal under that scope. A later approved report uses `approvalSource: "stored_grant"`.
+
+Rotating a product key produces a new scope, so an agent may ask again. The scope is not a user or
+agent identity.
+
+## Ask every time
+
+Every report requires fresh approval and `approvalSource: "granted_now"`. Stored consent is ignored.
+
+## Permission copy
+
+Use the concrete question carried by the protocol:
+
+> May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.
+
+<Warning>
+Never infer approval from silence. Diagnostics validate ask-mode contracts but do not submit a report,
+because a diagnostic cannot impersonate the user.
+</Warning>
+

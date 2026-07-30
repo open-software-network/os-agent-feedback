@@ -1,0 +1,82 @@
+---
+title: "Node MCP"
+description: "Instrument a stateless MCP 2026-07-28 server and register structured feedback automatically."
+---
+
+MCP is Epode's strongest integration: every completed product-tool call is a confirmed interaction, and
+the customer agent sees an explicit `report_product_feedback` tool.
+
+## Install
+
+```bash
+npm install https://app.epode.ai/static/agent-feedback-node-0.1.0.tgz
+npm install @modelcontextprotocol/server @modelcontextprotocol/node @modelcontextprotocol/express zod
+```
+
+## Configure once
+
+Create one process-level Epode instrumentation object so telemetry can batch across requests. Create a
+fresh MCP server for each stateless HTTP request and instrument it **before** registering business tools.
+
+```ts
+import { createMcpInstrumentation } from "@agent-feedback/node/mcp";
+import { createMcpExpressApp } from "@modelcontextprotocol/express";
+import { toNodeHandler } from "@modelcontextprotocol/node";
+import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
+import { z } from "zod";
+
+// [] rejects browser Origin requests. Add only trusted browser client origins.
+const app = createMcpExpressApp({ host: "0.0.0.0", allowedOrigins: [] });
+
+const feedback = createMcpInstrumentation({
+  apiKey: process.env.AGENT_FEEDBACK_KEY,
+});
+
+function productServer() {
+  const server = new McpServer({ name: "your-product", version: "1.0.0" });
+
+  feedback.instrument(server);
+
+  server.registerTool("search", {
+    description: "Search the product",
+    inputSchema: z.object({ query: z.string() }),
+  }, async ({ query }) => ({
+    content: [{ type: "text", text: await search(query) }],
+  }));
+
+  return server;
+}
+
+const mcp = createMcpHandler(productServer, {
+  legacy: "stateless",
+  responseMode: "json",
+});
+const handleMcp = toNodeHandler(mcp);
+
+app.all("/mcp", (req, res) => handleMcp(req, res, req.body));
+app.listen(Number(process.env.PORT || 3000), "0.0.0.0");
+```
+
+<Warning>
+Do not create or depend on `Mcp-Session-Id` for modern requests. MCP 2026-07-28 is stateless. Use an
+explicit application-level handle if your product has a meaningful multi-tool journey.
+</Warning>
+
+## Verify
+
+From an MCP 2026-07-28 client:
+
+1. Call `server/discover`.
+2. Call `tools/list` and confirm your product tool plus `report_product_feedback` are present.
+3. Call one normal product tool and confirm its result contains `_agentFeedback`.
+4. Call `report_product_feedback` using the returned `feedbackHandle`.
+5. Confirm the interaction and report appear in Epode.
+
+Call the feedback tool once under normal conditions. If it returns `retryable: true`, retry exactly once with
+the same `feedbackHandle` and identical report. Capabilities are idempotent, so a lost success response cannot
+create a second report.
+
+The `legacy: "stateless"` option retains a 2025-11-25 compatibility handshake without introducing
+transport-session state.
+
+[View the runnable Node MCP example](https://github.com/open-software-network/os-epode/tree/main/examples/setup-matrix-node-mcp)

@@ -1,0 +1,46 @@
+---
+title: "Protocol overview"
+description: "The language-neutral contract shared by every Epode SDK."
+---
+
+The Epode protocol is deliberately small enough to implement with standard HTTP, JSON, HMAC-SHA256,
+UUID, and base64url libraries.
+
+## Public discovery
+
+```http
+GET https://app.epode.ai/.well-known/agent-feedback-v1.json
+```
+
+The discovery document publishes supported feedback modes, report fields, MCP binding information,
+privacy rules, and downloadable SDK/protocol artifacts.
+
+## Product-authenticated telemetry
+
+```http
+POST https://app.epode.ai/api/v2/telemetry/batches
+Authorization: Bearer af_live_...
+Content-Type: application/json
+```
+
+Only company-side SDKs use the product key. Telemetry must be queued and sent off the primary response path.
+
+## Capability-authenticated report
+
+```http
+POST https://app.epode.ai/api/v2/reports
+Authorization: Bearer afr2_...
+Content-Type: application/json
+```
+
+The customer's agent receives only a short-lived interaction capability. It never receives the company key.
+
+## Downloadable conformance bundle
+
+```bash
+curl -fsSLO https://app.epode.ai/static/agent-feedback-protocol-v1.zip
+unzip agent-feedback-protocol-v1.zip
+```
+
+Use the included schemas and signing vector as the source of truth for a new adapter.
+

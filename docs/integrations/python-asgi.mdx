@@ -1,0 +1,53 @@
+---
+title: "Python ASGI"
+description: "Instrument FastAPI, Starlette, Quart, or Django ASGI responses."
+---
+
+## Install
+
+```bash
+python -m pip install https://app.epode.ai/static/agent_feedback-0.1.0-py3-none-any.whl
+```
+
+Python 3.10 or newer is required.
+
+## Configure once
+
+Wrap the completed ASGI app:
+
+```python
+import os
+from fastapi import FastAPI
+from agent_feedback import AgentFeedbackASGI
+
+app = FastAPI()
+
+@app.get("/search")
+async def search_endpoint(q: str):
+    return {"results": await search(q)}
+
+app = AgentFeedbackASGI(
+    app,
+    api_key=os.environ["AGENT_FEEDBACK_KEY"],
+    include=("/search", "/docs/*"),
+    customer_ref=lambda scope: scope.get("account_id"),  # optional opaque ID
+)
+```
+
+## Server-rendered HTML
+
+The same wrapper injects the machine-readable contract into finite HTML responses on included routes.
+JSON objects retain their existing shape and add `_agentFeedback`.
+
+## Verify
+
+Send a real request to an included route and inspect the response:
+
+```bash
+curl -sS 'https://your-product.example/search?q=epode-test' | jq '._agentFeedback'
+```
+
+Then confirm **Setup** shows telemetry. A generic HTTP client does not automatically prove agent use;
+the interaction becomes confirmed when its feedback capability returns.
+
+[View the runnable ASGI example](https://github.com/open-software-network/os-epode/tree/main/examples/setup-matrix-python-asgi)

@@ -1,0 +1,48 @@
+---
+title: "How Epode works"
+description: "The company-side integration, customer-agent handoff, and feedback path."
+---
+
+Epode has two participants with different responsibilities:
+
+| Participant | Responsibility |
+| --- | --- |
+| Your company | Adds the server-side SDK to selected product responses and keeps the product key secret |
+| Your customer's agent | Uses the product, interprets the bounded feedback contract, and may submit one report |
+
+The SDK signs a capability locally. It does **not** call Epode before returning your product response.
+Opportunity telemetry is delivered later through a bounded background queue.
+
+## What the capability can do
+
+The short-lived capability can submit one report for one interaction. It contains only a protocol
+version, interaction ID, issue/expiry timestamps, and nonce. It does not contain customer context,
+product content, a prompt, or an identity.
+
+## What a report contains
+
+```json
+{
+  "summary": "The result answered the question, but one field required verification.",
+  "impact": "helped_with_friction",
+  "confidence": 0.91,
+  "findings": [
+    { "kind": "strength", "topic": "relevance", "detail": "The top result was useful." },
+    { "kind": "gap", "topic": "freshness", "severity": "major", "detail": "One field was stale." }
+  ],
+  "workaround": { "used": true, "detail": "The agent verified the field in current docs." }
+}
+```
+
+This is intentionally more expressive than success/partial/failure. One experience can contain a
+strength, friction, uncertainty, gap, and workaround at the same time.
+
+## Failure isolation
+
+If Epode is slow or unavailable:
+
+- your product response is not delayed or failed;
+- queued opportunity telemetry may be retried or dropped;
+- a feedback submission receives a retryable failure;
+- no prompt, transcript, credential, or raw product payload is sent as telemetry.
+
