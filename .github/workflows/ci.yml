@@ -22,6 +22,7 @@ jobs:
       landing: ${{ steps.filter.outputs.landing }}
       sdk-node: ${{ steps.filter.outputs.sdk-node }}
       docs: ${{ steps.filter.outputs.docs }}
+      workflows: ${{ steps.filter.outputs.workflows }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - id: filter
@@ -73,6 +74,8 @@ jobs:
               - "backend/public/app.js"
               - "tests/docs-contract.test.mjs"
               - ".github/workflows/ci.yml"
+            workflows:
+              - ".github/workflows/**"
 
   backend:
     name: Backend
@@ -183,9 +186,29 @@ jobs:
   # this job alone rather than five names that must be edited whenever a job is
   # added or renamed. `always()` makes it run even when a dependency is skipped
   # or failed — without it, one skipped dependency would skip the gate too.
+  workflows:
+    name: Workflow lint
+    needs: changes
+    if: needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    env:
+      ACTIONLINT_VERSION: 1.7.10
+      ACTIONLINT_SHA256: f4c76b71db5755a713e6055cbb0857ed07e103e028bda117817660ebadb4386f
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install actionlint (pinned, checksum-verified)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum --check
+          tar -xzf actionlint.tar.gz actionlint
+      - name: Lint workflows
+        run: ./actionlint -color
+
   ci-ok:
     name: CI
-    needs: [backend, node, landing, sdk-node, docs]
+    needs: [backend, node, landing, sdk-node, docs, workflows]
     if: always()
     runs-on: ubuntu-latest
     steps:
