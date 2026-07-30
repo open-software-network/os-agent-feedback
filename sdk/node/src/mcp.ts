@@ -9,7 +9,7 @@ import {
 
 type McpContext = Record<string, unknown>;
 type McpResult = {
-  content?: Array<Record<string, unknown>>;
+  content?: Record<string, unknown>[];
   structuredContent?: Record<string, unknown>;
   isError?: boolean;
   [key: string]: unknown;

@@ -1,3 +1,8 @@
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "crate-restricted visibility satisfies unreachable_pub in this binary-only crate"
+)]
+
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
@@ -7,7 +12,7 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct Workspace {
+pub(crate) struct Workspace {
     pub id: Uuid,
     pub os_user_id: String,
     pub name: String,
@@ -21,7 +26,7 @@ pub struct Workspace {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CurrentUser {
+pub(crate) struct CurrentUser {
     pub id: String,
     pub handle: String,
     pub email: Option<String>,
@@ -30,7 +35,7 @@ pub struct CurrentUser {
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkspaceMembership {
+pub(crate) struct WorkspaceMembership {
     pub workspace_id: Uuid,
     pub workspace_name: String,
     pub workspace_slug: String,
@@ -39,7 +44,7 @@ pub struct WorkspaceMembership {
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct TeamMember {
+pub(crate) struct TeamMember {
     pub workspace_id: Uuid,
     pub os_user_id: String,
     pub handle: String,
@@ -52,7 +57,7 @@ pub struct TeamMember {
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct TeamInvitation {
+pub(crate) struct TeamInvitation {
     pub id: Uuid,
     pub workspace_id: Uuid,
     pub invited_by_os_user_id: String,
@@ -65,20 +70,20 @@ pub struct TeamInvitation {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CreateTeamInvitationInput {
+pub(crate) struct CreateTeamInvitationInput {
     pub invitee: Option<String>,
     pub role: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct UpdateTeamMemberInput {
+pub(crate) struct UpdateTeamMemberInput {
     pub role: String,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct ApiKeyPublic {
+pub(crate) struct ApiKeyPublic {
     pub id: Uuid,
     pub environment_id: Uuid,
     pub label: String,
@@ -92,7 +97,7 @@ pub struct ApiKeyPublic {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CreateApiKeyInput {
+pub(crate) struct CreateApiKeyInput {
     pub environment_id: Uuid,
     pub label: Option<String>,
     pub kind: Option<String>,
@@ -101,7 +106,7 @@ pub struct CreateApiKeyInput {
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct Product {
+pub(crate) struct Product {
     pub id: Uuid,
     pub workspace_id: Uuid,
     pub name: String,
@@ -112,7 +117,7 @@ pub struct Product {
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct ProductEnvironment {
+pub(crate) struct ProductEnvironment {
     pub id: Uuid,
     pub workspace_id: Uuid,
     pub product_id: Uuid,
@@ -127,25 +132,25 @@ pub struct ProductEnvironment {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CreateProductInput {
+pub(crate) struct CreateProductInput {
     pub name: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct UpdateNameInput {
+pub(crate) struct UpdateNameInput {
     pub name: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DeleteProductInput {
+pub(crate) struct DeleteProductInput {
     pub confirmation: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PolicyInput {
+pub(crate) struct PolicyInput {
     pub environment_id: Uuid,
     pub feedback_mode: String,
     pub collect_event_summaries: bool,
@@ -154,7 +159,7 @@ pub struct PolicyInput {
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct ProductSession {
+pub(crate) struct ProductSession {
     pub id: Uuid,
     pub workspace_id: Uuid,
     pub environment_id: Uuid,
@@ -167,7 +172,7 @@ pub struct ProductSession {
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct ProductInteraction {
+pub(crate) struct ProductInteraction {
     pub id: Uuid,
     pub workspace_id: Uuid,
     pub environment_id: Uuid,
@@ -189,7 +194,7 @@ pub struct ProductInteraction {
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct ProductFeedbackReport {
+pub(crate) struct ProductFeedbackReport {
     pub id: Uuid,
     pub workspace_id: Uuid,
     pub interaction_id: Uuid,
@@ -204,7 +209,7 @@ pub struct ProductFeedbackReport {
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct ProductFeedbackReportWithInteraction {
+pub(crate) struct ProductFeedbackReportWithInteraction {
     pub id: Uuid,
     pub interaction_id: Uuid,
     pub summary: String,
@@ -234,7 +239,7 @@ pub struct ProductFeedbackReportWithInteraction {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct UpdateFeedbackWorkflowInput {
+pub(crate) struct UpdateFeedbackWorkflowInput {
     pub product_id: Uuid,
     pub status: String,
     pub assignee_os_user_id: Option<String>,
@@ -245,7 +250,7 @@ pub struct UpdateFeedbackWorkflowInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct FeedbackListReportsInput {
+pub(crate) struct FeedbackListReportsInput {
     pub summary: Option<bool>,
     pub since: Option<DateTime<Utc>>,
     pub impact: Option<Vec<String>>,
@@ -260,7 +265,7 @@ pub struct FeedbackListReportsInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct FeedbackListInteractionsInput {
+pub(crate) struct FeedbackListInteractionsInput {
     pub since: Option<DateTime<Utc>>,
     pub reviewed: Option<bool>,
     pub operation: Option<String>,
@@ -272,14 +277,14 @@ pub struct FeedbackListInteractionsInput {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FeedbackWindow {
+pub(crate) struct FeedbackWindow {
     pub since: DateTime<Utc>,
     pub retention_days: i32,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct FeedbackReportItem {
+pub(crate) struct FeedbackReportItem {
     pub id: Uuid,
     pub summary: String,
     pub impact: Option<String>,
@@ -298,7 +303,7 @@ pub struct FeedbackReportItem {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FeedbackReportsPage {
+pub(crate) struct FeedbackReportsPage {
     pub reports: Vec<FeedbackReportItem>,
     pub next_cursor: Option<String>,
     pub window: FeedbackWindow,
@@ -306,7 +311,7 @@ pub struct FeedbackReportsPage {
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct FeedbackInteractionItem {
+pub(crate) struct FeedbackInteractionItem {
     pub id: Uuid,
     pub operation: String,
     pub customer_ref: Option<String>,
@@ -319,7 +324,7 @@ pub struct FeedbackInteractionItem {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FeedbackInteractionsPage {
+pub(crate) struct FeedbackInteractionsPage {
     pub interactions: Vec<FeedbackInteractionItem>,
     pub next_cursor: Option<String>,
     pub window: FeedbackWindow,
@@ -327,7 +332,7 @@ pub struct FeedbackInteractionsPage {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FeedbackOperationSummary {
+pub(crate) struct FeedbackOperationSummary {
     pub operation: String,
     pub interactions: i64,
     pub reports: i64,
@@ -335,14 +340,14 @@ pub struct FeedbackOperationSummary {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FeedbackSurfaceSummary {
+pub(crate) struct FeedbackSurfaceSummary {
     pub surface: String,
     pub interactions: i64,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FeedbackSummary {
+pub(crate) struct FeedbackSummary {
     pub product: String,
     pub window: FeedbackWindow,
     pub interactions: i64,
@@ -359,27 +364,27 @@ pub struct FeedbackSummary {
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
-pub enum FeedbackReportsResponse {
+pub(crate) enum FeedbackReportsResponse {
     Summary(FeedbackSummary),
     Page(FeedbackReportsPage),
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TelemetryBatchInput {
+pub(crate) struct TelemetryBatchInput {
     pub events: Vec<InteractionTelemetryInput>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TelemetryBatchResult {
+pub(crate) struct TelemetryBatchResult {
     pub accepted: usize,
     pub dropped: usize,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct InteractionTelemetryInput {
+pub(crate) struct InteractionTelemetryInput {
     pub interaction_id: Uuid,
     pub sequence: Option<i64>,
     pub surface: String,
@@ -398,7 +403,7 @@ pub struct InteractionTelemetryInput {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct FeedbackFindingInput {
+pub(crate) struct FeedbackFindingInput {
     pub kind: String,
     pub topic: String,
     pub severity: Option<String>,
@@ -407,14 +412,14 @@ pub struct FeedbackFindingInput {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct FeedbackWorkaroundInput {
+pub(crate) struct FeedbackWorkaroundInput {
     pub used: bool,
     pub detail: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ProductFeedbackReportInput {
+pub(crate) struct ProductFeedbackReportInput {
     pub summary: String,
     pub impact: Option<String>,
     pub confidence: Option<f64>,
@@ -426,7 +431,7 @@ pub struct ProductFeedbackReportInput {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct FeedbackConsentInput {
+pub(crate) struct FeedbackConsentInput {
     pub user_approved: bool,
     pub approval_source: String,
     pub consent_scope: Option<String>,
@@ -434,14 +439,14 @@ pub struct FeedbackConsentInput {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct InsightCount {
+pub(crate) struct InsightCount {
     pub name: String,
     pub count: i64,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Insights {
+pub(crate) struct Insights {
     pub window_days: i32,
     pub comparison_days: i32,
     pub opportunities: i64,
@@ -469,7 +474,7 @@ pub struct Insights {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DashboardListState {
+pub(crate) struct DashboardListState {
     pub interactions_total: i64,
     pub reports_total: i64,
     pub sessions_total: i64,
@@ -480,7 +485,7 @@ pub struct DashboardListState {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DashboardSessionDetail {
+pub(crate) struct DashboardSessionDetail {
     pub session: ProductSession,
     pub interactions: Vec<ProductInteraction>,
     pub reports: Vec<ProductFeedbackReportWithInteraction>,
@@ -488,7 +493,7 @@ pub struct DashboardSessionDetail {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DashboardData {
+pub(crate) struct DashboardData {
     pub user: CurrentUser,
     pub workspace: Workspace,
     pub workspace_memberships: Vec<WorkspaceMembership>,
@@ -508,14 +513,14 @@ pub struct DashboardData {
 }
 
 #[derive(Debug, Clone)]
-pub struct ProductAuth {
+pub(crate) struct ProductAuth {
     pub workspace: Workspace,
     pub environment: ProductEnvironment,
     pub api_key_id: Uuid,
 }
 
 #[derive(Debug, Clone)]
-pub struct DashboardContext {
+pub(crate) struct DashboardContext {
     pub user: CurrentUser,
     pub workspace: Workspace,
     pub role: String,

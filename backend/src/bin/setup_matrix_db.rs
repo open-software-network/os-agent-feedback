@@ -1,3 +1,8 @@
+#![allow(
+    clippy::print_stdout,
+    reason = "this database setup CLI communicates its results through standard output"
+)]
+
 use std::{env, time::Duration};
 
 use serde_json::json;
@@ -102,10 +107,10 @@ async fn main() -> anyhow::Result<()> {
         }
         "read" => {
             let rows = sqlx::query_as::<_, StoredRow>(
-                r#"SELECT i.id, i.surface, i.operation, i.classification, i.confirmation_method,
+                r"SELECT i.id, i.surface, i.operation, i.classification, i.confirmation_method,
                 r.summary, r.impact, r.findings, r.workaround
                 FROM interactions_v2 i JOIN feedback_reports r ON r.interaction_id = i.id
-                WHERE i.workspace_id = $1 ORDER BY r.summary"#,
+                WHERE i.workspace_id = $1 ORDER BY r.summary",
             )
             .bind(workspace_id)
             .fetch_all(&pool)
