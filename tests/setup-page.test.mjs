@@ -84,7 +84,7 @@ test("dashboard action notices are ephemeral fixed toasts", () => {
 
 test("products exist before integration setup without an environment picker", () => {
   assert.match(dashboardHtml, /id="product-scope"/);
-  assert.match(dashboardHtml, /app\.js\?v=20260729-home/);
+  assert.match(dashboardHtml, /app\.js\?v=20260730-quality/);
   assert.match(dashboardScript, /Create your first product/);
   assert.match(dashboardScript, /id="product-select"/);
   assert.match(dashboardScript, /\+ New product/);

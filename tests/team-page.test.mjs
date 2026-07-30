@@ -15,7 +15,7 @@ test("dashboard exposes team switching and membership management", () => {
   assert.match(dashboardScript, /id="workspace-select"/);
   assert.match(dashboardScript, /Invite teammates/);
   assert.match(dashboardScript, /type="email"/);
-  assert.match(dashboardScript, />Invite<\/button>/);
+  assert.match(dashboardScript, />Open email draft<\/button>/);
   assert.match(dashboardScript, /Copy member invite link/);
   assert.match(dashboardScript, /data-create-invite-link/);
   assert.match(dashboardScript, /teamInvitations\.filter\(\(invitation\) => invitation\.inviteeKind !== "link"\)/);
@@ -25,6 +25,7 @@ test("dashboard exposes team switching and membership management", () => {
   assert.doesNotMatch(dashboardScript, /OS Account|@handle/);
   assert.match(dashboardScript, /data-member-role/);
   assert.match(dashboardScript, /data-remove-member/);
+  assert.match(dashboardScript, /data-transfer-owner/);
   assert.match(dashboardScript, /data-revoke-invitation/);
 });
 

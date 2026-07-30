@@ -12,11 +12,11 @@ async function render(path = "/") {
   );
 }
 
-test("server-renders the Agent Feedback product contract", async () => {
+test("server-renders the Epode product contract", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   const html = await response.text();
-  assert.match(html, /Agent Feedback — product feedback from customer agents/i);
+  assert.match(html, /Epode — product feedback from customer agents/i);
   assert.match(html, /Did your product actually work for your customer/i);
   assert.match(html, /agentFeedback/);
   assert.match(html, /Node, Python, Go, Rust/i);
