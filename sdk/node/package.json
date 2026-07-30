@@ -43,8 +43,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test test/*.test.mjs",
-    "prepack": "npm test"
+    "test": "pnpm run build && node --test test/*.test.mjs",
+    "prepack": "pnpm run test"
   },
   "dependencies": {
     "fastify-plugin": "^5.1.0",

@@ -1,57 +1,26 @@
 {
-  "name": "agent-feedback-site",
-  "version": "0.1.0",
   "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.11.0",
+  "engines": {
+    "node": ">=22.13.0 <25"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/open-software-network/os-epode.git"
   },
-  "engines": {
-    "node": ">=22.13.0"
-  },
   "scripts": {
-    "dev": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev",
-    "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
-    "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
-    "test": "npm run build && node --test tests/*.test.mjs",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
-    "db:generate": "drizzle-kit generate",
+    "test": "node --test tests/*.test.mjs",
     "build:artifacts": "bash tests/build-hosted-artifacts.sh",
     "test:setup-matrix": "node tests/setup-matrix-e2e.mjs",
     "test:icp-loop": "node tests/icp-onboarding-e2e.mjs",
-    "docs:validate": "cd docs && npx --yes mint validate",
-    "docs:a11y": "cd docs && npx --yes mint a11y",
-    "test:docs-loop": "npm run docs:validate && npm run docs:a11y && node --test tests/docs-contract.test.mjs && SETUP_MATRIX_BACKEND_URL=https://agent-feedback-api-v2-canary.up.railway.app SETUP_MATRIX_DB_ENVIRONMENT=v2-canary SETUP_MATRIX_SKIP_BUILD=true node tests/setup-matrix-e2e.mjs"
-  },
-  "dependencies": {
-    "drizzle-orm": "0.45.2",
-    "next": "16.2.12",
-    "react": "19.2.6",
-    "react-dom": "19.2.6"
+    "docs:validate": "cd docs && pnpm exec mint validate",
+    "docs:a11y": "cd docs && pnpm exec mint a11y",
+    "test:docs-loop": "pnpm run docs:validate && pnpm run docs:a11y && node --test tests/docs-contract.test.mjs && SETUP_MATRIX_BACKEND_URL=https://agent-feedback-api-v2-canary.up.railway.app SETUP_MATRIX_DB_ENVIRONMENT=v2-canary node tests/setup-matrix-e2e.mjs"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "1.37.1",
-    "@tailwindcss/postcss": "4.2.1",
-    "@types/node": "22.19.19",
-    "@types/react": "19.2.14",
-    "@types/react-dom": "19.2.3",
-    "@vitejs/plugin-react": "6.0.2",
-    "@vitejs/plugin-rsc": "0.5.26",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
-    "drizzle-kit": "0.31.10",
-    "eslint": "9.39.4",
-    "eslint-config-next": "16.2.6",
-    "react-server-dom-webpack": "19.2.6",
-    "tailwindcss": "4.2.1",
-    "typescript": "5.9.3",
-    "vinext": "0.0.50",
-    "vite": "8.0.13",
-    "wrangler": "4.92.0"
-  },
-  "overrides": {
-    "postcss": "8.5.23",
-    "sharp": "0.35.3"
-  },
-  "type": "module"
+    "mint": "4.2.734"
+  }
 }

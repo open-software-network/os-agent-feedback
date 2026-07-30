@@ -438,7 +438,6 @@ const keyId = randomUUID();
 const apiKey = `af_live_${keyId.replaceAll("-", "")}_${randomBytes(30).toString("base64url")}`;
 
 try {
-  if (process.env.SETUP_MATRIX_SKIP_BUILD !== "true") run("bash", ["tests/build-hosted-artifacts.sh"]);
   if (process.env.SETUP_MATRIX_DATABASE_URL) {
     databaseUrl = process.env.SETUP_MATRIX_DATABASE_URL;
   } else {

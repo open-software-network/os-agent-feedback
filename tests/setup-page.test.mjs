@@ -47,17 +47,11 @@ const backendModels = await readFile(
   new URL("../backend/src/models.rs", import.meta.url),
   "utf8",
 );
-const appAuth = await readFile(
-  new URL("../app/auth.ts", import.meta.url),
-  "utf8",
-);
-
 test("the root URL is the canonical signed-in app", () => {
   assert.match(backendMain, /\.route\("\/", get\(root_page\)\)/);
   assert.doesNotMatch(backendMain, /\.route\("\/app"/);
   assert.match(backendMain, /format!\("\/\?view=team&team=\{workspace_id\}"\)/);
   assert.match(dashboardScript, /location\.assign\("\/auth\/start"\)/);
-  assert.match(appAuth, /requireAppUser\(returnTo = "\/"\)/);
   assert.doesNotMatch(backendMain, /"\/app"\.into\(\)/);
 });
 

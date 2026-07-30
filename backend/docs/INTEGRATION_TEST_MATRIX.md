@@ -36,10 +36,11 @@ site/CMS remains visibly disabled and is not counted as supported.
 
 ## Exact setup matrix
 
-`npm run test:setup-matrix` rebuilds the hosted SDK artifacts, creates a fresh disposable
-canary product and product key, installs each integration from the same artifact/command
-shown by Setup, and launches nine new product examples. A feedback-aware customer-agent
-client then exercises every enabled permutation.
+`pnpm run test:setup-matrix` creates a fresh disposable canary product and product key,
+installs each integration from the hosted artifacts already in `backend/public/` and the
+commands shown by Setup, and launches nine new product examples. Run
+`pnpm run build:artifacts` first if the SDK source changed. A feedback-aware
+customer-agent client then exercises every enabled permutation.
 
 For all 16 cases it asserts:
 

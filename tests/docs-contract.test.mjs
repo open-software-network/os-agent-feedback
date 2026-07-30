@@ -172,7 +172,7 @@ test("every public docs page has a title and actionable description", async () =
 });
 
 test("the downloadable protocol bundle contains only the current report contract", () => {
-  const listing = execFileSync("unzip", ["-Z1", new URL("../public/agent-feedback-protocol-v1.zip", import.meta.url).pathname], { encoding: "utf8" });
+  const listing = execFileSync("unzip", ["-Z1", new URL("../backend/public/agent-feedback-protocol-v1.zip", import.meta.url).pathname], { encoding: "utf8" });
   assert.doesNotMatch(listing, /outcome\.schema\.json/);
   for (const required of ["README.md", "conformance.json", "envelope.schema.json", "feedback-report.schema.json", "telemetry-batch.schema.json"]) {
     assert.match(listing, new RegExp(`protocol/v1/${required.replaceAll(".", "\\.")}$`, "m"));
