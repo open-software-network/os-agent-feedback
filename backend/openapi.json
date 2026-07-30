@@ -1,0 +1,972 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Epode Agent Feedback API",
+    "description": "Structured product feedback collection and workspace management API.",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/health": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "API and database are healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database health check failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/.well-known/agent-feedback-v1.json": {
+      "get": {
+        "tags": [
+          "ingest"
+        ],
+        "operationId": "feedback_discovery_v2",
+        "responses": {
+          "200": {
+            "description": "Agent Feedback protocol discovery document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackDiscoveryResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/telemetry/batches": {
+      "post": {
+        "tags": [
+          "ingest"
+        ],
+        "operationId": "telemetry_batch_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TelemetryBatchInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Telemetry batch accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TelemetryBatchResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid telemetry batch or malformed JSON body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or expired product API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the configured limit",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Request body is not JSON",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Telemetry ingestion failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          },
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v2/reports": {
+      "post": {
+        "tags": [
+          "ingest"
+        ],
+        "operationId": "product_feedback_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductFeedbackReportInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Feedback report accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductFeedbackAcceptedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid feedback report or malformed JSON body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or expired interaction capability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Required user consent is missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Interaction belongs to another product environment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Feedback collection is disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the configured limit",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Request body is not JSON",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Feedback submission failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApiErrorEnvelope": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "ClassificationDiscovery": {
+        "type": "object",
+        "required": [
+          "http",
+          "mcp"
+        ],
+        "properties": {
+          "http": {
+            "type": "string"
+          },
+          "mcp": {
+            "type": "string"
+          }
+        }
+      },
+      "FeedbackConsentDiscovery": {
+        "type": "object",
+        "required": [
+          "prompt",
+          "askOnceScope",
+          "askAlwaysScope",
+          "onRefusalOrNoResponse"
+        ],
+        "properties": {
+          "askAlwaysScope": {
+            "type": "string"
+          },
+          "askOnceScope": {
+            "type": "string"
+          },
+          "onRefusalOrNoResponse": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          }
+        }
+      },
+      "FeedbackConsentInput": {
+        "type": "object",
+        "required": [
+          "userApproved",
+          "approvalSource"
+        ],
+        "properties": {
+          "approvalSource": {
+            "type": "string"
+          },
+          "consentScope": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "userApproved": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "FeedbackDiscoveryResponse": {
+        "type": "object",
+        "required": [
+          "name",
+          "version",
+          "purpose",
+          "feedbackModes",
+          "telemetry",
+          "feedbackSubmission",
+          "classification",
+          "mcp",
+          "integrations",
+          "reliability",
+          "identity",
+          "privacy"
+        ],
+        "properties": {
+          "classification": {
+            "$ref": "#/components/schemas/ClassificationDiscovery"
+          },
+          "feedbackModes": {
+            "$ref": "#/components/schemas/FeedbackModesDiscovery"
+          },
+          "feedbackSubmission": {
+            "$ref": "#/components/schemas/FeedbackSubmissionDiscovery"
+          },
+          "identity": {
+            "type": "string"
+          },
+          "integrations": {
+            "$ref": "#/components/schemas/IntegrationsDiscovery"
+          },
+          "mcp": {
+            "$ref": "#/components/schemas/McpDiscovery"
+          },
+          "name": {
+            "type": "string"
+          },
+          "privacy": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "reliability": {
+            "$ref": "#/components/schemas/ReliabilityDiscovery"
+          },
+          "telemetry": {
+            "$ref": "#/components/schemas/TelemetryDiscovery"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "FeedbackFinding": {
+        "type": "object",
+        "description": "Schema-only view of legacy JSONB findings. Known fields are optional and\nadditional properties remain allowed because stored output is passed through.",
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "severity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "topic": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "FeedbackFindingInput": {
+        "type": "object",
+        "required": [
+          "kind",
+          "topic",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "severity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "topic": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "FeedbackModesDiscovery": {
+        "type": "object",
+        "required": [
+          "never_ask",
+          "ask_once",
+          "ask_always",
+          "off"
+        ],
+        "properties": {
+          "ask_always": {
+            "type": "string"
+          },
+          "ask_once": {
+            "type": "string"
+          },
+          "never_ask": {
+            "type": "string"
+          },
+          "off": {
+            "type": "string"
+          }
+        }
+      },
+      "FeedbackRequiredFieldsDiscovery": {
+        "type": "object",
+        "required": [
+          "summary"
+        ],
+        "properties": {
+          "summary": {
+            "type": "string"
+          }
+        }
+      },
+      "FeedbackSubmissionDiscovery": {
+        "type": "object",
+        "required": [
+          "url",
+          "authentication",
+          "requiredFields",
+          "optionalFields",
+          "findingKinds",
+          "findingSeverities",
+          "consent"
+        ],
+        "properties": {
+          "authentication": {
+            "type": "string"
+          },
+          "consent": {
+            "$ref": "#/components/schemas/FeedbackConsentDiscovery"
+          },
+          "findingKinds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "findingSeverities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "optionalFields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "requiredFields": {
+            "$ref": "#/components/schemas/FeedbackRequiredFieldsDiscovery"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "FeedbackWorkaround": {
+        "type": "object",
+        "description": "Schema-only view of legacy JSONB workarounds. Known fields are optional and\nadditional properties remain allowed because stored output is passed through.",
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "used": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "FeedbackWorkaroundInput": {
+        "type": "object",
+        "required": [
+          "used"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "used": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "service",
+          "database"
+        ],
+        "properties": {
+          "database": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "IntegrationsDiscovery": {
+        "type": "object",
+        "required": [
+          "node",
+          "python",
+          "go",
+          "rust",
+          "protocol"
+        ],
+        "properties": {
+          "go": {
+            "type": "string"
+          },
+          "node": {
+            "type": "string"
+          },
+          "protocol": {
+            "type": "string"
+          },
+          "python": {
+            "type": "string"
+          },
+          "rust": {
+            "type": "string"
+          }
+        }
+      },
+      "InteractionTelemetryInput": {
+        "type": "object",
+        "required": [
+          "interactionId",
+          "surface",
+          "operation"
+        ],
+        "properties": {
+          "classification": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confirmationMethod": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "customerRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "durationMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "interactionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "occurredAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "operation": {
+            "type": "string"
+          },
+          "runtimeHint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runtimeHintSource": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sequence": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "sessionRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionSource": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "statusCode": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "surface": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "McpDiscovery": {
+        "type": "object",
+        "required": [
+          "protocolVersion",
+          "transport",
+          "discoveryMethod",
+          "requiredHeaders",
+          "transportSessions",
+          "legacyCompatibility"
+        ],
+        "properties": {
+          "discoveryMethod": {
+            "type": "string"
+          },
+          "legacyCompatibility": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "protocolVersion": {
+            "type": "string"
+          },
+          "requiredHeaders": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "transport": {
+            "type": "string"
+          },
+          "transportSessions": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ProductFeedbackAcceptedResponse": {
+        "type": "object",
+        "required": [
+          "accepted",
+          "interactionId",
+          "report"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "boolean"
+          },
+          "interactionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "report": {
+            "$ref": "#/components/schemas/ProductFeedbackReport"
+          }
+        }
+      },
+      "ProductFeedbackReport": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspaceId",
+          "interactionId",
+          "summary",
+          "findings",
+          "source",
+          "createdAt"
+        ],
+        "properties": {
+          "confidence": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FeedbackFinding"
+            }
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "impact": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "interactionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "workaround": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FeedbackWorkaround"
+              }
+            ]
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "ProductFeedbackReportInput": {
+        "type": "object",
+        "required": [
+          "summary"
+        ],
+        "properties": {
+          "confidence": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "consent": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FeedbackConsentInput"
+              }
+            ]
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FeedbackFindingInput"
+            }
+          },
+          "impact": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": "string"
+          },
+          "workaround": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FeedbackWorkaroundInput"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReliabilityDiscovery": {
+        "type": "object",
+        "required": [
+          "http",
+          "mcp"
+        ],
+        "properties": {
+          "http": {
+            "type": "string"
+          },
+          "mcp": {
+            "type": "string"
+          }
+        }
+      },
+      "TelemetryBatchInput": {
+        "type": "object",
+        "required": [
+          "events"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InteractionTelemetryInput"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "TelemetryBatchResult": {
+        "type": "object",
+        "required": [
+          "accepted",
+          "dropped"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "dropped": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "TelemetryDiscovery": {
+        "type": "object",
+        "required": [
+          "url",
+          "authentication",
+          "delivery"
+        ],
+        "properties": {
+          "authentication": {
+            "type": "string"
+          },
+          "delivery": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "api_key": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key",
+        "description": "Epode product API key."
+      },
+      "bearer_auth": {
+        "type": "http",
+        "scheme": "bearer"
+      },
+      "session_cookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "af_oa_access",
+        "description": "Epode dashboard session cookie."
+      }
+    }
+  }
+}

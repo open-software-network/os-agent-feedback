@@ -2,6 +2,7 @@
 
 # dependencies and language build caches
 **/node_modules/
+.pnpm-store/
 **/target/
 **/__pycache__/
 **/.pytest_cache/

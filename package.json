@@ -14,6 +14,7 @@
     "check:fix": "biome check --fix .",
     "test": "node --test tests/*.test.mjs",
     "build:artifacts": "bash tests/build-hosted-artifacts.sh",
+    "gen:types": "mkdir -p web/lib/api && pnpm exec openapi-typescript backend/openapi.json -o web/lib/api/types.ts",
     "test:setup-matrix": "node tests/setup-matrix-e2e.mjs",
     "test:icp-loop": "node tests/icp-onboarding-e2e.mjs",
     "docs:validate": "cd docs && pnpm exec mint validate",
@@ -24,6 +25,7 @@
     "@biomejs/biome": "2.4.12",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
-    "mint": "4.2.734"
+    "mint": "4.2.734",
+    "openapi-typescript": "7.13.0"
   }
 }
