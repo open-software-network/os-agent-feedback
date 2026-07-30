@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -188,23 +189,29 @@ pub struct ProductInteraction {
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct ProductOutcome {
+pub struct ProductFeedbackReport {
     pub id: Uuid,
     pub workspace_id: Uuid,
     pub interaction_id: Uuid,
-    pub outcome: String,
-    pub note: String,
+    pub summary: String,
+    pub impact: Option<String>,
+    pub confidence: Option<f64>,
+    pub findings: Value,
+    pub workaround: Option<Value>,
     pub source: String,
     pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct ProductOutcomeWithInteraction {
+pub struct ProductFeedbackReportWithInteraction {
     pub id: Uuid,
     pub interaction_id: Uuid,
-    pub outcome: String,
-    pub note: String,
+    pub summary: String,
+    pub impact: Option<String>,
+    pub confidence: Option<f64>,
+    pub findings: Value,
+    pub workaround: Option<Value>,
     pub source: String,
     pub created_at: DateTime<Utc>,
     pub session_id: Option<Uuid>,
@@ -222,10 +229,13 @@ pub struct ProductOutcomeWithInteraction {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct FeedbackListOutcomesInput {
+pub struct FeedbackListReportsInput {
     pub summary: Option<bool>,
     pub since: Option<DateTime<Utc>>,
-    pub outcome: Option<Vec<String>>,
+    pub impact: Option<Vec<String>>,
+    pub finding_kind: Option<Vec<String>>,
+    pub severity: Option<Vec<String>>,
+    pub topic: Option<String>,
     pub operation: Option<String>,
     pub customer_ref: Option<String>,
     pub limit: Option<i64>,
@@ -253,10 +263,13 @@ pub struct FeedbackWindow {
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct FeedbackOutcomeItem {
+pub struct FeedbackReportItem {
     pub id: Uuid,
-    pub outcome: String,
-    pub note: String,
+    pub summary: String,
+    pub impact: Option<String>,
+    pub confidence: Option<f64>,
+    pub findings: Value,
+    pub workaround: Option<Value>,
     pub operation: String,
     pub customer_ref: Option<String>,
     pub surface: String,
@@ -269,8 +282,8 @@ pub struct FeedbackOutcomeItem {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FeedbackOutcomesPage {
-    pub outcomes: Vec<FeedbackOutcomeItem>,
+pub struct FeedbackReportsPage {
+    pub reports: Vec<FeedbackReportItem>,
     pub next_cursor: Option<String>,
     pub window: FeedbackWindow,
 }
@@ -301,7 +314,7 @@ pub struct FeedbackInteractionsPage {
 pub struct FeedbackOperationSummary {
     pub operation: String,
     pub interactions: i64,
-    pub outcomes: BTreeMap<String, i64>,
+    pub reports: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -320,17 +333,19 @@ pub struct FeedbackSummary {
     pub reviewed: i64,
     pub review_rate: f64,
     pub confirmation_rate: f64,
-    pub outcomes: BTreeMap<String, i64>,
-    pub outcome_success_rate: f64,
+    pub impacts: BTreeMap<String, i64>,
+    pub finding_kinds: BTreeMap<String, i64>,
+    pub severities: BTreeMap<String, i64>,
+    pub workaround_rate: f64,
     pub top_operations: Vec<FeedbackOperationSummary>,
     pub surfaces: Vec<FeedbackSurfaceSummary>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
-pub enum FeedbackOutcomesResponse {
+pub enum FeedbackReportsResponse {
     Summary(FeedbackSummary),
-    Page(FeedbackOutcomesPage),
+    Page(FeedbackReportsPage),
 }
 
 #[derive(Debug, Deserialize)]
@@ -357,11 +372,31 @@ pub struct InteractionTelemetryInput {
     pub occurred_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FeedbackFindingInput {
+    pub kind: String,
+    pub topic: String,
+    pub severity: Option<String>,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FeedbackWorkaroundInput {
+    pub used: bool,
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ProductOutcomeInput {
-    pub outcome: String,
-    pub note: String,
+pub struct ProductFeedbackReportInput {
+    pub summary: String,
+    pub impact: Option<String>,
+    pub confidence: Option<f64>,
+    #[serde(default)]
+    pub findings: Vec<FeedbackFindingInput>,
+    pub workaround: Option<FeedbackWorkaroundInput>,
 }
 
 #[derive(Debug, Serialize)]
@@ -376,13 +411,16 @@ pub struct InsightCount {
 pub struct Insights {
     pub opportunities: usize,
     pub confirmed_interactions: usize,
-    pub reviews: usize,
+    pub reports: usize,
     pub confirmation_rate: i64,
     pub review_rate: i64,
-    pub outcome_success_rate: i64,
+    pub reports_with_blockers: usize,
+    pub reports_with_workarounds: usize,
     pub top_operations: Vec<InsightCount>,
     pub surfaces: Vec<InsightCount>,
-    pub outcomes: Vec<InsightCount>,
+    pub impacts: Vec<InsightCount>,
+    pub finding_kinds: Vec<InsightCount>,
+    pub topics: Vec<InsightCount>,
 }
 
 #[derive(Debug, Serialize)]
@@ -400,7 +438,7 @@ pub struct DashboardData {
     pub current_environment: Option<ProductEnvironment>,
     pub api_keys: Vec<ApiKeyPublic>,
     pub interactions: Vec<ProductInteraction>,
-    pub outcomes: Vec<ProductOutcomeWithInteraction>,
+    pub reports: Vec<ProductFeedbackReportWithInteraction>,
     pub sessions: Vec<ProductSession>,
     pub insights: Insights,
 }

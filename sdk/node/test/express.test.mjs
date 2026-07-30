@@ -61,13 +61,10 @@ test("Express preserves JSON shape and queues a non-blocking opportunity", async
     body._agentFeedback.reliability,
     "best_effort_without_agent_adapter",
   );
-  assert.equal(body._agentFeedback.when, "after_outcome_known_before_final_response");
+  assert.equal(body._agentFeedback.when, "after_experience_known_before_final_response");
   assert.equal(body._agentFeedback.submit.method, "POST");
-  assert.deepEqual(body._agentFeedback.submit.fields.outcome, [
-    "success",
-    "partial",
-    "failure",
-  ]);
+  assert.deepEqual(body._agentFeedback.submit.reportSchema.required, ["summary"]);
+  assert.equal(body._agentFeedback.submit.reportSchema.maxFindings, 8);
   assert.match(body._agentFeedback.submit.authorization, /^Bearer afr2_/);
   assert.equal(response.headers.get("cache-control"), "private, no-store");
   await middleware.shutdown();
@@ -99,7 +96,7 @@ test("Express Ask-once mode emits a stable product-scoped consent key", async ()
   assert.equal(contract.consentRequired, true);
   assert.equal(contract.consentPolicy, "once");
   assert.equal(contract.consentScope, "afcs1_0123456789abcdef0123456789abcdef");
-  assert.equal(contract.when, "after_outcome_known_and_consent_resolved");
+  assert.equal(contract.when, "after_experience_known_and_consent_resolved");
   assert.match(contract.instruction, /ask the user once/i);
   assert.match(contract.instruction, /durable agent preferences/i);
   assert.match(contract.instruction, /do not ask again/i);
@@ -126,7 +123,7 @@ test("Express Ask-always mode requires fresh permission for every report", async
   assert.equal(contract.mode, "ask_always");
   assert.equal(contract.consentPolicy, "always");
   assert.equal(contract.consentScope, undefined);
-  assert.equal(contract.when, "after_outcome_known_and_explicit_user_approval");
+  assert.equal(contract.when, "after_experience_known_and_explicit_user_approval");
   assert.match(contract.instruction, /Ask again before every future report/i);
   await middleware.shutdown();
   await server.close();

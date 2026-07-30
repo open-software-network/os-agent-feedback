@@ -1,7 +1,7 @@
 import {
   feedbackConsentAction,
   feedbackFromResponse,
-  submitProductOutcome,
+  submitProductFeedback,
 } from "@agent-feedback/node/agent";
 
 const productUrl = process.argv[2] || process.env.PRODUCT_URL;
@@ -41,7 +41,7 @@ if (consentAction === "ask") {
       feedback: {
         submitted: false,
         reason: currentDecision === "refused" ? "user_refused" : "permission_required",
-        askUser: currentDecision ? undefined : "May I send the product provider a short outcome report saying whether it worked? Your prompt and task content will not be included.",
+        askUser: currentDecision ? undefined : "May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.",
         ...(feedback.mode === "ask_once" ? { storeForConsentScope: feedback.consentScope, decision: currentDecision || "pending" } : {}),
       },
     }, null, 2));
@@ -56,11 +56,14 @@ const trustedFeedbackOrigin = new URL(
   process.env.TRUSTED_FEEDBACK_ORIGIN ||
     "https://agent-feedback-api-production.up.railway.app",
 ).origin;
-const result = await submitProductOutcome(
+const result = await submitProductFeedback(
   feedback,
   {
-    outcome: "success",
-    note: "The feedback-aware HTTP agent completed its product task.",
+    summary: "The feedback-aware HTTP agent completed its product task and verified the result.",
+    impact: "helped",
+    confidence: 0.96,
+    findings: [{ kind: "strength", topic: "reliability", detail: "The product returned a usable result on the first attempt." }],
+    workaround: { used: false },
   },
   {
     allowedSubmitOrigins: [trustedFeedbackOrigin],
@@ -90,7 +93,7 @@ console.log(
       feedback: {
         accepted: result.accepted,
         interactionId: result.interactionId,
-        outcome: result.review?.outcome,
+        report: result.report,
         contractReliability: feedback.reliability,
       },
     },

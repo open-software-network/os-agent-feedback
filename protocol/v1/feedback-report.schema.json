@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-feedback.example/protocol/v1/feedback-report.schema.json",
+  "title": "Epode product feedback report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary"],
+  "properties": {
+    "summary": { "type": "string", "minLength": 8, "maxLength": 700 },
+    "impact": { "enum": ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"] },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "findings": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "topic", "detail"],
+        "properties": {
+          "kind": { "enum": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"] },
+          "topic": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+          "severity": { "enum": ["minor", "major", "blocking"] },
+          "detail": { "type": "string", "minLength": 3, "maxLength": 350 }
+        }
+      }
+    },
+    "workaround": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["used"],
+      "properties": {
+        "used": { "type": "boolean" },
+        "detail": { "type": "string", "minLength": 3, "maxLength": 350 }
+      },
+      "if": { "properties": { "used": { "const": true } } },
+      "then": { "required": ["detail"] }
+    }
+  }
+}

@@ -2,14 +2,31 @@ import { Buffer } from "node:buffer";
 
 import type { FeedbackEnvelope } from "./core.js";
 
-export type ProductOutcome = "success" | "partial" | "failure";
+export type FeedbackImpact = "helped" | "helped_with_friction" | "neutral" | "hindered" | "blocked" | "unknown";
+export type FeedbackFindingKind = "strength" | "friction" | "defect" | "gap" | "suggestion" | "uncertainty" | "other";
+export type FeedbackSeverity = "minor" | "major" | "blocking";
 
-export interface ProductOutcomeReview {
-  outcome: ProductOutcome;
-  note: string;
+export interface FeedbackFinding {
+  kind: FeedbackFindingKind;
+  topic: string;
+  severity?: FeedbackSeverity;
+  detail: string;
 }
 
-export interface SubmitProductOutcomeOptions {
+export interface FeedbackWorkaround {
+  used: boolean;
+  detail?: string;
+}
+
+export interface ProductFeedbackReport {
+  summary: string;
+  impact?: FeedbackImpact;
+  confidence?: number;
+  findings?: FeedbackFinding[];
+  workaround?: FeedbackWorkaround;
+}
+
+export interface SubmitProductFeedbackOptions {
   /**
    * Origins this agent runtime trusts to receive scoped feedback receipts.
    * The hosted Agent Feedback service is trusted by default.
@@ -23,13 +40,16 @@ export interface SubmitProductOutcomeOptions {
   timeoutMs?: number;
 }
 
-export interface ProductOutcomeSubmission {
+export interface ProductFeedbackSubmission {
   accepted: boolean;
   interactionId?: string;
-  review?: {
+  report?: {
     id?: string;
-    outcome?: ProductOutcome;
-    note?: string;
+    summary?: string;
+    impact?: FeedbackImpact;
+    confidence?: number;
+    findings?: FeedbackFinding[];
+    workaround?: FeedbackWorkaround;
   };
   [key: string]: unknown;
 }
@@ -69,19 +89,19 @@ function validConsentContract(value: Record<string, unknown>): boolean {
   if (value.mode === "never_ask") {
     return value.consentRequired === false &&
       value.consentPolicy === "none" &&
-      value.when === "after_outcome_known_before_final_response" &&
+      value.when === "after_experience_known_before_final_response" &&
       scope === undefined;
   }
   if (value.mode === "ask_once") {
     return value.consentRequired === true &&
       value.consentPolicy === "once" &&
-      value.when === "after_outcome_known_and_consent_resolved" &&
+      value.when === "after_experience_known_and_consent_resolved" &&
       validScope;
   }
   if (value.mode === "ask_always") {
     return value.consentRequired === true &&
       value.consentPolicy === "always" &&
-      value.when === "after_outcome_known_and_explicit_user_approval" &&
+      value.when === "after_experience_known_and_explicit_user_approval" &&
       scope === undefined;
   }
   return false;
@@ -147,19 +167,19 @@ export function feedbackFromResponse(
 }
 
 /**
- * Deterministically submit a compact outcome from a feedback-aware agent
+ * Deterministically submit a structured report from a feedback-aware agent
  * runtime. Generic agents may ignore response metadata; this explicit adapter
  * is the reliable HTTP/HTML path.
  */
-export async function submitProductOutcome(
+export async function submitProductFeedback(
   feedback: FeedbackEnvelope,
-  review: ProductOutcomeReview,
-  options: SubmitProductOutcomeOptions = {},
-): Promise<ProductOutcomeSubmission> {
+  report: ProductFeedbackReport,
+  options: SubmitProductFeedbackOptions = {},
+): Promise<ProductFeedbackSubmission> {
   const parsed = parseEnvelope(feedback);
   if (!parsed) throw new Error("Invalid Agent Feedback submission contract");
   if (parsed.consentRequired && options.userApproved !== true) {
-    throw new Error("Explicit user approval is required before submitting this outcome");
+    throw new Error("Explicit user approval is required before submitting this report");
   }
   if (
     parsed.mode === "ask_once" &&
@@ -170,13 +190,19 @@ export async function submitProductOutcome(
   if (parsed.mode === "ask_always" && options.approvalSource !== "granted_now") {
     throw new Error("Ask-every-time submission requires fresh approval");
   }
-  if (!["success", "partial", "failure"].includes(review.outcome)) {
-    throw new Error("outcome must be success, partial, or failure");
+  const summary = report.summary.trim();
+  if (summary.length < 8 || summary.length > 700) throw new Error("summary must contain 8 to 700 characters");
+  if (report.impact && !["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"].includes(report.impact)) throw new Error("invalid impact");
+  if (report.confidence !== undefined && (report.confidence < 0 || report.confidence > 1)) throw new Error("confidence must be between 0 and 1");
+  if ((report.findings?.length || 0) > 8) throw new Error("findings cannot contain more than 8 items");
+  for (const finding of report.findings || []) {
+    if (!["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"].includes(finding.kind)) throw new Error("invalid finding kind");
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(finding.topic)) throw new Error("finding topic must be a normalized slug");
+    if (finding.severity && !["minor", "major", "blocking"].includes(finding.severity)) throw new Error("invalid finding severity");
+    const detail = finding.detail.trim();
+    if (detail.length < 3 || detail.length > 350) throw new Error("finding detail must contain 3 to 350 characters");
   }
-  const note = review.note.trim();
-  if (note.length < 8 || note.length > 500) {
-    throw new Error("note must contain 8 to 500 characters");
-  }
+  if (report.workaround?.used && !report.workaround.detail?.trim()) throw new Error("workaround detail is required when a workaround was used");
 
   const submitUrl = new URL(parsed.submit.url);
   if (submitUrl.protocol !== "https:") {
@@ -200,14 +226,20 @@ export async function submitProductOutcome(
       "content-type": "application/json",
       "user-agent": "@agent-feedback/node-agent/0.1.0",
     },
-    body: JSON.stringify({ outcome: review.outcome, note }),
+    body: JSON.stringify({
+      summary,
+      ...(report.impact ? { impact: report.impact } : {}),
+      ...(report.confidence !== undefined ? { confidence: report.confidence } : {}),
+      ...(report.findings ? { findings: report.findings } : {}),
+      ...(report.workaround ? { workaround: report.workaround } : {}),
+    }),
     signal: AbortSignal.timeout(options.timeoutMs ?? 5_000),
   });
-  const body = (await response.json().catch(() => ({}))) as ProductOutcomeSubmission;
+  const body = (await response.json().catch(() => ({}))) as ProductFeedbackSubmission;
   if (!response.ok) {
     const retryable = response.status >= 500;
     throw new Error(
-      `Outcome submission failed with HTTP ${response.status}${retryable ? "; retry once" : ""}`,
+      `Feedback submission failed with HTTP ${response.status}${retryable ? "; retry once" : ""}`,
     );
   }
   return body;

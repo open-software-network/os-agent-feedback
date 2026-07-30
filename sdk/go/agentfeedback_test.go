@@ -76,13 +76,13 @@ func TestMiddlewarePreservesShapeAndQueuesOpportunity(t *testing.T) {
 func TestAgentHelperRejectsUntrustedOrigin(t *testing.T) {
 	envelope := &Envelope{
 		V: 1, Mode: FeedbackNeverAsk, Requested: true, ConsentPolicy: "none",
-		When: "after_outcome_known_before_final_response",
+		When: "after_experience_known_before_final_response",
 		Submit: SubmitContract{
-			URL: "https://evil.test/outcomes", Method: http.MethodPost,
+			URL: "https://evil.test/reports", Method: http.MethodPost,
 			Authorization: "Bearer afr2_test.payload.signature", ContentType: "application/json",
 		}}
-	_, err := SubmitProductOutcome(context.Background(), envelope, OutcomeReview{
-		Outcome: "success", Note: "The product completed the task.",
+	_, err := SubmitProductFeedback(context.Background(), envelope, FeedbackReport{
+		Summary: "The product completed the task.", Impact: "helped",
 	}, []string{"https://feedback.test"}, nil)
 	if err == nil {
 		t.Fatal("untrusted origin was accepted")
@@ -107,7 +107,7 @@ func TestAgentHelperRejectsMalformedConsentContracts(t *testing.T) {
 	malformed = prepared.Envelope
 	malformed.Mode = FeedbackAskOnce
 	malformed.ConsentPolicy = "once"
-	malformed.When = "after_outcome_known_and_consent_resolved"
+	malformed.When = "after_experience_known_and_consent_resolved"
 	malformed.ConsentScope = ""
 	if validEnvelope(&malformed) {
 		t.Fatal("ask-once contract without a scope was accepted")
@@ -131,7 +131,7 @@ func TestAskModesExposeDistinctConsentPolicies(t *testing.T) {
 	if envelope.ConsentPolicy != "once" || envelope.ConsentScope != "afcs1_0123456789abcdef0123456789abcdef" {
 		t.Fatalf("wrong ask-once scope: %#v", envelope)
 	}
-	if envelope.When != "after_outcome_known_and_consent_resolved" {
+	if envelope.When != "after_experience_known_and_consent_resolved" {
 		t.Fatalf("wrong ask timing: %s", envelope.When)
 	}
 	if !strings.Contains(envelope.Instruction, "ask the user once") ||
@@ -143,8 +143,8 @@ func TestAskModesExposeDistinctConsentPolicies(t *testing.T) {
 		FeedbackConsentAction(&envelope, "refused") != "skip" {
 		t.Fatal("ask-once decision was not resolved correctly")
 	}
-	_, err = SubmitProductOutcome(context.Background(), &envelope, OutcomeReview{
-		Outcome: "success", Note: "The product completed the task.",
+	_, err = SubmitProductFeedback(context.Background(), &envelope, FeedbackReport{
+		Summary: "The product completed the task.", Impact: "helped",
 	}, []string{"https://feedback.test"}, nil)
 	if err == nil || !strings.Contains(err.Error(), "explicit user approval") {
 		t.Fatalf("ask helper did not enforce approval: %v", err)

@@ -34,7 +34,7 @@ app.get("/", (_request, response) => {
       feedbackAwareAgent: "deterministic",
     },
     explanation:
-      "A generic agent may ignore instructions embedded in HTTP data. A feedback-aware agent adapter explicitly reads the scoped receipt and submits the compact outcome.",
+      "A generic agent may ignore instructions embedded in HTTP data. A feedback-aware agent adapter explicitly reads the scoped receipt and submits the structured report.",
   });
 });
 app.get("/health", (_request, response) => response.json({ status: "ok" }));

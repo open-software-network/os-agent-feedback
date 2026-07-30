@@ -12,8 +12,10 @@ struct StoredRow {
     operation: String,
     classification: String,
     confirmation_method: Option<String>,
-    outcome: String,
-    note: String,
+    summary: String,
+    impact: Option<String>,
+    findings: serde_json::Value,
+    workaround: Option<serde_json::Value>,
 }
 
 fn required(name: &str) -> anyhow::Result<String> {
@@ -85,13 +87,18 @@ async fn main() -> anyhow::Result<()> {
         "read" => {
             let rows = sqlx::query_as::<_, StoredRow>(
                 r#"SELECT i.id, i.surface, i.operation, i.classification, i.confirmation_method,
-                o.outcome, o.note FROM interactions_v2 i JOIN outcomes_v2 o ON o.interaction_id = i.id
-                WHERE i.workspace_id = $1 ORDER BY o.note"#,
-            ).bind(workspace_id).fetch_all(&pool).await?;
+                r.summary, r.impact, r.findings, r.workaround
+                FROM interactions_v2 i JOIN feedback_reports r ON r.interaction_id = i.id
+                WHERE i.workspace_id = $1 ORDER BY r.summary"#,
+            )
+            .bind(workspace_id)
+            .fetch_all(&pool)
+            .await?;
             let output: Vec<_> = rows.into_iter().map(|row| json!({
                 "id": row.id, "surface": row.surface, "operation": row.operation,
                 "classification": row.classification, "confirmationMethod": row.confirmation_method,
-                "outcome": row.outcome, "note": row.note,
+                "summary": row.summary, "impact": row.impact,
+                "findings": row.findings, "workaround": row.workaround,
             })).collect();
             println!("{}", serde_json::to_string(&output)?);
         }

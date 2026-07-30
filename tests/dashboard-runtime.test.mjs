@@ -24,13 +24,13 @@ const dashboard = {
   ],
   sessions: [{ id: "session-1", source: "product", refHint: "sess_01H", startedAt: iso(-20), lastSeenAt: iso(-5) }],
   interactions: [
-    { id: "interaction-1", apiKeyId: "key-1", sessionId: "session-1", surface: "http_json", operation: "search", statusCode: 200, durationMs: 320, customerRef: "acct_42", classification: "confirmed", confirmationMethod: "outcome_submission", runtimeHint: "codex", runtimeHintSource: "user-agent", occurredAt: iso(-20) },
+    { id: "interaction-1", apiKeyId: "key-1", sessionId: "session-1", surface: "http_json", operation: "search", statusCode: 200, durationMs: 320, customerRef: "acct_42", classification: "confirmed", confirmationMethod: "feedback_report", runtimeHint: "codex", runtimeHintSource: "user-agent", occurredAt: iso(-20) },
     { id: "interaction-2", apiKeyId: "key-1", sessionId: "session-1", surface: "mcp", operation: "fetch_document", statusCode: null, durationMs: 810, customerRef: "acct_42", classification: "confirmed", confirmationMethod: "mcp", runtimeHint: "mcp-client", runtimeHintSource: "client_info", occurredAt: iso(-10) },
     { id: "interaction-3", apiKeyId: "key-1", sessionId: null, surface: "http_json", operation: "search", statusCode: 200, durationMs: 190, customerRef: null, classification: "unclassified", confirmationMethod: null, runtimeHint: null, runtimeHintSource: null, occurredAt: iso(-3) },
   ],
-  outcomes: [
-    { id: "outcome-1", interactionId: "interaction-1", sessionId: "session-1", outcome: "success", note: "The result answered the question.", source: "company_relay", surface: "http_json", operation: "search", statusCode: 200, durationMs: 320, customerRef: "acct_42", classification: "confirmed", confirmationMethod: "outcome_submission", runtimeHint: "codex", runtimeHintSource: "user-agent", occurredAt: iso(-20), createdAt: iso(-18) },
-    { id: "outcome-2", interactionId: "interaction-2", sessionId: "session-1", outcome: "failure", note: "The document could not be opened.", source: "mcp_tool", surface: "mcp", operation: "fetch_document", statusCode: null, durationMs: 810, customerRef: "acct_42", classification: "confirmed", confirmationMethod: "mcp", runtimeHint: "mcp-client", runtimeHintSource: "client_info", occurredAt: iso(-10), createdAt: iso(-8) },
+  reports: [
+    { id: "report-1", interactionId: "interaction-1", sessionId: "session-1", summary: "The result answered the question with a small pagination detour.", impact: "helped_with_friction", confidence: 0.92, findings: [{ kind: "strength", topic: "relevance", detail: "The result answered the question." }, { kind: "friction", topic: "pagination", severity: "minor", detail: "A second page was required." }], workaround: { used: true, detail: "The agent requested the next page." }, source: "customer_agent", surface: "http_json", operation: "search", statusCode: 200, durationMs: 320, customerRef: "acct_42", classification: "confirmed", confirmationMethod: "feedback_report", runtimeHint: "codex", runtimeHintSource: "user-agent", occurredAt: iso(-20), createdAt: iso(-18) },
+    { id: "report-2", interactionId: "interaction-2", sessionId: "session-1", summary: "The document could not be opened and no fallback was available.", impact: "blocked", confidence: 0.99, findings: [{ kind: "defect", topic: "document_access", severity: "blocking", detail: "The document could not be opened." }], workaround: { used: false }, source: "customer_agent", surface: "mcp", operation: "fetch_document", statusCode: null, durationMs: 810, customerRef: "acct_42", classification: "confirmed", confirmationMethod: "mcp", runtimeHint: "mcp-client", runtimeHintSource: "client_info", occurredAt: iso(-10), createdAt: iso(-8) },
   ],
   insights: {},
 };
@@ -91,9 +91,9 @@ test("feedback, interaction, and session explorers render and preserve linked co
   const { handlers, page } = await loadDashboard();
   assert.match(page.innerHTML, /Agent feedback/);
   assert.match(page.innerHTML, /The result answered the question/);
-  assert.match(page.innerHTML, /Search feedback, operation, or customer/);
+  assert.match(page.innerHTML, /Search summaries, findings, topics, operation, or customer/);
 
-  await handlers.click({ target: { closest: () => button({ outcome: "outcome-1" }) } });
+  await handlers.click({ target: { closest: () => button({ report: "report-1" }) } });
   assert.match(page.innerHTML, /Linked product context/);
   assert.match(page.innerHTML, /Open session/);
 
@@ -107,16 +107,16 @@ test("feedback, interaction, and session explorers render and preserve linked co
   assert.match(page.innerHTML, /Open feedback/);
 });
 
-test("session list summarizes every outcome instead of showing an arbitrary review", async () => {
+test("session list summarizes every report instead of showing an arbitrary report", async () => {
   const { handlers, page } = await loadDashboard();
   await handlers.click({ target: { closest: () => button({ view: "sessions" }) } });
-  assert.match(page.innerHTML, /2 reviews/);
-  assert.match(page.innerHTML, /1 success · 1 failed/);
+  assert.match(page.innerHTML, /2 reports/);
+  assert.match(page.innerHTML, /1 blocking · 2 friction/);
 });
 
 test("facets and investigation shortcuts change the loaded explorer", async () => {
   const { handlers, page } = await loadDashboard();
-  await handlers.change({ target: { id: "explorer-primary", value: "failure", dataset: {} } });
+  await handlers.change({ target: { id: "explorer-primary", value: "blocked", dataset: {} } });
   assert.doesNotMatch(page.innerHTML, /The result answered the question/);
   assert.match(page.innerHTML, /The document could not be opened/);
 
@@ -127,9 +127,9 @@ test("facets and investigation shortcuts change the loaded explorer", async () =
 });
 
 test("malformed deep links and delayed searches cannot corrupt navigation state", async () => {
-  const { context, handlers } = await loadDashboard({ href: "https://app.epode.ai/?view=unknown&outcome=missing&filter=garbage&surface=bogus&range=forever" });
+  const { context, handlers } = await loadDashboard({ href: "https://app.epode.ai/?view=unknown&report=missing&filter=garbage&surface=bogus&range=forever" });
   assert.equal(vm.runInContext("currentView", context), "feedback");
-  assert.equal(vm.runInContext("selectedOutcome", context), null);
+  assert.equal(vm.runInContext("selectedReport", context), null);
   assert.equal(vm.runInContext("explorerPrimary", context), "all");
   assert.equal(vm.runInContext("explorerSecondary", context), "all");
   assert.equal(vm.runInContext("explorerRange", context), "30d");
@@ -293,7 +293,7 @@ test("product deletion requires the exact name and switches to the next product"
       state.apiKeys = [];
       state.sessions = [];
       state.interactions = [];
-      state.outcomes = [];
+      state.reports = [];
       return { ok: true, status: 200, json: async () => ({ deleted: true }) };
     }
     return { ok: true, status: 200, json: async () => structuredClone(state) };
@@ -323,7 +323,7 @@ test("deleting the last product returns owners to first-product onboarding", asy
       state.apiKeys = [];
       state.sessions = [];
       state.interactions = [];
-      state.outcomes = [];
+      state.reports = [];
       return { ok: true, status: 200, json: async () => ({ deleted: true }) };
     }
     return { ok: true, status: 200, json: async () => structuredClone(state) };

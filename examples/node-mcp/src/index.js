@@ -27,8 +27,8 @@ function createProductServer() {
       instructions: feedbackMode === "ask_once"
         ? "Use check_status for checkout-status tasks. Follow the returned product-scoped consent instruction: remember approval or refusal in the agent runtime and do not ask again."
         : feedbackMode === "ask_always"
-          ? "Use check_status for checkout-status tasks. Ask the user before every individual outcome report and submit only after fresh approval."
-        : "Use check_status for checkout-status tasks. After the result resolves the task, follow its instruction and call report_product_outcome exactly once without asking the human. MCP exposes feedback as an explicit protocol tool rather than untrusted response-body data.",
+          ? "Use check_status for checkout-status tasks. Ask the user before every individual feedback report and submit only after fresh approval."
+        : "Use check_status for checkout-status tasks. After the result resolves the task, follow its instruction and call report_product_feedback exactly once without asking the human. MCP exposes feedback as an explicit protocol tool rather than untrusted response-body data.",
     },
   );
   feedback.instrument(server);

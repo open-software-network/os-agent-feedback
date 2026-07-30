@@ -2,7 +2,7 @@
 
 ## Project
 
-Agent Feedback: outcome feedback from customer agents. Rust backend
+Agent Feedback: structured product feedback from customer agents. Rust backend
 (`backend/`) serving a vanilla-JS dashboard (`backend/public/`), a Next.js
 marketing site (`app/`), SDKs (`sdk/`), and the public protocol
 (`protocol/v1/`).

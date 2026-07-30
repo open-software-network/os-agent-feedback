@@ -49,42 +49,52 @@ await call("/api/v2/telemetry/batches", {
 console.log("PASS telemetry: anonymous HTTP opportunity accepted asynchronously");
 
 const receipt = capability(interactionId);
-const first = await call("/api/v2/outcomes", {
+const first = await call("/api/v2/reports", {
   token: receipt,
-  body: { outcome: "partial", note: "The result helped, but one field was missing." },
+  body: {
+    summary: "The result helped, but one important field was missing.",
+    impact: "helped_with_friction",
+    confidence: 0.86,
+    findings: [
+      { kind: "strength", topic: "relevance", detail: "The primary result answered the question." },
+      { kind: "gap", topic: "completeness", severity: "major", detail: "One requested field was absent." },
+    ],
+    workaround: { used: true, detail: "The agent inferred the missing field from a second result." },
+  },
 });
-assert.equal(first.payload.review.outcome, "partial");
-const duplicate = await call("/api/v2/outcomes", {
+assert.equal(first.payload.report.impact, "helped_with_friction");
+assert.equal(first.payload.report.findings.length, 2);
+const duplicate = await call("/api/v2/reports", {
   token: receipt,
-  body: { outcome: "failure", note: "A duplicate must return the original review." },
+  body: { summary: "A duplicate report must return the original report unchanged." },
 });
-assert.equal(duplicate.payload.review.id, first.payload.review.id);
-assert.equal(duplicate.payload.review.outcome, "partial");
-console.log("PASS outcome: receipt promotes interaction and first review wins idempotently");
+assert.equal(duplicate.payload.report.id, first.payload.report.id);
+assert.equal(duplicate.payload.report.impact, "helped_with_friction");
+console.log("PASS report: receipt promotes interaction and first report wins idempotently");
 
 const forged = `${receipt.slice(0, -1)}${receipt.endsWith("A") ? "B" : "A"}`;
-await call("/api/v2/outcomes", {
+await call("/api/v2/reports", {
   token: forged,
   expected: 401,
-  body: { outcome: "success", note: "A forged receipt must be rejected." },
+  body: { summary: "A forged receipt must be rejected by the service." },
 });
 const now = Math.floor(Date.now() / 1000);
-await call("/api/v2/outcomes", {
+await call("/api/v2/reports", {
   token: capability(randomUUID(), now - 7300, now - 100),
   expected: 401,
-  body: { outcome: "success", note: "An expired receipt must be rejected." },
+  body: { summary: "An expired receipt must be rejected by the service." },
 });
 console.log("PASS capability security: forged and expired receipts rejected");
 
-await call("/api/v2/outcomes", {
+await call("/api/v2/reports", {
   token: capability(randomUUID()),
   expected: 400,
-  body: { outcome: "success", note: "Otherwise valid compact review.", metadata: { prompt: "private" } },
+  body: { summary: "Otherwise this would be a valid product feedback report.", metadata: { prompt: "private" } },
 });
-await call("/api/v2/outcomes", {
+await call("/api/v2/reports", {
   token: capability(randomUUID()),
   expected: 400,
-  body: { outcome: "success", note: "Bearer private-token must never be accepted." },
+  body: { summary: "Bearer private-token must never be accepted here." },
 });
 console.log("PASS privacy: unknown, recursive, and secret-shaped review data rejected");
 

@@ -11,7 +11,7 @@ export async function generateMetadata(): Promise<Metadata> {
   const host = requestHeaders.get("x-forwarded-host") || requestHeaders.get("host") || "localhost";
   const protocol = requestHeaders.get("x-forwarded-proto") || (host.startsWith("localhost") ? "http" : "https");
   const metadataBase = new URL(`${protocol}://${host}`);
-  const title = "Agent Feedback — outcome feedback from customer agents";
+  const title = "Agent Feedback — product feedback from customer agents";
   const description = "Learn whether your API, MCP server, or agent-readable website actually worked for your customer's agent.";
   const image = new URL("/og.png", metadataBase).href;
   return {

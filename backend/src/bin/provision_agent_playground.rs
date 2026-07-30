@@ -101,9 +101,9 @@ async fn main() -> anyhow::Result<()> {
                 .bind(environment_id)
                 .fetch_one(&pool)
                 .await?;
-        let outcomes: i64 = sqlx::query_scalar(
-            r#"SELECT COUNT(*) FROM outcomes_v2 o
-            JOIN interactions_v2 i ON i.id = o.interaction_id
+        let reports: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM feedback_reports r
+            JOIN interactions_v2 i ON i.id = r.interaction_id
             WHERE i.environment_id = $1"#,
         )
         .bind(environment_id)
@@ -118,13 +118,15 @@ async fn main() -> anyhow::Result<()> {
                 'operation', i.operation,
                 'customerRef', i.customer_ref,
                 'classification', i.classification,
-                'outcome', o.outcome,
-                'note', o.note,
+                'summary', r.summary,
+                'impact', r.impact,
+                'findings', r.findings,
+                'workaround', r.workaround,
                 'occurredAt', i.occurred_at
               ) AS row_data, i.occurred_at
               FROM interactions_v2 i
               LEFT JOIN sessions_v2 s ON s.id = i.session_id
-              LEFT JOIN outcomes_v2 o ON o.interaction_id = i.id
+              LEFT JOIN feedback_reports r ON r.interaction_id = i.id
               WHERE i.environment_id = $1
               ORDER BY i.occurred_at DESC
               LIMIT 20
@@ -142,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
                 "feedbackMode": stored_feedback_mode,
                 "sessions": sessions,
                 "interactions": interactions,
-                "outcomes": outcomes,
+                "reports": reports,
                 "latest": latest,
             }))?
         );

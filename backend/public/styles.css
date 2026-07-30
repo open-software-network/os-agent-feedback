@@ -186,6 +186,11 @@ pre { background:#111; color:#eee; padding:14px; overflow:auto; white-space:pre-
 .review-card { display:grid; gap:24px; border-left:4px solid var(--warn); }.review-card.positive { border-left-color:var(--good); }.review-card.negative { border-left-color:var(--bad); }
 .review-card>div { display:flex; justify-content:space-between; align-items:center; gap:12px; }
 .review-card .quote { margin:0; font-size:24px; line-height:1.4; }
+.finding-list { display:grid; gap:10px; margin-top:16px; }
+.finding-card { border:1px solid var(--line); padding:16px; }
+.finding-card>div { align-items:center; display:flex; flex-wrap:wrap; gap:8px; }
+.finding-card p { margin:12px 0 0; }
+.finding-card code { color:var(--muted); font-size:12px; }
 .detail-links { display:flex; flex-wrap:wrap; gap:8px; margin-top:18px; }
 .linked { width:100%; border:1px solid var(--line); background:#fff; color:var(--ink); padding:12px 14px; text-align:left; }
 .linked:hover { border-color:var(--accent); color:var(--accent); }

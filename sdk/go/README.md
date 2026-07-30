@@ -16,6 +16,6 @@ defer feedback.Shutdown(context.Background())
 http.ListenAndServe(":8080", feedback.Middleware(router))
 ```
 
-It instruments finite JSON and HTML responses, detects `Flush` and leaves streams untouched, and sends telemetry through a bounded background queue. `FeedbackFromResponse` and `SubmitProductOutcome` provide the allow-listed feedback-aware agent path.
+It instruments finite JSON and HTML responses, detects `Flush` and leaves streams untouched, and sends telemetry through a bounded background queue. `FeedbackFromResponse` and `SubmitProductFeedback` provide the allow-listed feedback-aware agent path.
 
-Use `FeedbackAskOnce` to store approval or refusal under the returned product-scoped `ConsentScope`; approved future reports set `OutcomeReview.ApprovalSource` to `stored_grant`. Use `FeedbackAskAlways` to require `granted_now` for every report. `FeedbackConsentAction` resolves the agent-local preference without sending it to Epode.
+Use `FeedbackAskOnce` to store approval or refusal under the returned product-scoped `ConsentScope`; approved future reports set `FeedbackReport.ApprovalSource` to `stored_grant`. Use `FeedbackAskAlways` to require `granted_now` for every report. `FeedbackConsentAction` resolves the agent-local preference without sending it to Epode.

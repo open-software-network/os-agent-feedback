@@ -20,6 +20,6 @@ let app = Router::new()
 
 Finite Axum JSON and HTML bodies are instrumented. Bodies without an exact bounded size—including streams—are left untouched. Telemetry uses a bounded Tokio queue and never blocks the product response.
 
-`feedback_from_response` and `submit_product_outcome` provide the deterministic, allow-listed customer-agent path.
+`feedback_from_response` and `submit_product_feedback` provide the deterministic, allow-listed customer-agent path.
 
 Use `FeedbackMode::AskOnce` to store approval or refusal under the returned product-scoped `consent_scope`; approved future reports pass `Some("stored_grant")`. Use `FeedbackMode::AskAlways` to require `Some("granted_now")` for every report. `feedback_consent_action` resolves the agent-local preference without sending it to Epode.

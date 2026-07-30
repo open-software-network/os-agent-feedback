@@ -7,7 +7,7 @@ let dashboard;
 let currentView = initialUrl.searchParams.get("view") || "feedback";
 let selectedWorkspaceId = initialUrl.searchParams.get("team") || "";
 let selectedProductId = initialUrl.searchParams.get("product") || "";
-let selectedOutcome = initialUrl.searchParams.get("outcome");
+let selectedReport = initialUrl.searchParams.get("report");
 let selectedInteraction = initialUrl.searchParams.get("interaction");
 let selectedSession = initialUrl.searchParams.get("session");
 let explorerQuery = initialUrl.searchParams.get("q") || "";
@@ -80,7 +80,12 @@ const setNotice = (message, timeoutMs = 2800, tone = "info") => {
     noticeTimer?.unref?.();
   }
 };
-const outcomeClass = (value) => value === "success" ? "positive" : value === "failure" ? "negative" : "neutral";
+const impactClass = (value) => ["helped", "helped_with_friction"].includes(value) ? "positive" : ["hindered", "blocked"].includes(value) ? "negative" : "neutral";
+const reportImpact = (report) => report.impact || "unspecified";
+const reportFindings = (report) => Array.isArray(report.findings) ? report.findings : [];
+const reportTopics = (report) => reportFindings(report).map((finding) => finding.topic);
+const reportSeverity = (report) => reportFindings(report).some((finding) => finding.severity === "blocking") ? "blocking" : reportFindings(report).some((finding) => finding.severity === "major") ? "major" : reportFindings(report).some((finding) => finding.severity === "minor") ? "minor" : "none";
+const findingBadge = (finding) => `<span class="status-pill status-${esc(finding.severity || finding.kind)}">${esc(title(finding.kind))}${finding.severity ? ` · ${esc(title(finding.severity))}` : ""}</span>`;
 const customer = (value) => value ? `Customer ${value}` : "Customer not linked";
 const relativeDate = (value) => {
   if (!value) return "—";
@@ -111,7 +116,7 @@ function syncUrl(mode = "replace") {
     view: currentView,
     team: selectedWorkspaceId,
     product: selectedProductId,
-    outcome: selectedOutcome,
+    report: selectedReport,
     interaction: selectedInteraction,
     session: selectedSession,
     q: explorerQuery,
@@ -138,7 +143,7 @@ function normalizeDashboardState() {
   if (!validViews.has(currentView)) currentView = "feedback";
   if (!validRanges.has(explorerRange)) explorerRange = "30d";
   const primaryByView = {
-    feedback: ["all", "success", "partial", "failure"],
+    feedback: ["all", "helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown", "unspecified"],
     insights: ["all", "confirmed", "unclassified"],
     interactions: ["all", "confirmed", "unclassified", "reviewed", "unreviewed"],
     sessions: ["all", "reviewed", "unreviewed"],
@@ -146,9 +151,9 @@ function normalizeDashboardState() {
   if (primaryByView[currentView] && !primaryByView[currentView].includes(explorerPrimary)) explorerPrimary = "all";
   const secondaryValues = currentView === "sessions"
     ? new Set(dashboard.sessions.map((entry) => entry.source))
-    : new Set((currentView === "feedback" ? dashboard.outcomes : dashboard.interactions).map((entry) => entry.surface));
+    : new Set((currentView === "feedback" ? dashboard.reports : dashboard.interactions).map((entry) => entry.surface));
   if (explorerSecondary !== "all" && !secondaryValues.has(explorerSecondary)) explorerSecondary = "all";
-  if (selectedOutcome && !dashboard.outcomes.some((entry) => entry.id === selectedOutcome)) selectedOutcome = null;
+  if (selectedReport && !dashboard.reports.some((entry) => entry.id === selectedReport)) selectedReport = null;
   if (selectedInteraction && !dashboard.interactions.some((entry) => entry.id === selectedInteraction)) selectedInteraction = null;
   if (selectedSession && !dashboard.sessions.some((entry) => entry.id === selectedSession)) selectedSession = null;
 }
@@ -233,7 +238,7 @@ async function refresh() {
   }
   account.innerHTML = `<strong>${esc(dashboard.user.displayName)}</strong>${dashboard.user.email ? `<small>${esc(dashboard.user.email)}</small>` : ""}<small>${esc(title(dashboard.currentRole))} · ${esc(dashboard.workspace.name)}</small>`;
   renderProductScope();
-  const navigationCounts = { feedback: dashboard.outcomes.length, interactions: dashboard.interactions.length, sessions: dashboard.sessions.length };
+  const navigationCounts = { feedback: dashboard.reports.length, interactions: dashboard.interactions.length, sessions: dashboard.sessions.length };
   for (const [view, count] of Object.entries(navigationCounts)) {
     const element = document.querySelector(`[data-nav-count="${view}"]`);
     if (element) element.textContent = String(count);
@@ -269,7 +274,7 @@ function renderProductScope() {
 function navigate(view) {
   clearTimeout(explorerTimer);
   currentView = view;
-  selectedOutcome = null;
+  selectedReport = null;
   selectedInteraction = null;
   selectedSession = null;
   resetExplorer();
@@ -309,17 +314,13 @@ function breakdown(rows, total, fallback) {
   return `<div class="breakdown">${rows.map((row) => `<div><span><b>${esc(title(row.name))}</b><small>${row.count} · ${total ? Math.round(row.count / total * 100) : 0}%</small></span><i><em style="width:${Math.round(row.count / max * 100)}%"></em></i></div>`).join("")}</div>`;
 }
 
-function sessionOutcomeSummary(outcomes) {
-  if (!outcomes.length) return "—";
-  const counts = outcomes.reduce((result, outcome) => {
-    result[outcome.outcome] = (result[outcome.outcome] || 0) + 1;
-    return result;
-  }, {});
-  const details = [["success", "success"], ["partial", "partial"], ["failure", "failed"]]
-    .filter(([key]) => counts[key])
-    .map(([key, label]) => `${counts[key]} ${label}`)
-    .join(" · ");
-  return `<span class="session-feedback-summary"><strong>${outcomes.length} review${outcomes.length === 1 ? "" : "s"}</strong><small>${esc(details)}</small></span>`;
+function sessionFeedbackSummary(reports) {
+  if (!reports.length) return "—";
+  const findings = reports.flatMap(reportFindings);
+  const blocking = findings.filter((finding) => finding.severity === "blocking").length;
+  const friction = findings.filter((finding) => ["friction", "defect", "gap"].includes(finding.kind)).length;
+  const details = [blocking ? `${blocking} blocking` : "", friction ? `${friction} friction` : ""].filter(Boolean).join(" · ") || `${findings.length} findings`;
+  return `<span class="session-feedback-summary"><strong>${reports.length} report${reports.length === 1 ? "" : "s"}</strong><small>${esc(details)}</small></span>`;
 }
 
 function renderLoadError(error) {
@@ -328,24 +329,27 @@ function renderLoadError(error) {
 }
 
 function feedbackView() {
-  const item = dashboard.outcomes.find((entry) => entry.id === selectedOutcome);
+  const item = dashboard.reports.find((entry) => entry.id === selectedReport);
   if (item) {
     const interaction = dashboard.interactions.find((entry) => entry.id === item.interactionId);
     const session = item.sessionId ? dashboard.sessions.find((entry) => entry.id === item.sessionId) : null;
     const contextActions = `<div class="detail-links"><button class="linked" data-open-interaction="${esc(item.interactionId)}">Open interaction →</button>${session ? `<button class="linked" data-open-session="${esc(session.id)}">Open session →</button>` : ""}</div>`;
-    return `${header("FEEDBACK", title(item.outcome), date(item.createdAt), detailActions())}<button class="back" data-back="feedback">← All feedback</button><div class="detail-layout"><div class="detail-main"><article class="review-card ${outcomeClass(item.outcome)}"><div>${badge(item.outcome)}<small>Submitted by the customer’s agent</small></div><p class="quote">“${esc(item.note)}”</p></article><section class="detail-section"><h2>Linked product context</h2><div class="context-row"><span><small>Operation</small><strong>${esc(item.operation)}</strong></span><span><small>Surface</small><strong>${esc(title(item.surface))}</strong></span><span><small>Duration</small><strong>${duration(item.durationMs)}</strong></span><span><small>Status</small><strong>${esc(item.statusCode || "—")}</strong></span></div>${contextActions}</section></div><aside class="detail-sidebar"><section><h2>Properties</h2>${propertyList([["Received", esc(date(item.createdAt))], ["Review source", esc(title(item.source))], ["Customer", esc(customer(item.customerRef))], ["Classification", esc(title(item.classification))], ["Confirmation", esc(title(item.confirmationMethod || "none"))], ["Runtime hint", esc(item.runtimeHint || "Not provided")], ["Runtime provenance", esc(item.runtimeHintSource || "Not provided")]])}</section><p class="privacy-note"><b>Agent identity is not collected.</b> Runtime values are unverified hints, not identities.</p>${interaction ? `<code class="object-id">${esc(interaction.id)}</code>` : ""}</aside></div>`;
+    const findings = reportFindings(item);
+    const findingRows = findings.length ? findings.map((finding) => `<article class="finding-card"><div>${findingBadge(finding)}<code>${esc(finding.topic)}</code></div><p>${esc(finding.detail)}</p></article>`).join("") : `<div class="inline-empty"><p>No individual findings were supplied.</p></div>`;
+    const workaround = item.workaround?.used ? `<section class="detail-section"><p class="eyebrow">WORKAROUND USED</p><h2>How the agent got unstuck</h2><p>${esc(item.workaround.detail)}</p></section>` : "";
+    return `${header("FEEDBACK", title(reportImpact(item)), date(item.createdAt), detailActions())}<button class="back" data-back="feedback">← All feedback</button><div class="detail-layout"><div class="detail-main"><article class="review-card ${impactClass(item.impact)}"><div>${badge(reportImpact(item))}<small>Submitted by the customer’s agent</small></div><p class="quote">“${esc(item.summary)}”</p></article><section class="detail-section"><div class="section-heading"><div><p class="eyebrow">FINDINGS</p><h2>What the agent observed</h2></div><span>${findings.length} finding${findings.length === 1 ? "" : "s"}</span></div><div class="finding-list">${findingRows}</div></section>${workaround}<section class="detail-section"><h2>Linked product context</h2><div class="context-row"><span><small>Operation</small><strong>${esc(item.operation)}</strong></span><span><small>Surface</small><strong>${esc(title(item.surface))}</strong></span><span><small>Duration</small><strong>${duration(item.durationMs)}</strong></span><span><small>Status</small><strong>${esc(item.statusCode || "—")}</strong></span></div>${contextActions}</section></div><aside class="detail-sidebar"><section><h2>Properties</h2>${propertyList([["Received", esc(date(item.createdAt))], ["Impact", esc(title(reportImpact(item)))], ["Confidence", item.confidence == null ? "Not provided" : `${Math.round(item.confidence * 100)}%`], ["Highest severity", esc(title(reportSeverity(item)))], ["Workaround", item.workaround?.used ? "Used" : "Not used"], ["Customer", esc(customer(item.customerRef))], ["Confirmation", esc(title(item.confirmationMethod || "none"))], ["Runtime hint", esc(item.runtimeHint || "Not provided")]])}</section><p class="privacy-note"><b>Agent identity is not collected.</b> Runtime values are unverified hints, not identities.</p>${interaction ? `<code class="object-id">${esc(interaction.id)}</code>` : ""}</aside></div>`;
   }
-  if (!dashboard.outcomes.length) return `${header("FEEDBACK", "Agent feedback", "0 reviews", `<button class="button" data-refresh-data>Refresh</button>`)}${empty("No feedback yet", "Install Epode on an agent-usable product route, then send one real interaction.")}`;
-  const ranged = dashboard.outcomes.filter((entry) => inTimeRange(entry.createdAt));
-  const surfaces = [...new Set(dashboard.outcomes.map((entry) => entry.surface))].sort().map((value) => [value, title(value)]);
-  const filtered = ranged.filter((entry) => (explorerPrimary === "all" || entry.outcome === explorerPrimary) && (explorerSecondary === "all" || entry.surface === explorerSecondary) && matchesQuery(entry.note, entry.operation, entry.surface, entry.customerRef, entry.runtimeHint));
-  const successes = filtered.filter((entry) => entry.outcome === "success").length;
-  const failures = filtered.filter((entry) => entry.outcome === "failure").length;
-  const partial = filtered.filter((entry) => entry.outcome === "partial").length;
-  const rows = filtered.map((entry) => `<button class="table-row feedback-columns" data-outcome="${esc(entry.id)}" aria-label="Open ${esc(entry.outcome)} feedback for ${esc(entry.operation)}"><span>${badge(entry.outcome)}</span><span class="primary-cell"><strong>${esc(entry.note)}</strong><small>${esc(title(entry.source))}</small></span><span><strong>${esc(entry.operation)}</strong><small>${esc(title(entry.surface))}</small></span><span>${esc(entry.customerRef || "Not linked")}</span><time title="${esc(date(entry.createdAt))}">${esc(relativeDate(entry.createdAt))}</time></button>`).join("");
-  const toolbar = explorerToolbar({ placeholder: "Search feedback, operation, or customer", primaryLabel: "Outcome", primaryOptions: [["all", "All outcomes"], ["success", "Success"], ["partial", "Partial"], ["failure", "Failure"]], secondaryOptions: surfaces });
-  const table = rows ? `<div class="explorer-table"><div class="table-head feedback-columns"><span>Outcome</span><span>Feedback</span><span>Operation</span><span>Customer</span><span>Received</span></div>${rows}</div>` : `<div class="filtered-empty"><h2>No matching feedback</h2><p>Try a wider time range or clear the filters.</p><button class="button" data-clear-filters>Clear filters</button></div>`;
-  return `${header("FEEDBACK", "Agent feedback", `${filtered.length} of ${ranged.length} reviews`, `<button class="button" data-refresh-data>Refresh</button>`)}${metricStrip([[filtered.length, "Reviews"], [filtered.length ? `${Math.round(successes / filtered.length * 100)}%` : "—", "Success rate", "positive"], [partial, "Partial", "neutral"], [failures, "Failed", failures ? "negative" : ""]])}${toolbar}${table}`;
+  if (!dashboard.reports.length) return `${header("FEEDBACK", "Agent feedback", "0 reports", `<button class="button" data-refresh-data>Refresh</button>`)}${empty("No feedback yet", "Install Epode on an agent-usable product route, then send one real interaction.")}`;
+  const ranged = dashboard.reports.filter((entry) => inTimeRange(entry.createdAt));
+  const surfaces = [...new Set(dashboard.reports.map((entry) => entry.surface))].sort().map((value) => [value, title(value)]);
+  const filtered = ranged.filter((entry) => (explorerPrimary === "all" || reportImpact(entry) === explorerPrimary) && (explorerSecondary === "all" || entry.surface === explorerSecondary) && matchesQuery(entry.summary, entry.operation, entry.surface, entry.customerRef, entry.runtimeHint, ...reportTopics(entry), ...reportFindings(entry).map((finding) => finding.detail)));
+  const blockers = filtered.filter((entry) => reportSeverity(entry) === "blocking").length;
+  const workarounds = filtered.filter((entry) => entry.workaround?.used).length;
+  const findings = filtered.reduce((count, entry) => count + reportFindings(entry).length, 0);
+  const rows = filtered.map((entry) => `<button class="table-row feedback-columns" data-report="${esc(entry.id)}" aria-label="Open feedback for ${esc(entry.operation)}"><span>${badge(reportImpact(entry))}</span><span class="primary-cell"><strong>${esc(entry.summary)}</strong><small>${reportFindings(entry).length} finding${reportFindings(entry).length === 1 ? "" : "s"}${reportSeverity(entry) !== "none" ? ` · ${esc(title(reportSeverity(entry)))}` : ""}</small></span><span><strong>${esc(entry.operation)}</strong><small>${esc(title(entry.surface))}</small></span><span>${esc(entry.customerRef || "Not linked")}</span><time title="${esc(date(entry.createdAt))}">${esc(relativeDate(entry.createdAt))}</time></button>`).join("");
+  const toolbar = explorerToolbar({ placeholder: "Search summaries, findings, topics, operation, or customer", primaryLabel: "Impact", primaryOptions: [["all", "All impacts"], ["helped", "Helped"], ["helped_with_friction", "Helped with friction"], ["neutral", "Neutral"], ["hindered", "Hindered"], ["blocked", "Blocked"], ["unknown", "Unknown"], ["unspecified", "Not specified"]], secondaryOptions: surfaces });
+  const table = rows ? `<div class="explorer-table"><div class="table-head feedback-columns"><span>Impact</span><span>Report</span><span>Operation</span><span>Customer</span><span>Received</span></div>${rows}</div>` : `<div class="filtered-empty"><h2>No matching feedback</h2><p>Try a wider time range or clear the filters.</p><button class="button" data-clear-filters>Clear filters</button></div>`;
+  return `${header("FEEDBACK", "Agent feedback", `${filtered.length} of ${ranged.length} reports`, `<button class="button" data-refresh-data>Refresh</button>`)}${metricStrip([[filtered.length, "Reports"], [findings, "Findings"], [blockers, "With blockers", blockers ? "negative" : ""], [workarounds, "With workarounds"]])}${toolbar}${table}`;
 }
 
 function insightsView() {
@@ -353,14 +357,15 @@ function insightsView() {
   const surfaces = [...new Set(dashboard.interactions.map((entry) => entry.surface))].sort().map((value) => [value, title(value)]);
   const interactions = dashboard.interactions.filter((entry) => inTimeRange(entry.occurredAt) && (explorerPrimary === "all" || entry.classification === explorerPrimary) && (explorerSecondary === "all" || entry.surface === explorerSecondary) && matchesQuery(entry.operation, entry.surface, entry.customerRef, entry.runtimeHint));
   const ids = new Set(interactions.map((entry) => entry.id));
-  const outcomes = dashboard.outcomes.filter((entry) => ids.has(entry.interactionId));
+  const reports = dashboard.reports.filter((entry) => ids.has(entry.interactionId));
   const confirmed = interactions.filter((entry) => entry.classification === "confirmed").length;
-  const successful = outcomes.filter((entry) => entry.outcome === "success").length;
   const countBy = (items, field) => [...items.reduce((map, item) => map.set(item[field] || "unknown", (map.get(item[field] || "unknown") || 0) + 1), new Map())].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, 8);
   const operationRows = countBy(interactions, "operation");
   const surfaceRows = countBy(interactions, "surface");
-  const outcomeRows = countBy(outcomes, "outcome");
-  const failureRows = countBy(outcomes.filter((entry) => entry.outcome === "failure"), "operation");
+  const impactRows = countBy(reports.map((report) => ({ impact: reportImpact(report) })), "impact");
+  const findingRows = countBy(reports.flatMap(reportFindings), "kind");
+  const topicRows = countBy(reports.flatMap(reportFindings), "topic");
+  const blockerRows = countBy(reports.filter((report) => reportSeverity(report) === "blocking").flatMap(reportFindings).filter((finding) => finding.severity === "blocking"), "topic");
   const durations = interactions.filter((entry) => entry.durationMs != null).reduce((map, entry) => {
     const value = map.get(entry.operation) || { sum: 0, count: 0 };
     value.sum += entry.durationMs;
@@ -369,35 +374,37 @@ function insightsView() {
     return map;
   }, new Map());
   const slowest = [...durations].map(([name, value]) => ({ name, average: Math.round(value.sum / value.count) })).sort((a, b) => b.average - a.average)[0];
-  const gap = Math.max(confirmed - outcomes.length, 0);
+  const gap = Math.max(confirmed - reports.length, 0);
+  const blockers = reports.filter((report) => reportSeverity(report) === "blocking").length;
+  const workarounds = reports.filter((report) => report.workaround?.used).length;
   const toolbar = explorerToolbar({ placeholder: "Filter by operation, customer, or runtime", primaryLabel: "Classification", primaryOptions: [["all", "All interactions"], ["confirmed", "Confirmed"], ["unclassified", "Unclassified"]], secondaryOptions: surfaces });
-  const investigations = `<section class="investigations"><div><p class="eyebrow">INVESTIGATE</p><h2>Where to look next</h2></div><div class="investigation-grid">${failureRows[0] ? `<button data-investigate-view="feedback" data-investigate-filter="failure" data-investigate-query="${esc(failureRows[0].name)}"><span>Most failed operation</span><strong>${esc(failureRows[0].name)}</strong><small>${failureRows[0].count} failed review${failureRows[0].count === 1 ? "" : "s"} →</small></button>` : `<article><span>Failures</span><strong>None found</strong><small>No failed reviews in this view.</small></article>`}${gap ? `<button data-investigate-view="interactions" data-investigate-filter="unreviewed"><span>Feedback gap</span><strong>${gap} confirmed</strong><small>Interactions without feedback →</small></button>` : `<article><span>Feedback gap</span><strong>Fully covered</strong><small>Every confirmed interaction has feedback.</small></article>`}${slowest ? `<button data-investigate-view="interactions" data-investigate-query="${esc(slowest.name)}"><span>Slowest operation</span><strong>${esc(slowest.name)}</strong><small>${duration(slowest.average)} average →</small></button>` : `<article><span>Latency</span><strong>No timing data</strong><small>Duration appears when integrations provide it.</small></article>`}</div></section>`;
-  return `${header("INSIGHTS", "Product health", `${interactions.length} interactions in view`, `<button class="button" data-refresh-data>Refresh</button>`)}${toolbar}${metricStrip([[interactions.length, "Opportunities"], [confirmed, "Confirmed"], [interactions.length ? `${Math.round(confirmed / interactions.length * 100)}%` : "—", "Confirmation rate"], [confirmed ? `${Math.round(outcomes.length / confirmed * 100)}%` : "—", "Review rate"], [outcomes.length ? `${Math.round(successful / outcomes.length * 100)}%` : "—", "Outcome success"]])}<section class="funnel"><div><p class="eyebrow">CONVERSION</p><h2>From product response to outcome</h2></div><div class="funnel-steps"><button data-investigate-view="interactions"><strong>${interactions.length}</strong><span>Opportunities</span></button><i>→</i><button data-investigate-view="interactions" data-investigate-filter="confirmed"><strong>${confirmed}</strong><span>Confirmed</span></button><i>→</i><button data-investigate-view="feedback"><strong>${outcomes.length}</strong><span>Reviewed</span></button></div></section><div class="three-col breakdown-grid"><article><h2>Operations</h2>${breakdown(operationRows, interactions.length, "No operations yet.")}</article><article><h2>Product surfaces</h2>${breakdown(surfaceRows, interactions.length, "No surface data yet.")}</article><article><h2>Outcomes</h2>${breakdown(outcomeRows, outcomes.length, "No reviews yet.")}</article></div>${investigations}<section class="explanation compact"><h2>Evidence model</h2><p>HTTP responses begin as opportunities—not assumed agent traffic. A submitted review confirms the interaction. MCP tool calls are confirmed immediately because the protocol proves a tool-capable client used them.</p></section>`;
+  const investigations = `<section class="investigations"><div><p class="eyebrow">INVESTIGATE</p><h2>Where to look next</h2></div><div class="investigation-grid">${blockerRows[0] ? `<button data-investigate-view="feedback" data-investigate-query="${esc(blockerRows[0].name)}"><span>Most common blocker</span><strong>${esc(title(blockerRows[0].name))}</strong><small>${blockerRows[0].count} blocking finding${blockerRows[0].count === 1 ? "" : "s"} →</small></button>` : `<article><span>Blockers</span><strong>None reported</strong><small>No blocking findings in this view.</small></article>`}${gap ? `<button data-investigate-view="interactions" data-investigate-filter="unreviewed"><span>Feedback gap</span><strong>${gap} confirmed</strong><small>Interactions without feedback →</small></button>` : `<article><span>Feedback gap</span><strong>Fully covered</strong><small>Every confirmed interaction has feedback.</small></article>`}${slowest ? `<button data-investigate-view="interactions" data-investigate-query="${esc(slowest.name)}"><span>Slowest operation</span><strong>${esc(slowest.name)}</strong><small>${duration(slowest.average)} average →</small></button>` : `<article><span>Latency</span><strong>No timing data</strong><small>Duration appears when integrations provide it.</small></article>`}</div></section>`;
+  return `${header("INSIGHTS", "Product learning", `${interactions.length} interactions in view`, `<button class="button" data-refresh-data>Refresh</button>`)}${toolbar}${metricStrip([[interactions.length, "Opportunities"], [confirmed, "Confirmed"], [confirmed ? `${Math.round(reports.length / confirmed * 100)}%` : "—", "Report rate"], [blockers, "Reports with blockers", blockers ? "negative" : ""], [workarounds, "Workarounds used"]])}<section class="funnel"><div><p class="eyebrow">CONVERSION</p><h2>From product response to feedback</h2></div><div class="funnel-steps"><button data-investigate-view="interactions"><strong>${interactions.length}</strong><span>Opportunities</span></button><i>→</i><button data-investigate-view="interactions" data-investigate-filter="confirmed"><strong>${confirmed}</strong><span>Confirmed</span></button><i>→</i><button data-investigate-view="feedback"><strong>${reports.length}</strong><span>Reported</span></button></div></section><div class="three-col breakdown-grid"><article><h2>Impacts</h2>${breakdown(impactRows, reports.length, "No impact data yet.")}</article><article><h2>Finding types</h2>${breakdown(findingRows, findingRows.reduce((sum, row) => sum + row.count, 0), "No findings yet.")}</article><article><h2>Topics</h2>${breakdown(topicRows, topicRows.reduce((sum, row) => sum + row.count, 0), "No topics yet.")}</article></div>${investigations}<section class="explanation compact"><h2>Evidence model</h2><p>HTTP responses begin as opportunities—not assumed agent traffic. A submitted report confirms the interaction. MCP tool calls are confirmed immediately because the protocol proves a tool-capable client used them.</p></section>`;
 }
 
 function interactionsView() {
   const interaction = dashboard.interactions.find((entry) => entry.id === selectedInteraction);
   if (interaction) {
-    const linked = dashboard.outcomes.find((entry) => entry.interactionId === interaction.id);
+    const linked = dashboard.reports.find((entry) => entry.interactionId === interaction.id);
     const session = interaction.sessionId ? dashboard.sessions.find((entry) => entry.id === interaction.sessionId) : null;
-    return `${header("INTERACTION", interaction.operation, date(interaction.occurredAt), detailActions())}<button class="back" data-back="interactions">← All interactions</button>${metricStrip([[title(interaction.classification), "Classification", interaction.classification === "confirmed" ? "positive" : "neutral"], [title(interaction.surface), "Surface"], [interaction.statusCode || "—", "HTTP status"], [duration(interaction.durationMs), "Duration"]])}<div class="detail-layout"><div class="detail-main"><section class="detail-section"><div class="section-heading"><div><p class="eyebrow">EVIDENCE</p><h2>What proves this interaction</h2></div>${badge(interaction.classification)}</div><p>${interaction.classification === "confirmed" ? `Confirmed by ${esc(title(interaction.confirmationMethod || "outcome submission"))}.` : "This response carried feedback instructions, but no agent action has confirmed it yet."}</p></section><section class="detail-section"><div class="section-heading"><h2>Agent feedback</h2>${linked ? badge(linked.outcome) : ""}</div>${linked ? `<p class="quote">“${esc(linked.note)}”</p><button class="linked" data-open-feedback="${esc(linked.id)}">Open feedback →</button>` : `<div class="inline-empty"><p>No feedback was submitted for this interaction.</p><small>This is expected for many HTTP opportunities.</small></div>`}</section>${session ? `<section class="detail-section"><h2>Session context</h2><p>This interaction belongs to a continuity group supplied by ${esc(title(session.source))}.</p><button class="linked" data-open-session="${esc(session.id)}">Open session →</button></section>` : ""}</div><aside class="detail-sidebar"><section><h2>Properties</h2>${propertyList([["Occurred", esc(date(interaction.occurredAt))], ["Operation", esc(interaction.operation)], ["Customer", esc(interaction.customerRef || "Not linked")], ["Confirmation", esc(title(interaction.confirmationMethod || "none"))], ["Runtime hint", esc(interaction.runtimeHint || "Not provided")], ["Hint provenance", esc(interaction.runtimeHintSource || "Not provided")]])}</section><p class="privacy-note"><b>No agent identity.</b> Epode stores only evidence supplied by the product or protocol.</p><code class="object-id">${esc(interaction.id)}</code></aside></div>`;
+    return `${header("INTERACTION", interaction.operation, date(interaction.occurredAt), detailActions())}<button class="back" data-back="interactions">← All interactions</button>${metricStrip([[title(interaction.classification), "Classification", interaction.classification === "confirmed" ? "positive" : "neutral"], [title(interaction.surface), "Surface"], [interaction.statusCode || "—", "HTTP status"], [duration(interaction.durationMs), "Duration"]])}<div class="detail-layout"><div class="detail-main"><section class="detail-section"><div class="section-heading"><div><p class="eyebrow">EVIDENCE</p><h2>What proves this interaction</h2></div>${badge(interaction.classification)}</div><p>${interaction.classification === "confirmed" ? `Confirmed by ${esc(title(interaction.confirmationMethod || "feedback report"))}.` : "This response carried feedback instructions, but no agent action has confirmed it yet."}</p></section><section class="detail-section"><div class="section-heading"><h2>Agent feedback</h2>${linked ? badge(reportImpact(linked)) : ""}</div>${linked ? `<p class="quote">“${esc(linked.summary)}”</p><small>${reportFindings(linked).length} finding${reportFindings(linked).length === 1 ? "" : "s"}</small><button class="linked" data-open-feedback="${esc(linked.id)}">Open feedback →</button>` : `<div class="inline-empty"><p>No feedback was submitted for this interaction.</p><small>This is expected for many HTTP opportunities.</small></div>`}</section>${session ? `<section class="detail-section"><h2>Session context</h2><p>This interaction belongs to a continuity group supplied by ${esc(title(session.source))}.</p><button class="linked" data-open-session="${esc(session.id)}">Open session →</button></section>` : ""}</div><aside class="detail-sidebar"><section><h2>Properties</h2>${propertyList([["Occurred", esc(date(interaction.occurredAt))], ["Operation", esc(interaction.operation)], ["Customer", esc(interaction.customerRef || "Not linked")], ["Confirmation", esc(title(interaction.confirmationMethod || "none"))], ["Runtime hint", esc(interaction.runtimeHint || "Not provided")], ["Hint provenance", esc(interaction.runtimeHintSource || "Not provided")]])}</section><p class="privacy-note"><b>No agent identity.</b> Epode stores only evidence supplied by the product or protocol.</p><code class="object-id">${esc(interaction.id)}</code></aside></div>`;
   }
   if (!dashboard.interactions.length) return `${header("INTERACTIONS", "Product activity", "0 interactions", `<button class="button" data-refresh-data>Refresh</button>`)}${empty("No interactions yet", "Finish setup and use one configured product route.")}`;
-  const outcomeByInteraction = new Map(dashboard.outcomes.map((entry) => [entry.interactionId, entry]));
+  const reportByInteraction = new Map(dashboard.reports.map((entry) => [entry.interactionId, entry]));
   const ranged = dashboard.interactions.filter((entry) => inTimeRange(entry.occurredAt));
   const surfaces = [...new Set(dashboard.interactions.map((entry) => entry.surface))].sort().map((value) => [value, title(value)]);
   const filtered = ranged.filter((entry) => {
-    const reviewed = outcomeByInteraction.has(entry.id);
+    const reviewed = reportByInteraction.has(entry.id);
     const primaryMatch = explorerPrimary === "all" || explorerPrimary === entry.classification || (explorerPrimary === "reviewed" && reviewed) || (explorerPrimary === "unreviewed" && entry.classification === "confirmed" && !reviewed);
     return primaryMatch && (explorerSecondary === "all" || entry.surface === explorerSecondary) && matchesQuery(entry.operation, entry.surface, entry.customerRef, entry.runtimeHint, entry.statusCode);
   });
   const confirmed = filtered.filter((entry) => entry.classification === "confirmed").length;
-  const reviewed = filtered.filter((entry) => outcomeByInteraction.has(entry.id)).length;
+  const reviewed = filtered.filter((entry) => reportByInteraction.has(entry.id)).length;
   const durations = filtered.filter((entry) => entry.durationMs != null);
   const average = durations.length ? Math.round(durations.reduce((sum, entry) => sum + entry.durationMs, 0) / durations.length) : null;
   const rows = filtered.map((entry) => {
-    const outcome = outcomeByInteraction.get(entry.id);
-    return `<button class="table-row interaction-columns" data-interaction="${esc(entry.id)}" aria-label="Open ${esc(entry.operation)} interaction"><span>${badge(entry.classification)}</span><span class="primary-cell"><strong>${esc(entry.operation)}</strong><small>${esc(entry.customerRef || "Customer not linked")}</small></span><span>${esc(title(entry.surface))}</span><span>${esc(entry.statusCode || "—")}</span><span>${duration(entry.durationMs)}</span><span>${outcome ? badge(outcome.outcome) : "—"}</span><time title="${esc(date(entry.occurredAt))}">${esc(relativeDate(entry.occurredAt))}</time></button>`;
+    const report = reportByInteraction.get(entry.id);
+    return `<button class="table-row interaction-columns" data-interaction="${esc(entry.id)}" aria-label="Open ${esc(entry.operation)} interaction"><span>${badge(entry.classification)}</span><span class="primary-cell"><strong>${esc(entry.operation)}</strong><small>${esc(entry.customerRef || "Customer not linked")}</small></span><span>${esc(title(entry.surface))}</span><span>${esc(entry.statusCode || "—")}</span><span>${duration(entry.durationMs)}</span><span>${report ? badge(reportImpact(report)) : "—"}</span><time title="${esc(date(entry.occurredAt))}">${esc(relativeDate(entry.occurredAt))}</time></button>`;
   }).join("");
   const toolbar = explorerToolbar({ placeholder: "Search operation, customer, status, or runtime", primaryLabel: "Evidence", primaryOptions: [["all", "All interactions"], ["confirmed", "Confirmed"], ["unclassified", "Unclassified"], ["reviewed", "Has feedback"], ["unreviewed", "Confirmed without feedback"]], secondaryOptions: surfaces });
   const table = rows ? `<div class="explorer-table"><div class="table-head interaction-columns"><span>Evidence</span><span>Operation</span><span>Surface</span><span>Status</span><span>Duration</span><span>Feedback</span><span>Occurred</span></div>${rows}</div>` : `<div class="filtered-empty"><h2>No matching interactions</h2><p>Try a wider time range or clear the filters.</p><button class="button" data-clear-filters>Clear filters</button></div>`;
@@ -408,13 +415,13 @@ function sessionsView() {
   const session = dashboard.sessions.find((entry) => entry.id === selectedSession);
   if (session) {
     const interactions = dashboard.interactions.filter((entry) => entry.sessionId === session.id).sort((a, b) => new Date(a.occurredAt) - new Date(b.occurredAt));
-    const outcomeByInteraction = new Map(dashboard.outcomes.map((entry) => [entry.interactionId, entry]));
-    const reviewed = interactions.filter((entry) => outcomeByInteraction.has(entry.id));
+    const reportByInteraction = new Map(dashboard.reports.map((entry) => [entry.interactionId, entry]));
+    const reviewed = interactions.filter((entry) => reportByInteraction.has(entry.id));
     const confirmed = interactions.filter((entry) => entry.classification === "confirmed").length;
     const customers = [...new Set(interactions.map((entry) => entry.customerRef).filter(Boolean))];
     const timeline = interactions.map((entry, index) => {
-      const outcome = outcomeByInteraction.get(entry.id);
-      return `<button class="timeline-event" data-interaction="${esc(entry.id)}"><b>${index + 1}</b><span class="timeline-content"><span><strong>${esc(entry.operation)}</strong>${badge(entry.classification)}</span><small>${esc(title(entry.surface))} · ${duration(entry.durationMs)}${entry.statusCode ? ` · HTTP ${esc(entry.statusCode)}` : ""}</small>${outcome ? `<em class="timeline-feedback ${outcomeClass(outcome.outcome)}">${esc(title(outcome.outcome))}: “${esc(outcome.note)}”</em>` : ""}</span><time title="${esc(date(entry.occurredAt))}">${esc(relativeDate(entry.occurredAt))}</time></button>`;
+      const report = reportByInteraction.get(entry.id);
+      return `<button class="timeline-event" data-interaction="${esc(entry.id)}"><b>${index + 1}</b><span class="timeline-content"><span><strong>${esc(entry.operation)}</strong>${badge(entry.classification)}</span><small>${esc(title(entry.surface))} · ${duration(entry.durationMs)}${entry.statusCode ? ` · HTTP ${esc(entry.statusCode)}` : ""}</small>${report ? `<em class="timeline-feedback ${impactClass(report.impact)}">${esc(title(reportImpact(report)))}: “${esc(report.summary)}”</em>` : ""}</span><time title="${esc(date(entry.occurredAt))}">${esc(relativeDate(entry.occurredAt))}</time></button>`;
     }).join("");
     return `${header("SESSION", `Session ${session.refHint}…`, `${interactions.length} interactions`, detailActions())}<button class="back" data-back="sessions">← All sessions</button>${metricStrip([[interactions.length, "Interactions"], [confirmed, "Confirmed"], [reviewed.length, "Reviews"], [sessionDuration(session), "Duration"]])}<div class="detail-layout session-detail"><div class="detail-main"><section class="detail-section"><div class="section-heading"><div><p class="eyebrow">TIMELINE</p><h2>Interaction journey</h2></div><span>${esc(date(session.startedAt))}</span></div>${timeline ? `<div class="session-timeline">${timeline}</div>` : `<div class="inline-empty"><p>No interactions are currently loaded for this session.</p></div>`}</section></div><aside class="detail-sidebar"><section><h2>Session properties</h2>${propertyList([["Proof source", esc(title(session.source))], ["Started", esc(date(session.startedAt))], ["Last seen", esc(date(session.lastSeenAt))], ["Customer", esc(customers.length === 1 ? customers[0] : customers.length > 1 ? "Multiple customer refs" : "Not linked")]])}</section><p class="privacy-note"><b>Proof-based continuity.</b> This session exists only because the product or MCP protocol supplied a stable reference. Epode never groups by time or inferred identity.</p><code class="object-id">${esc(session.id)}</code></aside></div>`;
   }
@@ -425,22 +432,22 @@ function sessionsView() {
     map.get(entry.sessionId).push(entry);
     return map;
   }, new Map());
-  const outcomeByInteraction = new Map(dashboard.outcomes.map((entry) => [entry.interactionId, entry]));
+  const reportByInteraction = new Map(dashboard.reports.map((entry) => [entry.interactionId, entry]));
   const ranged = dashboard.sessions.filter((entry) => inTimeRange(entry.lastSeenAt));
   const sources = [...new Set(dashboard.sessions.map((entry) => entry.source))].sort().map((value) => [value, title(value)]);
   const filtered = ranged.filter((entry) => {
     const interactions = interactionsBySession.get(entry.id) || [];
-    const hasFeedback = interactions.some((interaction) => outcomeByInteraction.has(interaction.id));
+    const hasFeedback = interactions.some((interaction) => reportByInteraction.has(interaction.id));
     const primaryMatch = explorerPrimary === "all" || (explorerPrimary === "reviewed" && hasFeedback) || (explorerPrimary === "unreviewed" && !hasFeedback);
     return primaryMatch && (explorerSecondary === "all" || entry.source === explorerSecondary) && matchesQuery(entry.refHint, entry.source, ...interactions.map((interaction) => interaction.operation));
   });
   const totalInteractions = filtered.reduce((sum, entry) => sum + (interactionsBySession.get(entry.id) || []).length, 0);
-  const reviewedSessions = filtered.filter((entry) => (interactionsBySession.get(entry.id) || []).some((interaction) => outcomeByInteraction.has(interaction.id))).length;
+  const reviewedSessions = filtered.filter((entry) => (interactionsBySession.get(entry.id) || []).some((interaction) => reportByInteraction.has(interaction.id))).length;
   const rows = filtered.map((entry) => {
     const interactions = interactionsBySession.get(entry.id) || [];
-    const outcomes = interactions.map((interaction) => outcomeByInteraction.get(interaction.id)).filter(Boolean);
+    const reports = interactions.map((interaction) => reportByInteraction.get(interaction.id)).filter(Boolean);
     const customerRefs = [...new Set(interactions.map((interaction) => interaction.customerRef).filter(Boolean))];
-    return `<button class="table-row session-columns" data-session="${esc(entry.id)}" aria-label="Open session ${esc(entry.refHint)}"><span class="primary-cell"><strong>${esc(entry.refHint)}…</strong><small>${esc(title(entry.source))}</small></span><span>${interactions.length}</span><span>${sessionOutcomeSummary(outcomes)}</span><span>${esc(customerRefs.length === 1 ? customerRefs[0] : customerRefs.length > 1 ? "Multiple" : "Not linked")}</span><span>${sessionDuration(entry)}</span><time title="${esc(date(entry.lastSeenAt))}">${esc(relativeDate(entry.lastSeenAt))}</time></button>`;
+    return `<button class="table-row session-columns" data-session="${esc(entry.id)}" aria-label="Open session ${esc(entry.refHint)}"><span class="primary-cell"><strong>${esc(entry.refHint)}…</strong><small>${esc(title(entry.source))}</small></span><span>${interactions.length}</span><span>${sessionFeedbackSummary(reports)}</span><span>${esc(customerRefs.length === 1 ? customerRefs[0] : customerRefs.length > 1 ? "Multiple" : "Not linked")}</span><span>${sessionDuration(entry)}</span><time title="${esc(date(entry.lastSeenAt))}">${esc(relativeDate(entry.lastSeenAt))}</time></button>`;
   }).join("");
   const toolbar = explorerToolbar({ placeholder: "Search session, operation, or source", primaryLabel: "Feedback", primaryOptions: [["all", "All sessions"], ["reviewed", "Has feedback"], ["unreviewed", "No feedback"]], secondaryLabel: "Proof source", secondaryOptions: sources });
   const table = rows ? `<div class="explorer-table"><div class="table-head session-columns"><span>Session</span><span>Interactions</span><span>Feedback</span><span>Customer</span><span>Duration</span><span>Last seen</span></div>${rows}</div>` : `<div class="filtered-empty"><h2>No matching sessions</h2><p>Sessions only exist when your product or MCP supplies proof of continuity.</p><button class="button" data-clear-filters>Clear filters</button></div>`;
@@ -473,7 +480,7 @@ const setupSurfaceCopy = {
 
 const setupStackOptions = {
   mcp: [
-    ["node-mcp", "Node MCP", "Registers and handles the outcome tool automatically."],
+    ["node-mcp", "Node MCP", "Registers and handles the feedback report tool automatically."],
     ["manual-mcp", "Another MCP stack", "Implement the small public protocol in any language."],
   ],
   api: [
@@ -511,8 +518,8 @@ function setupInstructions() {
     "manual-mcp": {
       name: "Language-neutral MCP protocol",
       install: `curl -O ${artifacts}/agent-feedback-protocol-v1.zip`,
-      code: `1. Implement stateless MCP 2026-07-28 and server/discover.\n2. Validate MCP-Protocol-Version, Mcp-Method, and Mcp-Name.\n3. Emit confirmed telemetry and add _agentFeedback to product-tool results.\n4. Register report_product_outcome and submit only outcome + note.`,
-      verify: "Verify discovery, stateless headers, cache hints, a product tool call, and one outcome-tool review.",
+      code: `1. Implement stateless MCP 2026-07-28 and server/discover.\n2. Validate MCP-Protocol-Version, Mcp-Method, and Mcp-Name.\n3. Emit confirmed telemetry and add _agentFeedback to product-tool results.\n4. Register report_product_feedback and submit a structured product report.`,
+      verify: "Verify discovery, stateless headers, cache hints, a product tool call, and one feedback-report tool call.",
     },
     "node-express": {
       name: "Node · Express",
@@ -569,8 +576,8 @@ function setupInstructions() {
 function setupConnectionStatus(apiKeyId) {
   const interactions = dashboard.interactions.filter((entry) => entry.apiKeyId === apiKeyId);
   const interactionIds = new Set(interactions.map((entry) => entry.id));
-  const outcomes = dashboard.outcomes.filter((entry) => interactionIds.has(entry.interactionId));
-  return { interactions, outcomes };
+  const reports = dashboard.reports.filter((entry) => interactionIds.has(entry.interactionId));
+  return { interactions, reports };
 }
 
 function setupAgentPrompt(integration) {
@@ -609,9 +616,9 @@ function setupView() {
   const surface = setupSurfaceCopy[setupSurface];
   const integration = setupInstructions();
   const setupKey = dashboard.apiKeys.find((key) => key.id === setupConnectionId && keyKind(key) === "write") || dashboard.apiKeys.find((key) => keyKind(key) === "write");
-  const status = setupConnectionId ? setupConnectionStatus(setupConnectionId) : { interactions: [], outcomes: [] };
+  const status = setupConnectionId ? setupConnectionStatus(setupConnectionId) : { interactions: [], reports: [] };
   const connected = status.interactions.length > 0;
-  const reviewed = status.outcomes.length > 0;
+  const reviewed = status.reports.length > 0;
   const stacks = setupStackOptions[setupSurface].map(([id, name, copy]) => `<button class="choice-card" data-setup-stack="${esc(id)}" aria-pressed="${setupStack === id}"><strong>${esc(name)}</strong><span>${esc(copy)}</span></button>`).join("");
   const surfaces = Object.entries(setupSurfaceCopy).map(([id, item]) => `<button class="choice-card surface-card" data-setup-surface="${esc(id)}" aria-pressed="${setupSurface === id}" ${item.disabled ? "disabled" : ""}><strong>${esc(item.name)}</strong><span>${esc(item.summary)}</span>${item.disabled ? "<small>COMING SOON</small>" : ""}</button>`).join("");
   const ready = `<div class="connection-created"><b>Installation ready</b><span>${setupKey ? `${esc(setupKey.prefix)}…` : "Preparing the product key…"}</span></div>`;
@@ -625,10 +632,10 @@ function setupView() {
   const manualInstall = `<div class="install-panel"><h3>Install</h3><div class="copy-block"><pre><code>${esc(integration.install)}</code></pre><button class="button" data-copy="${esc(integration.install)}">Copy</button></div><h3>Configure once</h3><div class="copy-block"><pre><code>${esc(integration.code)}</code></pre><button class="button" data-copy="${esc(integration.code)}">Copy</button></div>${integration.advanced ? `<details><summary>Optional customer grouping</summary><p>Use an opaque account ID from authentication your product already has. Do not send names or emails.</p><pre><code>${esc(integration.advanced)}</code></pre></details>` : ""}</div>`;
   const installStep = `<section class="setup-step"><div class="step-number">2</div><div class="step-body"><p class="eyebrow">INSTALL</p><h2>Install ${esc(integration.name)}</h2><p>Your installation is ready. Use the guided agent setup or copy the commands yourself. Your product response never waits for Agent Feedback.</p>${secret}<h3>Set the server environment variable</h3><div class="copy-block"><pre><code>${esc(integration.environment)}</code></pre><button class="button" data-copy="${esc(integration.environment)}">Copy</button></div>${installMode}${setupInstallMode === "agent" ? agentInstall : manualInstall}<a class="text-link" href="/.well-known/agent-feedback-v1.json" target="_blank" rel="noreferrer">Read the protocol contract →</a></div></section>`;
   const surfaceResult = setupSurface === "mcp" ? "A normal MCP tool call will appear as a confirmed interaction." : "A successful response will appear as an opportunity. It becomes confirmed if the agent submits feedback.";
-  const verifyStep = `<section class="setup-step"><div class="step-number">3</div><div class="step-body"><p class="eyebrow">VERIFY</p><h2>Send one real interaction</h2><p>${esc(integration.verify)}</p><p>${esc(surfaceResult)}</p><div class="verification"><div class="verification-row ${connected ? "complete" : "waiting"}"><b>${connected ? "✓" : "○"}</b><span><strong>${connected ? (setupSurface === "mcp" ? "Confirmed interaction received" : "Product connection works") : "Waiting for the first interaction"}</strong><small>${connected ? `${status.interactions.length} interaction${status.interactions.length === 1 ? "" : "s"} received for this product.` : "This page checks automatically every few seconds."}</small></span></div><div class="verification-row ${reviewed ? "complete" : "waiting"}"><b>${reviewed ? "✓" : "○"}</b><span><strong>${reviewed ? "Agent feedback received" : "Waiting for agent feedback"}</strong><small>${reviewed ? `${status.outcomes.length} compact review${status.outcomes.length === 1 ? "" : "s"} received.` : "Feedback is a second milestone. The integration works as soon as the first interaction arrives."}</small></span></div></div><div class="setup-actions"><button class="button" data-refresh-setup>Check now</button>${connected ? `<button class="button primary" data-view="interactions">View first interaction</button>` : ""}${reviewed ? `<button class="button primary" data-view="feedback">View feedback</button>` : ""}</div></div></section>`;
+  const verifyStep = `<section class="setup-step"><div class="step-number">3</div><div class="step-body"><p class="eyebrow">VERIFY</p><h2>Send one real interaction</h2><p>${esc(integration.verify)}</p><p>${esc(surfaceResult)}</p><div class="verification"><div class="verification-row ${connected ? "complete" : "waiting"}"><b>${connected ? "✓" : "○"}</b><span><strong>${connected ? (setupSurface === "mcp" ? "Confirmed interaction received" : "Product connection works") : "Waiting for the first interaction"}</strong><small>${connected ? `${status.interactions.length} interaction${status.interactions.length === 1 ? "" : "s"} received for this product.` : "This page checks automatically every few seconds."}</small></span></div><div class="verification-row ${reviewed ? "complete" : "waiting"}"><b>${reviewed ? "✓" : "○"}</b><span><strong>${reviewed ? "Agent feedback received" : "Waiting for agent feedback"}</strong><small>${reviewed ? `${status.reports.length} feedback report${status.reports.length === 1 ? "" : "s"} received.` : "Feedback is a second milestone. The integration works as soon as the first interaction arrives."}</small></span></div></div><div class="setup-actions"><button class="button" data-refresh-setup>Check now</button>${connected ? `<button class="button primary" data-view="interactions">View first interaction</button>` : ""}${reviewed ? `<button class="button primary" data-view="feedback">View feedback</button>` : ""}</div></div></section>`;
   const connections = dashboard.apiKeys.map((key) => {
     const keyStatus = setupConnectionStatus(key.id);
-    const state = keyStatus.outcomes.length ? "Feedback received" : keyStatus.interactions.length ? "Connected" : "Never seen";
+    const state = keyStatus.reports.length ? "Feedback received" : keyStatus.interactions.length ? "Connected" : "Never seen";
     return `<div class="connection-row"><span><strong>${esc(key.label)} <i class="key-kind ${esc(keyKind(key))}">${esc(keyKind(key))}</i></strong><small>${esc(key.prefix)}… · created ${date(key.createdAt)}</small><small>expires ${key.expiresAt ? date(key.expiresAt) : "never"} · ${key.lastUsedAt ? `last used ${date(key.lastUsedAt)}` : "never used"}</small></span><b class="${keyStatus.interactions.length ? "positive" : "neutral"}">${esc(state)}</b><button class="link-button" data-revoke-key="${esc(key.id)}">Rotate key</button></div>`;
   }).join("") || `<p class="muted">No integrations yet.</p>`;
   const readKeys = dashboard.apiKeys.filter((key) => keyKind(key) === "read");
@@ -668,7 +675,7 @@ function teamView() {
 
 function policyView() {
   const settings = dashboard.currentEnvironment;
-  return `${header("COLLECTION POLICY", "Data controls", dashboard.currentProduct.name)}<p class="page-context">These controls apply to this product. Product traffic stays available even if Epode is unavailable.</p><form id="policy-form" class="policy"><section><div><p class="eyebrow">FEEDBACK</p><h2>Outcome collection</h2><p>Choose how customer agents request or submit a short outcome report after using your product.</p></div><label><span>Feedback mode</span><select name="feedbackMode"><option value="never_ask" ${settings.feedbackMode === "never_ask" ? "selected" : ""}>Never ask — submit autonomously</option><option value="ask_once" ${settings.feedbackMode === "ask_once" ? "selected" : ""}>Ask once — remember this product’s permission</option><option value="ask_always" ${settings.feedbackMode === "ask_always" ? "selected" : ""}>Ask every time — request permission for each report</option><option value="off" ${settings.feedbackMode === "off" ? "selected" : ""}>Off — do not request outcome feedback</option></select><small>Never ask submits autonomously without interrupting the user. Ask once is scoped to this product in one agent runtime—not a human identity. Generic HTTP agents may not preserve the decision. Independent agents cannot be forced to comply.</small></label></section><section><div><p class="eyebrow">RETENTION</p><h2>Data lifetime</h2><p>Automatically remove interaction, session, and feedback records after this period.</p></div><label><span>Retention period</span><select name="retentionDays">${[7, 30, 90, 365].map((days) => `<option value="${days}" ${settings.retentionDays === days ? "selected" : ""}>${days} days</option>`).join("")}</select></label></section><input type="hidden" name="collectEventSummaries" value="off"><section class="guardrails"><div><p class="eyebrow">PRIVACY</p><h2>Always rejected</h2><p>These fields cannot be enabled.</p></div><ul><li>Prompts and transcripts</li><li>Secrets and authentication payloads</li><li>Personal data and raw customer content</li><li>Raw tool inputs or outputs</li><li>Unknown review fields</li></ul></section><div class="form-footer"><span>Current mode: <b>${esc(feedbackModeLabel(settings.feedbackMode))}</b> · ${settings.retentionDays} day retention</span><button class="button primary">Save changes</button></div></form>`;
+  return `${header("COLLECTION POLICY", "Data controls", dashboard.currentProduct.name)}<p class="page-context">These controls apply to this product. Product traffic stays available even if Epode is unavailable.</p><form id="policy-form" class="policy"><section><div><p class="eyebrow">FEEDBACK</p><h2>Feedback collection</h2><p>Choose how customer agents submit structured feedback after using your product.</p></div><label><span>Feedback mode</span><select name="feedbackMode"><option value="never_ask" ${settings.feedbackMode === "never_ask" ? "selected" : ""}>Never ask — submit autonomously</option><option value="ask_once" ${settings.feedbackMode === "ask_once" ? "selected" : ""}>Ask once — remember this product’s permission</option><option value="ask_always" ${settings.feedbackMode === "ask_always" ? "selected" : ""}>Ask every time — request permission for each report</option><option value="off" ${settings.feedbackMode === "off" ? "selected" : ""}>Off — do not request feedback</option></select><small>Never ask submits autonomously without interrupting the user. Ask once is scoped to this product in one agent runtime—not a human identity. Generic HTTP agents may not preserve the decision. Independent agents cannot be forced to comply.</small></label></section><section><div><p class="eyebrow">RETENTION</p><h2>Data lifetime</h2><p>Automatically remove interaction, session, and feedback records after this period.</p></div><label><span>Retention period</span><select name="retentionDays">${[7, 30, 90, 365].map((days) => `<option value="${days}" ${settings.retentionDays === days ? "selected" : ""}>${days} days</option>`).join("")}</select></label></section><input type="hidden" name="collectEventSummaries" value="off"><section class="guardrails"><div><p class="eyebrow">PRIVACY</p><h2>Always rejected</h2><p>These fields cannot be enabled.</p></div><ul><li>Prompts and transcripts</li><li>Secrets and authentication payloads</li><li>Personal data and raw customer content</li><li>Raw tool inputs or outputs</li><li>Unknown report fields</li></ul></section><div class="form-footer"><span>Current mode: <b>${esc(feedbackModeLabel(settings.feedbackMode))}</b> · ${settings.retentionDays} day retention</span><button class="button primary">Save changes</button></div></form>`;
 }
 
 function render() {
@@ -680,7 +687,7 @@ function render() {
   } else {
     page.innerHTML = ({ feedback: feedbackView, insights: insightsView, interactions: interactionsView, sessions: sessionsView, setup: setupView, policy: policyView, team: teamView, "new-product": productCreateView }[currentView] || feedbackView)();
   }
-  if (currentView !== "setup" || !setupConnectionId || setupConnectionStatus(setupConnectionId).outcomes.length) {
+  if (currentView !== "setup" || !setupConnectionId || setupConnectionStatus(setupConnectionId).reports.length) {
     clearInterval(setupMonitor);
     setupMonitor = null;
   } else if (!setupMonitor) {
@@ -744,7 +751,7 @@ document.addEventListener("click", async (event) => {
         body: JSON.stringify({ confirmation }),
       });
       selectedProductId = "";
-      selectedOutcome = null;
+      selectedReport = null;
       selectedInteraction = null;
       selectedSession = null;
       apiSecret = "";
@@ -766,18 +773,18 @@ document.addEventListener("click", async (event) => {
       setupInstallMode = target.dataset.installMode;
       render();
     }
-    if (target.dataset.outcome) { selectedOutcome = target.dataset.outcome; syncUrl("push"); render(); }
+    if (target.dataset.report) { selectedReport = target.dataset.report; syncUrl("push"); render(); }
     if (target.dataset.interaction) { selectedInteraction = target.dataset.interaction; selectedSession = null; currentView = "interactions"; syncUrl("push"); render(); }
     if (target.dataset.session) { selectedSession = target.dataset.session; syncUrl("push"); render(); }
-    if (target.dataset.back) { selectedOutcome = null; selectedInteraction = null; selectedSession = null; syncUrl("push"); render(); }
-    if (target.dataset.openInteraction) { currentView = "interactions"; selectedInteraction = target.dataset.openInteraction; selectedOutcome = null; selectedSession = null; syncUrl("push"); render(); }
-    if (target.dataset.openSession) { currentView = "sessions"; selectedSession = target.dataset.openSession; selectedOutcome = null; selectedInteraction = null; syncUrl("push"); render(); }
-    if (target.dataset.openFeedback) { currentView = "feedback"; selectedOutcome = target.dataset.openFeedback; selectedInteraction = null; selectedSession = null; syncUrl("push"); render(); }
+    if (target.dataset.back) { selectedReport = null; selectedInteraction = null; selectedSession = null; syncUrl("push"); render(); }
+    if (target.dataset.openInteraction) { currentView = "interactions"; selectedInteraction = target.dataset.openInteraction; selectedReport = null; selectedSession = null; syncUrl("push"); render(); }
+    if (target.dataset.openSession) { currentView = "sessions"; selectedSession = target.dataset.openSession; selectedReport = null; selectedInteraction = null; syncUrl("push"); render(); }
+    if (target.dataset.openFeedback) { currentView = "feedback"; selectedReport = target.dataset.openFeedback; selectedInteraction = null; selectedSession = null; syncUrl("push"); render(); }
     if (target.hasAttribute("data-copy-page-link")) { await copyText(location.href); setNotice("Link copied.", 1800); }
     if (target.hasAttribute("data-clear-filters")) { resetExplorer(); explorerRange = "30d"; syncUrl("replace"); render(); }
     if (target.dataset.investigateView) {
       currentView = target.dataset.investigateView;
-      selectedOutcome = null;
+      selectedReport = null;
       selectedInteraction = null;
       selectedSession = null;
       explorerPrimary = target.dataset.investigateFilter || "all";
@@ -875,7 +882,7 @@ document.addEventListener("change", async (event) => {
     if (event.target.id === "workspace-select") {
       selectedWorkspaceId = event.target.value;
       selectedProductId = "";
-      selectedOutcome = null;
+      selectedReport = null;
       selectedInteraction = null;
       selectedSession = null;
       resetExplorer();
@@ -887,7 +894,7 @@ document.addEventListener("change", async (event) => {
     }
     if (event.target.id === "product-select") {
       selectedProductId = event.target.value;
-      selectedOutcome = null;
+      selectedReport = null;
       selectedInteraction = null;
       selectedSession = null;
       resetExplorer();
@@ -990,7 +997,7 @@ window.addEventListener("popstate", () => {
   currentView = url.searchParams.get("view") || "feedback";
   selectedWorkspaceId = url.searchParams.get("team") || "";
   selectedProductId = url.searchParams.get("product") || "";
-  selectedOutcome = url.searchParams.get("outcome");
+  selectedReport = url.searchParams.get("report");
   selectedInteraction = url.searchParams.get("interaction");
   selectedSession = url.searchParams.get("session");
   explorerQuery = url.searchParams.get("q") || "";

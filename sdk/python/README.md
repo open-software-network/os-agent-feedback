@@ -29,6 +29,6 @@ app.wsgi_app = AgentFeedbackWSGI(
 
 ASGI JSON and HTML responses are decorated directly. The conservative WSGI adapter uses the response header contract only for finite responses so it never buffers or mutates the application body.
 
-HTTP feedback is best-effort for generic agents. `feedback_from_response` and `submit_product_outcome` provide the deterministic, allow-listed agent-runtime path.
+HTTP feedback is best-effort for generic agents. `feedback_from_response` and `submit_product_feedback` provide the deterministic, allow-listed agent-runtime path.
 
 Pass `feedback_mode="ask_once"` to store approval or refusal under the returned product-scoped `consentScope`; approved future reports use `approval_source="stored_grant"`. Use `ask_always` to require `approval_source="granted_now"` for every report. `feedback_consent_action` resolves the agent-local preference without sending it to Epode.

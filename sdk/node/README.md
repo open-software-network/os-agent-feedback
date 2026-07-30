@@ -1,10 +1,10 @@
 # `@agent-feedback/node`
 
-Collect one compact outcome review from the independent customer agents using your product. The SDK never identifies an agent, never sends prompts or product payloads, and never waits for Agent Feedback on your response path.
+Collect one structured feedback report from the independent customer agents using your product. The SDK never identifies an agent, never sends prompts or product payloads, and never waits for Agent Feedback on your response path.
 
 There are two reliability levels:
 
-- **MCP is protocol-backed.** The SDK registers an explicit `report_product_outcome` tool, which compatible agents can call autonomously.
+- **MCP is protocol-backed.** The SDK registers an explicit `report_product_feedback` tool, which compatible agents can call autonomously.
 - **Ask once remembers product consent.** Set `feedbackMode: "ask_once"`; the agent runtime stores approval or refusal under the returned `consentScope`. Approved future reports use `approvalSource: "stored_grant"` without asking again.
 - **Ask every time requires fresh consent.** Set `feedbackMode: "ask_always"`; every report requires `userApproved: true` and `approvalSource: "granted_now"`.
 - **HTTP and HTML are best-effort by default.** Generic agents may treat response metadata as untrusted and ignore its side-effect instruction. A feedback-aware agent adapter can make submission deterministic.
@@ -67,7 +67,7 @@ const handleMcp = toNodeHandler(mcp);
 app.all("/mcp", (req, res) => handleMcp(req, res, req.body));
 ```
 
-The official handler implements `server/discover`, per-request protocol metadata, `Mcp-Method`/`Mcp-Name` validation, cache hints, and the required `resultType` field. Its legacy fallback keeps 2025-era clients working without transport-session state. Business-tool results are decorated automatically and `report_product_outcome` is registered for the customer agent. MCP tool use is a confirmed agent interaction.
+The official handler implements `server/discover`, per-request protocol metadata, `Mcp-Method`/`Mcp-Name` validation, cache hints, and the required `resultType` field. Its legacy fallback keeps 2025-era clients working without transport-session state. Business-tool results are decorated automatically and `report_product_feedback` is registered for the customer agent. MCP tool use is a confirmed agent interaction.
 
 `instrumentMcp(server, options)` remains available for existing long-lived or legacy server objects.
 
@@ -79,7 +79,7 @@ Agent runtimes that want deterministic HTTP/HTML feedback can explicitly consume
 import {
   feedbackConsentAction,
   feedbackFromResponse,
-  submitProductOutcome,
+  submitProductFeedback,
 } from "@agent-feedback/node/agent";
 
 const response = await fetch(productUrl);
@@ -96,9 +96,14 @@ if (feedback) {
     ? (await askUserForPermission() ? "granted_now" : undefined)
     : "stored_grant";
   if (!approvalSource && feedback.consentRequired) return;
-  await submitProductOutcome(
+  await submitProductFeedback(
     feedback,
-    { outcome: "success", note: "The product completed the task." },
+    {
+      summary: "The product completed the task, but required a retry.",
+      impact: "helped_with_friction",
+      findings: [{ kind: "friction", topic: "reliability", severity: "minor", detail: "The first request timed out." }],
+      workaround: { used: true, detail: "The agent retried once." },
+    },
     {
       allowedSubmitOrigins: ["https://agent-feedback-api-production.up.railway.app"],
       userApproved: feedback.consentRequired ? true : undefined,
@@ -108,7 +113,7 @@ if (feedback) {
 }
 ```
 
-The adapter requires an allow-listed HTTPS destination and submits only `outcome` and `note`. In Ask once mode, the agent runtime—not Epode—stores approval or refusal under `consentScope`.
+The adapter requires an allow-listed HTTPS destination and submits only the structured report fields. In Ask once mode, the agent runtime—not Epode—stores approval or refusal under `consentScope`.
 
 ## Verify the whole loop
 

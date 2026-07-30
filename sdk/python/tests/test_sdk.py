@@ -12,7 +12,7 @@ from agent_feedback import (
     feedback_consent_action,
     feedback_from_response,
     sign_capability,
-    submit_product_outcome,
+    submit_product_feedback,
 )
 
 KEY = "af_live_0123456789abcdef0123456789abcdef_conformance_secret_0123456789abcdef"
@@ -118,9 +118,9 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
             "requested": True,
             "consentRequired": False,
             "consentPolicy": "none",
-            "when": "after_outcome_known_before_final_response",
+            "when": "after_experience_known_before_final_response",
             "submit": {
-                "url": "https://feedback.test/api/v2/outcomes",
+                "url": "https://feedback.test/api/v2/reports",
                 "method": "POST",
                 "authorization": "Bearer afr2_test.payload.signature",
                 "contentType": "application/json",
@@ -132,15 +132,19 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
             sent.append(json.loads(body))
             return {"accepted": True}
 
-        result = submit_product_outcome(
+        result = submit_product_feedback(
             envelope,
-            "success",
-            "The product completed the task.",
+            {
+                "summary": "The product completed the task with one workaround.",
+                "impact": "helped_with_friction",
+                "findings": [{"kind": "friction", "topic": "pagination", "severity": "minor", "detail": "A second request was needed."}],
+                "workaround": {"used": True, "detail": "The agent requested the next page."},
+            },
             allowed_submit_origins=("https://feedback.test",),
             sender=sender,
         )
         self.assertTrue(result["accepted"])
-        self.assertEqual(sent, [{"outcome": "success", "note": "The product completed the task."}])
+        self.assertEqual(sent[0]["findings"][0]["topic"], "pagination")
 
     def test_ask_modes_have_distinct_consent_policies(self) -> None:
         runtime = AgentFeedback(AgentFeedbackOptions(api_key=KEY, feedback_mode="ask_once"))
@@ -149,17 +153,16 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(envelope["consentRequired"])
         self.assertEqual(envelope["consentPolicy"], "once")
         self.assertEqual(envelope["consentScope"], "afcs1_0123456789abcdef0123456789abcdef")
-        self.assertEqual(envelope["when"], "after_outcome_known_and_consent_resolved")
+        self.assertEqual(envelope["when"], "after_experience_known_and_consent_resolved")
         self.assertIn("ask the user once", envelope["instruction"])
         self.assertIn("do not ask again", envelope["instruction"])
         self.assertEqual(feedback_consent_action(envelope), "ask")
         self.assertEqual(feedback_consent_action(envelope, "approved"), "submit")
         self.assertEqual(feedback_consent_action(envelope, "refused"), "skip")
         with self.assertRaisesRegex(ValueError, "Explicit user approval is required"):
-            submit_product_outcome(
+            submit_product_feedback(
                 envelope,
-                "success",
-                "The product completed the task.",
+                {"summary": "The product completed the task.", "impact": "helped"},
                 allowed_submit_origins=("https://feedback.test",),
                 sender=lambda *_: {"accepted": True},
             )
@@ -186,7 +189,7 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         missing_scope.update(
             mode="ask_once",
             consentPolicy="once",
-            when="after_outcome_known_and_consent_resolved",
+            when="after_experience_known_and_consent_resolved",
         )
         self.assertEqual(feedback_consent_action(missing_scope), "skip")
         runtime.shutdown()

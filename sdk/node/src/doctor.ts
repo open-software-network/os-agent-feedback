@@ -13,7 +13,7 @@ type Envelope = {
     method?: string;
     authorization?: string;
     contentType?: string;
-    fields?: Record<string, unknown>;
+    reportSchema?: Record<string, unknown>;
   };
   instruction?: string;
 };
@@ -59,7 +59,7 @@ async function main(): Promise<void> {
     !envelope.submit?.url ||
     envelope.submit.method !== "POST" ||
     !envelope.submit.authorization?.startsWith("Bearer afr2_") ||
-    !envelope.submit.fields
+    !envelope.submit.reportSchema
   ) {
     fail("Response has an incomplete feedback submission contract");
   }
@@ -69,12 +69,12 @@ async function main(): Promise<void> {
       envelope.consentRequired === true &&
       envelope.consentPolicy === "once" &&
       /^afcs1_[0-9a-f]{32}$/.test(envelope.consentScope || "") &&
-      envelope.when === "after_outcome_known_and_consent_resolved";
+      envelope.when === "after_experience_known_and_consent_resolved";
     const validAlways = envelope.mode === "ask_always" &&
       envelope.consentRequired === true &&
       envelope.consentPolicy === "always" &&
       envelope.consentScope === undefined &&
-      envelope.when === "after_outcome_known_and_explicit_user_approval";
+      envelope.when === "after_experience_known_and_explicit_user_approval";
     if (!validOnce && !validAlways) fail("Response has an invalid consent contract");
     console.log("PASS response injection");
     console.log(`PASS ${envelope.mode} consent contract`);
@@ -86,27 +86,30 @@ async function main(): Promise<void> {
     envelope.consentRequired !== false ||
     envelope.consentPolicy !== "none" ||
     envelope.consentScope !== undefined ||
-    envelope.when !== "after_outcome_known_before_final_response"
+    envelope.when !== "after_experience_known_before_final_response"
   ) {
     fail("Response has an invalid Never ask feedback contract");
   }
-  const review = await fetch(envelope.submit.url, {
+  const report = await fetch(envelope.submit.url, {
     method: "POST",
     headers: {
       authorization: envelope.submit.authorization,
       "content-type": envelope.submit.contentType || "application/json",
     },
     body: JSON.stringify({
-      outcome: "success",
-      note: "The integration doctor verified this product response end to end.",
+      summary: "The integration doctor verified this product response end to end.",
+      impact: "helped",
+      confidence: 1,
+      findings: [{ kind: "strength", topic: "integration", detail: "Response discovery and feedback submission both worked." }],
+      workaround: { used: false },
     }),
     signal: AbortSignal.timeout(10_000),
   });
-  if (!review.ok) fail(`Synthetic review returned HTTP ${review.status}`);
-  const accepted = (await review.json()) as { interactionId?: string };
+  if (!report.ok) fail(`Synthetic report returned HTTP ${report.status}`);
+  const accepted = (await report.json()) as { interactionId?: string };
   console.log(`PASS response injection`);
   console.log(`PASS scoped direct submission`);
-  console.log(`PASS synthetic review ${accepted.interactionId || "accepted"}`);
+  console.log(`PASS synthetic report ${accepted.interactionId || "accepted"}`);
 }
 
 main().catch((error) => fail(error instanceof Error ? error.message : String(error)));

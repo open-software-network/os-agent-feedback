@@ -6,7 +6,7 @@ Generic agents may treat instructions inside HTTP response data as untrusted and
 
 1. reading the scoped `_agentFeedback`, HTML, or header contract;
 2. finishing the normal product task;
-3. submitting only `outcome` and a short `note` to an allow-listed feedback origin.
+3. submitting only the structured feedback report fields to an allow-listed feedback origin.
 
 ```sh
 npm install

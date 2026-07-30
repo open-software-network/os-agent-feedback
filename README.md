@@ -2,12 +2,18 @@
 
 Agent Feedback tells companies whether their product actually worked for the independent customer agents using it.
 
-A company instruments selected API, website, or MCP surfaces once. Every SDK creates the same short-lived, write-only interaction receipt locally and adds the same compact feedback contract to eligible successful responses. The product response never waits for Agent Feedback. After the customer agent knows the outcome, it can submit:
+A company instruments selected API, website, or MCP surfaces once. Every SDK creates the same short-lived, write-only interaction receipt locally and adds the same feedback contract to eligible successful responses. The product response never waits for Agent Feedback. After the customer agent understands the product's contribution, it can submit:
 
 ```json
 {
-  "outcome": "success",
-  "note": "The search result completed the task."
+  "summary": "The result answered the question, but one field was stale.",
+  "impact": "helped_with_friction",
+  "confidence": 0.91,
+  "findings": [
+    { "kind": "strength", "topic": "relevance", "detail": "The top result was useful." },
+    { "kind": "gap", "topic": "freshness", "severity": "major", "detail": "One field used an older API." }
+  ],
+  "workaround": { "used": true, "detail": "The agent verified the field in official docs." }
 }
 ```
 
@@ -44,7 +50,7 @@ No handler changes, primary-path network call, relay endpoint, or agent account 
 
 Collection has four modes. `never_ask` submits autonomously without interrupting the user. `ask_once` asks once per
 product and agent runtime, then remembers approval or refusal under an opaque product-scoped key.
-`ask_always` requests fresh permission for every report. `off` emits no outcome contract. Epode
+`ask_always` requests fresh permission for every report. `off` emits no feedback contract. Epode
 does not receive the stored ask-once preference or treat it as an identity.
 
 ## Repository

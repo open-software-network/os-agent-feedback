@@ -1,7 +1,7 @@
 {
   "name": "@agent-feedback/node",
   "version": "0.1.0",
-  "description": "Collect compact outcome feedback from the customer agents using your Node product.",
+  "description": "Collect structured product feedback from the customer agents using your Node product.",
   "repository": {
     "type": "git",
     "url": "https://github.com/open-software-network/os-epode.git",

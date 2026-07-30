@@ -12,7 +12,7 @@ test("observability explorers share search, facets, time range, and deep links",
   assert.match(script, /Last 24 hours/);
   assert.match(script, /Last 7 days/);
   assert.match(script, /Last 30 days/);
-  assert.match(script, /outcome: selectedOutcome/);
+  assert.match(script, /report: selectedReport/);
   assert.match(script, /interaction: selectedInteraction/);
   assert.match(script, /session: selectedSession/);
   assert.match(script, /data-copy-page-link/);
@@ -24,14 +24,16 @@ test("observability explorers share search, facets, time range, and deep links",
   assert.match(styles, /\.explorer-table/);
 });
 
-test("feedback connects qualitative outcome to interaction and session context", () => {
+test("feedback connects structured reports to interaction and session context", () => {
   assert.match(script, /Submitted by the customer’s agent/);
   assert.match(script, /Linked product context/);
   assert.match(script, /data-open-interaction/);
   assert.match(script, /data-open-session/);
-  assert.match(script, /Runtime provenance/);
+  assert.match(script, /Highest severity/);
   assert.match(script, /Agent identity is not collected/);
-  assert.match(script, /Search feedback, operation, or customer/);
+  assert.match(script, /Search summaries, findings, topics, operation, or customer/);
+  assert.match(script, /What the agent observed/);
+  assert.match(script, /WORKAROUND USED/);
 });
 
 test("sessions expose proof-based grouping, aggregate health, and a linked timeline", () => {
@@ -42,15 +44,15 @@ test("sessions expose proof-based grouping, aggregate health, and a linked timel
   assert.match(script, /timeline-feedback/);
   assert.match(script, /never guesses continuity from timing or identity/);
   assert.match(styles, /\.session-timeline/);
-  assert.match(script, /function sessionOutcomeSummary/);
-  assert.doesNotMatch(script, /outcomes\.at\(-1\)\.outcome/);
+  assert.match(script, /function sessionFeedbackSummary/);
+  assert.doesNotMatch(script, /reports\.at\(-1\)\.impact/);
   assert.match(store, /started_at = LEAST\(sessions_v2\.started_at, EXCLUDED\.started_at\)/);
 });
 
 test("insights turn aggregate metrics into investigations", () => {
-  assert.match(script, /From product response to outcome/);
+  assert.match(script, /From product response to feedback/);
   assert.match(script, /Where to look next/);
-  assert.match(script, /Most failed operation/);
+  assert.match(script, /Most common blocker/);
   assert.match(script, /Feedback gap/);
   assert.match(script, /Slowest operation/);
   assert.match(script, /data-investigate-view/);

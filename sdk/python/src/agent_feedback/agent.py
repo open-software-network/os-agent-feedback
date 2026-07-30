@@ -27,7 +27,7 @@ def _valid(value: Any) -> bool:
         return (
             value.get("consentRequired") is False
             and value.get("consentPolicy") == "none"
-            and value.get("when") == "after_outcome_known_before_final_response"
+            and value.get("when") == "after_experience_known_before_final_response"
             and scope is None
         )
     if mode == "ask_once":
@@ -36,14 +36,14 @@ def _valid(value: Any) -> bool:
             and value.get("consentPolicy") == "once"
             and isinstance(scope, str)
             and re.fullmatch(r"afcs1_[0-9a-f]{32}", scope) is not None
-            and value.get("when") == "after_outcome_known_and_consent_resolved"
+            and value.get("when") == "after_experience_known_and_consent_resolved"
         )
     if mode == "ask_always":
         return (
             value.get("consentRequired") is True
             and value.get("consentPolicy") == "always"
             and scope is None
-            and value.get("when") == "after_outcome_known_and_explicit_user_approval"
+            and value.get("when") == "after_experience_known_and_explicit_user_approval"
         )
     return False
 
@@ -94,10 +94,9 @@ def feedback_consent_action(
     return "ask"
 
 
-def submit_product_outcome(
+def submit_product_feedback(
     feedback: Mapping[str, Any],
-    outcome: str,
-    note: str,
+    report: Mapping[str, Any],
     *,
     allowed_submit_origins: tuple[str, ...] = (DEFAULT_ENDPOINT,),
     user_approved: bool = False,
@@ -107,16 +106,37 @@ def submit_product_outcome(
     if not _valid(feedback):
         raise ValueError("Invalid Agent Feedback submission contract")
     if feedback.get("consentRequired") is True and not user_approved:
-        raise ValueError("Explicit user approval is required before submitting this outcome")
+        raise ValueError("Explicit user approval is required before submitting this report")
     if feedback.get("mode") == "ask_once" and approval_source not in {"granted_now", "stored_grant"}:
         raise ValueError("Ask-once submission requires granted_now or stored_grant approval")
     if feedback.get("mode") == "ask_always" and approval_source != "granted_now":
         raise ValueError("Ask-every-time submission requires fresh approval")
-    if outcome not in {"success", "partial", "failure"}:
-        raise ValueError("outcome must be success, partial, or failure")
-    note = note.strip()
-    if not 8 <= len(note) <= 500:
-        raise ValueError("note must contain 8 to 500 characters")
+    summary = str(report.get("summary", "")).strip()
+    if not 8 <= len(summary) <= 700:
+        raise ValueError("summary must contain 8 to 700 characters")
+    impact = report.get("impact")
+    if impact is not None and impact not in {"helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"}:
+        raise ValueError("invalid impact")
+    confidence = report.get("confidence")
+    if confidence is not None and (not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1):
+        raise ValueError("confidence must be between 0 and 1")
+    findings = report.get("findings", [])
+    if not isinstance(findings, list) or len(findings) > 8:
+        raise ValueError("findings must be an array with at most 8 items")
+    for finding in findings:
+        if not isinstance(finding, dict) or finding.get("kind") not in {"strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"}:
+            raise ValueError("invalid finding kind")
+        if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", str(finding.get("topic", ""))) is None:
+            raise ValueError("finding topic must be a normalized slug")
+        if finding.get("severity") is not None and finding.get("severity") not in {"minor", "major", "blocking"}:
+            raise ValueError("invalid finding severity")
+        if not 3 <= len(str(finding.get("detail", "")).strip()) <= 350:
+            raise ValueError("finding detail must contain 3 to 350 characters")
+    workaround = report.get("workaround")
+    if workaround is not None and (not isinstance(workaround, dict) or not isinstance(workaround.get("used"), bool)):
+        raise ValueError("workaround must contain used")
+    if isinstance(workaround, dict) and workaround.get("used") and not str(workaround.get("detail", "")).strip():
+        raise ValueError("workaround detail is required when a workaround was used")
     url = str(feedback["submit"]["url"])
     parsed = urlparse(url)
     allowed = {(urlparse(value).scheme, urlparse(value).netloc) for value in allowed_submit_origins}
@@ -127,7 +147,7 @@ def submit_product_outcome(
         "content-type": "application/json",
         "user-agent": "agent-feedback-python-agent/0.1.0",
     }
-    data = json.dumps({"outcome": outcome, "note": note}, separators=(",", ":")).encode()
+    data = json.dumps(dict(report), separators=(",", ":")).encode()
     if sender:
         return sender(url, headers, data)
     request = urllib.request.Request(url, data=data, headers=headers, method="POST")

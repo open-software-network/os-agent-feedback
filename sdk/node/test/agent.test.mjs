@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   feedbackConsentAction,
   feedbackFromResponse,
-  submitProductOutcome,
+  submitProductFeedback,
 } from "../dist/agent.js";
 
 const envelope = {
@@ -14,16 +14,20 @@ const envelope = {
   consentRequired: false,
   consentPolicy: "none",
   reliability: "best_effort_without_agent_adapter",
-  when: "after_outcome_known_before_final_response",
-  instruction: "Submit one outcome.",
+  when: "after_experience_known_before_final_response",
+  instruction: "Submit one feedback report.",
   submit: {
-    url: "https://feedback.test/api/v2/outcomes",
+    url: "https://feedback.test/api/v2/reports",
     method: "POST",
     authorization: "Bearer afr2_test.payload.signature",
     contentType: "application/json",
-    fields: {
-      outcome: ["success", "partial", "failure"],
-      note: "One short sentence.",
+    reportSchema: {
+      required: ["summary"],
+      optional: ["impact", "confidence", "findings", "workaround"],
+      impacts: ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"],
+      findingKinds: ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"],
+      findingSeverities: ["minor", "major", "blocking"],
+      maxFindings: 8,
     },
   },
   privacy: "No user data.",
@@ -45,11 +49,17 @@ test("feedback-aware adapter reads JSON, HTML, and header metadata", () => {
   assert.deepEqual(feedbackFromResponse({ headers }, ["ok"]), envelope);
 });
 
-test("feedback-aware adapter submits only the compact outcome to a trusted origin", async () => {
+test("feedback-aware adapter submits a structured report to a trusted origin", async () => {
   const requests = [];
-  const result = await submitProductOutcome(
+  const result = await submitProductFeedback(
     envelope,
-    { outcome: "success", note: "The product response completed the task." },
+    {
+      summary: "The product response completed the task with one workaround.",
+      impact: "helped_with_friction",
+      confidence: 0.9,
+      findings: [{ kind: "friction", topic: "pagination", severity: "minor", detail: "A second request was needed." }],
+      workaround: { used: true, detail: "The agent requested the next page." },
+    },
     {
       allowedSubmitOrigins: ["https://feedback.test"],
       fetch: async (url, init) => {
@@ -62,10 +72,7 @@ test("feedback-aware adapter submits only the compact outcome to a trusted origi
     },
   );
   assert.equal(result.accepted, true);
-  assert.deepEqual(JSON.parse(requests[0].init.body), {
-    outcome: "success",
-    note: "The product response completed the task.",
-  });
+  assert.equal(JSON.parse(requests[0].init.body).findings[0].topic, "pagination");
   assert.equal(
     requests[0].init.headers.authorization,
     envelope.submit.authorization,
@@ -74,9 +81,9 @@ test("feedback-aware adapter submits only the compact outcome to a trusted origi
 
 test("feedback-aware adapter rejects untrusted submission origins", async () => {
   await assert.rejects(
-    submitProductOutcome(
+    submitProductFeedback(
       { ...envelope, submit: { ...envelope.submit, url: "https://evil.test/collect" } },
-      { outcome: "success", note: "This note is long enough." },
+      { summary: "This report summary is long enough." },
       { allowedSubmitOrigins: ["https://feedback.test"] },
     ),
     /untrusted origin/,
@@ -90,14 +97,14 @@ test("feedback-aware adapter resolves and enforces both consent modes", async ()
     consentRequired: true,
     consentPolicy: "once",
     consentScope: "afcs1_0123456789abcdef0123456789abcdef",
-    when: "after_outcome_known_and_consent_resolved",
+    when: "after_experience_known_and_consent_resolved",
   };
-  const review = {
-    outcome: "success",
-    note: "The product response completed the task.",
+  const report = {
+    summary: "The product response completed the task.",
+    impact: "helped",
   };
   await assert.rejects(
-    submitProductOutcome(askOnceEnvelope, review, {
+    submitProductFeedback(askOnceEnvelope, report, {
       allowedSubmitOrigins: ["https://feedback.test"],
     }),
     /Explicit user approval is required/,
@@ -108,7 +115,7 @@ test("feedback-aware adapter resolves and enforces both consent modes", async ()
   assert.equal(feedbackConsentAction(askOnceEnvelope, "refused"), "skip");
 
   let submitted = false;
-  await submitProductOutcome(askOnceEnvelope, review, {
+  await submitProductFeedback(askOnceEnvelope, report, {
     allowedSubmitOrigins: ["https://feedback.test"],
     userApproved: true,
     approvalSource: "stored_grant",
@@ -127,11 +134,11 @@ test("feedback-aware adapter resolves and enforces both consent modes", async ()
     mode: "ask_always",
     consentPolicy: "always",
     consentScope: undefined,
-    when: "after_outcome_known_and_explicit_user_approval",
+    when: "after_experience_known_and_explicit_user_approval",
   };
   assert.equal(feedbackConsentAction(askAlwaysEnvelope, "approved"), "ask");
   await assert.rejects(
-    submitProductOutcome(askAlwaysEnvelope, review, {
+    submitProductFeedback(askAlwaysEnvelope, report, {
       allowedSubmitOrigins: ["https://feedback.test"],
       userApproved: true,
       approvalSource: "stored_grant",
@@ -146,7 +153,7 @@ test("feedback-aware adapter rejects malformed consent contracts", () => {
     mode: "ask_always",
     consentRequired: false,
     consentPolicy: "always",
-    when: "after_outcome_known_and_explicit_user_approval",
+    when: "after_experience_known_and_explicit_user_approval",
   };
   assert.equal(
     feedbackFromResponse(
@@ -162,7 +169,7 @@ test("feedback-aware adapter rejects malformed consent contracts", () => {
     mode: "ask_once",
     consentRequired: true,
     consentPolicy: "once",
-    when: "after_outcome_known_and_consent_resolved",
+    when: "after_experience_known_and_consent_resolved",
   };
   assert.equal(feedbackConsentAction(missingScope), "skip");
 });

@@ -5,10 +5,10 @@ import { createMcpInstrumentation, instrumentMcp } from "../dist/mcp.js";
 
 const key = `af_live_2123456789abcdef0123456789abcdef_${"z".repeat(32)}`;
 
-test("MCP instrumentation decorates business tools and registers outcome reporting", async () => {
+test("MCP instrumentation decorates business tools and registers structured feedback reporting", async () => {
   const tools = new Map();
   const telemetry = [];
-  const outcomes = [];
+  const reports = [];
   const server = {
     registerTool(name, configuration, handler) {
       tools.set(name, { configuration, handler });
@@ -25,7 +25,7 @@ test("MCP instrumentation decorates business tools and registers outcome reporti
         telemetry.push(JSON.parse(init.body));
         return new Response("{}", { status: 202 });
       }
-      outcomes.push(JSON.parse(init.body));
+      reports.push(JSON.parse(init.body));
       return new Response(
         JSON.stringify({ accepted: true, interactionId: "interaction" }),
         { status: 200, headers: { "content-type": "application/json" } },
@@ -39,18 +39,19 @@ test("MCP instrumentation decorates business tools and registers outcome reporti
 
   const result = await tools.get("search").handler({}, { sessionId: "mcp_session_1" });
   assert.equal(result.structuredContent.answer, "found");
-  assert.equal(result.structuredContent._agentFeedback.reportTool, "report_product_outcome");
+  assert.equal(result.structuredContent._agentFeedback.reportTool, "report_product_feedback");
   assert.equal(result.structuredContent._agentFeedback.reliability, "protocol_tool");
   assert.match(result.structuredContent._agentFeedback.feedbackHandle, /^afr2_/);
   const feedbackHandle = result.structuredContent._agentFeedback.feedbackHandle;
-  const report = await tools.get("report_product_outcome").handler({
+  const report = await tools.get("report_product_feedback").handler({
     feedbackHandle,
-    outcome: "success",
-    note: "The search result completed the task.",
+    summary: "The search result completed the task with useful context.",
+    impact: "helped",
+    findings: [{ kind: "strength", topic: "relevance", detail: "The top result answered the question." }],
   });
   assert.equal(report.structuredContent.accepted, true);
-  assert.deepEqual(outcomes, [
-    { outcome: "success", note: "The search result completed the task." },
+  assert.deepEqual(reports, [
+    { summary: "The search result completed the task with useful context.", impact: "helped", findings: [{ kind: "strength", topic: "relevance", detail: "The top result answered the question." }] },
   ]);
   await instrumentation.shutdown();
   assert.equal(telemetry[0].events[0].classification, "confirmed");
@@ -95,9 +96,9 @@ test("stateless MCP factories share one process-level telemetry queue", async ()
   );
 });
 
-test("MCP Ask-always mode requires fresh approval for every outcome", async () => {
+test("MCP Ask-always mode requires fresh approval for every report", async () => {
   const tools = new Map();
-  const outcomes = [];
+  const reports = [];
   const server = {
     registerTool(name, configuration, handler) {
       tools.set(name, { configuration, handler });
@@ -110,8 +111,8 @@ test("MCP Ask-always mode requires fresh approval for every outcome", async () =
     feedbackMode: "ask_always",
     flushIntervalMs: 60_000,
     fetch: async (url, init) => {
-      if (String(url).endsWith("/api/v2/outcomes")) {
-        outcomes.push(JSON.parse(init.body));
+      if (String(url).endsWith("/api/v2/reports")) {
+        reports.push(JSON.parse(init.body));
         return new Response('{"accepted":true}', {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -132,40 +133,39 @@ test("MCP Ask-always mode requires fresh approval for every outcome", async () =
   assert.equal(contract.consentRequired, true);
   assert.equal(contract.consentPolicy, "always");
   assert.equal(contract.consentScope, undefined);
-  assert.equal(contract.when, "after_outcome_known_and_explicit_user_approval");
+  assert.equal(contract.when, "after_experience_known_and_explicit_user_approval");
   assert.match(contract.instruction, /Ask again before every future report/i);
   assert.doesNotMatch(contract.instruction, /autonomously/i);
   assert.match(result.content.at(-1).text, /Ask permission for this report/i);
-  assert.match(tools.get("report_product_outcome").configuration.description, /individual report/i);
-  assert.doesNotMatch(tools.get("report_product_outcome").configuration.description, /autonomously/i);
+  assert.match(tools.get("report_product_feedback").configuration.description, /individual report/i);
+  assert.doesNotMatch(tools.get("report_product_feedback").configuration.description, /autonomously/i);
 
   const feedbackHandle = contract.feedbackHandle;
-  const withoutApproval = await tools.get("report_product_outcome").handler({
+  const withoutApproval = await tools.get("report_product_feedback").handler({
     feedbackHandle,
-    outcome: "success",
-    note: "The search result completed the task.",
+    summary: "The search result completed the task with useful context.",
   });
   assert.equal(withoutApproval.isError, true);
   assert.equal(withoutApproval.structuredContent.consentRequired, true);
-  assert.deepEqual(outcomes, []);
+  assert.deepEqual(reports, []);
 
-  const approved = await tools.get("report_product_outcome").handler({
+  const approved = await tools.get("report_product_feedback").handler({
     feedbackHandle,
-    outcome: "success",
-    note: "The search result completed the task.",
+    summary: "The search result completed the task with useful context.",
+    impact: "helped",
     userApproved: true,
     approvalSource: "granted_now",
   });
   assert.equal(approved.structuredContent.accepted, true);
-  assert.deepEqual(outcomes, [
-    { outcome: "success", note: "The search result completed the task." },
+  assert.deepEqual(reports, [
+    { summary: "The search result completed the task with useful context.", impact: "helped" },
   ]);
   await feedback.shutdown();
 });
 
 test("MCP Ask-once mode accepts current or stored product-scoped approval", async () => {
   const tools = new Map();
-  const outcomes = [];
+  const reports = [];
   const server = {
     registerTool(name, configuration, handler) {
       tools.set(name, { configuration, handler });
@@ -178,8 +178,8 @@ test("MCP Ask-once mode accepts current or stored product-scoped approval", asyn
     feedbackMode: "ask_once",
     flushIntervalMs: 60_000,
     fetch: async (url, init) => {
-      if (String(url).endsWith("/api/v2/outcomes")) {
-        outcomes.push(JSON.parse(init.body));
+      if (String(url).endsWith("/api/v2/reports")) {
+        reports.push(JSON.parse(init.body));
         return new Response('{"accepted":true}', {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -199,20 +199,20 @@ test("MCP Ask-once mode accepts current or stored product-scoped approval", asyn
   assert.equal(contract.mode, "ask_once");
   assert.equal(contract.consentPolicy, "once");
   assert.match(contract.consentScope, /^afcs1_[0-9a-f]{32}$/);
-  assert.equal(contract.when, "after_outcome_known_and_consent_resolved");
+  assert.equal(contract.when, "after_experience_known_and_consent_resolved");
   assert.match(contract.instruction, /stored_grant/);
   assert.match(contract.instruction, /do not ask again/i);
 
-  const approved = await tools.get("report_product_outcome").handler({
+  const approved = await tools.get("report_product_feedback").handler({
     feedbackHandle: contract.feedbackHandle,
-    outcome: "success",
-    note: "The stored consent allowed this report.",
+    summary: "The stored consent allowed this structured report.",
+    impact: "helped",
     userApproved: true,
     approvalSource: "stored_grant",
   });
   assert.equal(approved.structuredContent.accepted, true);
-  assert.deepEqual(outcomes, [
-    { outcome: "success", note: "The stored consent allowed this report." },
+  assert.deepEqual(reports, [
+    { summary: "The stored consent allowed this structured report.", impact: "helped" },
   ]);
   await feedback.shutdown();
 });

@@ -9,8 +9,13 @@ Rust    router.layer(AgentFeedbackLayer::new(options)?)
 // Every adapter emits the same language-neutral contract.`;
 
 const review = `{
-  "outcome": "success",
-  "note": "The search result completed the task."
+  "summary": "The result answered the question, but one field was stale.",
+  "impact": "helped_with_friction",
+  "findings": [
+    { "kind": "strength", "topic": "relevance", "detail": "Useful result." },
+    { "kind": "gap", "topic": "freshness", "severity": "major", "detail": "Older API." }
+  ],
+  "workaround": { "used": true, "detail": "Verified in official docs." }
 }`;
 
 export default function Home() {
@@ -25,12 +30,12 @@ export default function Home() {
       </nav>
 
       <section id="top" className="hero">
-        <p className="eyebrow">OUTCOME FEEDBACK FROM CUSTOMER AGENTS</p>
+        <p className="eyebrow">PRODUCT FEEDBACK FROM CUSTOMER AGENTS</p>
         <h1>Did your product actually work for your customer&apos;s agent?</h1>
         <p className="lede">
           Instrument your API, MCP server, or agent-readable website once—in the
-          language you already use. MCP exposes an explicit outcome tool; HTTP
-          offers a compact receipt that feedback-aware runtimes can submit.
+          language you already use. MCP exposes an explicit feedback tool; HTTP
+          offers a scoped receipt that feedback-aware runtimes can submit.
         </p>
         <div className="actions">
           <a className="button primary" href={`${dashboard}/auth/start`}>Set up a product</a>
@@ -43,7 +48,7 @@ export default function Home() {
         <span aria-hidden="true">→</span>
         <article><b>2</b><h2>The customer&apos;s agent uses it</h2><p>HTTP begins as an opportunity. MCP tool use is confirmed immediately.</p></article>
         <span aria-hidden="true">→</span>
-        <article><b>3</b><h2>The agent reviews the outcome</h2><p>One short result: success, partial, or failure, plus a sentence explaining why.</p></article>
+        <article><b>3</b><h2>The agent reports the experience</h2><p>A concise narrative plus the strengths, friction, gaps, defects, suggestions, uncertainty, and workarounds that actually applied.</p></article>
       </section>
 
       <section id="integration" className="integration">
@@ -58,7 +63,7 @@ export default function Home() {
             <li>No agent identity or Agent Feedback account required</li>
             <li>No blocking call on the product response path</li>
             <li>No prompts, transcripts, credentials, or raw payloads accepted</li>
-            <li>Choose Auto, Ask once, Ask every time, or Off</li>
+            <li>Choose Never ask, Ask once, Ask every time, or Off</li>
             <li>Node, Python, Go, Rust, and MCP adapters use the same contract</li>
             <li>Every other stack can implement the small public HTTP protocol</li>
           </ul>
@@ -79,7 +84,7 @@ export default function Home() {
       </section>
 
       <section className="review-shape">
-        <div><p className="eyebrow">THE WHOLE REVIEW</p><h2>Small enough for an agent. Structured enough for product decisions.</h2></div>
+        <div><p className="eyebrow">A REAL REPORT</p><h2>Flexible enough for reality. Structured enough for product decisions.</h2></div>
         <pre><code>{review}</code></pre>
       </section>
 

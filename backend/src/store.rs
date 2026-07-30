@@ -1,9 +1,10 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -842,27 +843,26 @@ async fn feedback_summary(
             .bind(auth.workspace.id)
             .fetch_one(pool)
             .await?;
-    let counts = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64)>(
-        r#"SELECT COUNT(i.id), COUNT(o.id),
+    let counts = sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
+        r#"SELECT COUNT(i.id), COUNT(r.id),
         COUNT(i.id) FILTER (WHERE i.classification = 'confirmed'),
-        COUNT(o.id) FILTER (WHERE o.outcome = 'success'),
-        COUNT(o.id) FILTER (WHERE o.outcome = 'partial'),
-        COUNT(o.id) FILTER (WHERE o.outcome = 'failure')
+        COUNT(r.id) FILTER (WHERE r.workaround ->> 'used' = 'true'),
+        COUNT(r.id) FILTER (WHERE EXISTS (
+          SELECT 1 FROM jsonb_array_elements(r.findings) finding
+          WHERE finding ->> 'severity' = 'blocking'
+        ))
         FROM interactions_v2 i
-        LEFT JOIN outcomes_v2 o ON o.interaction_id = i.id
+        LEFT JOIN feedback_reports r ON r.interaction_id = i.id
         WHERE i.environment_id = $1 AND i.occurred_at >= $2"#,
     )
     .bind(auth.environment.id)
     .bind(window.since)
     .fetch_one(pool)
     .await?;
-    let operation_counts = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
-        r#"SELECT i.operation, COUNT(i.id),
-        COUNT(o.id) FILTER (WHERE o.outcome = 'success'),
-        COUNT(o.id) FILTER (WHERE o.outcome = 'partial'),
-        COUNT(o.id) FILTER (WHERE o.outcome = 'failure')
+    let operation_counts = sqlx::query_as::<_, (String, i64, i64)>(
+        r#"SELECT i.operation, COUNT(i.id), COUNT(r.id)
         FROM interactions_v2 i
-        LEFT JOIN outcomes_v2 o ON o.interaction_id = i.id
+        LEFT JOIN feedback_reports r ON r.interaction_id = i.id
         WHERE i.environment_id = $1 AND i.occurred_at >= $2
         GROUP BY i.operation
         ORDER BY COUNT(i.id) DESC, i.operation"#,
@@ -873,23 +873,13 @@ async fn feedback_summary(
     .await?;
     let top_operations = operation_counts
         .into_iter()
-        .map(|(operation, interactions, success, partial, failure)| {
-            let mut outcomes = BTreeMap::new();
-            for (name, count) in [
-                ("success", success),
-                ("partial", partial),
-                ("failure", failure),
-            ] {
-                if count > 0 {
-                    outcomes.insert(name.into(), count);
-                }
-            }
-            FeedbackOperationSummary {
+        .map(
+            |(operation, interactions, reports)| FeedbackOperationSummary {
                 operation,
                 interactions,
-                outcomes,
-            }
-        })
+                reports,
+            },
+        )
         .collect();
     let surfaces = sqlx::query_as::<_, (String, i64)>(
         r#"SELECT surface, COUNT(*) FROM interactions_v2
@@ -906,11 +896,45 @@ async fn feedback_summary(
         interactions,
     })
     .collect();
-    let outcomes = BTreeMap::from([
-        ("failure".into(), counts.5),
-        ("partial".into(), counts.4),
-        ("success".into(), counts.3),
-    ]);
+    let impacts = sqlx::query_as::<_, (String, i64)>(
+        r#"SELECT COALESCE(r.impact, 'unspecified'), COUNT(*)
+        FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id
+        WHERE i.environment_id = $1 AND i.occurred_at >= $2
+        GROUP BY COALESCE(r.impact, 'unspecified')"#,
+    )
+    .bind(auth.environment.id)
+    .bind(window.since)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect();
+    let finding_kinds = sqlx::query_as::<_, (String, i64)>(
+        r#"SELECT finding ->> 'kind', COUNT(*)
+        FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id,
+        LATERAL jsonb_array_elements(r.findings) finding
+        WHERE i.environment_id = $1 AND i.occurred_at >= $2
+        GROUP BY finding ->> 'kind'"#,
+    )
+    .bind(auth.environment.id)
+    .bind(window.since)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect();
+    let severities = sqlx::query_as::<_, (String, i64)>(
+        r#"SELECT finding ->> 'severity', COUNT(*)
+        FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id,
+        LATERAL jsonb_array_elements(r.findings) finding
+        WHERE i.environment_id = $1 AND i.occurred_at >= $2
+          AND finding ? 'severity'
+        GROUP BY finding ->> 'severity'"#,
+    )
+    .bind(auth.environment.id)
+    .bind(window.since)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect();
     Ok(FeedbackSummary {
         product,
         window,
@@ -918,49 +942,91 @@ async fn feedback_summary(
         reviewed: counts.1,
         review_rate: rounded_rate(counts.1, counts.0),
         confirmation_rate: rounded_rate(counts.2, counts.0),
-        outcomes,
-        outcome_success_rate: rounded_rate(counts.3, counts.1),
+        impacts,
+        finding_kinds,
+        severities,
+        workaround_rate: rounded_rate(counts.3, counts.1),
         top_operations,
         surfaces,
     })
 }
 
-pub async fn feedback_list_outcomes(
+pub async fn feedback_list_reports(
     pool: &PgPool,
     auth: &ProductAuth,
-    input: FeedbackListOutcomesInput,
-) -> Result<FeedbackOutcomesResponse, ApiError> {
+    input: FeedbackListReportsInput,
+) -> Result<FeedbackReportsResponse, ApiError> {
     if input.summary.unwrap_or(false) {
-        return Ok(FeedbackOutcomesResponse::Summary(
+        return Ok(FeedbackReportsResponse::Summary(
             feedback_summary(pool, auth, input.since).await?,
         ));
     }
     validate_feedback_values(
-        input.outcome.as_deref(),
-        &["success", "partial", "failure"],
-        "outcome",
+        input.impact.as_deref(),
+        &[
+            "helped",
+            "helped_with_friction",
+            "neutral",
+            "hindered",
+            "blocked",
+            "unknown",
+        ],
+        "impact",
+    )?;
+    validate_feedback_values(
+        input.finding_kind.as_deref(),
+        &[
+            "strength",
+            "friction",
+            "defect",
+            "gap",
+            "suggestion",
+            "uncertainty",
+            "other",
+        ],
+        "findingKind",
+    )?;
+    validate_feedback_values(
+        input.severity.as_deref(),
+        &["minor", "major", "blocking"],
+        "severity",
     )?;
     let limit = feedback_limit(input.limit)?;
     let (window, retained_since) = feedback_window(auth.environment.retention_days, input.since);
     let cursor = decode_feedback_cursor(input.cursor.as_deref(), retained_since)?;
     let cursor_occurred_at = cursor.as_ref().map(|cursor| cursor.occurred_at);
     let cursor_id = cursor.as_ref().map(|cursor| cursor.id);
-    let mut outcomes = sqlx::query_as::<_, FeedbackOutcomeItem>(
-        r#"SELECT o.id, o.outcome, o.note, i.operation, i.customer_ref, i.surface,
-        i.duration_ms, i.status_code, i.occurred_at, o.created_at, i.id AS interaction_id
-        FROM outcomes_v2 o
-        JOIN interactions_v2 i ON i.id = o.interaction_id
+    let mut reports = sqlx::query_as::<_, FeedbackReportItem>(
+        r#"SELECT r.id, r.summary, r.impact, r.confidence, r.findings, r.workaround,
+        i.operation, i.customer_ref, i.surface, i.duration_ms, i.status_code,
+        i.occurred_at, r.created_at, i.id AS interaction_id
+        FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id
         WHERE i.environment_id = $1 AND i.occurred_at >= $2
-          AND ($3::TEXT[] IS NULL OR o.outcome = ANY($3))
-          AND ($4::TEXT IS NULL OR i.operation = $4)
-          AND ($5::TEXT IS NULL OR i.customer_ref = $5)
-          AND ($6::TIMESTAMPTZ IS NULL OR (i.occurred_at, i.id) < ($6, $7))
+          AND ($3::TEXT[] IS NULL OR r.impact = ANY($3))
+          AND ($4::TEXT[] IS NULL OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(r.findings) finding
+            WHERE finding ->> 'kind' = ANY($4)
+          ))
+          AND ($5::TEXT[] IS NULL OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(r.findings) finding
+            WHERE finding ->> 'severity' = ANY($5)
+          ))
+          AND ($6::TEXT IS NULL OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(r.findings) finding
+            WHERE LOWER(finding ->> 'topic') = LOWER($6)
+          ))
+          AND ($7::TEXT IS NULL OR i.operation = $7)
+          AND ($8::TEXT IS NULL OR i.customer_ref = $8)
+          AND ($9::TIMESTAMPTZ IS NULL OR (i.occurred_at, i.id) < ($9, $10))
         ORDER BY i.occurred_at DESC, i.id DESC
-        LIMIT $8"#,
+        LIMIT $11"#,
     )
     .bind(auth.environment.id)
     .bind(window.since)
-    .bind(input.outcome)
+    .bind(input.impact)
+    .bind(input.finding_kind)
+    .bind(input.severity)
+    .bind(input.topic)
     .bind(input.operation)
     .bind(input.customer_ref)
     .bind(cursor_occurred_at)
@@ -968,8 +1034,8 @@ pub async fn feedback_list_outcomes(
     .bind(limit + 1)
     .fetch_all(pool)
     .await?;
-    let next_cursor = if outcomes.len() > limit as usize {
-        let last = &outcomes[limit as usize - 1];
+    let next_cursor = if reports.len() > limit as usize {
+        let last = &reports[limit as usize - 1];
         Some(encode_feedback_cursor(
             last.occurred_at,
             last.interaction_id,
@@ -977,9 +1043,9 @@ pub async fn feedback_list_outcomes(
     } else {
         None
     };
-    outcomes.truncate(limit as usize);
-    Ok(FeedbackOutcomesResponse::Page(FeedbackOutcomesPage {
-        outcomes,
+    reports.truncate(limit as usize);
+    Ok(FeedbackReportsResponse::Page(FeedbackReportsPage {
+        reports,
         next_cursor,
         window,
     }))
@@ -1004,9 +1070,9 @@ pub async fn feedback_list_interactions(
         r#"SELECT i.id, i.operation, i.customer_ref, i.surface, i.classification,
         i.duration_ms, i.status_code, i.occurred_at
         FROM interactions_v2 i
-        LEFT JOIN outcomes_v2 o ON o.interaction_id = i.id
+        LEFT JOIN feedback_reports r ON r.interaction_id = i.id
         WHERE i.environment_id = $1 AND i.occurred_at >= $2
-          AND ($3::BOOLEAN IS NULL OR (o.id IS NOT NULL) = $3)
+          AND ($3::BOOLEAN IS NULL OR (r.id IS NOT NULL) = $3)
           AND ($4::TEXT IS NULL OR i.operation = $4)
           AND ($5::TEXT IS NULL OR i.customer_ref = $5)
           AND ($6::TEXT[] IS NULL OR i.surface = ANY($6))
@@ -1148,13 +1214,14 @@ pub async fn dashboard(
     .bind(environment_id)
     .fetch_all(pool)
     .await?;
-    let outcomes = sqlx::query_as::<_, ProductOutcomeWithInteraction>(
-        r#"SELECT o.id, o.interaction_id, o.outcome, o.note, o.source, o.created_at,
+    let reports = sqlx::query_as::<_, ProductFeedbackReportWithInteraction>(
+        r#"SELECT r.id, r.interaction_id, r.summary, r.impact, r.confidence,
+        r.findings, r.workaround, r.source, r.created_at,
         i.session_id, i.surface, i.operation, i.status_code, i.duration_ms,
         i.customer_ref, i.classification, i.confirmation_method, i.runtime_hint,
         i.runtime_hint_source, i.occurred_at
-        FROM outcomes_v2 o JOIN interactions_v2 i ON i.id = o.interaction_id
-        WHERE i.environment_id = $1 ORDER BY o.created_at DESC LIMIT 250"#,
+        FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id
+        WHERE i.environment_id = $1 ORDER BY r.created_at DESC LIMIT 250"#,
     )
     .bind(environment_id)
     .fetch_all(pool)
@@ -1171,13 +1238,32 @@ pub async fn dashboard(
         .iter()
         .filter(|interaction| interaction.classification == "confirmed")
         .count();
-    let successful = outcomes
+    let reports_with_blockers = reports
         .iter()
-        .filter(|outcome| outcome.outcome == "success")
+        .filter(|report| {
+            report.findings.as_array().is_some_and(|findings| {
+                findings.iter().any(|finding| {
+                    finding.get("severity").and_then(Value::as_str) == Some("blocking")
+                })
+            })
+        })
+        .count();
+    let reports_with_workarounds = reports
+        .iter()
+        .filter(|report| {
+            report
+                .workaround
+                .as_ref()
+                .and_then(|workaround| workaround.get("used"))
+                .and_then(Value::as_bool)
+                == Some(true)
+        })
         .count();
     let mut operation_counts: HashMap<String, i64> = HashMap::new();
     let mut surface_counts: HashMap<String, i64> = HashMap::new();
-    let mut outcome_counts: HashMap<String, i64> = HashMap::new();
+    let mut impact_counts: HashMap<String, i64> = HashMap::new();
+    let mut finding_kind_counts: HashMap<String, i64> = HashMap::new();
+    let mut topic_counts: HashMap<String, i64> = HashMap::new();
     for interaction in &interactions {
         *operation_counts
             .entry(interaction.operation.clone())
@@ -1186,8 +1272,25 @@ pub async fn dashboard(
             .entry(interaction.surface.clone())
             .or_default() += 1;
     }
-    for outcome in &outcomes {
-        *outcome_counts.entry(outcome.outcome.clone()).or_default() += 1;
+    for report in &reports {
+        *impact_counts
+            .entry(
+                report
+                    .impact
+                    .clone()
+                    .unwrap_or_else(|| "unspecified".into()),
+            )
+            .or_default() += 1;
+        if let Some(findings) = report.findings.as_array() {
+            for finding in findings {
+                if let Some(kind) = finding.get("kind").and_then(Value::as_str) {
+                    *finding_kind_counts.entry(kind.into()).or_default() += 1;
+                }
+                if let Some(topic) = finding.get("topic").and_then(Value::as_str) {
+                    *topic_counts.entry(topic.into()).or_default() += 1;
+                }
+            }
+        }
     }
     let counts = |map: HashMap<String, i64>| {
         let mut values = map
@@ -1201,7 +1304,7 @@ pub async fn dashboard(
     let insights = Insights {
         opportunities: interactions.len(),
         confirmed_interactions: confirmed,
-        reviews: outcomes.len(),
+        reports: reports.len(),
         confirmation_rate: if interactions.is_empty() {
             0
         } else {
@@ -1210,16 +1313,15 @@ pub async fn dashboard(
         review_rate: if confirmed == 0 {
             0
         } else {
-            (outcomes.len() as f64 / confirmed as f64 * 100.0).round() as i64
+            (reports.len() as f64 / confirmed as f64 * 100.0).round() as i64
         },
-        outcome_success_rate: if outcomes.is_empty() {
-            0
-        } else {
-            (successful as f64 / outcomes.len() as f64 * 100.0).round() as i64
-        },
+        reports_with_blockers,
+        reports_with_workarounds,
         top_operations: counts(operation_counts),
         surfaces: counts(surface_counts),
-        outcomes: counts(outcome_counts),
+        impacts: counts(impact_counts),
+        finding_kinds: counts(finding_kind_counts),
+        topics: counts(topic_counts),
     };
     let team_members = sqlx::query_as::<_, TeamMember>(
         r#"SELECT workspace_id, os_user_id, handle, email, display_name, role,
@@ -1258,7 +1360,7 @@ pub async fn dashboard(
         current_environment,
         api_keys,
         interactions,
-        outcomes,
+        reports,
         sessions,
         insights,
     })
@@ -1450,38 +1552,147 @@ pub async fn ingest_telemetry_batch(
     Ok(event_count)
 }
 
-pub async fn submit_product_outcome(
-    pool: &PgPool,
-    capability: &str,
-    input: ProductOutcomeInput,
-) -> Result<(ProductInteraction, ProductOutcome), ApiError> {
-    if !["success", "partial", "failure"].contains(&input.outcome.as_str()) {
-        return Err(ApiError::bad_request(
-            "outcome must be success, partial, or failure",
-        ));
-    }
-    let note = clean(&input.note, 500);
-    if note.len() < 8 {
-        return Err(ApiError::bad_request(
-            "note must contain at least 8 characters",
-        ));
-    }
-    let lower_note = note.to_ascii_lowercase();
-    if [
+fn contains_sensitive_report_text(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    [
         "bearer ",
         "af_live_",
         "api key",
         "password",
         "transcript:",
         "prompt:",
+        "raw input:",
+        "raw output:",
     ]
     .iter()
-    .any(|pattern| lower_note.contains(pattern))
-    {
+    .any(|pattern| value.contains(pattern))
+}
+
+pub async fn submit_product_feedback(
+    pool: &PgPool,
+    capability: &str,
+    input: ProductFeedbackReportInput,
+) -> Result<(ProductInteraction, ProductFeedbackReport), ApiError> {
+    let summary = clean(&input.summary, 700);
+    if summary.len() < 8 {
         return Err(ApiError::bad_request(
-            "The outcome note appears to contain sensitive data",
+            "summary must contain 8 to 700 characters",
         ));
     }
+    if contains_sensitive_report_text(&summary) {
+        return Err(ApiError::bad_request(
+            "The feedback report appears to contain sensitive data",
+        ));
+    }
+    if let Some(impact) = input.impact.as_deref()
+        && ![
+            "helped",
+            "helped_with_friction",
+            "neutral",
+            "hindered",
+            "blocked",
+            "unknown",
+        ]
+        .contains(&impact)
+    {
+        return Err(ApiError::bad_request(
+            "impact must be helped, helped_with_friction, neutral, hindered, blocked, or unknown",
+        ));
+    }
+    if input
+        .confidence
+        .is_some_and(|confidence| !(0.0..=1.0).contains(&confidence))
+    {
+        return Err(ApiError::bad_request("confidence must be between 0 and 1"));
+    }
+    if input.findings.len() > 8 {
+        return Err(ApiError::bad_request(
+            "A feedback report can contain at most 8 findings",
+        ));
+    }
+    let mut findings = Vec::with_capacity(input.findings.len());
+    for mut finding in input.findings {
+        if ![
+            "strength",
+            "friction",
+            "defect",
+            "gap",
+            "suggestion",
+            "uncertainty",
+            "other",
+        ]
+        .contains(&finding.kind.as_str())
+        {
+            return Err(ApiError::bad_request("Invalid finding kind"));
+        }
+        if finding
+            .severity
+            .as_deref()
+            .is_some_and(|severity| !["minor", "major", "blocking"].contains(&severity))
+        {
+            return Err(ApiError::bad_request("Invalid finding severity"));
+        }
+        finding.topic = clean(&finding.topic, 64)
+            .to_ascii_lowercase()
+            .replace(' ', "_");
+        finding.detail = clean(&finding.detail, 350);
+        if finding.topic.is_empty()
+            || !finding
+                .topic
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphanumeric())
+            || !finding.topic.chars().all(|character| {
+                character.is_ascii_lowercase()
+                    || character.is_ascii_digit()
+                    || "-_".contains(character)
+            })
+            || finding.detail.len() < 3
+        {
+            return Err(ApiError::bad_request(
+                "Each finding requires a safe topic and 3 to 350 character detail",
+            ));
+        }
+        if contains_sensitive_report_text(&finding.detail) {
+            return Err(ApiError::bad_request(
+                "The feedback report appears to contain sensitive data",
+            ));
+        }
+        findings.push(finding);
+    }
+    let workaround = if let Some(mut workaround) = input.workaround {
+        workaround.detail = workaround
+            .detail
+            .map(|detail| clean(&detail, 350))
+            .filter(|detail| !detail.is_empty());
+        if workaround.used
+            && workaround
+                .detail
+                .as_deref()
+                .is_none_or(|detail| detail.len() < 3)
+        {
+            return Err(ApiError::bad_request(
+                "A used workaround requires a 3 to 350 character detail",
+            ));
+        }
+        if workaround
+            .detail
+            .as_deref()
+            .is_some_and(contains_sensitive_report_text)
+        {
+            return Err(ApiError::bad_request(
+                "The feedback report appears to contain sensitive data",
+            ));
+        }
+        Some(workaround)
+    } else {
+        None
+    };
+    let findings = serde_json::to_value(findings).map_err(ApiError::internal)?;
+    let workaround = workaround
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(ApiError::internal)?;
 
     let parsed = parse_capability(capability)?;
     let key = sqlx::query_as::<_, (Uuid, Vec<u8>, String, Uuid)>(
@@ -1506,10 +1717,10 @@ pub async fn submit_product_outcome(
         (id, workspace_id, environment_id, api_key_id, surface, operation, classification,
          confirmation_method, capability_nonce_hash, occurred_at)
         VALUES ($1, $2, $3, $4, 'unknown', 'pending', 'confirmed',
-          'outcome_submission', $5, TO_TIMESTAMP($6))
+          'feedback_report', $5, TO_TIMESTAMP($6))
         ON CONFLICT (id) DO UPDATE SET
           classification = 'confirmed',
-          confirmation_method = COALESCE(interactions_v2.confirmation_method, 'outcome_submission'),
+          confirmation_method = COALESCE(interactions_v2.confirmation_method, 'feedback_report'),
           capability_nonce_hash = COALESCE(interactions_v2.capability_nonce_hash, EXCLUDED.capability_nonce_hash),
           updated_at = NOW()
         WHERE interactions_v2.environment_id = EXCLUDED.environment_id
@@ -1527,29 +1738,33 @@ pub async fn submit_product_outcome(
     .await?
     .ok_or_else(|| ApiError::conflict("interactionId belongs to another product environment"))?;
 
-    if let Some(existing) =
-        sqlx::query_as::<_, ProductOutcome>("SELECT * FROM outcomes_v2 WHERE interaction_id = $1")
-            .bind(claims.i)
-            .fetch_optional(&mut *tx)
-            .await?
+    if let Some(existing) = sqlx::query_as::<_, ProductFeedbackReport>(
+        "SELECT * FROM feedback_reports WHERE interaction_id = $1",
+    )
+    .bind(claims.i)
+    .fetch_optional(&mut *tx)
+    .await?
     {
         tx.commit().await?;
         return Ok((interaction, existing));
     }
-    let outcome = sqlx::query_as::<_, ProductOutcome>(
-        r#"INSERT INTO outcomes_v2
-        (id, workspace_id, interaction_id, outcome, note)
-        VALUES ($1, $2, $3, $4, $5) RETURNING *"#,
+    let report = sqlx::query_as::<_, ProductFeedbackReport>(
+        r#"INSERT INTO feedback_reports
+        (id, workspace_id, interaction_id, summary, impact, confidence, findings, workaround)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *"#,
     )
     .bind(Uuid::new_v4())
     .bind(key.0)
     .bind(claims.i)
-    .bind(input.outcome)
-    .bind(note)
+    .bind(summary)
+    .bind(input.impact)
+    .bind(input.confidence)
+    .bind(findings)
+    .bind(workaround)
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok((interaction, outcome))
+    Ok((interaction, report))
 }
 
 #[cfg(test)]
@@ -1725,9 +1940,12 @@ mod product_tests {
                 .await?;
             }
             sqlx::query(
-                r#"INSERT INTO outcomes_v2
-                (id, workspace_id, interaction_id, outcome, note)
-                VALUES ($1, $2, $3, 'success', 'The operation completed successfully.')"#,
+                r#"INSERT INTO feedback_reports
+                (id, workspace_id, interaction_id, summary, impact, confidence, findings, workaround)
+                VALUES ($1, $2, $3, 'The operation completed and returned the requested result.',
+                        'helped', 0.95,
+                        '[{"kind":"strength","topic":"relevance","detail":"The result directly answered the request."}]'::jsonb,
+                        '{"used":false}'::jsonb)"#,
             )
             .bind(Uuid::new_v4())
             .bind(workspace_id)
@@ -1735,13 +1953,16 @@ mod product_tests {
             .execute(&pool)
             .await?;
 
-            let summary = feedback_list_outcomes(
+            let summary = feedback_list_reports(
                 &pool,
                 &read_auth,
-                FeedbackListOutcomesInput {
+                FeedbackListReportsInput {
                     summary: Some(true),
                     since: None,
-                    outcome: Some(vec!["failure".into()]),
+                    impact: Some(vec!["blocked".into()]),
+                    finding_kind: Some(vec!["defect".into()]),
+                    severity: Some(vec!["blocking".into()]),
+                    topic: Some("ignored".into()),
                     operation: Some("ignored".into()),
                     customer_ref: Some("ignored".into()),
                     limit: Some(101),
@@ -1750,7 +1971,7 @@ mod product_tests {
             )
             .await
             .map_err(test_error)?;
-            let FeedbackOutcomesResponse::Summary(summary) = summary else {
+            let FeedbackReportsResponse::Summary(summary) = summary else {
                 anyhow::bail!("summary:true returned a paginated response");
             };
             anyhow::ensure!(summary.product == "Read key product");
@@ -1758,15 +1979,19 @@ mod product_tests {
             anyhow::ensure!(summary.reviewed == 1);
             anyhow::ensure!(summary.review_rate == 0.5);
             anyhow::ensure!(summary.confirmation_rate == 1.0);
-            anyhow::ensure!(summary.outcomes.get("success") == Some(&1));
+            anyhow::ensure!(summary.impacts.get("helped") == Some(&1));
+            anyhow::ensure!(summary.finding_kinds.get("strength") == Some(&1));
 
-            let outcomes = feedback_list_outcomes(
+            let reports = feedback_list_reports(
                 &pool,
                 &read_auth,
-                FeedbackListOutcomesInput {
+                FeedbackListReportsInput {
                     summary: None,
                     since: None,
-                    outcome: Some(vec!["success".into()]),
+                    impact: Some(vec!["helped".into()]),
+                    finding_kind: Some(vec!["strength".into()]),
+                    severity: None,
+                    topic: Some("relevance".into()),
                     operation: Some("search".into()),
                     customer_ref: Some("acct_1".into()),
                     limit: None,
@@ -1775,11 +2000,11 @@ mod product_tests {
             )
             .await
             .map_err(test_error)?;
-            let FeedbackOutcomesResponse::Page(outcomes) = outcomes else {
+            let FeedbackReportsResponse::Page(reports) = reports else {
                 anyhow::bail!("list call returned a summary response");
             };
-            anyhow::ensure!(outcomes.outcomes.len() == 1);
-            anyhow::ensure!(outcomes.outcomes[0].interaction_id == reviewed_id);
+            anyhow::ensure!(reports.reports.len() == 1);
+            anyhow::ensure!(reports.reports[0].interaction_id == reviewed_id);
 
             let first_page = feedback_list_interactions(
                 &pool,

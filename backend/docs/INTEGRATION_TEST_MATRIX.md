@@ -8,8 +8,8 @@
 | Python ASGI and WSGI | One middleware wrapper | JSON object, compact headers, or embedded HTML JSON | Unclassified until review |
 | Go net/http and Rust Tower | One middleware/layer | JSON object, compact headers, or embedded HTML JSON | Unclassified until review |
 | Language-neutral HTTP | Public v1 protocol | Same JSON, header, and HTML contract | Unclassified until review |
-| Node MCP | `instrumentMcp` immediately after server construction | Decorated business result plus `report_product_outcome` | Confirmed on tool use |
-| Language-neutral MCP | Public v1 protocol | Explicit outcome tool and decorated result | Confirmed on tool use |
+| Node MCP | `instrumentMcp` immediately after server construction | Decorated business result plus `report_product_feedback` | Confirmed on tool use |
+| Language-neutral MCP | Public v1 protocol | Explicit feedback tool and decorated result | Confirmed on tool use |
 
 The Setup page currently exposes 16 enabled permutations: seven HTTP API integrations,
 the same seven server-rendered website integrations, and two MCP integrations. Static
@@ -48,11 +48,11 @@ For all 16 cases it asserts:
 - the agent submits an exact, unique success note;
 - a contradictory duplicate returns the original review;
 - PostgreSQL contains one linked review with the expected surface and operation;
-- HTTP/HTML is confirmed by `outcome_submission`, while MCP remains confirmed by `mcp`.
+- HTTP/HTML is confirmed by `feedback_report`, while MCP remains confirmed by `mcp`.
 
 The test deletes only its randomly generated workspace when it finishes. The current full
 run passed `7 API + 7 website + 2 MCP` and stored all 16 exact notes.
 
 ## Behavioral agent check
 
-`tests/agent_instruction_probe.py` compares a bare submission URL with the compact self-contained v2 instruction. Current fresh-agent tests used the HTTP product result but ignored the additional side effect even when the compact instruction was explicit. The feedback-aware HTTP adapter submitted the same scoped contract deterministically. A fresh MCP client called `report_product_outcome` autonomously because feedback was exposed as an explicit protocol tool. Production therefore treats HTTP/HTML as best-effort opportunities and MCP as protocol-confirmed behavior.
+`tests/agent_instruction_probe.py` compares a bare submission URL with the self-contained v2 instruction. Current fresh-agent tests used the HTTP product result but ignored the additional side effect even when the instruction was explicit. The feedback-aware HTTP adapter submitted the same scoped contract deterministically. A fresh MCP client called `report_product_feedback` autonomously because feedback was exposed as an explicit protocol tool. Production therefore treats HTTP/HTML as best-effort opportunities and MCP as protocol-confirmed behavior.

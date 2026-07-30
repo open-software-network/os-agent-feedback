@@ -128,33 +128,45 @@ function assertEnvelope(envelope) {
   assert.equal(envelope.reliability, "best_effort_without_agent_adapter");
   assert.match(envelope.instruction, /autonomously/i);
   assert.match(envelope.instruction, /do not ask the human/i);
-  assert.equal(envelope.submit.url, `${backendUrl}/api/v2/outcomes`);
+  assert.equal(envelope.submit.url, `${backendUrl}/api/v2/reports`);
   assert.equal(envelope.submit.method, "POST");
   assert.match(envelope.submit.authorization, /^Bearer afr2_/);
-  assert.deepEqual(envelope.submit.fields.outcome, ["success", "partial", "failure"]);
+  assert.deepEqual(envelope.submit.reportSchema.required, ["summary"]);
+  assert.equal(envelope.submit.reportSchema.maxFindings, 8);
   assert.doesNotMatch(JSON.stringify(envelope), /af_live_/);
 }
 
-async function submit(envelope, note) {
+async function submit(envelope, summary) {
+  const report = {
+    summary,
+    impact: "helped_with_friction",
+    confidence: 0.91,
+    findings: [
+      { kind: "strength", topic: "integration", detail: "The configured product surface returned the expected result." },
+      { kind: "friction", topic: "verification", severity: "minor", detail: "The agent performed one additional verification step." },
+    ],
+    workaround: { used: true, detail: "The agent verified the result through the setup harness." },
+  };
   const response = await fetch(envelope.submit.url, {
     method: "POST",
     headers: { authorization: envelope.submit.authorization, "content-type": "application/json" },
-    body: JSON.stringify({ outcome: "success", note }),
+    body: JSON.stringify(report),
   });
   const body = await response.json();
   assert.equal(response.status, 200, JSON.stringify(body));
   assert.equal(body.accepted, true);
-  assert.equal(body.review.outcome, "success");
-  assert.equal(body.review.note, note);
+  assert.equal(body.report.summary, summary);
+  assert.equal(body.report.impact, "helped_with_friction");
+  assert.equal(body.report.findings.length, 2);
   const duplicate = await fetch(envelope.submit.url, {
     method: "POST",
     headers: { authorization: envelope.submit.authorization, "content-type": "application/json" },
-    body: JSON.stringify({ outcome: "failure", note: "This duplicate must not replace the first outcome." }),
+    body: JSON.stringify({ summary: "This duplicate report must not replace the first report." }),
   });
   const duplicateBody = await duplicate.json();
   assert.equal(duplicate.status, 200);
-  assert.equal(duplicateBody.review.id, body.review.id);
-  assert.equal(duplicateBody.review.note, note);
+  assert.equal(duplicateBody.report.id, body.report.id);
+  assert.equal(duplicateBody.report.summary, summary);
   return body;
 }
 
@@ -170,10 +182,10 @@ async function testHttp(base, stack) {
     const envelope = envelopeFrom(response, body);
     assert.ok(envelope, `${stack}/${surfaceName} did not expose feedback metadata`);
     assertEnvelope(envelope);
-    const note = `Epode ${stack} ${surfaceName} setup returned the expected result.`;
-    const outcome = await submit(envelope, note);
-    expected.set(note, { surface, operation: path, confirmationMethod: "outcome_submission", interactionId: outcome.interactionId });
-    console.log(`PASS ${stack}/${surfaceName}: response contract, autonomous review, idempotency`);
+    const summary = `Epode ${stack} ${surfaceName} setup returned the expected result.`;
+    const report = await submit(envelope, summary);
+    expected.set(summary, { surface, operation: path, confirmationMethod: "feedback_report", interactionId: report.interactionId });
+    console.log(`PASS ${stack}/${surfaceName}: response contract, autonomous report, idempotency`);
   }
 }
 
@@ -262,7 +274,7 @@ async function testMcp(url, stack) {
   assert.ok(Number.isSafeInteger(payload.result.ttlMs));
   const names = payload.result.tools.map((tool) => tool.name);
   assert.ok(names.includes("search"));
-  assert.ok(names.includes("report_product_outcome"));
+  assert.ok(names.includes("report_product_feedback"));
 
   const mismatch = await mcpPost(
     url,
@@ -275,18 +287,28 @@ async function testMcp(url, stack) {
   assert.equal(payload.result.resultType, "complete");
   const feedback = payload.result.structuredContent._agentFeedback;
   assert.equal(feedback.reliability, "protocol_tool");
-  assert.equal(feedback.reportTool, "report_product_outcome");
+  assert.equal(feedback.reportTool, "report_product_feedback");
   assert.match(feedback.feedbackHandle, /^afr2_/);
   assert.match(feedback.instruction, /autonomously/i);
-  const note = `Epode ${stack} MCP setup returned the expected result.`;
+  const summary = `Epode ${stack} MCP setup returned the expected result.`;
   payload = await mcpPost(url, modernMcpRequest(5, "tools/call", {
-    name: "report_product_outcome",
-    arguments: { feedbackHandle: feedback.feedbackHandle, outcome: "success", note },
+    name: "report_product_feedback",
+    arguments: {
+      feedbackHandle: feedback.feedbackHandle,
+      summary,
+      impact: "helped_with_friction",
+      confidence: 0.91,
+      findings: [
+        { kind: "strength", topic: "integration", detail: "The MCP tool returned the expected result." },
+        { kind: "friction", topic: "verification", severity: "minor", detail: "The agent performed one additional verification step." },
+      ],
+      workaround: { used: true, detail: "The agent verified the result through the setup harness." },
+    },
   }));
   assert.equal(payload.result.resultType, "complete");
   assert.equal(payload.result.structuredContent.accepted, true, JSON.stringify(payload.result));
-  assert.equal(payload.result.structuredContent.review.note, note);
-  expected.set(note, { surface: "mcp", operation: "search", confirmationMethod: "mcp", interactionId: payload.result.structuredContent.interactionId });
+  assert.equal(payload.result.structuredContent.report.summary, summary);
+  expected.set(summary, { surface: "mcp", operation: "search", confirmationMethod: "mcp", interactionId: payload.result.structuredContent.interactionId });
 
   const legacyResponse = await fetch(url, {
     method: "POST",
@@ -433,16 +455,18 @@ try {
   assert.equal(expected.size, 16);
   assert.equal(rows.length, 16, JSON.stringify(rows, null, 2));
   for (const row of rows) {
-    const contract = expected.get(row.note);
-    assert.ok(contract, `Unexpected stored note: ${row.note}`);
+    const contract = expected.get(row.summary);
+    assert.ok(contract, `Unexpected stored report: ${row.summary}`);
     assert.equal(row.id, contract.interactionId);
-    assert.equal(row.surface, contract.surface, `surface mismatch for ${row.note}: ${JSON.stringify(row)}`);
-    assert.equal(row.operation, contract.operation, `operation mismatch for ${row.note}: ${JSON.stringify(row)}`);
+    assert.equal(row.surface, contract.surface, `surface mismatch for ${row.summary}: ${JSON.stringify(row)}`);
+    assert.equal(row.operation, contract.operation, `operation mismatch for ${row.summary}: ${JSON.stringify(row)}`);
     assert.equal(row.classification, "confirmed");
     assert.equal(row.confirmationMethod, contract.confirmationMethod);
-    assert.equal(row.outcome, "success");
+    assert.equal(row.impact, "helped_with_friction");
+    assert.equal(row.findings.length, 2);
+    assert.equal(row.workaround.used, true);
   }
-  console.log("PASS persistence: all 16 Setup permutations stored the exact agent note on the correct confirmed interaction");
+  console.log("PASS persistence: all 16 Setup permutations stored the exact structured report on the correct confirmed interaction");
   console.log("PASS setup matrix E2E: 7 API + 7 website + 2 MCP permutations");
 } finally {
   for (const child of children) await stop(child);

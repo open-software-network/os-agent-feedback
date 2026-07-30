@@ -15,7 +15,7 @@ const mcp = createMcpHandler(() => {
 });
 ```
 
-The customer's MCP client can see and call the outcome tool explicitly. A successful business-tool call is immediately a confirmed interaction; the later outcome tool links a compact `success`, `partial`, or `failure` review to it.
+The customer's MCP client can see and call the feedback tool explicitly. A business-tool call is immediately a confirmed interaction; the later feedback tool links a structured report with a narrative, optional impact, findings, workaround, and confidence.
 
 Set `AGENT_FEEDBACK_MODE=never_ask` to submit autonomously, `ask_once` to remember approval or refusal under the returned `consentScope`, or `ask_always` to require `approvalSource: "granted_now"` for every report.
 

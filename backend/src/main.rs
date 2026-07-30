@@ -152,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/settings/policy", post(update_policy_handler))
         .route("/api/v2/telemetry/batches", post(telemetry_batch_handler))
-        .route("/api/v2/outcomes", post(product_outcome_handler))
+        .route("/api/v2/reports", post(product_feedback_handler))
         .route("/mcp", get(mcp_info).post(mcp_handler))
         .nest_service("/static", ServeDir::new("public"))
         .layer(DefaultBodyLimit::max(64 * 1024))
@@ -259,34 +259,36 @@ async fn feedback_discovery_v2(State(state): State<Arc<AppState>>) -> Json<Value
     Json(json!({
         "name": "Agent Feedback Protocol",
         "version": 1,
-        "purpose": "Collect one compact product-outcome review from a customer's independent agent.",
+        "purpose": "Collect one structured product feedback report from a customer's independent agent.",
         "feedbackModes": {
             "never_ask": "The agent submits its own assessment autonomously without interrupting the user.",
             "ask_once": "The agent asks once per product and agent runtime, then remembers approval or refusal.",
-            "ask_always": "The agent asks before every individual outcome report.",
-            "off": "No outcome contract is emitted."
+            "ask_always": "The agent asks before every individual feedback report.",
+            "off": "No feedback contract is emitted."
         },
         "telemetry": {
             "url": format!("{}/api/v2/telemetry/batches", state.public_base_url),
             "authentication": "Bearer af_live_... company product key",
             "delivery": "bounded, asynchronous, and non-blocking"
         },
-        "outcomeSubmission": {
-            "url": format!("{}/api/v2/outcomes", state.public_base_url),
+        "feedbackSubmission": {
+            "url": format!("{}/api/v2/reports", state.public_base_url),
             "authentication": "Bearer afr2_... short-lived interaction capability",
             "requiredFields": {
-                "outcome": ["success", "partial", "failure"],
-                "note": "one short sentence, at most 500 characters"
+                "summary": "concise description of how the product contributed, 8 to 700 characters"
             },
+            "optionalFields": ["impact", "confidence", "findings", "workaround"],
+            "findingKinds": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"],
+            "findingSeverities": ["minor", "major", "blocking"],
             "consent": {
-                "prompt": "May I send the product provider a short outcome report saying whether it worked? Your prompt and task content will not be included.",
+                "prompt": "May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.",
                 "askOnceScope": "per product and agent runtime; no user or agent identity is stored by Epode",
-                "askAlwaysScope": "per outcome report",
+                "askAlwaysScope": "per feedback report",
                 "onRefusalOrNoResponse": "do not submit"
             }
         },
         "classification": {
-            "http": "unclassified until an outcome is submitted",
+            "http": "unclassified until a feedback report is submitted",
             "mcp": "confirmed immediately by protocol tool use"
         },
         "mcp": {
@@ -306,7 +308,7 @@ async fn feedback_discovery_v2(State(state): State<Arc<AppState>>) -> Json<Value
         },
         "reliability": {
             "http": "best effort for generic agents; deterministic with a feedback-aware runtime",
-            "mcp": "protocol-backed explicit outcome tool"
+            "mcp": "protocol-backed explicit feedback tool"
         },
         "identity": "Agent identity is neither required nor claimed. customerRef and runtime hints are optional opaque context.",
         "privacy": "Never submit prompts, transcripts, secrets, credentials, personal data, customer content, or raw tool payloads."
@@ -762,7 +764,7 @@ async fn telemetry_batch_handler(
         .into_response())
 }
 
-async fn product_outcome_handler(
+async fn product_feedback_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(value): Json<Value>,
@@ -770,16 +772,16 @@ async fn product_outcome_handler(
     let capability = bearer_token(&headers)
         .filter(|token| token.starts_with("afr2_"))
         .ok_or_else(ApiError::unauthorized)?;
-    let (interaction, review) = submit_product_outcome(
+    let (interaction, report) = submit_product_feedback(
         &state.pool,
         &capability,
-        safe_input::<ProductOutcomeInput>(value)?,
+        safe_input::<ProductFeedbackReportInput>(value)?,
     )
     .await?;
     let mut response = Json(json!({
         "accepted": true,
         "interactionId": interaction.id,
-        "review": review
+        "report": report
     }))
     .into_response();
     response.headers_mut().insert(
@@ -803,7 +805,7 @@ const MCP_PROTOCOL_VERSION: &str = "2026-07-28";
 const MCP_PROTOCOL_META: &str = "io.modelcontextprotocol/protocolVersion";
 const MCP_CAPABILITIES_META: &str = "io.modelcontextprotocol/clientCapabilities";
 const MCP_SERVER_INFO_META: &str = "io.modelcontextprotocol/serverInfo";
-const MCP_INSTRUCTIONS: &str = "Inspect product interactions and outcome feedback. This server is read-only. Never request prompts, transcripts, secrets, personal data, customer data, or raw tool payloads.";
+const MCP_INSTRUCTIONS: &str = "Inspect product interactions and structured feedback reports. This server is read-only. Never request prompts, transcripts, secrets, personal data, customer data, or raw tool payloads.";
 
 fn mcp_server_info() -> Value {
     json!({ "name": "agent-feedback", "version": "2.0.0" })
@@ -1057,9 +1059,9 @@ async fn mcp_handler(
                 .into_response();
             }
             let result = match name {
-                "feedback_list_outcomes" => {
-                    match serde_json::from_value::<FeedbackListOutcomesInput>(arguments) {
-                        Ok(input) => feedback_list_outcomes(&state.pool, &auth, input)
+                "feedback_list_reports" => {
+                    match serde_json::from_value::<FeedbackListReportsInput>(arguments) {
+                        Ok(input) => feedback_list_reports(&state.pool, &auth, input)
                             .await
                             .map(|response| json!(response)),
                         Err(error) => {
@@ -1096,10 +1098,7 @@ async fn mcp_handler(
 }
 
 fn mcp_tool_allowed(name: &str) -> bool {
-    matches!(
-        name,
-        "feedback_list_outcomes" | "feedback_list_interactions"
-    )
+    matches!(name, "feedback_list_reports" | "feedback_list_interactions")
 }
 
 fn mcp_tools() -> Value {
@@ -1109,8 +1108,8 @@ fn mcp_tools() -> Value {
 fn mcp_read_tools() -> Value {
     json!([
         {
-            "name": "feedback_list_outcomes",
-            "description": "List outcome reviews submitted by customer agents, newest first. Each carries a short free-text note explaining what worked or did not. This is where actionable signal lives. Pass summary:true to get aggregate counts and rates for the whole product instead of individual records — call that first to orient.",
+            "name": "feedback_list_reports",
+            "description": "List rich feedback reports submitted by customer agents, newest first. Reports contain a narrative plus optional impact, findings, workaround, and confidence. Pass summary:true to get aggregate report and finding counts for the whole product — call that first to orient.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1124,14 +1123,23 @@ fn mcp_read_tools() -> Value {
                         "format": "date-time",
                         "description": "ISO 8601. Track this per client to poll for what is new."
                     },
-                    "outcome": {
+                    "impact": {
                         "type": "array",
                         "items": {
                             "type": "string",
-                            "enum": ["success", "partial", "failure"]
+                            "enum": ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"]
                         },
-                        "description": "Filter to these outcomes. Omit for all. Use [\"partial\",\"failure\"] to find problems."
+                        "description": "Filter by the agent's optional high-level impact assessment."
                     },
+                    "findingKind": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"] }
+                    },
+                    "severity": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["minor", "major", "blocking"] }
+                    },
+                    "topic": { "type": "string", "description": "Exact normalized finding topic." },
                     "operation": {
                         "type": "string",
                         "description": "Exact operation name, e.g. a tool or route name."
@@ -1155,14 +1163,14 @@ fn mcp_read_tools() -> Value {
         },
         {
             "name": "feedback_list_interactions",
-            "description": "List product interactions, newest first, including those with no outcome review. Use reviewed:false to find operations customer agents use but never review.",
+            "description": "List product interactions, newest first, including those with no feedback report. Use reviewed:false to find operations customer agents use but never report on.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "since": { "type": "string", "format": "date-time" },
                     "reviewed": {
                         "type": "boolean",
-                        "description": "true = only interactions with an outcome; false = only those without; omit for both."
+                        "description": "true = only interactions with a feedback report; false = only those without; omit for both."
                     },
                     "operation": { "type": "string" },
                     "customerRef": { "type": "string" },
@@ -1215,10 +1223,10 @@ mod page_tests {
     fn mcp_tool_surface_is_read_only() {
         assert_eq!(
             tool_names(),
-            ["feedback_list_outcomes", "feedback_list_interactions"]
+            ["feedback_list_reports", "feedback_list_interactions"]
         );
         assert!(!mcp_tool_allowed("agent_start_session"));
-        assert!(mcp_tool_allowed("feedback_list_outcomes"));
+        assert!(mcp_tool_allowed("feedback_list_reports"));
     }
 
     #[tokio::test]
