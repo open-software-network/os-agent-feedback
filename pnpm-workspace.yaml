@@ -1,6 +1,5 @@
 packages:
   - "."
-  - "landing-page"
   - "sdk/node"
   - "web"
 

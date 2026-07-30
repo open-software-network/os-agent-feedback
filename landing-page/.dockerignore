@@ -1,9 +1,0 @@
-# The Dockerfile does `COPY . /srv`, so anything left in the build context is
-# served at the web root. Keep build/config files out of it.
-# Caddyfile is deliberately NOT listed: the image needs it at
-# /etc/caddy/Caddyfile, so the Dockerfile removes it from /srv instead.
-Dockerfile
-.dockerignore
-railway.json
-package.json
-node_modules

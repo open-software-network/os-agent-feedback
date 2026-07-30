@@ -4,8 +4,6 @@
     "includes": [
       "*.json",
       "tests/**/*.mjs",
-      "landing-page/**/*.css",
-      "landing-page/**/*.json",
       "sdk/node/src/**/*.ts",
       "sdk/node/test/**/*.mjs",
       "sdk/node/**/*.json",
