@@ -139,6 +139,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Lists repositories reachable by the installation. The listing is capped at 1000 repositories; when the cap is reached `truncated` is true and the response is a partial view. */
         get: operations["github_repositories_handler"];
         put?: never;
         post?: never;
@@ -741,6 +742,11 @@ export interface components {
             installationId: number;
             /** @description Repositories currently accessible to the installation. */
             repositories: components["schemas"]["GithubRepositoryResponse"][];
+            /**
+             * @description True when the pagination cap cut the listing short, so `repositories` is
+             *     a partial view of the installation rather than the complete set.
+             */
+            truncated: boolean;
         };
         GithubRepositoryResponse: {
             /** @description Repository's default branch. */

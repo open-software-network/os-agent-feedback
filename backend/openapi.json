@@ -529,6 +529,7 @@
         "tags": [
           "github"
         ],
+        "description": "Lists repositories reachable by the installation. The listing is capped at 1000 repositories; when the cap is reached `truncated` is true and the response is a partial view.",
         "operationId": "github_repositories_handler",
         "parameters": [
           {
@@ -4637,7 +4638,8 @@
         "type": "object",
         "required": [
           "installationId",
-          "repositories"
+          "repositories",
+          "truncated"
         ],
         "properties": {
           "installationId": {
@@ -4651,6 +4653,10 @@
               "$ref": "#/components/schemas/GithubRepositoryResponse"
             },
             "description": "Repositories currently accessible to the installation."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when the pagination cap cut the listing short, so `repositories` is\na partial view of the installation rather than the complete set."
           }
         }
       },

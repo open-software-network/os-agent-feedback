@@ -149,6 +149,9 @@ pub(crate) struct GithubRepositoriesResponse {
     pub installation_id: i64,
     /// Repositories currently accessible to the installation.
     pub repositories: Vec<GithubRepositoryResponse>,
+    /// True when the pagination cap cut the listing short, so `repositories` is
+    /// a partial view of the installation rather than the complete set.
+    pub truncated: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

@@ -105,6 +105,17 @@ pub(crate) struct GithubRepo {
     pub(crate) private: bool,
 }
 
+/// Repositories read from one installation, plus whether the pagination cap cut
+/// the listing short. GitHub's code-search and REST quotas are tight, so the
+/// listing stops at `MAX_REPOSITORY_PAGES` rather than walking an unbounded
+/// account; callers must surface `truncated` instead of presenting a partial
+/// page as the complete set.
+#[derive(Debug, Clone)]
+pub(crate) struct GithubRepositoryPage {
+    pub(crate) repositories: Vec<GithubRepo>,
+    pub(crate) truncated: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct AppClaims<'a> {
     iat: i64,
@@ -223,9 +234,11 @@ impl GithubAppClient {
     pub(crate) async fn installation_repositories(
         &self,
         installation_id: i64,
-    ) -> anyhow::Result<Vec<GithubRepo>> {
+    ) -> anyhow::Result<GithubRepositoryPage> {
         let token = self.installation_token(installation_id).await?;
         let mut repositories = Vec::new();
+        // Stays true only if every page came back full and the cap ran out.
+        let mut truncated = true;
         for page in 1..=MAX_REPOSITORY_PAGES {
             let response = Self::request(
                 self.http
@@ -253,10 +266,21 @@ impl GithubAppClient {
                     }),
             );
             if page_len < REPOSITORIES_PER_PAGE {
+                truncated = false;
                 break;
             }
         }
-        Ok(repositories)
+        if truncated {
+            tracing::warn!(
+                installation_id,
+                repositories = repositories.len(),
+                "GitHub repository listing hit the pagination cap and is truncated"
+            );
+        }
+        Ok(GithubRepositoryPage {
+            repositories,
+            truncated,
+        })
     }
 
     pub(crate) fn verify_webhook_signature(&self, body: &[u8], header: &str) -> bool {

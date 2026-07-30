@@ -1037,6 +1037,9 @@ async fn github_installations_handler(
         (status = 500, description = "GitHub repositories could not be listed", body = ApiErrorEnvelope),
         (status = 503, description = "GitHub App integration is not configured", body = ApiErrorEnvelope)
     ),
+    description = "Lists repositories reachable by the installation. The listing \
+        is capped at 1000 repositories; when the cap is reached `truncated` is \
+        true and the response is a partial view.",
     security(("session_cookie" = []))
 )]
 async fn github_repositories_handler(
@@ -1057,10 +1060,13 @@ async fn github_repositories_handler(
             "GitHub installation not found for this team",
         ));
     }
-    let repositories = github
+    let page = github
         .installation_repositories(installation_id)
         .await
-        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)?;
+    let truncated = page.truncated;
+    let repositories = page
+        .repositories
         .into_iter()
         .map(|repository| GithubRepositoryResponse {
             full_name: repository.full_name,
@@ -1073,6 +1079,7 @@ async fn github_repositories_handler(
         Json(GithubRepositoriesResponse {
             installation_id,
             repositories,
+            truncated,
         }),
         tokens,
     )
