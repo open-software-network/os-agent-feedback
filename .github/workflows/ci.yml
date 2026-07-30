@@ -1,0 +1,205 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      node: ${{ steps.filter.outputs.node }}
+      landing: ${{ steps.filter.outputs.landing }}
+      sdk-node: ${{ steps.filter.outputs.sdk-node }}
+      docs: ${{ steps.filter.outputs.docs }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - id: filter
+        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
+        with:
+          filters: |
+            backend:
+              - "backend/**"
+              - "Makefile"
+              - ".github/workflows/ci.yml"
+            node:
+              - "package.json"
+              - "pnpm-lock.yaml"
+              - "pnpm-workspace.yaml"
+              - "biome.json"
+              - "Makefile"
+              - "tests/**"
+              - "backend/**"
+              - "landing-page/**"
+              - "sdk/**"
+              - "protocol/**"
+              - "docs/**"
+              - ".github/workflows/ci.yml"
+            landing:
+              - "package.json"
+              - "pnpm-lock.yaml"
+              - "pnpm-workspace.yaml"
+              - "biome.json"
+              - "Makefile"
+              - "landing-page/**"
+              - "tests/rendered-html.test.mjs"
+              - ".github/workflows/ci.yml"
+            sdk-node:
+              - "package.json"
+              - "pnpm-lock.yaml"
+              - "pnpm-workspace.yaml"
+              - "biome.json"
+              - "Makefile"
+              - "sdk/node/**"
+              - ".github/workflows/ci.yml"
+            docs:
+              - "package.json"
+              - "pnpm-lock.yaml"
+              - "pnpm-workspace.yaml"
+              - "Makefile"
+              - "docs/**"
+              - "sdk/**"
+              - "protocol/**"
+              - "backend/public/app.js"
+              - "tests/docs-contract.test.mjs"
+              - ".github/workflows/ci.yml"
+
+  backend:
+    name: Backend
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust 1.95
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: "1.95"
+          components: clippy, rustfmt
+      - name: Cache Cargo
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo
+            backend/target
+          key: ${{ runner.os }}-cargo-1.95-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-1.95-
+      - name: Check formatting
+        run: make backend-fmt-check
+      - name: Run Clippy
+        run: make backend-clippy
+      - name: Run backend tests
+        run: make backend-test
+
+  node:
+    name: Node and Biome
+    needs: changes
+    if: needs.changes.outputs.node == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Install dependencies
+        run: make node-install
+      - name: Run Biome
+        run: make biome-check
+      - name: Run Node tests
+        run: make node-test
+
+  landing:
+    name: Landing page
+    needs: changes
+    if: needs.changes.outputs.landing == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Install dependencies
+        run: make node-install
+      - name: Check landing page
+        run: make landing-check
+
+  sdk-node:
+    name: Node SDK
+    needs: changes
+    if: needs.changes.outputs.sdk-node == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Install dependencies
+        run: make node-install
+      - name: Test Node SDK
+        run: make sdk-node-test
+
+  docs:
+    name: Documentation
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Install dependencies
+        run: make node-install
+      - name: Validate documentation
+        run: make docs-validate
+      - name: Audit documentation accessibility
+        run: make docs-a11y
+
+  # Single required status check. Every job above is path-filtered, so a PR that
+  # touches only docs or briefs skips all of them; branch protection should name
+  # this job alone rather than five names that must be edited whenever a job is
+  # added or renamed. `always()` makes it run even when a dependency is skipped
+  # or failed — without it, one skipped dependency would skip the gate too.
+  ci-ok:
+    name: CI
+    needs: [backend, node, landing, sdk-node, docs]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify no required job failed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          set -euo pipefail
+          results="$RESULTS"
+          echo "Job results: $results"
+          for result in $results; do
+            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+              echo "::error::A required CI job reported '$result'."
+              exit 1
+            fi
+          done
+          echo "All applicable CI jobs succeeded or were skipped."

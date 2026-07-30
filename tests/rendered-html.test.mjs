@@ -5,6 +5,18 @@ import test from "node:test";
 const landingHtml = await readFile(new URL("../landing-page/index.html", import.meta.url), "utf8");
 const appHtml = await readFile(new URL("../landing-page/app/index.html", import.meta.url), "utf8");
 const landingCss = await readFile(new URL("../landing-page/styles.css", import.meta.url), "utf8");
+const caddyfile = await readFile(new URL("../landing-page/Caddyfile", import.meta.url), "utf8");
+const landingDockerfile = await readFile(
+  new URL("../landing-page/Dockerfile", import.meta.url),
+  "utf8",
+);
+const dockerignore = await readFile(
+  new URL("../landing-page/.dockerignore", import.meta.url),
+  "utf8",
+);
+const railwayConfig = JSON.parse(
+  await readFile(new URL("../landing-page/railway.json", import.meta.url), "utf8"),
+);
 
 test("the static landing page contains the Epode product contract", () => {
   assert.match(landingHtml, /Epode — product feedback from customer agents/i);
@@ -89,4 +101,43 @@ test("links and redirects to the canonical app origin", () => {
   assert.match(appHtml, /<a [^>]*href="https:\/\/app\.epode\.ai\/auth\/start"/);
   assert.match(appHtml, /<a [^>]*>[^<]+<\/a>/, "fallback link has no text");
   assert.match(appHtml, /<meta name="robots" content="noindex/);
+});
+
+test("/app has a real HTTP redirect with the HTML page as its fallback body", () => {
+  assert.match(caddyfile, /@app\s+path\s+\/app\s+\/app\//);
+
+  const caddyRedirect = caddyfile.match(/redir\s+@app\s+(\S+)\s+(\d{3})/);
+  assert.ok(caddyRedirect, "Caddyfile is missing the /app redirect");
+  assert.equal(caddyRedirect[1], "https://app.epode.ai/auth/start");
+  assert.equal(caddyRedirect[2], "308");
+
+  const fallbackRedirect = appHtml.match(
+    /<meta[^>]+http-equiv="refresh"[^>]+content="0;url=([^"]+)"/i,
+  );
+  assert.ok(fallbackRedirect, "app/index.html is missing its fallback redirect");
+  assert.equal(fallbackRedirect[1], caddyRedirect[1]);
+});
+
+test("the Railway image serves landing-page as the Caddy document root", () => {
+  assert.equal(railwayConfig.build?.builder, "DOCKERFILE");
+  assert.equal(railwayConfig.build?.dockerfilePath, "Dockerfile");
+  assert.equal(railwayConfig.deploy?.healthcheckPath, "/");
+  assert.match(landingDockerfile, /COPY Caddyfile \/etc\/caddy\/Caddyfile/);
+  assert.match(landingDockerfile, /COPY \. \/srv/);
+  assert.match(caddyfile, /root\s+\*\s+\/srv/);
+  assert.match(caddyfile, /\bfile_server\b/);
+});
+
+// `COPY . /srv` means anything left in the build context is served at the web
+// root. Verified end-to-end against the built image: these four return 404
+// while /, /styles.css, /favicon.svg and /og.png return 200.
+test("build and config files stay out of the published document root", () => {
+  assert.match(landingDockerfile, /rm -f \/srv\/Caddyfile/);
+  for (const excluded of ["Dockerfile", "railway.json", "package.json"]) {
+    assert.match(
+      dockerignore,
+      new RegExp(`^${excluded.replaceAll(".", "\\.")}$`, "m"),
+      `${excluded} is not excluded from the build context`,
+    );
+  }
 });
