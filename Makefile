@@ -1,4 +1,4 @@
-.PHONY: help install node-install backend-install node-version-check backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test landing-check sdk-node-test web-install web-types-check web-check web-typecheck web-test web-build docs-validate docs-a11y types check
+.PHONY: help install node-install backend-install node-version-check backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test sdk-node-test web-install web-types-check web-check web-typecheck web-test web-build docs-validate docs-a11y types check
 
 .DEFAULT_GOAL := help
 
@@ -53,14 +53,6 @@ biome-fix:  ## Apply safe formatting and lint fixes to Biome-managed files
 node-test:  ## Run the root Node test suite
 	pnpm test
 
-# Biome only sees styles.css and package.json here — its HTML formatter is
-# behind an experimental flag, so landing-page/*.html is deliberately outside
-# biome.json's file set. The markup contract (copy, links, redirect, tag
-# balance) is asserted by tests/rendered-html.test.mjs instead.
-landing-check:  ## Check landing-page CSS formatting and the HTML markup + content contract
-	pnpm exec biome check landing-page/
-	node --test tests/rendered-html.test.mjs
-
 sdk-node-test:  ## Build and test the Node SDK
 	cd sdk/node && pnpm test
 
@@ -107,4 +99,4 @@ types: node-version-check backend-openapi  ## Regenerate OpenAPI TypeScript type
 # the tree is stale.
 # The production web build stays separate: it is an artifact-producing, slower
 # gate, while formatting, types, and tests provide the cheap feedback loop here.
-check: node-version-check backend-fmt-check backend-clippy backend-test backend-openapi-check biome-check node-test landing-check sdk-node-test web-check web-typecheck web-test docs-validate docs-a11y  ## Run all backend, OpenAPI, Node, SDK, web, landing-page, and docs checks
+check: node-version-check backend-fmt-check backend-clippy backend-test backend-openapi-check biome-check node-test sdk-node-test web-check web-typecheck web-test docs-validate docs-a11y  ## Run all backend, OpenAPI, Node, SDK, web, and docs checks

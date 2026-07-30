@@ -3,9 +3,8 @@
 ## Project
 
 Agent Feedback: structured product feedback from customer agents. Rust backend
-(`backend/`) serving a vanilla-JS dashboard (`backend/public/`), a hand-written
-static HTML/CSS marketing site (`landing-page/`), SDKs (`sdk/`), and the public
-protocol (`protocol/v1/`).
+(`backend/`) serving a vanilla-JS dashboard (`backend/public/`), SDKs (`sdk/`),
+and the public protocol (`protocol/v1/`).
 
 ## Agent skills
 
