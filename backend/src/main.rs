@@ -872,13 +872,15 @@ struct GithubWebhookAccount {
     request_body(content = String, content_type = "application/json", description = "Raw GitHub webhook event payload"),
     responses(
         (status = 200, description = "Signed webhook accepted", body = String, content_type = "text/plain"),
+        (status = 400, description = "Signed webhook payload could not be parsed", body = ApiErrorEnvelope),
         (status = 401, description = "Webhook signature is missing or invalid", body = ApiErrorEnvelope),
         (status = 413, description = "Webhook body exceeds the configured limit", body = String, content_type = "text/plain"),
         (status = 500, description = "Webhook could not be persisted; GitHub should redeliver", body = ApiErrorEnvelope),
         (status = 503, description = "GitHub App integration is not configured", body = ApiErrorEnvelope)
     ),
     description = "Receives signed GitHub App events. Persistence failures answer \
-        500 so GitHub redelivers; unhandled or non-actionable events answer 200."
+        500 so GitHub redelivers; an unparseable payload answers 400; unhandled \
+        or non-actionable events answer 200."
 )]
 async fn github_webhook_handler(
     State(state): State<Arc<AppState>>,
@@ -903,11 +905,18 @@ async fn github_webhook_handler(
         .and_then(|value| value.to_str().ok())
         == Some("installation")
     {
-        if let Ok(payload) = serde_json::from_slice::<GithubWebhookPayload>(&body) {
-            handle_github_installation_webhook(&state, payload).await?;
-        } else {
-            tracing::warn!("ignored malformed signed GitHub installation webhook");
-        }
+        // The signature already passed, so a body that will not deserialize is
+        // upstream schema drift or a garbled delivery rather than an attack.
+        // Answer 400 so it shows up in GitHub's delivery log instead of being
+        // silently accepted; a retry of the same bytes fails identically, so
+        // this stays 4xx rather than joining the retryable 5xx path.
+        let Ok(payload) = serde_json::from_slice::<GithubWebhookPayload>(&body) else {
+            tracing::warn!("rejected malformed signed GitHub installation webhook");
+            return Err(ApiError::bad_request(
+                "Malformed GitHub installation webhook payload",
+            ));
+        };
+        handle_github_installation_webhook(&state, payload).await?;
     }
     Ok((StatusCode::OK, "ok"))
 }

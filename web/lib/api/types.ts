@@ -109,7 +109,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Receives signed GitHub App events. Persistence failures answer 500 so GitHub redelivers; unhandled or non-actionable events answer 200. */
+        /** @description Receives signed GitHub App events. Persistence failures answer 500 so GitHub redelivers; an unparseable payload answers 400; unhandled or non-actionable events answer 200. */
         post: operations["github_webhook_handler"];
         delete?: never;
         options?: never;
@@ -1400,6 +1400,15 @@ export interface operations {
                 };
                 content: {
                     "text/plain": string;
+                };
+            };
+            /** @description Signed webhook payload could not be parsed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
                 };
             };
             /** @description Webhook signature is missing or invalid */
