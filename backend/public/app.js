@@ -668,10 +668,11 @@ function teamView() {
     const roleControl = isOwner && member.role !== "owner" ? `<select class="compact-select" data-member-role="${esc(member.osUserId)}" aria-label="Role for ${esc(member.displayName)}">${roleOptions(member.role)}</select>` : `<b>${esc(title(member.role))}</b>`;
     return `<div class="team-row"><span><strong>${esc(member.displayName)}${isSelf ? " (you)" : ""}</strong>${member.email ? `<small>${esc(member.email)}</small>` : ""}</span>${roleControl}<span>${canRemove ? `<button class="link-button danger" data-remove-member="${esc(member.osUserId)}">Remove</button>` : ""}</span></div>`;
   }).join("");
-  const invitationRows = dashboard.teamInvitations.map((invitation) => {
+  const pendingInvitations = dashboard.teamInvitations.filter((invitation) => invitation.inviteeKind !== "link");
+  const invitationRows = pendingInvitations.map((invitation) => {
     const link = `${location.origin}/join/${invitation.id}`;
     const canRevoke = isOwner || (isAdmin && invitation.role === "member");
-    const recipient = invitation.inviteeKind === "email" ? invitation.inviteeValue : invitation.inviteeKind === "link" ? "Member invite link" : "Private invitation";
+    const recipient = invitation.inviteeKind === "email" ? invitation.inviteeValue : "Private invitation";
     return `<div class="team-row"><span><strong>${esc(recipient)}</strong><small>${esc(title(invitation.role))} · expires ${date(invitation.expiresAt)}</small></span><button class="link-button" data-copy="${esc(link)}">Copy link</button><span>${canRevoke ? `<button class="link-button danger" data-revoke-invitation="${esc(invitation.id)}">Revoke</button>` : ""}</span></div>`;
   }).join("");
   const roleChoices = `${isOwner ? `<option value="admin">Admin</option>` : ""}<option value="member" selected>Member</option>`;
@@ -808,7 +809,6 @@ document.addEventListener("click", async (event) => {
         body: JSON.stringify({ role: "member" }),
       });
       await copyText(`${location.origin}${body.joinPath}`);
-      await refresh();
       setNotice("Invite link copied.", 1800);
     }
     if (target.hasAttribute("data-refresh-setup")) {

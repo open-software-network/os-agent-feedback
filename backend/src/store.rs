@@ -174,7 +174,7 @@ async fn accept_invitation(
           handle = EXCLUDED.handle,
           email = EXCLUDED.email,
           display_name = EXCLUDED.display_name,
-          role = CASE WHEN workspace_members.role = 'owner' THEN 'owner' ELSE EXCLUDED.role END,
+          role = CASE WHEN workspace_members.role IN ('owner', 'admin') THEN workspace_members.role ELSE EXCLUDED.role END,
           updated_at = NOW()"#,
     )
     .bind(invitation.workspace_id)
@@ -190,15 +190,21 @@ async fn accept_invitation(
     .bind(&invitation.role)
     .execute(&mut *tx)
     .await?;
-    sqlx::query(
+    let accepted = sqlx::query(
         r#"UPDATE workspace_invitations
-        SET accepted_at = NOW(), accepted_by_os_user_id = $1
+        SET accepted_at = CASE WHEN invitee_kind = 'link' THEN NULL ELSE NOW() END,
+          accepted_by_os_user_id = CASE WHEN invitee_kind = 'link' THEN NULL ELSE $1 END
         WHERE id = $2 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()"#,
     )
     .bind(&os_user.id)
     .bind(invitation.id)
     .execute(&mut *tx)
     .await?;
+    if accepted.rows_affected() != 1 {
+        return Err(ApiError::gone(
+            "This team invitation is no longer available",
+        ));
+    }
     tx.commit().await?;
     Ok(invitation.workspace_id)
 }
@@ -332,11 +338,55 @@ pub async fn create_team_invitation(
     if context.role == "admin" && role != "member" {
         return Err(ApiError::forbidden("Admins can only invite members"));
     }
+    if input.invitee.is_none() {
+        if role != "member" {
+            return Err(ApiError::bad_request(
+                "Shareable invite links can only grant the member role",
+            ));
+        }
+        sqlx::query(
+            r#"UPDATE workspace_invitations SET revoked_at = NOW()
+            WHERE workspace_id = $1 AND invitee_kind = 'link'
+              AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at <= NOW()"#,
+        )
+        .bind(context.workspace.id)
+        .execute(pool)
+        .await?;
+        let invitation_id = Uuid::new_v4();
+        if let Some(invitation) = sqlx::query_as::<_, TeamInvitation>(
+            r#"INSERT INTO workspace_invitations
+            (id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value, role, expires_at)
+            VALUES ($1, $2, $3, 'link', $4, 'member', NOW() + INTERVAL '24 hours')
+            ON CONFLICT (workspace_id) WHERE invitee_kind = 'link'
+              AND accepted_at IS NULL AND revoked_at IS NULL
+            DO NOTHING
+            RETURNING id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
+            role, created_at, expires_at"#,
+        )
+        .bind(invitation_id)
+        .bind(context.workspace.id)
+        .bind(&context.user.id)
+        .bind(invitation_id.to_string())
+        .fetch_optional(pool)
+        .await?
+        {
+            return Ok(invitation);
+        }
+        return sqlx::query_as::<_, TeamInvitation>(
+            r#"SELECT id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
+            role, created_at, expires_at FROM workspace_invitations
+            WHERE workspace_id = $1 AND invitee_kind = 'link' AND role = 'member'
+              AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()
+            ORDER BY created_at DESC LIMIT 1"#,
+        )
+        .bind(context.workspace.id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| ApiError::conflict("Could not create the team invite link"));
+    }
     let invitation_id = Uuid::new_v4();
-    let (invitee_kind, invitee_value) = match input.invitee {
-        Some(value) => ("email", normalize_invitee_email(&value)?),
-        None => ("link", invitation_id.to_string()),
-    };
+    let invitee_kind = "email";
+    let invitee_value = normalize_invitee_email(&input.invitee.unwrap_or_default())?;
     let existing_member: bool = match invitee_kind {
         "email" => sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND LOWER(email) = $2)",
@@ -1338,7 +1388,7 @@ pub async fn dashboard(
             r#"SELECT id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
             role, created_at, expires_at FROM workspace_invitations
             WHERE workspace_id = $1 AND accepted_at IS NULL AND revoked_at IS NULL
-              AND expires_at > NOW()
+              AND expires_at > NOW() AND invitee_kind <> 'link'
             ORDER BY created_at DESC"#,
         )
         .bind(context.workspace.id)
@@ -2496,8 +2546,27 @@ mod product_tests {
             .await
             .map_err(test_error)?;
             anyhow::ensure!(link_invitation.invitee_kind == "link");
+            anyhow::ensure!(link_invitation.expires_at <= Utc::now() + Duration::hours(24));
+            anyhow::ensure!(link_invitation.expires_at > Utc::now() + Duration::hours(23));
+            let copied_link = create_team_invitation(
+                &pool,
+                &owner_context,
+                CreateTeamInvitationInput {
+                    invitee: None,
+                    role: "member".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(copied_link.id == link_invitation.id);
             anyhow::ensure!(
                 accept_team_invitation(&pool, &guest, link_invitation.id)
+                    .await
+                    .map_err(test_error)?
+                    == workspace.id
+            );
+            anyhow::ensure!(
+                accept_team_invitation(&pool, &teammate, link_invitation.id)
                     .await
                     .map_err(test_error)?
                     == workspace.id
