@@ -52,6 +52,11 @@
       "semicolons": "always"
     }
   },
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
+    }
+  },
   "overrides": [
     {
       "includes": ["tests/**/*.mjs", "sdk/node/test/**/*.mjs", "sdk/node/src/doctor.ts"],
