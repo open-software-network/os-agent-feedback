@@ -2899,8 +2899,8 @@ mod product_tests {
             anyhow::ensure!(summary.product == "Read key product");
             anyhow::ensure!(summary.interactions == 2);
             anyhow::ensure!(summary.reviewed == 1);
-            anyhow::ensure!(summary.review_rate == 0.5);
-            anyhow::ensure!(summary.confirmation_rate == 1.0);
+            anyhow::ensure!((summary.review_rate - 0.5).abs() < f64::EPSILON);
+            anyhow::ensure!((summary.confirmation_rate - 1.0).abs() < f64::EPSILON);
             anyhow::ensure!(summary.impacts.get("helped") == Some(&1));
             anyhow::ensure!(summary.finding_kinds.get("strength") == Some(&1));
 
