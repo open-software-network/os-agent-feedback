@@ -117,6 +117,7 @@ jobs:
             --environment staging \
             --json \
             | jq -r '.[] | select(.name == "epode-api") | .source.image // empty')
+          mutation_started_at=$(node --eval 'process.stdout.write(new Date().toISOString())')
 
           if [[ "$current_image" == "$IMAGE_REF" ]]; then
             railway redeploy \
@@ -134,26 +135,46 @@ jobs:
               /dev/null
           fi
 
+          # Neither mutation returns a deployment ID for these modes. Discover
+          # the matching deployment once, then freeze and poll that exact ID.
+          deployment_id=""
           for _ in $(seq 1 60); do
-            deployment=$(railway deployment list \
+            deployments=$(railway deployment list \
               --project "$RAILWAY_PROJECT_ID" \
               --environment staging \
               --service epode-api \
-              --limit 1 \
+              --limit 100 \
               --json)
-            deployment_id=$(jq -r '.[0].id // empty' <<< "$deployment")
-            status=$(jq -r '.[0].status // empty' <<< "$deployment")
-            deployment_image=$(jq -r '.[0].meta.image // empty' <<< "$deployment")
 
-            if [[ -z "$deployment_id" || "$deployment_id" == "$previous_id" ]]; then
+            if [[ -z "$deployment_id" ]]; then
+              deployment_id=$(jq -r \
+                --arg previous_id "$previous_id" \
+                --arg image "$IMAGE_REF" \
+                --arg started_at "$mutation_started_at" \
+                'first(.[] | select(
+                  .id != $previous_id
+                  and .meta.image == $image
+                  and .createdAt > $started_at
+                ) | .id) // empty' <<< "$deployments")
+              if [[ -z "$deployment_id" ]]; then
+                sleep 10
+                continue
+              fi
+              echo "Tracking staging deployment $deployment_id."
+            fi
+
+            deployment=$(jq -c \
+              --arg deployment_id "$deployment_id" \
+              'first(.[] | select(.id == $deployment_id)) // empty' <<< "$deployments")
+            if [[ -z "$deployment" ]]; then
               sleep 10
               continue
             fi
-            # A concurrent deploy from another source would surface here with a
-            # different image; skip it rather than reporting its status as ours.
-            if [[ -n "$deployment_image" && "$deployment_image" != "$IMAGE_REF" ]]; then
-              sleep 10
-              continue
+            status=$(jq -r '.status // empty' <<< "$deployment")
+            deployment_image=$(jq -r '.meta.image // empty' <<< "$deployment")
+            if [[ "$deployment_image" != "$IMAGE_REF" ]]; then
+              echo "::error::Staging deployment $deployment_id uses $deployment_image instead of $IMAGE_REF."
+              exit 1
             fi
 
             case "$status" in
