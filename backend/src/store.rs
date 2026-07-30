@@ -2185,7 +2185,6 @@ async fn ingest_telemetry_event(
 fn contains_sensitive_report_text(value: &str) -> bool {
     let value = value.to_ascii_lowercase();
     let forbidden_pattern = [
-        "bearer ",
         "af_live_",
         "af_read_",
         "github_pat_",
@@ -2210,7 +2209,20 @@ fn contains_sensitive_report_text(value: &str) -> bool {
             .split_once('@')
             .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.'))
     });
-    forbidden_pattern || email_like
+    let bearer_credential = value.match_indices("bearer ").any(|(index, _)| {
+        let candidate = value[index + "bearer ".len()..]
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_matches(|character: char| {
+                !character.is_ascii_alphanumeric() && !"-._~+/=".contains(character)
+            });
+        candidate.len() >= 20
+            && candidate
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "-._~+/=".contains(character))
+    });
+    forbidden_pattern || bearer_credential || email_like
 }
 
 pub(crate) async fn feedback_consent_state(
@@ -2645,6 +2657,19 @@ mod product_tests {
             findings: vec![],
             workaround: None,
         }
+    }
+
+    #[test]
+    fn sensitive_report_filter_allows_credential_descriptions_but_not_credentials() {
+        assert!(!contains_sensitive_report_text(
+            "The SDK described an HTTP request authenticated with a bearer token."
+        ));
+        assert!(contains_sensitive_report_text(
+            "The request exposed Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature"
+        ));
+        assert!(contains_sensitive_report_text(
+            "The response exposed customer@example.com"
+        ));
     }
 
     #[test]

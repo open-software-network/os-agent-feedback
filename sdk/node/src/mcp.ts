@@ -416,7 +416,7 @@ function instrumentServer(
             content: [
               {
                 type: "text",
-                text: `Feedback submission failed with HTTP ${response.status}. ${response.status >= 500 ? "Retry this tool once." : "Do not include additional data."}`,
+                text: `Feedback submission failed with HTTP ${response.status}. ${response.status >= 500 ? "Retry this tool once." : "Retry this tool once with only feedbackHandle and a concise summary; omit every optional field."}`,
               },
             ],
             structuredContent: { accepted: false, retryable: response.status >= 500 },

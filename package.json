@@ -18,6 +18,7 @@
     "test:setup-matrix": "node tests/setup-matrix-e2e.mjs",
     "test:icp-loop": "node tests/icp-onboarding-e2e.mjs",
     "test:agent-compliance": "node experiments/agent-compliance/run.mjs --runtime codex --suite placement-pilot --repetitions 3 --output .artifacts/agent-compliance/codex-placement.json",
+    "test:agent-compliance:production": "node experiments/agent-compliance/production-run.mjs",
     "analyze:agent-compliance": "node experiments/agent-compliance/analyze.mjs .artifacts/agent-compliance/*.json",
     "docs:validate": "cd docs && pnpm exec mint validate",
     "docs:a11y": "cd docs && pnpm exec mint a11y",

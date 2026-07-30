@@ -356,3 +356,42 @@ test("MCP Ask-once lets Epode own approval and never exposes report fields early
   ]);
   await feedback.shutdown();
 });
+
+test("MCP gives agents a safe minimal retry after backend report validation fails", async () => {
+  const tools = new Map();
+  const server = {
+    registerTool(name, configuration, handler) {
+      tools.set(name, { configuration, handler });
+      return { remove() {} };
+    },
+  };
+  const feedback = createMcpInstrumentation({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    flushIntervalMs: 60_000,
+    fetch: async (url) => {
+      if (String(url).endsWith("/api/v2/reports")) {
+        return new Response('{"error":"untrusted backend detail"}', {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("{}", { status: 202 });
+    },
+  });
+  feedback.instrument(server);
+
+  const result = await tools.get("report_product_feedback").handler({
+    feedbackHandle: `afr2_${"a".repeat(96)}`,
+    summary: "The product returned a useful result.",
+    impact: "helped",
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(
+    result.content[0].text,
+    /Retry this tool once with only feedbackHandle and a concise summary/,
+  );
+  assert.doesNotMatch(result.content[0].text, /untrusted backend detail/);
+  await feedback.shutdown();
+});
