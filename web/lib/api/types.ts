@@ -1334,7 +1334,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description GitHub installation completed or failed; redirect to the connectors dashboard */
+            /** @description Redirect to the connectors dashboard with github=connected, github=conflict, or github=error */
             303: {
                 headers: {
                     /** @description Connectors dashboard result URL */
@@ -1354,15 +1354,6 @@ export interface operations {
                 };
                 content: {
                     "text/plain": string;
-                };
-            };
-            /** @description GitHub installation callback could not be completed */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
                 };
             };
             /** @description GitHub App integration is not configured */

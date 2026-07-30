@@ -32,7 +32,10 @@ use utoipa::{
     Modify, OpenApi,
     openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, SecurityScheme},
 };
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::{
+    router::{OpenApiRouter, UtoipaMethodRouterExt},
+    routes,
+};
 use uuid::Uuid;
 
 use crate::{
@@ -66,7 +69,7 @@ use crate::{
         bearer_token, clear_cookie, cookie, http_only_cookie, random_token, reject_sensitive_fields,
     },
     store::{
-        accept_team_invitation, agent_product_auth, create_api_key,
+        GithubInstallationUpsert, accept_team_invitation, agent_product_auth, create_api_key,
         create_product_with_default_key, create_team_invitation, dashboard_interaction_by_id,
         dashboard_report_by_id, dashboard_session_by_id, dashboard_with_limits, delete_product,
         feedback_consent_state, feedback_list_interactions, feedback_list_reports,
@@ -166,7 +169,7 @@ fn build_app_router() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(auth_callback))
         .routes(routes!(github_install_handler))
         .routes(routes!(github_callback_handler))
-        .routes(routes!(github_webhook_handler))
+        .routes(routes!(github_webhook_handler).layer(DefaultBodyLimit::max(2 * 1024 * 1024)))
         .routes(routes!(github_installations_handler))
         .routes(routes!(github_repositories_handler))
         .routes(routes!(join_team_handler))
@@ -752,7 +755,7 @@ struct GithubCallbackQuery {
     responses(
         (
             status = 303,
-            description = "GitHub installation completed or failed; redirect to the connectors dashboard",
+            description = "Redirect to the connectors dashboard with github=connected, github=conflict, or github=error",
             body = String,
             content_type = "text/plain",
             headers(
@@ -761,16 +764,24 @@ struct GithubCallbackQuery {
             )
         ),
         (status = 400, description = "Malformed GitHub callback query", body = String, content_type = "text/plain"),
-        (status = 500, description = "GitHub installation callback could not be completed", body = ApiErrorEnvelope),
         (status = 503, description = "GitHub App integration is not configured", body = ApiErrorEnvelope)
-    )
+    ),
+    security(("session_cookie" = []))
 )]
 async fn github_callback_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<GithubCallbackQuery>,
-) -> Result<Response, ApiError> {
-    let github = require_github(&state)?;
+) -> Response {
+    let Some(github) = state.github.as_ref() else {
+        let mut response = ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GitHub App integration is not configured",
+        )
+        .into_response();
+        clear_github_flow_cookies(&mut response, &state);
+        return response;
+    };
     let GithubCallbackQuery {
         installation_id,
         setup_action,
@@ -778,31 +789,57 @@ async fn github_callback_handler(
     } = query;
     let _setup_action = setup_action.as_deref();
     let expected_state = cookie(&headers, GITHUB_STATE_COOKIE);
-    let workspace_id =
-        cookie(&headers, GITHUB_WORKSPACE_COOKIE).and_then(|value| Uuid::parse_str(&value).ok());
+    let Some(cookie_workspace_id) =
+        cookie(&headers, GITHUB_WORKSPACE_COOKIE).and_then(|value| Uuid::parse_str(&value).ok())
+    else {
+        return github_callback_redirect(&state, "error");
+    };
+    let Ok((context, tokens)) = dashboard_auth(&state, &headers, Some(cookie_workspace_id)).await
+    else {
+        return github_callback_redirect(&state, "error");
+    };
+    if require_workspace_editor(&context).is_err() {
+        return github_callback_redirect_with_tokens(&state, "error", tokens);
+    }
+
     let valid_state = expected_state
         .as_deref()
         .is_some_and(|expected| returned_state.as_deref() == Some(expected));
-    let (Some(installation_id), Some(workspace_id)) = (installation_id, workspace_id) else {
-        return Ok(github_callback_redirect(&state, "error"));
+    let Some(installation_id) = installation_id else {
+        return github_callback_redirect_with_tokens(&state, "error", tokens);
     };
     if !valid_state {
-        return Ok(github_callback_redirect(&state, "error"));
+        return github_callback_redirect_with_tokens(&state, "error", tokens);
     }
 
-    let account = github
-        .installation(installation_id)
-        .await
-        .map_err(ApiError::internal)?;
-    upsert_github_installation(
+    let Ok(account) = github.installation(installation_id).await else {
+        tracing::warn!(
+            installation_id,
+            "GitHub installation lookup failed during callback"
+        );
+        return github_callback_redirect_with_tokens(&state, "error", tokens);
+    };
+    let result = upsert_github_installation(
         &state.pool,
-        workspace_id,
+        context.workspace.id,
         installation_id,
         &account.login,
         &account.account_type,
     )
-    .await?;
-    Ok(github_callback_redirect(&state, "connected"))
+    .await;
+    let outcome = match result {
+        Ok(GithubInstallationUpsert::Bound) => "connected",
+        Ok(GithubInstallationUpsert::ConflictingWorkspace) => "conflict",
+        Err(_) => {
+            tracing::warn!(
+                installation_id,
+                workspace_id = %context.workspace.id,
+                "GitHub installation binding failed during callback"
+            );
+            "error"
+        }
+    };
+    github_callback_redirect_with_tokens(&state, outcome, tokens)
 }
 
 #[derive(Debug, Deserialize)]
@@ -889,7 +926,7 @@ async fn handle_github_installation_webhook(state: &AppState, payload: GithubWeb
             let Some(account) = installation.account else {
                 return;
             };
-            if upsert_github_installation(
+            match upsert_github_installation(
                 &state.pool,
                 workspace_id,
                 installation.id,
@@ -897,12 +934,16 @@ async fn handle_github_installation_webhook(state: &AppState, payload: GithubWeb
                 &account.account_type,
             )
             .await
-            .is_err()
             {
-                tracing::warn!(
+                Ok(GithubInstallationUpsert::Bound) => {}
+                Ok(GithubInstallationUpsert::ConflictingWorkspace) => tracing::warn!(
+                    installation_id = installation.id,
+                    "ignored conflicting GitHub installation restore from webhook"
+                ),
+                Err(_) => tracing::warn!(
                     installation_id = installation.id,
                     "failed to restore GitHub installation from webhook"
-                );
+                ),
             }
         }
         _ => {}
@@ -1046,12 +1087,32 @@ fn require_github(state: &AppState) -> Result<&GithubAppClient, ApiError> {
     })
 }
 
-fn github_callback_redirect(state: &AppState, result: &str) -> Response {
-    let location = format!(
+fn github_callback_redirect_target(public_base_url: &str, result: &str) -> String {
+    format!(
         "{}/?view=connectors&github={result}",
-        state.public_base_url.trim_end_matches('/')
-    );
+        public_base_url.trim_end_matches('/')
+    )
+}
+
+fn github_callback_redirect(state: &AppState, result: &str) -> Response {
+    let location = github_callback_redirect_target(&state.public_base_url, result);
     let mut response = Redirect::to(&location).into_response();
+    clear_github_flow_cookies(&mut response, state);
+    response
+}
+
+fn github_callback_redirect_with_tokens(
+    state: &AppState,
+    result: &str,
+    tokens: Option<TokenPair>,
+) -> Response {
+    dashboard_response(state, github_callback_redirect(state, result), tokens).map_or_else(
+        |_| github_callback_redirect(state, "error"),
+        std::convert::identity,
+    )
+}
+
+fn clear_github_flow_cookies(response: &mut Response, state: &AppState) {
     for value in [
         clear_cookie(GITHUB_STATE_COOKIE, state.secure_cookies),
         clear_cookie(GITHUB_WORKSPACE_COOKIE, state.secure_cookies),
@@ -1060,7 +1121,6 @@ fn github_callback_redirect(state: &AppState, result: &str) -> Response {
             response.headers_mut().append(header::SET_COOKIE, value);
         }
     }
-    response
 }
 
 #[utoipa::path(
@@ -2784,8 +2844,8 @@ mod page_tests {
     use axum::{body::to_bytes, http::StatusCode};
 
     use super::{
-        ApiError, build_app_router, feedback_discovery, mcp_auth_error, mcp_tool_allowed,
-        mcp_tools, reveal_auth_error,
+        ApiError, build_app_router, feedback_discovery, github_callback_redirect_target,
+        mcp_auth_error, mcp_tool_allowed, mcp_tools, reveal_auth_error,
     };
     use serde_json::{Value, json};
 
@@ -2798,6 +2858,14 @@ mod page_tests {
         let revealed = reveal_auth_error(html);
         assert!(revealed.contains(r#"id="auth-error" class="auth-error">Try again"#));
         assert!(!revealed.contains("auth-error\" hidden"));
+    }
+
+    #[test]
+    fn github_conflict_redirect_targets_connectors_view() {
+        assert_eq!(
+            github_callback_redirect_target("https://epode.test/", "conflict"),
+            "https://epode.test/?view=connectors&github=conflict"
+        );
     }
 
     #[test]

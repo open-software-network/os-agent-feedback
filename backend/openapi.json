@@ -302,7 +302,7 @@
         ],
         "responses": {
           "303": {
-            "description": "GitHub installation completed or failed; redirect to the connectors dashboard",
+            "description": "Redirect to the connectors dashboard with github=connected, github=conflict, or github=error",
             "headers": {
               "Location": {
                 "schema": {
@@ -335,16 +335,6 @@
               }
             }
           },
-          "500": {
-            "description": "GitHub installation callback could not be completed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiErrorEnvelope"
-                }
-              }
-            }
-          },
           "503": {
             "description": "GitHub App integration is not configured",
             "content": {
@@ -355,7 +345,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
       }
     },
     "/api/github/webhook": {
