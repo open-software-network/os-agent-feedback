@@ -29,10 +29,7 @@ export interface AgentFeedbackOptions<Request = unknown> {
    */
   cacheMode?: HttpCacheMode;
   /** Decide at response time whether this particular successful result is outcome-bearing. */
-  shouldInstrument?: (
-    request: Request,
-    response: HttpInstrumentationContext,
-  ) => boolean;
+  shouldInstrument?: (request: Request, response: HttpInstrumentationContext) => boolean;
   customerRef?: (request: Request) => string | undefined | null;
   sessionRef?: (request: Request) => string | undefined | null;
   runtimeHint?: (request: Request) => string | undefined | null;
@@ -295,11 +292,11 @@ class TelemetryQueue {
     } catch (error) {
       for (const entry of batch) {
         entry.attempts += 1;
-        entry.retryAt = Date.now() + Math.min(30_000, 500 * (2 ** (entry.attempts - 1)));
+        entry.retryAt = Date.now() + Math.min(30_000, 500 * 2 ** (entry.attempts - 1));
         if (
-          entry.attempts < this.#maxTelemetryAttempts
-          && (!this.#shuttingDown || Date.now() < this.#shutdownDeadline)
-          && this.#events.length < this.#maxQueueSize
+          entry.attempts < this.#maxTelemetryAttempts &&
+          (!this.#shuttingDown || Date.now() < this.#shutdownDeadline) &&
+          this.#events.length < this.#maxQueueSize
         ) {
           this.#events.push(entry);
         }
@@ -320,9 +317,9 @@ class TelemetryQueue {
     this.#shutdownDeadline = Date.now() + this.#shutdownTimeoutMs;
     for (
       let pass = 0;
-      this.#events.length
-        && pass < this.#maxTelemetryAttempts + 1
-        && Date.now() < this.#shutdownDeadline;
+      this.#events.length &&
+      pass < this.#maxTelemetryAttempts + 1 &&
+      Date.now() < this.#shutdownDeadline;
       pass += 1
     ) {
       await this.flush();
@@ -384,12 +381,14 @@ export class AgentFeedbackRuntime<Request = unknown> {
     cacheControl?: string;
   }): boolean {
     if (this.cacheMode === "request" && !options.requestOptIn) return false;
-    const sharedCache = /(?:^|,)\s*(?:public|s-maxage\s*=|max-age\s*=|immutable|stale-while-revalidate\s*=)/i
-      .test(options.cacheControl || "");
+    const sharedCache =
+      /(?:^|,)\s*(?:public|s-maxage\s*=|max-age\s*=|immutable|stale-while-revalidate\s*=)/i.test(
+        options.cacheControl || "",
+      );
     if (this.cacheMode === "safe" && sharedCache) {
       if (!this.#warnedSharedCache) {
         this.logger.warn(
-          "[agent-feedback] Instrumentation skipped an explicitly cacheable response. Use cacheMode: \"request\" for opt-in agent requests or cacheMode: \"private\" only when disabling shared caching is intentional.",
+          '[agent-feedback] Instrumentation skipped an explicitly cacheable response. Use cacheMode: "request" for opt-in agent requests or cacheMode: "private" only when disabling shared caching is intentional.',
         );
         this.#warnedSharedCache = true;
       }

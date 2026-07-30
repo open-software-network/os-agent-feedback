@@ -153,12 +153,14 @@ test("MCP keeps full journey telemetry while requesting feedback only at outcome
   await feedback.flush();
 
   const events = telemetry.flatMap((batch) => batch.events);
-  assert.deepEqual(events.map((event) => event.operation), [
-    "browser_navigate",
-    "browser_extract",
-    "browser_act",
-  ]);
-  assert.deepEqual(events.map((event) => event.statusCode), [200, 200, 500]);
+  assert.deepEqual(
+    events.map((event) => event.operation),
+    ["browser_navigate", "browser_extract", "browser_act"],
+  );
+  assert.deepEqual(
+    events.map((event) => event.statusCode),
+    [200, 200, 500],
+  );
   assert.ok(events.every((event) => event.sessionRef === "bb_session_1"));
   await feedback.shutdown();
 });

@@ -508,16 +508,21 @@ async function runMcpApp(label, command, args, cwd, port) {
 async function waitForPersistedExpected() {
   let lastRows = [];
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    const raw = database("read").split("\n").findLast((line) => line.trim().startsWith("["));
+    const raw = database("read")
+      .split("\n")
+      .findLast((line) => line.trim().startsWith("["));
     const rows = JSON.parse(raw || "[]");
     lastRows = rows;
     if (
-      rows.length === expected.size
-      && rows.every((row) => row.surface !== "unknown" && row.operation !== "pending")
-    ) return;
+      rows.length === expected.size &&
+      rows.every((row) => row.surface !== "unknown" && row.operation !== "pending")
+    )
+      return;
     await new Promise((resolveWait) => setTimeout(resolveWait, 2_000));
   }
-  const unresolved = lastRows.filter((row) => row.surface === "unknown" || row.operation === "pending");
+  const unresolved = lastRows.filter(
+    (row) => row.surface === "unknown" || row.operation === "pending",
+  );
   throw new Error(
     `Timed out waiting for ${expected.size} fully reconciled Setup interactions: ${JSON.stringify(unresolved)}`,
   );
