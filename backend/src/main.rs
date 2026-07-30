@@ -1,5 +1,6 @@
 mod api_types;
 mod error;
+mod github;
 mod models;
 mod os_accounts;
 mod security;
@@ -9,7 +10,7 @@ use std::{env, net::SocketAddr, sync::Arc};
 
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     middleware::{Next, from_fn},
@@ -38,12 +39,14 @@ use crate::{
     api_types::{
         ApiKeyCreatedResponse, ApiKeyRotatedResponse, AuthenticationStateResponse,
         ConsentDecisionResponse, DashboardInteractionResponse, DashboardReportResponse,
-        EnvironmentResponse, McpInfoResponse, OpaqueJsonObject, ProductCreatedResponse,
-        ProductDeletedResponse, ProductResponse, RemovedResponse, RevokedResponse,
-        TeamInvitationCreatedResponse, TeamMemberResponse, TransferredResponse, UpdatedResponse,
-        WorkspaceResponse,
+        EnvironmentResponse, GithubInstallationResponse, GithubInstallationsResponse,
+        GithubRepositoriesResponse, GithubRepositoryResponse, McpInfoResponse, OpaqueJsonObject,
+        ProductCreatedResponse, ProductDeletedResponse, ProductResponse, RemovedResponse,
+        RevokedResponse, TeamInvitationCreatedResponse, TeamMemberResponse, TransferredResponse,
+        UpdatedResponse, WorkspaceResponse,
     },
     error::{ApiError, ApiErrorEnvelope},
+    github::{GithubAppClient, GithubAppConfig},
     models::{
         ClassificationDiscovery, ConsentDecisionInput, ConsentStateInput, ConsentStateResponse,
         CreateApiKeyInput, CreateProductInput, CreateTeamInvitationInput, CurrentUser,
@@ -59,17 +62,21 @@ use crate::{
     os_accounts::{
         ACCESS_COOKIE, OsAccountsClient, PKCE_COOKIE, REFRESH_COOKIE, STATE_COOKIE, TokenPair,
     },
-    security::{bearer_token, clear_cookie, cookie, http_only_cookie, reject_sensitive_fields},
+    security::{
+        bearer_token, clear_cookie, cookie, http_only_cookie, random_token, reject_sensitive_fields,
+    },
     store::{
         accept_team_invitation, agent_product_auth, create_api_key,
         create_product_with_default_key, create_team_invitation, dashboard_interaction_by_id,
         dashboard_report_by_id, dashboard_session_by_id, dashboard_with_limits, delete_product,
         feedback_consent_state, feedback_list_interactions, feedback_list_reports,
-        get_or_create_workspace, ingest_telemetry_batch, purge_expired_product_data,
-        read_product_auth, record_feedback_consent_decision, remove_team_member, rename_product,
-        rename_workspace, resolve_workspace_access, revoke_api_key, revoke_team_invitation,
-        rotate_api_key, submit_product_feedback, transfer_team_ownership, update_feedback_workflow,
-        update_policy, update_team_member_role,
+        get_or_create_workspace, github_installation_workspace, ingest_telemetry_batch,
+        list_github_installations, purge_expired_product_data, read_product_auth,
+        record_feedback_consent_decision, remove_team_member, rename_product, rename_workspace,
+        resolve_workspace_access, revoke_api_key, revoke_github_installation,
+        revoke_team_invitation, rotate_api_key, submit_product_feedback, transfer_team_ownership,
+        update_feedback_workflow, update_policy, update_team_member_role,
+        upsert_github_installation,
     },
 };
 
@@ -79,10 +86,13 @@ struct AppState {
     public_base_url: String,
     secure_cookies: bool,
     accounts: OsAccountsClient,
+    github: Option<GithubAppClient>,
     mcp_allowed_origins: Vec<String>,
 }
 
 const TEAM_INVITE_COOKIE: &str = "af_team_invite";
+const GITHUB_STATE_COOKIE: &str = "af_gh_state";
+const GITHUB_WORKSPACE_COOKIE: &str = "af_gh_ws";
 
 #[derive(OpenApi)]
 #[openapi(
@@ -154,6 +164,11 @@ fn build_app_router() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(feedback_discovery_v2))
         .routes(routes!(auth_start))
         .routes(routes!(auth_callback))
+        .routes(routes!(github_install_handler))
+        .routes(routes!(github_callback_handler))
+        .routes(routes!(github_webhook_handler))
+        .routes(routes!(github_installations_handler))
+        .routes(routes!(github_repositories_handler))
         .routes(routes!(join_team_handler))
         .routes(routes!(logout_handler))
         .routes(routes!(dashboard_handler))
@@ -247,6 +262,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     let accounts = OsAccountsClient::from_env(&public_base_url)?;
+    let github = GithubAppConfig::from_env()?.map(GithubAppClient::new);
     let database_url =
         env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL is required"))?;
     let database_max_connections = match env::var("DATABASE_MAX_CONNECTIONS") {
@@ -282,6 +298,7 @@ async fn main() -> anyhow::Result<()> {
         public_base_url,
         pool,
         accounts,
+        github,
         mcp_allowed_origins,
     });
     spawn_retention_worker(state.pool.clone());
@@ -652,6 +669,398 @@ async fn auth_callback(
         &clear_cookie(TEAM_INVITE_COOKIE, state.secure_cookies),
     )?;
     Ok(response)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/github/install",
+    tag = "github",
+    params(
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    responses(
+        (
+            status = 303,
+            description = "Redirect to GitHub to install the Epode GitHub App",
+            body = String,
+            content_type = "text/plain",
+            headers(
+                ("Location" = String, description = "GitHub App installation URL"),
+                ("Set-Cookie" = String, description = "Short-lived GitHub installation state and team cookies")
+            )
+        ),
+        (status = 400, description = "Invalid team header", body = ApiErrorEnvelope),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "GitHub installation flow could not be started", body = ApiErrorEnvelope),
+        (status = 503, description = "GitHub App integration is not configured", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn github_install_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let github = require_github(&state)?;
+    let github_state = random_token("");
+    let mut response = dashboard_response(
+        &state,
+        Redirect::to(&github.install_url(&github_state)),
+        tokens,
+    )?;
+    append_cookie(
+        &mut response,
+        &http_only_cookie(
+            GITHUB_STATE_COOKIE,
+            &github_state,
+            600,
+            state.secure_cookies,
+        ),
+    )?;
+    append_cookie(
+        &mut response,
+        &http_only_cookie(
+            GITHUB_WORKSPACE_COOKIE,
+            &context.workspace.id.to_string(),
+            600,
+            state.secure_cookies,
+        ),
+    )?;
+    Ok(response)
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+struct GithubCallbackQuery {
+    /// GitHub installation identifier created or updated by the setup flow.
+    installation_id: Option<i64>,
+    /// GitHub's setup action, such as `install` or `update`.
+    setup_action: Option<String>,
+    /// Opaque state nonce supplied when the setup flow began.
+    state: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/github/callback",
+    tag = "github",
+    params(GithubCallbackQuery),
+    responses(
+        (
+            status = 303,
+            description = "GitHub installation completed or failed; redirect to the connectors dashboard",
+            body = String,
+            content_type = "text/plain",
+            headers(
+                ("Location" = String, description = "Connectors dashboard result URL"),
+                ("Set-Cookie" = String, description = "Cleared GitHub installation flow cookies")
+            )
+        ),
+        (status = 400, description = "Malformed GitHub callback query", body = String, content_type = "text/plain"),
+        (status = 500, description = "GitHub installation callback could not be completed", body = ApiErrorEnvelope),
+        (status = 503, description = "GitHub App integration is not configured", body = ApiErrorEnvelope)
+    )
+)]
+async fn github_callback_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<GithubCallbackQuery>,
+) -> Result<Response, ApiError> {
+    let github = require_github(&state)?;
+    let GithubCallbackQuery {
+        installation_id,
+        setup_action,
+        state: returned_state,
+    } = query;
+    let _setup_action = setup_action.as_deref();
+    let expected_state = cookie(&headers, GITHUB_STATE_COOKIE);
+    let workspace_id =
+        cookie(&headers, GITHUB_WORKSPACE_COOKIE).and_then(|value| Uuid::parse_str(&value).ok());
+    let valid_state = expected_state
+        .as_deref()
+        .is_some_and(|expected| returned_state.as_deref() == Some(expected));
+    let (Some(installation_id), Some(workspace_id)) = (installation_id, workspace_id) else {
+        return Ok(github_callback_redirect(&state, "error"));
+    };
+    if !valid_state {
+        return Ok(github_callback_redirect(&state, "error"));
+    }
+
+    let account = github
+        .installation(installation_id)
+        .await
+        .map_err(ApiError::internal)?;
+    upsert_github_installation(
+        &state.pool,
+        workspace_id,
+        installation_id,
+        &account.login,
+        &account.account_type,
+    )
+    .await?;
+    Ok(github_callback_redirect(&state, "connected"))
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubWebhookPayload {
+    action: Option<String>,
+    installation: Option<GithubWebhookInstallation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubWebhookInstallation {
+    id: i64,
+    account: Option<GithubWebhookAccount>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubWebhookAccount {
+    login: String,
+    #[serde(rename = "type")]
+    account_type: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/github/webhook",
+    tag = "github",
+    params(
+        ("X-Hub-Signature-256" = String, Header, description = "HMAC-SHA256 signature of the raw request body"),
+        ("X-GitHub-Event" = String, Header, description = "GitHub webhook event name")
+    ),
+    request_body(content = String, content_type = "application/json", description = "Raw GitHub webhook event payload"),
+    responses(
+        (status = 200, description = "Signed webhook accepted", body = String, content_type = "text/plain"),
+        (status = 401, description = "Webhook signature is missing or invalid", body = ApiErrorEnvelope),
+        (status = 413, description = "Webhook body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 503, description = "GitHub App integration is not configured", body = ApiErrorEnvelope)
+    )
+)]
+async fn github_webhook_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<(StatusCode, &'static str), ApiError> {
+    let github = require_github(&state)?;
+    let signature = headers
+        .get("x-hub-signature-256")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !github.verify_webhook_signature(&body, signature) {
+        tracing::warn!("rejected GitHub webhook with invalid signature");
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "Invalid GitHub webhook signature",
+        ));
+    }
+
+    if headers
+        .get("x-github-event")
+        .and_then(|value| value.to_str().ok())
+        == Some("installation")
+    {
+        if let Ok(payload) = serde_json::from_slice::<GithubWebhookPayload>(&body) {
+            handle_github_installation_webhook(&state, payload).await;
+        } else {
+            tracing::warn!("ignored malformed signed GitHub installation webhook");
+        }
+    }
+    Ok((StatusCode::OK, "ok"))
+}
+
+async fn handle_github_installation_webhook(state: &AppState, payload: GithubWebhookPayload) {
+    let Some(installation) = payload.installation else {
+        return;
+    };
+    match payload.action.as_deref() {
+        Some("deleted" | "suspend") => {
+            best_effort_revoke_github_installation(state, installation.id).await;
+        }
+        Some("created" | "unsuspend") => {
+            let Ok(Some(workspace_id)) =
+                github_installation_workspace(&state.pool, installation.id).await
+            else {
+                return;
+            };
+            let Some(account) = installation.account else {
+                return;
+            };
+            if upsert_github_installation(
+                &state.pool,
+                workspace_id,
+                installation.id,
+                &account.login,
+                &account.account_type,
+            )
+            .await
+            .is_err()
+            {
+                tracing::warn!(
+                    installation_id = installation.id,
+                    "failed to restore GitHub installation from webhook"
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+async fn best_effort_revoke_github_installation(state: &AppState, installation_id: i64) {
+    if revoke_github_installation(&state.pool, installation_id)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            installation_id,
+            "failed to revoke GitHub installation from webhook"
+        );
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/github/installations",
+    tag = "github",
+    params(
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "GitHub App configuration and active installations", body = GithubInstallationsResponse),
+        (status = 400, description = "Invalid team header", body = ApiErrorEnvelope),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "GitHub installations could not be listed", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn github_installations_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let configured = state.github.is_some();
+    let installations = if configured {
+        list_github_installations(&state.pool, context.workspace.id)
+            .await?
+            .into_iter()
+            .map(|installation| GithubInstallationResponse {
+                id: installation.id,
+                installation_id: installation.installation_id,
+                account_login: installation.account_login,
+                account_type: installation.account_type,
+                created_at: installation.created_at,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    dashboard_response(
+        &state,
+        Json(GithubInstallationsResponse {
+            configured,
+            installations,
+        }),
+        tokens,
+    )
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/github/installations/{installation_id}/repositories",
+    tag = "github",
+    params(
+        ("installation_id" = i64, Path, description = "GitHub installation identifier"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Repositories visible to the GitHub installation", body = GithubRepositoriesResponse),
+        (
+            status = 400,
+            description = "Invalid path or team header",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Active GitHub installation not found for this team", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "GitHub repositories could not be listed", body = ApiErrorEnvelope),
+        (status = 503, description = "GitHub App integration is not configured", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn github_repositories_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(installation_id): Path<i64>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let github = require_github(&state)?;
+    let active_installations = list_github_installations(&state.pool, context.workspace.id).await?;
+    if !active_installations
+        .iter()
+        .any(|installation| installation.installation_id == installation_id)
+    {
+        return Err(ApiError::not_found(
+            "GitHub installation not found for this team",
+        ));
+    }
+    let repositories = github
+        .installation_repositories(installation_id)
+        .await
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .map(|repository| GithubRepositoryResponse {
+            full_name: repository.full_name,
+            default_branch: repository.default_branch,
+            private: repository.private,
+        })
+        .collect();
+    dashboard_response(
+        &state,
+        Json(GithubRepositoriesResponse {
+            installation_id,
+            repositories,
+        }),
+        tokens,
+    )
+}
+
+fn require_github(state: &AppState) -> Result<&GithubAppClient, ApiError> {
+    state.github.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GitHub App integration is not configured",
+        )
+    })
+}
+
+fn github_callback_redirect(state: &AppState, result: &str) -> Response {
+    let location = format!(
+        "{}/?view=connectors&github={result}",
+        state.public_base_url.trim_end_matches('/')
+    );
+    let mut response = Redirect::to(&location).into_response();
+    for value in [
+        clear_cookie(GITHUB_STATE_COOKIE, state.secure_cookies),
+        clear_cookie(GITHUB_WORKSPACE_COOKIE, state.secure_cookies),
+    ] {
+        if let Ok(value) = HeaderValue::from_str(&value) {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+    }
+    response
 }
 
 #[utoipa::path(

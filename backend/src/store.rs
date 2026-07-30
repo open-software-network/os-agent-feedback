@@ -32,6 +32,15 @@ use crate::{
     },
 };
 
+#[derive(Debug, sqlx::FromRow)]
+pub(crate) struct GithubInstallationRow {
+    pub(crate) id: Uuid,
+    pub(crate) installation_id: i64,
+    pub(crate) account_login: String,
+    pub(crate) account_type: String,
+    pub(crate) created_at: DateTime<Utc>,
+}
+
 pub(crate) fn clean(value: &str, max: usize) -> String {
     value
         .split_whitespace()
@@ -90,6 +99,71 @@ fn validated_name(value: &str, entity: &str) -> Result<String, ApiError> {
         )));
     }
     Ok(name)
+}
+
+pub(crate) async fn upsert_github_installation(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    installation_id: i64,
+    login: &str,
+    account_type: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        r"INSERT INTO github_installations
+        (id, workspace_id, installation_id, account_login, account_type)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (installation_id) DO UPDATE SET
+          workspace_id = EXCLUDED.workspace_id,
+          account_login = EXCLUDED.account_login,
+          account_type = EXCLUDED.account_type,
+          revoked_at = NULL",
+    )
+    .bind(Uuid::new_v4())
+    .bind(workspace_id)
+    .bind(installation_id)
+    .bind(login)
+    .bind(account_type)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn revoke_github_installation(
+    pool: &PgPool,
+    installation_id: i64,
+) -> Result<(), ApiError> {
+    sqlx::query("UPDATE github_installations SET revoked_at = NOW() WHERE installation_id = $1")
+        .bind(installation_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn list_github_installations(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Vec<GithubInstallationRow>, ApiError> {
+    Ok(sqlx::query_as::<_, GithubInstallationRow>(
+        r"SELECT id, installation_id, account_login, account_type, created_at
+        FROM github_installations
+        WHERE workspace_id = $1 AND revoked_at IS NULL
+        ORDER BY account_login, installation_id",
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+pub(crate) async fn github_installation_workspace(
+    pool: &PgPool,
+    installation_id: i64,
+) -> Result<Option<Uuid>, ApiError> {
+    Ok(sqlx::query_scalar(
+        "SELECT workspace_id FROM github_installations WHERE installation_id = $1",
+    )
+    .bind(installation_id)
+    .fetch_optional(pool)
+    .await?)
 }
 
 pub(crate) async fn get_or_create_workspace(
