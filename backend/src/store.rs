@@ -2793,12 +2793,19 @@ pub(crate) async fn regroup_report_groups(
                 status_code: row.status_code,
                 findings: &findings,
             };
-            if grouper.assign(&input).group_key == row.current_group_key {
-                summary.unchanged += 1;
-                continue;
-            }
+            // Always reassign, even when the key is unchanged: a newer grouper
+            // can produce the same key while carrying a different name,
+            // version, or explanation, and `assign_report_group`'s upsert is
+            // what refreshes those columns. Skipping the call here would leave
+            // the row attributed to whichever grouper first created the key,
+            // so "why are these together?" would answer with stale reasoning.
+            let moved = grouper.assign(&input).group_key != row.current_group_key;
             assign_report_group(&mut tx, grouper, row.workspace_id, row.id, &input).await?;
-            summary.moved += 1;
+            if moved {
+                summary.moved += 1;
+            } else {
+                summary.unchanged += 1;
+            }
         }
 
         tx.commit().await?;
