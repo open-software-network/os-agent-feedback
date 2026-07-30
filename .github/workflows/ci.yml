@@ -186,12 +186,16 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
       - name: Install dependencies
         run: make node-install
+      - name: Check generated API types
+        run: make web-types-check
       - name: Check web formatting and linting
         run: make web-check
       - name: Typecheck web
         run: make web-typecheck
       - name: Test web
         run: make web-test
+      - name: Build web
+        run: make web-build
 
   docs:
     name: Documentation
