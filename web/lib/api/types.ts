@@ -68,6 +68,88 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/github/install": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["github_install_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/github/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["github_callback_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/github/webhook": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Receives signed GitHub App events. Persistence failures answer 500 so GitHub redelivers; an unparseable payload answers 400; unhandled or non-actionable events answer 200. */
+        post: operations["github_webhook_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/github/installations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["github_installations_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/github/installations/{installation_id}/repositories": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Lists repositories reachable by the installation. The listing is capped at 1000 repositories; when the cap is reached `truncated` is true and the response is a partial view. */
+        get: operations["github_repositories_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/join/{invitation_id}": {
         parameters: {
             query?: never;
@@ -626,6 +708,55 @@ export interface components {
             optional: string[];
             required: string[];
         };
+        GithubInstallationResponse: {
+            /** @description Login of the GitHub user or organization that owns the installation. */
+            accountLogin: string;
+            /** @description GitHub account kind, either `User` or `Organization`. */
+            accountType: string;
+            /**
+             * Format: date-time
+             * @description Time when the installation was first connected to the workspace.
+             */
+            createdAt: string;
+            /**
+             * Format: uuid
+             * @description Internal identifier for the stored installation record.
+             */
+            id: string;
+            /**
+             * Format: int64
+             * @description GitHub's numeric installation identifier.
+             */
+            installationId: number;
+        };
+        GithubInstallationsResponse: {
+            /** @description Whether the server has complete GitHub App configuration. */
+            configured: boolean;
+            /** @description Active GitHub App installations connected to the workspace. */
+            installations: components["schemas"]["GithubInstallationResponse"][];
+        };
+        GithubRepositoriesResponse: {
+            /**
+             * Format: int64
+             * @description GitHub installation whose repositories were listed.
+             */
+            installationId: number;
+            /** @description Repositories currently accessible to the installation. */
+            repositories: components["schemas"]["GithubRepositoryResponse"][];
+            /**
+             * @description True when the pagination cap cut the listing short, so `repositories` is
+             *     a partial view of the installation rather than the complete set.
+             */
+            truncated: boolean;
+        };
+        GithubRepositoryResponse: {
+            /** @description Repository's default branch. */
+            defaultBranch: string;
+            /** @description Repository name in `owner/name` form. */
+            fullName: string;
+            /** @description Whether GitHub marks the repository as private. */
+            private: boolean;
+        };
         HealthResponse: {
             database: string;
             service: string;
@@ -1104,6 +1235,369 @@ export interface operations {
             };
             /** @description Authentication callback processing failed */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    github_install_handler: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Team to configure; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect to GitHub to install the Epode GitHub App */
+            303: {
+                headers: {
+                    /** @description GitHub App installation URL */
+                    Location?: string;
+                    /** @description Short-lived GitHub installation state and team cookies */
+                    "Set-Cookie"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description Invalid team header */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot configure the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description A pending team invitation changed while team membership was refreshed */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description GitHub installation flow could not be started */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description GitHub App integration is not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    github_callback_handler: {
+        parameters: {
+            query?: {
+                /** @description GitHub installation identifier created or updated by the setup flow. */
+                installation_id?: number;
+                /** @description GitHub's setup action, such as `install` or `update`. */
+                setup_action?: string;
+                /** @description Opaque state nonce supplied when the setup flow began. */
+                state?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect to the connectors dashboard with github=connected, github=conflict, or github=error */
+            303: {
+                headers: {
+                    /** @description Connectors dashboard result URL */
+                    Location?: string;
+                    /** @description Cleared GitHub installation flow cookies */
+                    "Set-Cookie"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description Malformed GitHub callback query */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description GitHub App integration is not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    github_webhook_handler: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description HMAC-SHA256 signature of the raw request body */
+                "X-Hub-Signature-256": string;
+                /** @description GitHub webhook event name */
+                "X-GitHub-Event": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Raw GitHub webhook event payload */
+        requestBody: {
+            content: {
+                "application/json": string;
+            };
+        };
+        responses: {
+            /** @description Signed webhook accepted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description Signed webhook payload could not be parsed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Webhook signature is missing or invalid */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Webhook body exceeds the configured limit */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description Webhook could not be persisted; GitHub should redeliver */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description GitHub App integration is not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    github_installations_handler: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Team to access; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description GitHub App configuration and active installations */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GithubInstallationsResponse"];
+                };
+            };
+            /** @description Invalid team header */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot configure the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description A pending team invitation changed while team membership was refreshed */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description GitHub installations could not be listed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    github_repositories_handler: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Team to access; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path: {
+                /** @description GitHub installation identifier */
+                installation_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Repositories visible to the GitHub installation */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GithubRepositoriesResponse"];
+                };
+            };
+            /** @description Invalid path or team header */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                    "text/plain": string;
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot configure the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Active GitHub installation not found for this team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description A pending team invitation changed while team membership was refreshed */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description GitHub repositories could not be listed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description GitHub App integration is not configured */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

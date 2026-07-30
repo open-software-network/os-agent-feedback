@@ -32,6 +32,21 @@ use crate::{
     },
 };
 
+#[derive(Debug, sqlx::FromRow)]
+pub(crate) struct GithubInstallationRow {
+    pub(crate) id: Uuid,
+    pub(crate) installation_id: i64,
+    pub(crate) account_login: String,
+    pub(crate) account_type: String,
+    pub(crate) created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GithubInstallationUpsert {
+    Bound,
+    ConflictingWorkspace,
+}
+
 pub(crate) fn clean(value: &str, max: usize) -> String {
     value
         .split_whitespace()
@@ -90,6 +105,75 @@ fn validated_name(value: &str, entity: &str) -> Result<String, ApiError> {
         )));
     }
     Ok(name)
+}
+
+pub(crate) async fn upsert_github_installation(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    installation_id: i64,
+    login: &str,
+    account_type: &str,
+) -> Result<GithubInstallationUpsert, ApiError> {
+    let result = sqlx::query(
+        r"INSERT INTO github_installations
+        (id, workspace_id, installation_id, account_login, account_type)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (installation_id) DO UPDATE SET
+          account_login = EXCLUDED.account_login,
+          account_type = EXCLUDED.account_type,
+          revoked_at = NULL
+        WHERE github_installations.workspace_id = EXCLUDED.workspace_id",
+    )
+    .bind(Uuid::new_v4())
+    .bind(workspace_id)
+    .bind(installation_id)
+    .bind(login)
+    .bind(account_type)
+    .execute(pool)
+    .await?;
+    Ok(if result.rows_affected() == 0 {
+        GithubInstallationUpsert::ConflictingWorkspace
+    } else {
+        GithubInstallationUpsert::Bound
+    })
+}
+
+pub(crate) async fn revoke_github_installation(
+    pool: &PgPool,
+    installation_id: i64,
+) -> Result<(), ApiError> {
+    sqlx::query("UPDATE github_installations SET revoked_at = NOW() WHERE installation_id = $1")
+        .bind(installation_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn list_github_installations(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Vec<GithubInstallationRow>, ApiError> {
+    Ok(sqlx::query_as::<_, GithubInstallationRow>(
+        r"SELECT id, installation_id, account_login, account_type, created_at
+        FROM github_installations
+        WHERE workspace_id = $1 AND revoked_at IS NULL
+        ORDER BY account_login, installation_id",
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+pub(crate) async fn github_installation_workspace(
+    pool: &PgPool,
+    installation_id: i64,
+) -> Result<Option<Uuid>, ApiError> {
+    Ok(sqlx::query_scalar(
+        "SELECT workspace_id FROM github_installations WHERE installation_id = $1",
+    )
+    .bind(installation_id)
+    .fetch_optional(pool)
+    .await?)
 }
 
 pub(crate) async fn get_or_create_workspace(
@@ -2657,6 +2741,203 @@ mod product_tests {
             findings: vec![],
             workaround: None,
         }
+    }
+
+    async fn github_test_workspace(pool: &PgPool, label: &str) -> anyhow::Result<Uuid> {
+        let workspace_id = Uuid::new_v4();
+        sqlx::query(
+            r"INSERT INTO workspaces (id, os_user_id, name, slug)
+            VALUES ($1, $2, $3, $4)",
+        )
+        .bind(workspace_id)
+        .bind(format!("usr_github_{}", workspace_id.simple()))
+        .bind(label)
+        .bind(format!(
+            "github-{}",
+            &workspace_id.simple().to_string()[..12]
+        ))
+        .execute(pool)
+        .await?;
+        Ok(workspace_id)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn github_same_workspace_reinstall_updates_metadata_and_revives() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace_id = github_test_workspace(&pool, "GitHub reinstall test").await?;
+        let installation_id = i64::from(Uuid::new_v4().as_fields().0);
+
+        let result = async {
+            anyhow::ensure!(
+                upsert_github_installation(&pool, workspace_id, installation_id, "before", "User",)
+                    .await
+                    .map_err(test_error)?
+                    == GithubInstallationUpsert::Bound
+            );
+            revoke_github_installation(&pool, installation_id)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(
+                upsert_github_installation(
+                    &pool,
+                    workspace_id,
+                    installation_id,
+                    "after",
+                    "Organization",
+                )
+                .await
+                .map_err(test_error)?
+                    == GithubInstallationUpsert::Bound
+            );
+
+            let row = sqlx::query_as::<_, (Uuid, String, String, Option<DateTime<Utc>>)>(
+                r"SELECT workspace_id, account_login, account_type, revoked_at
+                FROM github_installations WHERE installation_id = $1",
+            )
+            .bind(installation_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(row.0 == workspace_id);
+            anyhow::ensure!(row.1 == "after");
+            anyhow::ensure!(row.2 == "Organization");
+            anyhow::ensure!(row.3.is_none());
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn github_installation_cannot_move_between_workspaces() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let original_workspace = github_test_workspace(&pool, "GitHub original tenant").await?;
+        let other_workspace = github_test_workspace(&pool, "GitHub other tenant").await?;
+        let installation_id = i64::from(Uuid::new_v4().as_fields().0);
+
+        let result = async {
+            anyhow::ensure!(
+                upsert_github_installation(
+                    &pool,
+                    original_workspace,
+                    installation_id,
+                    "original",
+                    "Organization",
+                )
+                .await
+                .map_err(test_error)?
+                    == GithubInstallationUpsert::Bound
+            );
+            anyhow::ensure!(
+                upsert_github_installation(
+                    &pool,
+                    other_workspace,
+                    installation_id,
+                    "attacker",
+                    "User",
+                )
+                .await
+                .map_err(test_error)?
+                    == GithubInstallationUpsert::ConflictingWorkspace
+            );
+
+            let row = sqlx::query_as::<_, (Uuid, String, String)>(
+                r"SELECT workspace_id, account_login, account_type
+                FROM github_installations WHERE installation_id = $1",
+            )
+            .bind(installation_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(row.0 == original_workspace);
+            anyhow::ensure!(row.1 == "original");
+            anyhow::ensure!(row.2 == "Organization");
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1 OR id = $2")
+            .bind(original_workspace)
+            .bind(other_workspace)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn revoked_github_installation_disappears_from_active_list() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace_id = github_test_workspace(&pool, "GitHub revoke test").await?;
+        let installation_id = i64::from(Uuid::new_v4().as_fields().0);
+
+        let result = async {
+            anyhow::ensure!(
+                upsert_github_installation(
+                    &pool,
+                    workspace_id,
+                    installation_id,
+                    "revoked",
+                    "Organization",
+                )
+                .await
+                .map_err(test_error)?
+                    == GithubInstallationUpsert::Bound
+            );
+            anyhow::ensure!(
+                list_github_installations(&pool, workspace_id)
+                    .await
+                    .map_err(test_error)?
+                    .iter()
+                    .any(|installation| installation.installation_id == installation_id)
+            );
+
+            revoke_github_installation(&pool, installation_id)
+                .await
+                .map_err(test_error)?;
+            let revoked_at: Option<DateTime<Utc>> = sqlx::query_scalar(
+                "SELECT revoked_at FROM github_installations WHERE installation_id = $1",
+            )
+            .bind(installation_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(revoked_at.is_some());
+            anyhow::ensure!(
+                list_github_installations(&pool, workspace_id)
+                    .await
+                    .map_err(test_error)?
+                    .iter()
+                    .all(|installation| installation.installation_id != installation_id)
+            );
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await?;
+        result
     }
 
     #[test]

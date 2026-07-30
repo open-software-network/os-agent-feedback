@@ -108,6 +108,53 @@ pub(crate) struct RevokedResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GithubInstallationResponse {
+    /// Internal identifier for the stored installation record.
+    pub id: uuid::Uuid,
+    /// GitHub's numeric installation identifier.
+    pub installation_id: i64,
+    /// Login of the GitHub user or organization that owns the installation.
+    pub account_login: String,
+    /// GitHub account kind, either `User` or `Organization`.
+    pub account_type: String,
+    /// Time when the installation was first connected to the workspace.
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GithubRepositoryResponse {
+    /// Repository name in `owner/name` form.
+    pub full_name: String,
+    /// Repository's default branch.
+    pub default_branch: String,
+    /// Whether GitHub marks the repository as private.
+    pub private: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GithubInstallationsResponse {
+    /// Whether the server has complete GitHub App configuration.
+    pub configured: bool,
+    /// Active GitHub App installations connected to the workspace.
+    pub installations: Vec<GithubInstallationResponse>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GithubRepositoriesResponse {
+    /// GitHub installation whose repositories were listed.
+    pub installation_id: i64,
+    /// Repositories currently accessible to the installation.
+    pub repositories: Vec<GithubRepositoryResponse>,
+    /// True when the pagination cap cut the listing short, so `repositories` is
+    /// a partial view of the installation rather than the complete set.
+    pub truncated: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub(crate) struct McpInfoResponse {
     pub name: String,
     pub transport: String,
