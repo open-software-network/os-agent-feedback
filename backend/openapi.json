@@ -56,6 +56,2663 @@
         }
       }
     },
+    "/auth/start": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "auth_start",
+        "responses": {
+          "303": {
+            "description": "Redirect to OS Accounts to begin authentication",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "OS Accounts authorization URL"
+              },
+              "Set-Cookie": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Short-lived PKCE verifier and OAuth state cookies"
+              }
+            }
+          },
+          "500": {
+            "description": "Authentication flow setup failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/callback": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "auth_callback",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "description": "Authorization code returned by OS Accounts.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "OAuth state returned by OS Accounts.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "Authentication completed or failed; redirect to the dashboard or login page",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Dashboard or authentication-failure URL"
+              },
+              "Set-Cookie": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Dashboard session cookies and cleared OAuth flow cookies"
+              }
+            }
+          },
+          "500": {
+            "description": "Authentication callback processing failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/join/{invitation_id}": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "join_team_handler",
+        "parameters": [
+          {
+            "name": "invitation_id",
+            "in": "path",
+            "description": "Team invitation identifier",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "Remember the invitation and redirect to authentication",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Authentication start URL"
+              },
+              "Set-Cookie": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Short-lived team invitation cookie"
+              }
+            }
+          },
+          "400": {
+            "description": "Invitation identifier is not a UUID",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Invitation redirect setup failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "logout_handler",
+        "responses": {
+          "200": {
+            "description": "Dashboard session cleared",
+            "headers": {
+              "Set-Cookie": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Cleared dashboard session cookies"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthenticationStateResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Session cookie cleanup failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/dashboard": {
+      "get": {
+        "tags": [
+          "dashboard"
+        ],
+        "operationId": "dashboard_handler",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "description": "Team to open. Defaults to the caller's personal team.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "productId",
+            "in": "query",
+            "description": "Product to select. Defaults to the first product.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "environmentId",
+            "in": "query",
+            "description": "Legacy environment selection used by existing dashboard links.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "interactionLimit",
+            "in": "query",
+            "description": "Maximum interactions returned.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 250
+            }
+          },
+          {
+            "name": "reportLimit",
+            "in": "query",
+            "description": "Maximum feedback reports returned.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 250
+            }
+          },
+          {
+            "name": "sessionLimit",
+            "in": "query",
+            "description": "Maximum sessions returned.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dashboard state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardData"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed dashboard query parameters",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot access the requested team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A pending team invitation changed while team membership was refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Dashboard state could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/dashboard/reports/{report_id}": {
+      "get": {
+        "tags": [
+          "dashboard"
+        ],
+        "operationId": "dashboard_report_handler",
+        "parameters": [
+          {
+            "name": "report_id",
+            "in": "path",
+            "description": "Feedback report identifier",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "productId",
+            "in": "query",
+            "description": "Product that owns the requested dashboard record.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to access; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Feedback report with interaction and workflow context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardReportResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path, query, or team header",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot access the requested team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Feedback report not found for the product",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A pending team invitation changed while team membership was refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Feedback report could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "dashboard"
+        ],
+        "operationId": "update_feedback_workflow_handler",
+        "parameters": [
+          {
+            "name": "report_id",
+            "in": "path",
+            "description": "Feedback report identifier",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to access; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateFeedbackWorkflowInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Feedback workflow updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdatedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path, team header, workflow update, or malformed JSON body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot edit the requested team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Feedback report not found for the product",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A pending team invitation changed while team membership was refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the configured limit",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Request body is not JSON",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "JSON body does not match the workflow update schema",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Feedback workflow could not be updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/dashboard/interactions/{interaction_id}": {
+      "get": {
+        "tags": [
+          "dashboard"
+        ],
+        "operationId": "dashboard_interaction_handler",
+        "parameters": [
+          {
+            "name": "interaction_id",
+            "in": "path",
+            "description": "Interaction identifier",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "productId",
+            "in": "query",
+            "description": "Product that owns the requested dashboard record.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to access; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Product interaction",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardInteractionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path, query, or team header",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot access the requested team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Interaction not found for the product",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A pending team invitation changed while team membership was refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Interaction could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/dashboard/sessions/{session_id}": {
+      "get": {
+        "tags": [
+          "dashboard"
+        ],
+        "operationId": "dashboard_session_handler",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "Session identifier",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "productId",
+            "in": "query",
+            "description": "Product that owns the requested dashboard record.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to access; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session with its interactions and feedback reports",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardSessionDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path, query, or team header",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot access the requested team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found for the product",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A pending team invitation changed while team membership was refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Session could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/products": {
+      "post": {
+        "tags": [
+          "products"
+        ],
+        "operationId": "create_product_handler",
+        "parameters": [
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to configure; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProductInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Product, default environment, and one-time API key secret created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductCreatedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid team header, product data, or malformed JSON body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot configure the requested team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Team not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Product name conflicts or the team product limit was reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A pending team invitation changed while team membership was refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the configured limit",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Request body is not JSON",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "JSON body does not match the product schema",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Product could not be created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/products/{product_id}": {
+      "delete": {
+        "tags": [
+          "products"
+        ],
+        "operationId": "delete_product_handler",
+        "parameters": [
+          {
+            "name": "product_id",
+            "in": "path",
+            "description": "Product identifier",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to configure; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteProductInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Deleted product",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductDeletedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path, team header, confirmation, or malformed JSON body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot configure the requested team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Product not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A pending team invitation changed while team membership was refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the configured limit",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Request body is not JSON",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "JSON body does not match the product deletion schema",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Product could not be deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "products"
+        ],
+        "operationId": "rename_product_handler",
+        "parameters": [
+          {
+            "name": "product_id",
+            "in": "path",
+            "description": "Product identifier",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to configure; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateNameInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Renamed product",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path, team header, product name, or malformed JSON body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot configure the requested team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Product not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A product with this name already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A pending team invitation changed while team membership was refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the configured limit",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Request body is not JSON",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "JSON body does not match the product update schema",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Product could not be renamed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/team": {
+      "patch": {
+        "tags": [
+          "team"
+        ],
+        "operationId": "rename_team_handler",
+        "parameters": [
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to configure; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateNameInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Renamed team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid team header, team name, or malformed JSON body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot configure the requested team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Team not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A team with this name already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A pending team invitation changed while team membership was refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the configured limit",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Request body is not JSON",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "JSON body does not match the team update schema",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Team could not be renamed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/team/invitations": {
+      "post": {
+        "tags": [
+          "team"
+        ],
+        "operationId": "create_team_invitation_handler",
+        "parameters": [
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to configure; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTeamInvitationInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Team invitation created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamInvitationCreatedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid team header, invitation values, or malformed JSON body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot invite this role to the requested team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Invitee is already a member or has an active invitation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A pending team invitation changed while team membership was refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the configured limit",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Request body is not JSON",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "JSON body does not match the invitation schema",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Invitation could not be created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/team/invitations/{invitation_id}": {
+      "delete": {
+        "tags": [
+          "team"
+        ],
+        "operationId": "revoke_team_invitation_handler",
+        "parameters": [
+          {
+            "name": "invitation_id",
+            "in": "path",
+            "description": "Team invitation identifier",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to configure; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Team invitation revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid invitation identifier or team header",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot revoke this invitation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Active invitation not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A pending team invitation changed while team membership was refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Invitation could not be revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/team/members/{os_user_id}": {
+      "delete": {
+        "tags": [
+          "team"
+        ],
+        "operationId": "remove_team_member_handler",
+        "parameters": [
+          {
+            "name": "os_user_id",
+            "in": "path",
+            "description": "OS Accounts user identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to configure; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Team member removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemovedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid team header",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot remove this team member",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Team member not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A pending team invitation changed while team membership was refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Team member could not be removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "team"
+        ],
+        "operationId": "update_team_member_handler",
+        "parameters": [
+          {
+            "name": "os_user_id",
+            "in": "path",
+            "description": "OS Accounts user identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to configure; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateTeamMemberInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated team member",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamMemberResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid team header, member role, or malformed JSON body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot change this member's role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Team member not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A pending team invitation changed while team membership was refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the configured limit",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Request body is not JSON",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "JSON body does not match the member update schema",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Team member could not be updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/team/ownership/{os_user_id}": {
+      "post": {
+        "tags": [
+          "team"
+        ],
+        "operationId": "transfer_team_ownership_handler",
+        "parameters": [
+          {
+            "name": "os_user_id",
+            "in": "path",
+            "description": "OS Accounts user identifier for the new owner",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to configure; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Team ownership transferred",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferredResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid team header or the caller selected themself",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Only the current owner can transfer ownership",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "New owner is not a team member",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Team ownership changed or is already held by the selected member",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A pending team invitation changed while team membership was refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Team ownership could not be transferred",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/settings/api-keys": {
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "operationId": "create_api_key_handler",
+        "parameters": [
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to configure; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateApiKeyInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "API key and one-time secret created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyCreatedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid team header, API key configuration, or malformed JSON body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot configure the requested team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Product environment not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Environment already has the maximum number of active keys",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A pending team invitation changed while team membership was refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the configured limit",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Request body is not JSON",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "JSON body does not match the API key schema",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "API key could not be created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/settings/api-keys/{key_id}": {
+      "delete": {
+        "tags": [
+          "settings"
+        ],
+        "operationId": "revoke_api_key_handler",
+        "parameters": [
+          {
+            "name": "key_id",
+            "in": "path",
+            "description": "API key identifier",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to configure; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "API key revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid key identifier or team header",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot configure the requested team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Active API key not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A pending team invitation changed while team membership was refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "API key could not be revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/settings/api-keys/{key_id}/rotate": {
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "operationId": "rotate_api_key_handler",
+        "parameters": [
+          {
+            "name": "key_id",
+            "in": "path",
+            "description": "API key identifier",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to configure; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successor API key and one-time secret created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyRotatedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid key identifier or team header",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot configure the requested team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Active API key not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A pending team invitation changed while team membership was refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "API key could not be rotated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/settings/policy": {
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "operationId": "update_policy_handler",
+        "parameters": [
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to configure; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PolicyInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated product environment policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnvironmentResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid team header, policy values, or malformed JSON body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot configure the requested team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Product environment not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A pending team invitation changed while team membership was refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the configured limit",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Request body is not JSON",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "JSON body does not match the policy schema",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Policy could not be updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
     "/api/v2/telemetry/batches": {
       "post": {
         "tags": [
@@ -271,6 +2928,193 @@
           }
         ]
       }
+    },
+    "/mcp": {
+      "get": {
+        "tags": [
+          "mcp"
+        ],
+        "operationId": "mcp_info",
+        "responses": {
+          "200": {
+            "description": "MCP transport metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpInfoResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "mcp"
+        ],
+        "description": "Processes stateless MCP requests. Request and response bodies are opaque JSON objects because their exact JSON-RPC shape depends on the MCP method.",
+        "operationId": "mcp_handler",
+        "parameters": [
+          {
+            "name": "MCP-Protocol-Version",
+            "in": "header",
+            "description": "MCP protocol version; required and matched against request metadata for modern requests",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Mcp-Method",
+            "in": "header",
+            "description": "MCP method; required and matched against the JSON-RPC body for modern requests",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Mcp-Name",
+            "in": "header",
+            "description": "MCP tool name; required and matched for modern tools/call requests",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "description": "Request origin, when sent, must be allow-listed",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Opaque MCP JSON-RPC request object; fields depend on the requested method",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpaqueJsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "MCP JSON-RPC response object",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpaqueJsonObject"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Legacy initialized notification accepted"
+          },
+          "400": {
+            "description": "Invalid MCP metadata, protocol version, or malformed JSON body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpaqueJsonObject"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid, or expired read API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpaqueJsonObject"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request origin is not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpaqueJsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown modern MCP method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpaqueJsonObject"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the configured limit",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Request body is not JSON",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "MCP authentication or request processing failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpaqueJsonObject"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -286,6 +3130,118 @@
           }
         }
       },
+      "ApiKeyCreatedResponse": {
+        "type": "object",
+        "required": [
+          "apiKey",
+          "secret",
+          "shownOnce"
+        ],
+        "properties": {
+          "apiKey": {
+            "$ref": "#/components/schemas/ApiKeyPublic"
+          },
+          "secret": {
+            "type": "string"
+          },
+          "shownOnce": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ApiKeyPublic": {
+        "type": "object",
+        "required": [
+          "id",
+          "environmentId",
+          "label",
+          "prefix",
+          "kind",
+          "createdAt",
+          "lastUsedAt",
+          "revokedAt",
+          "expiresAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "environmentId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "lastUsedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "prefix": {
+            "type": "string"
+          },
+          "revokedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "ApiKeyRotatedResponse": {
+        "type": "object",
+        "required": [
+          "apiKey",
+          "secret",
+          "shownOnce",
+          "predecessorExpiresAt"
+        ],
+        "properties": {
+          "apiKey": {
+            "$ref": "#/components/schemas/ApiKeyPublic"
+          },
+          "predecessorExpiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "secret": {
+            "type": "string"
+          },
+          "shownOnce": {
+            "type": "boolean"
+          }
+        }
+      },
+      "AuthenticationStateResponse": {
+        "type": "object",
+        "required": [
+          "authenticated"
+        ],
+        "properties": {
+          "authenticated": {
+            "type": "boolean"
+          }
+        }
+      },
       "ClassificationDiscovery": {
         "type": "object",
         "required": [
@@ -298,6 +3254,312 @@
           },
           "mcp": {
             "type": "string"
+          }
+        }
+      },
+      "CreateApiKeyInput": {
+        "type": "object",
+        "required": [
+          "environmentId"
+        ],
+        "properties": {
+          "environmentId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expiresInSeconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "CreateProductInput": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateTeamInvitationInput": {
+        "type": "object",
+        "required": [
+          "role"
+        ],
+        "properties": {
+          "invitee": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CurrentUser": {
+        "type": "object",
+        "required": [
+          "id",
+          "handle",
+          "email",
+          "displayName"
+        ],
+        "properties": {
+          "displayName": {
+            "type": "string"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "handle": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        }
+      },
+      "DashboardData": {
+        "type": "object",
+        "required": [
+          "user",
+          "workspace",
+          "workspaceMemberships",
+          "currentRole",
+          "teamMembers",
+          "teamInvitations",
+          "products",
+          "environments",
+          "currentProduct",
+          "currentEnvironment",
+          "apiKeys",
+          "interactions",
+          "reports",
+          "sessions",
+          "insights",
+          "listState"
+        ],
+        "properties": {
+          "apiKeys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiKeyPublic"
+            }
+          },
+          "currentEnvironment": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ProductEnvironment"
+              }
+            ]
+          },
+          "currentProduct": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Product"
+              }
+            ]
+          },
+          "currentRole": {
+            "type": "string"
+          },
+          "environments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProductEnvironment"
+            }
+          },
+          "insights": {
+            "$ref": "#/components/schemas/Insights"
+          },
+          "interactions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProductInteraction"
+            }
+          },
+          "listState": {
+            "$ref": "#/components/schemas/DashboardListState"
+          },
+          "products": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Product"
+            }
+          },
+          "reports": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProductFeedbackReportWithInteraction"
+            }
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProductSession"
+            }
+          },
+          "teamInvitations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TeamInvitation"
+            }
+          },
+          "teamMembers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TeamMember"
+            }
+          },
+          "user": {
+            "$ref": "#/components/schemas/CurrentUser"
+          },
+          "workspace": {
+            "$ref": "#/components/schemas/Workspace"
+          },
+          "workspaceMemberships": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceMembership"
+            }
+          }
+        }
+      },
+      "DashboardInteractionResponse": {
+        "type": "object",
+        "required": [
+          "interaction"
+        ],
+        "properties": {
+          "interaction": {
+            "$ref": "#/components/schemas/ProductInteraction"
+          }
+        }
+      },
+      "DashboardListState": {
+        "type": "object",
+        "required": [
+          "interactionsTotal",
+          "reportsTotal",
+          "sessionsTotal",
+          "interactionsLoaded",
+          "reportsLoaded",
+          "sessionsLoaded"
+        ],
+        "properties": {
+          "interactionsLoaded": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "interactionsTotal": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "reportsLoaded": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "reportsTotal": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sessionsLoaded": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sessionsTotal": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "DashboardReportResponse": {
+        "type": "object",
+        "required": [
+          "report"
+        ],
+        "properties": {
+          "report": {
+            "$ref": "#/components/schemas/ProductFeedbackReportWithInteraction"
+          }
+        }
+      },
+      "DashboardSessionDetail": {
+        "type": "object",
+        "required": [
+          "session",
+          "interactions",
+          "reports"
+        ],
+        "properties": {
+          "interactions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProductInteraction"
+            }
+          },
+          "reports": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProductFeedbackReportWithInteraction"
+            }
+          },
+          "session": {
+            "$ref": "#/components/schemas/ProductSession"
+          }
+        }
+      },
+      "DeleteProductInput": {
+        "type": "object",
+        "required": [
+          "confirmation"
+        ],
+        "properties": {
+          "confirmation": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "EnvironmentResponse": {
+        "type": "object",
+        "required": [
+          "environment"
+        ],
+        "properties": {
+          "environment": {
+            "$ref": "#/components/schemas/ProductEnvironment"
           }
         }
       },
@@ -592,6 +3854,162 @@
           }
         }
       },
+      "InsightCount": {
+        "type": "object",
+        "required": [
+          "name",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "Insights": {
+        "type": "object",
+        "required": [
+          "windowDays",
+          "comparisonDays",
+          "opportunities",
+          "confirmedInteractions",
+          "reports",
+          "recentOpportunities",
+          "recentConfirmedInteractions",
+          "recentReports",
+          "previousOpportunities",
+          "previousConfirmedInteractions",
+          "previousReports",
+          "confirmationRate",
+          "reviewRate",
+          "reportsWithBlockers",
+          "reportsWithWorkarounds",
+          "p50DurationMs",
+          "p95DurationMs",
+          "topOperations",
+          "surfaces",
+          "impacts",
+          "findingKinds",
+          "topics",
+          "blockingTopics"
+        ],
+        "properties": {
+          "blockingTopics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "comparisonDays": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "confirmationRate": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "confirmedInteractions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "findingKinds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "impacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "opportunities": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "p50DurationMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "p95DurationMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "previousConfirmedInteractions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "previousOpportunities": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "previousReports": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "recentConfirmedInteractions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "recentOpportunities": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "recentReports": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "reports": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "reportsWithBlockers": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "reportsWithWorkarounds": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "reviewRate": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "surfaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "topOperations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "topics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "windowDays": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
       "IntegrationsDiscovery": {
         "type": "object",
         "required": [
@@ -747,6 +4165,192 @@
           }
         }
       },
+      "McpInfoResponse": {
+        "type": "object",
+        "required": [
+          "name",
+          "transport",
+          "endpoint",
+          "authentication",
+          "privacy"
+        ],
+        "properties": {
+          "authentication": {
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "privacy": {
+            "type": "string"
+          },
+          "transport": {
+            "type": "string"
+          }
+        }
+      },
+      "OpaqueJsonObject": {
+        "type": "object",
+        "description": "Opaque JSON object whose fields depend on the MCP JSON-RPC method."
+      },
+      "PolicyInput": {
+        "type": "object",
+        "required": [
+          "environmentId",
+          "feedbackMode",
+          "collectEventSummaries",
+          "retentionDays"
+        ],
+        "properties": {
+          "collectEventSummaries": {
+            "type": "boolean"
+          },
+          "environmentId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "feedbackMode": {
+            "type": "string"
+          },
+          "retentionDays": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "Product": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspaceId",
+          "name",
+          "slug",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "ProductCreatedResponse": {
+        "type": "object",
+        "required": [
+          "product",
+          "environment",
+          "apiKey",
+          "secret",
+          "shownOnce"
+        ],
+        "properties": {
+          "apiKey": {
+            "$ref": "#/components/schemas/ApiKeyPublic"
+          },
+          "environment": {
+            "$ref": "#/components/schemas/ProductEnvironment"
+          },
+          "product": {
+            "$ref": "#/components/schemas/Product"
+          },
+          "secret": {
+            "type": "string"
+          },
+          "shownOnce": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ProductDeletedResponse": {
+        "type": "object",
+        "required": [
+          "deleted",
+          "product"
+        ],
+        "properties": {
+          "deleted": {
+            "type": "boolean"
+          },
+          "product": {
+            "$ref": "#/components/schemas/Product"
+          }
+        }
+      },
+      "ProductEnvironment": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspaceId",
+          "productId",
+          "name",
+          "slug",
+          "feedbackMode",
+          "collectEventSummaries",
+          "retentionDays",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "collectEventSummaries": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "feedbackMode": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "productId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "retentionDays": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "ProductFeedbackAcceptedResponse": {
         "type": "object",
         "required": [
@@ -774,7 +4378,10 @@
           "workspaceId",
           "interactionId",
           "summary",
+          "impact",
+          "confidence",
           "findings",
+          "workaround",
           "source",
           "createdAt"
         ],
@@ -883,6 +4490,336 @@
         },
         "additionalProperties": false
       },
+      "ProductFeedbackReportWithInteraction": {
+        "type": "object",
+        "required": [
+          "id",
+          "interactionId",
+          "summary",
+          "impact",
+          "confidence",
+          "findings",
+          "workaround",
+          "source",
+          "createdAt",
+          "sessionId",
+          "surface",
+          "operation",
+          "statusCode",
+          "durationMs",
+          "customerRef",
+          "classification",
+          "confirmationMethod",
+          "runtimeHint",
+          "runtimeHintSource",
+          "occurredAt",
+          "workflowStatus",
+          "assigneeOsUserId",
+          "tags",
+          "internalNote",
+          "workflowUpdatedAt"
+        ],
+        "properties": {
+          "assigneeOsUserId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "classification": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "confirmationMethod": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "customerRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "durationMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FeedbackFinding"
+            }
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "impact": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "interactionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "internalNote": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "operation": {
+            "type": "string"
+          },
+          "runtimeHint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runtimeHintSource": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "source": {
+            "type": "string"
+          },
+          "statusCode": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "surface": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "workaround": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FeedbackWorkaround"
+              }
+            ]
+          },
+          "workflowStatus": {
+            "type": "string"
+          },
+          "workflowUpdatedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "ProductInteraction": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspaceId",
+          "environmentId",
+          "apiKeyId",
+          "sessionId",
+          "surface",
+          "operation",
+          "statusCode",
+          "durationMs",
+          "customerRef",
+          "classification",
+          "confirmationMethod",
+          "runtimeHint",
+          "runtimeHintSource",
+          "occurredAt",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "apiKeyId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "classification": {
+            "type": "string"
+          },
+          "confirmationMethod": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "customerRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "durationMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "environmentId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "operation": {
+            "type": "string"
+          },
+          "runtimeHint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runtimeHintSource": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "statusCode": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "surface": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "ProductResponse": {
+        "type": "object",
+        "required": [
+          "product"
+        ],
+        "properties": {
+          "product": {
+            "$ref": "#/components/schemas/Product"
+          }
+        }
+      },
+      "ProductSession": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspaceId",
+          "environmentId",
+          "source",
+          "refHint",
+          "startedAt",
+          "lastSeenAt",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "environmentId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "refHint": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "ReliabilityDiscovery": {
         "type": "object",
         "required": [
@@ -895,6 +4832,142 @@
           },
           "mcp": {
             "type": "string"
+          }
+        }
+      },
+      "RemovedResponse": {
+        "type": "object",
+        "required": [
+          "removed"
+        ],
+        "properties": {
+          "removed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "RevokedResponse": {
+        "type": "object",
+        "required": [
+          "revoked"
+        ],
+        "properties": {
+          "revoked": {
+            "type": "boolean"
+          }
+        }
+      },
+      "TeamInvitation": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspaceId",
+          "invitedByOsUserId",
+          "inviteeKind",
+          "inviteeValue",
+          "role",
+          "createdAt",
+          "expiresAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "invitedByOsUserId": {
+            "type": "string"
+          },
+          "inviteeKind": {
+            "type": "string"
+          },
+          "inviteeValue": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "TeamInvitationCreatedResponse": {
+        "type": "object",
+        "required": [
+          "invitation",
+          "joinPath"
+        ],
+        "properties": {
+          "invitation": {
+            "$ref": "#/components/schemas/TeamInvitation"
+          },
+          "joinPath": {
+            "type": "string"
+          }
+        }
+      },
+      "TeamMember": {
+        "type": "object",
+        "required": [
+          "workspaceId",
+          "osUserId",
+          "handle",
+          "email",
+          "displayName",
+          "role",
+          "joinedAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "displayName": {
+            "type": "string"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "handle": {
+            "type": "string"
+          },
+          "joinedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "osUserId": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "TeamMemberResponse": {
+        "type": "object",
+        "required": [
+          "member"
+        ],
+        "properties": {
+          "member": {
+            "$ref": "#/components/schemas/TeamMember"
           }
         }
       },
@@ -946,6 +5019,169 @@
           },
           "url": {
             "type": "string"
+          }
+        }
+      },
+      "TransferredResponse": {
+        "type": "object",
+        "required": [
+          "transferred"
+        ],
+        "properties": {
+          "transferred": {
+            "type": "boolean"
+          }
+        }
+      },
+      "UpdateFeedbackWorkflowInput": {
+        "type": "object",
+        "required": [
+          "productId",
+          "status"
+        ],
+        "properties": {
+          "assigneeOsUserId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "internalNote": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "productId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "UpdateNameInput": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "UpdateTeamMemberInput": {
+        "type": "object",
+        "required": [
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "UpdatedResponse": {
+        "type": "object",
+        "required": [
+          "updated"
+        ],
+        "properties": {
+          "updated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Workspace": {
+        "type": "object",
+        "required": [
+          "id",
+          "osUserId",
+          "name",
+          "slug",
+          "feedbackMode",
+          "collectEventSummaries",
+          "retentionDays",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "collectEventSummaries": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "feedbackMode": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "osUserId": {
+            "type": "string"
+          },
+          "retentionDays": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "WorkspaceMembership": {
+        "type": "object",
+        "required": [
+          "workspaceId",
+          "workspaceName",
+          "workspaceSlug",
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspaceName": {
+            "type": "string"
+          },
+          "workspaceSlug": {
+            "type": "string"
+          }
+        }
+      },
+      "WorkspaceResponse": {
+        "type": "object",
+        "required": [
+          "workspace"
+        ],
+        "properties": {
+          "workspace": {
+            "$ref": "#/components/schemas/Workspace"
           }
         }
       }

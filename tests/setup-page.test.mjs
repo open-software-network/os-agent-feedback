@@ -37,6 +37,16 @@ const dropLegacyDataMigration = await readFile(
 const backendMain = await readFile(new URL("../backend/src/main.rs", import.meta.url), "utf8");
 const backendStore = await readFile(new URL("../backend/src/store.rs", import.meta.url), "utf8");
 const backendModels = await readFile(new URL("../backend/src/models.rs", import.meta.url), "utf8");
+const backendOpenApi = JSON.parse(
+  await readFile(new URL("../backend/openapi.json", import.meta.url), "utf8"),
+);
+
+function assertOpenApiOperation(path, method, operationId) {
+  const operation = backendOpenApi.paths?.[path]?.[method.toLowerCase()];
+  assert.ok(operation, `expected ${method.toUpperCase()} ${path} in backend/openapi.json`);
+  assert.equal(operation.operationId, operationId);
+}
+
 test("the root URL is the canonical signed-in app", () => {
   assert.match(backendMain, /\.route\("\/", get\(root_page\)\)/);
   assert.doesNotMatch(backendMain, /\.route\("\/app"/);
@@ -215,18 +225,19 @@ test("read keys ship per-client MCP config snippets, not a server env variable",
 test("new products receive their product key automatically", () => {
   assert.match(backendMain, /create_product_with_default_key/);
   assert.match(backendStore, /'Default product key'[\s\S]*'write'/);
-  assert.match(backendMain, /"apiKey": api_key/);
-  assert.match(backendMain, /"secret": secret/);
+  assert.match(backendMain, /Json\(ProductCreatedResponse \{[\s\S]*api_key,[\s\S]*secret,/);
   assert.match(backendStore, /None => None/);
   assert.doesNotMatch(backendMain, /\/api\/products\/\{product_id\}\/environments/);
   assert.doesNotMatch(backendModels, /CreateEnvironmentInput/);
 });
 
 test("owners and admins can rename teams and products without replacing their IDs", () => {
-  assert.match(backendMain, /\.route\("\/api\/team", patch\(rename_team_handler\)\)/);
+  assertOpenApiOperation("/api/team", "patch", "rename_team_handler");
+  assertOpenApiOperation("/api/products/{product_id}", "patch", "rename_product_handler");
+  assert.match(backendMain, /\.routes\(routes!\(rename_team_handler\)\)/);
   assert.match(
     backendMain,
-    /"\/api\/products\/\{product_id\}"[\s\S]*patch\(rename_product_handler\)/,
+    /\.routes\(routes!\(rename_product_handler, delete_product_handler\)\)/,
   );
   assert.match(backendMain, /async fn rename_team_handler[\s\S]*require_workspace_editor/);
   assert.match(backendMain, /async fn rename_product_handler[\s\S]*require_workspace_editor/);
@@ -239,7 +250,11 @@ test("owners and admins can rename teams and products without replacing their ID
 });
 
 test("owners and admins can permanently delete a product with exact-name confirmation", () => {
-  assert.match(backendMain, /patch\(rename_product_handler\)\.delete\(delete_product_handler\)/);
+  assertOpenApiOperation("/api/products/{product_id}", "delete", "delete_product_handler");
+  assert.match(
+    backendMain,
+    /\.routes\(routes!\(rename_product_handler, delete_product_handler\)\)/,
+  );
   assert.match(backendMain, /async fn delete_product_handler[\s\S]*require_workspace_editor/);
   assert.match(backendStore, /pub(?:\(crate\))? async fn delete_product/);
   assert.match(backendStore, /input\.confirmation\.trim\(\) != product\.name/);
