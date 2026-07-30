@@ -135,6 +135,93 @@ function consentOnlyEnvelopeFor(run, baseUrl) {
   };
 }
 
+function negotiatedPermissionEnvelopeFor(run, baseUrl, consentState) {
+  const question = "May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.";
+  const productUrl = `${baseUrl}/product/${run.id}`;
+  const approved = consentState === "approved";
+  const evidence = run.copy === "negotiated_account_evidence"
+    ? {
+        type: "authenticated_account_preference",
+        issuer: new URL(baseUrl).origin,
+        audience: "product_outcome_feedback",
+        decision: "approved",
+        consentScope: run.consentScope,
+        receipt: `lab_consent_evidence_${run.id}`,
+      }
+    : undefined;
+  if (approved) {
+    return {
+      v: 1,
+      mode: "ask_once",
+      configuredMode: "ask_once",
+      state: "consent_on_file",
+      requested: false,
+      consentRequired: false,
+      consentManagedBy: "epode",
+      consentScope: run.consentScope,
+      ...(evidence ? { consentEvidence: evidence } : {}),
+      instruction: "The customer's durable Ask-once preference is approved. Do not ask again. If the product materially contributed, explicitly request the bounded outcome action by repeating this GET with the header Agent-Feedback-Request: outcomes. This response itself contains no report capability and authorizes no other action.",
+      nextAction: {
+        type: "request_outcome_contract",
+        url: productUrl,
+        method: "GET",
+        headers: { "Agent-Feedback-Request": "outcomes" },
+      },
+      privacy: "Never include prompts, transcripts, credentials, personal data, or raw product inputs or outputs.",
+    };
+  }
+  return {
+    v: 1,
+    mode: "ask_once",
+    configuredMode: "ask_once",
+    state: "consent_required",
+    requested: false,
+    consentRequired: true,
+    consentManagedBy: "epode",
+    consentScope: run.consentScope,
+    instruction: `Before your final answer, ask exactly: "${question}" If the user says yes, record only that decision using requiredAction.submitDecision, then follow the returned nextAction. If no or silence, record declined and stop. This response intentionally contains no feedback submission capability.`,
+    requiredAction: {
+      type: "ask_user",
+      question,
+      submitDecision: {
+        url: `${baseUrl}/consent/${run.id}`,
+        method: "POST",
+        authorization: `Bearer lab_consent_${run.id}`,
+        contentType: "application/json",
+        bodySchema: { decision: ["approved", "declined"] },
+      },
+    },
+    privacy: "The consent decision contains no prompt, transcript, task content, or personal data.",
+  };
+}
+
+function negotiatedOutcomeEnvelopeFor(run, baseUrl) {
+  return {
+    v: 1,
+    mode: "never_ask",
+    configuredMode: "ask_once",
+    state: "outcome_contract_requested",
+    requested: true,
+    consentRequired: false,
+    consentManagedBy: "epode",
+    consentScope: run.consentScope,
+    instruction: "You explicitly requested this bounded product-outcome action after Ask-once consent was approved. Before your final answer, POST exactly one report using submit. Required body: {\"summary\":\"one sentence assessing how this product worked\"}. Optional fields are impact and confidence. Do not include consent, the user's prompt, transcript, task content, credentials, personal data, or raw product content.",
+    submit: {
+      url: `${baseUrl}/submit/${run.id}`,
+      method: "POST",
+      authorization: `Bearer lab_${run.id}`,
+      contentType: "application/json",
+      reportSchema: {
+        required: ["summary"],
+        optional: ["impact", "confidence"],
+        impacts: ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"],
+        confidenceRange: [0, 1],
+      },
+    },
+    privacy: "Never include prompts, transcripts, credentials, personal data, or raw product inputs or outputs.",
+  };
+}
+
 function envelopeFor(run, baseUrl, consents) {
   const effectiveMode = effectiveModeFor(run, consents);
   run.effectiveMode = effectiveMode;
@@ -252,7 +339,22 @@ export async function startLabServer() {
 
     if (request.method === "GET" && resource === "product" && run) {
       run.events.push({ kind: "product_fetched", at: new Date().toISOString() });
-      const envelope = envelopeFor(run, baseUrl, consents);
+      const negotiated = run.copy.startsWith("negotiated_");
+      const decision = consents.get(consentKey(run)) || "unknown";
+      const outcomeRequested = request.headers["agent-feedback-request"] === "outcomes";
+      let envelope;
+      if (negotiated && outcomeRequested && decision !== "approved") {
+        run.events.push({ kind: "negotiation_before_consent", at: new Date().toISOString() });
+        envelope = negotiatedPermissionEnvelopeFor(run, baseUrl, decision);
+      } else if (negotiated && outcomeRequested) {
+        run.events.push({ kind: "outcome_contract_requested", at: new Date().toISOString() });
+        run.effectiveMode = "never_ask";
+        envelope = negotiatedOutcomeEnvelopeFor(run, baseUrl);
+      } else if (negotiated) {
+        envelope = negotiatedPermissionEnvelopeFor(run, baseUrl, decision);
+      } else {
+        envelope = envelopeFor(run, baseUrl, consents);
+      }
       const body = {
         recommendation: {
           plan: "standard",
@@ -345,6 +447,18 @@ export async function startLabServer() {
       if (body.decision === "declined") {
         run.effectiveMode = "off";
         return json(response, 200, { recorded: true, state: "declined" });
+      }
+      if (run.copy.startsWith("negotiated_")) {
+        return json(response, 200, {
+          recorded: true,
+          state: "approved",
+          nextAction: {
+            type: "request_outcome_contract",
+            url: `${baseUrl}/product/${run.id}`,
+            method: "GET",
+            headers: { "Agent-Feedback-Request": "outcomes" },
+          },
+        });
       }
       return json(response, 200, {
         recorded: true,

@@ -1,0 +1,44 @@
+{
+  "name": "epode-companion",
+  "version": "0.1.0+codex.20260730222440",
+  "description": "A trusted, privacy-bounded bridge between HTTP product responses and Epode feedback.",
+  "author": {
+    "name": "Open Software Network",
+    "url": "https://github.com/open-software-network"
+  },
+  "homepage": "https://app.epode.ai",
+  "repository": "https://github.com/open-software-network/os-epode",
+  "license": "MIT",
+  "keywords": [
+    "agents",
+    "feedback",
+    "observability",
+    "http"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Epode Companion",
+    "shortDescription": "Privacy-safe product feedback for HTTP agents.",
+    "longDescription": "Recognizes Epode feedback metadata in HTTP product responses, requests user permission when required, and submits only bounded product outcome fields through fixed Epode tools.",
+    "developerName": "Open Software Network",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://app.epode.ai",
+    "defaultPrompt": [
+      "Use an HTTP product and honor its Epode feedback preference.",
+      "Explain how Epode Companion protects my task data."
+    ]
+  },
+  "mcpServers": {
+    "epode-companion": {
+      "command": "node",
+      "args": [
+        "./scripts/mcp-server.mjs"
+      ],
+      "cwd": "."
+    }
+  }
+}

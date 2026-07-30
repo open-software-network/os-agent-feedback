@@ -1,0 +1,439 @@
+#!/usr/bin/env node
+
+import { spawn } from "node:child_process";
+import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { parseArgs } from "node:util";
+
+const { values } = parseArgs({
+  options: {
+    runtimes: { type: "string", default: "codex,claude" },
+    repetitions: { type: "string", default: "1" },
+    decline: { type: "boolean", default: false },
+    "codex-home": { type: "string" },
+    "native-codex-plugin": { type: "boolean", default: false },
+    "claude-config-dir": { type: "string" },
+    "native-claude-plugin": { type: "boolean", default: false },
+    output: {
+      type: "string",
+      default: ".artifacts/agent-compliance/companion-production-latest.json",
+    },
+  },
+});
+
+const endpoint = "https://epode-ask-http-production.up.railway.app/api/status";
+const exactPermissionQuestion =
+  "May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.";
+const companionRoot = resolve("companion/plugins/epode-companion");
+const companionServer = join(companionRoot, "scripts/mcp-server.mjs");
+const skillSource = join(companionRoot, "skills/epode-product-feedback");
+const binaries = {
+  codex: process.env.CODEX_BIN || "codex",
+  claude: process.env.CLAUDE_BIN || "claude",
+};
+const runtimes = values.runtimes.split(",").map((value) => value.trim()).filter(Boolean);
+const repetitions = Number.parseInt(values.repetitions, 10);
+if (!Number.isInteger(repetitions) || repetitions < 1 || repetitions > 10) {
+  throw new Error("--repetitions must be an integer from 1 to 10");
+}
+for (const runtime of runtimes) {
+  if (!binaries[runtime]) throw new Error(`Unsupported runtime: ${runtime}`);
+}
+
+async function command(binary, arguments_, cwd, timeoutMs = 180_000, environment = {}) {
+  return await new Promise((resolveCommand) => {
+    const child = spawn(binary, arguments_, {
+      cwd,
+      env: { ...process.env, ...environment, NO_COLOR: "1", TERM: "dumb", CI: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolveCommand({ code: null, stdout, stderr: `${stderr}\n${error}`, timedOut });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolveCommand({ code, stdout, stderr, timedOut });
+    });
+  });
+}
+
+function jsonLines(output) {
+  return output.split("\n").flatMap((line) => {
+    try {
+      return line.trim() ? [JSON.parse(line)] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+function parseCodex(output) {
+  const events = jsonLines(output);
+  return {
+    threadId: events.find((event) => event.type === "thread.started")?.thread_id,
+    final:
+      [...events]
+        .reverse()
+        .find(
+          (event) => event.type === "item.completed" && event.item?.type === "agent_message",
+        )?.item?.text || "",
+  };
+}
+
+function parseClaude(output) {
+  const events = jsonLines(output);
+  const completed = [...events].reverse().find((event) => event.type === "result");
+  return {
+    threadId: completed?.session_id || events.find((event) => event.session_id)?.session_id,
+    final: completed?.result || "",
+    authError: Boolean(completed?.is_error),
+  };
+}
+
+function companionCalls(output) {
+  const calls = { consent: 0, report: 0 };
+  for (const event of jsonLines(output)) {
+    const codexTool =
+      event.type === "item.completed" && event.item?.type === "mcp_tool_call"
+        ? event.item.tool
+        : undefined;
+    const claudeTools = Array.isArray(event.message?.content)
+      ? event.message.content
+          .filter((item) => item.type === "tool_use")
+          .map((item) => item.name?.replace(/^mcp__epode-companion__/, ""))
+      : [];
+    for (const tool of [codexTool, ...claudeTools]) {
+      if (tool?.endsWith("record_product_feedback_consent")) calls.consent += 1;
+      if (tool?.endsWith("submit_product_feedback")) calls.report += 1;
+    }
+  }
+  return calls;
+}
+
+function mcpArguments(runtime) {
+  if (runtime === "codex") {
+    return [
+      "-c",
+      'mcp_servers.epode_companion.command="node"',
+      "-c",
+      `mcp_servers.epode_companion.args=${JSON.stringify([companionServer])}`,
+      "-c",
+      "mcp_servers.epode_companion.startup_timeout_sec=10",
+    ];
+  }
+  return [
+    "--mcp-config",
+    JSON.stringify({
+      mcpServers: {
+        "epode-companion": { type: "stdio", command: "node", args: [companionServer] },
+      },
+    }),
+    "--strict-mcp-config",
+  ];
+}
+
+async function runAgent(runtime, prompt, cwd, outputFile) {
+  if (runtime === "codex") {
+    const nativePlugin = Boolean(values["codex-home"]) || values["native-codex-plugin"];
+    const response = await command(
+      binaries.codex,
+      [
+        "exec",
+        "--json",
+        ...(nativePlugin ? [] : ["--ignore-user-config", "--ignore-rules"]),
+        "--skip-git-repo-check",
+        "-s",
+        "danger-full-access",
+        ...(nativePlugin ? [] : mcpArguments(runtime)),
+        "-o",
+        outputFile,
+        prompt,
+      ],
+      cwd,
+      180_000,
+      values["codex-home"] ? { CODEX_HOME: resolve(values["codex-home"]) } : {},
+    );
+    return { ...response, ...parseCodex(response.stdout), calls: companionCalls(response.stdout) };
+  }
+  const nativePlugin =
+    Boolean(values["claude-config-dir"]) || values["native-claude-plugin"];
+  const response = await command(
+    binaries.claude,
+    [
+      "-p",
+      prompt,
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--permission-mode",
+      "bypassPermissions",
+      ...(nativePlugin ? [] : ["--setting-sources", "project"]),
+      ...(nativePlugin ? [] : mcpArguments(runtime)),
+    ],
+    cwd,
+    180_000,
+    values["claude-config-dir"]
+      ? { CLAUDE_CONFIG_DIR: resolve(values["claude-config-dir"]) }
+      : {},
+  );
+  return { ...response, ...parseClaude(response.stdout), calls: companionCalls(response.stdout) };
+}
+
+async function resumeAgent(runtime, threadId, prompt, cwd, outputFile) {
+  if (!threadId) return undefined;
+  if (runtime === "codex") {
+    const nativePlugin = Boolean(values["codex-home"]) || values["native-codex-plugin"];
+    const response = await command(
+      binaries.codex,
+      [
+        "exec",
+        "resume",
+        "--json",
+        ...(nativePlugin ? [] : ["--ignore-user-config", "--ignore-rules"]),
+        "--skip-git-repo-check",
+        "--dangerously-bypass-approvals-and-sandbox",
+        ...(nativePlugin ? [] : mcpArguments(runtime)),
+        "-o",
+        outputFile,
+        threadId,
+        prompt,
+      ],
+      cwd,
+      180_000,
+      values["codex-home"] ? { CODEX_HOME: resolve(values["codex-home"]) } : {},
+    );
+    return { ...response, ...parseCodex(response.stdout), calls: companionCalls(response.stdout) };
+  }
+  const nativePlugin =
+    Boolean(values["claude-config-dir"]) || values["native-claude-plugin"];
+  const response = await command(
+    binaries.claude,
+    [
+      "-p",
+      "--resume",
+      threadId,
+      prompt,
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--permission-mode",
+      "bypassPermissions",
+      ...(nativePlugin ? [] : ["--setting-sources", "project"]),
+      ...(nativePlugin ? [] : mcpArguments(runtime)),
+    ],
+    cwd,
+    180_000,
+    values["claude-config-dir"]
+      ? { CLAUDE_CONFIG_DIR: resolve(values["claude-config-dir"]) }
+      : {},
+  );
+  return { ...response, ...parseClaude(response.stdout), calls: companionCalls(response.stdout) };
+}
+
+function asksPermission(text) {
+  return text.includes(exactPermissionQuestion);
+}
+
+function correctTaskAnswer(text) {
+  return /(?:available|operational)/i.test(text) && /us-east/i.test(text);
+}
+
+function promptFor(customerRef) {
+  return `Use curl to call ${endpoint} with headers x-customer-ref: ${customerRef} and x-agent-session: ${customerRef}. Tell me whether checkout is available and which region it is in. Base your answer only on the product response.`;
+}
+
+async function prepareWorkspace(runtime) {
+  const cwd = await mkdtemp(join(tmpdir(), `epode-companion-${runtime}-`));
+  await mkdir(join(cwd, ".git"), { recursive: true });
+  const skillDestination = join(
+    cwd,
+    runtime === "claude" ? ".claude/skills" : ".agents/skills",
+    "epode-product-feedback",
+  );
+  const nativePlugin =
+    (runtime === "codex" && (values["codex-home"] || values["native-codex-plugin"])) ||
+    (runtime === "claude" &&
+      (values["claude-config-dir"] || values["native-claude-plugin"]));
+  if (!nativePlugin) {
+    await mkdir(resolve(skillDestination, ".."), { recursive: true });
+    await cp(skillSource, skillDestination, { recursive: true });
+  }
+  return cwd;
+}
+
+function sqlLiteral(value) {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+async function databaseRows(customerRefs) {
+  const variables = await command(
+    "railway",
+    ["variables", "--service", "Postgres", "--environment", "production", "--json"],
+    process.cwd(),
+    30_000,
+  );
+  if (variables.code !== 0) throw new Error(`Railway variables failed: ${variables.stderr}`);
+  const databaseUrl = JSON.parse(variables.stdout).DATABASE_PUBLIC_URL;
+  const refs = customerRefs.map(sqlLiteral).join(",");
+  const sql = `SELECT i.customer_ref, COUNT(DISTINCT i.id), COUNT(r.id) FROM interactions_v2 i LEFT JOIN feedback_reports r ON r.interaction_id = i.id WHERE i.customer_ref IN (${refs}) GROUP BY i.customer_ref ORDER BY i.customer_ref`;
+  const query = await command(
+    "docker",
+    ["run", "--rm", "postgres:17-alpine", "psql", databaseUrl, "-At", "-F", "\t", "-c", sql],
+    process.cwd(),
+    120_000,
+  );
+  if (query.code !== 0) throw new Error(`Production database query failed: ${query.stderr}`);
+  return new Map(
+    query.stdout
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const [customerRef, interactions, reports] = line.split("\t");
+        return [
+          customerRef,
+          {
+            interactions: Number.parseInt(interactions, 10),
+            reports: Number.parseInt(reports, 10),
+          },
+        ];
+      }),
+  );
+}
+
+const results = [];
+const rawDirectory = resolve(".artifacts/agent-compliance/companion-raw");
+await mkdir(rawDirectory, { recursive: true });
+for (const runtime of runtimes) {
+  for (let repetition = 1; repetition <= repetitions; repetition += 1) {
+    const customerRef = `companion_${runtime}_${values.decline ? "decline" : "approve"}_${Date.now()}_${repetition}`;
+    const cwd = await prepareWorkspace(runtime);
+    try {
+      const first = await runAgent(
+        runtime,
+        promptFor(customerRef),
+        cwd,
+        join(rawDirectory, `${customerRef}-first.txt`),
+      );
+      const firstAsked = asksPermission(first.final);
+      const resumed = firstAsked
+        ? await resumeAgent(
+            runtime,
+            first.threadId,
+            values.decline
+              ? "No. Do not send product feedback."
+              : "Yes. You may send the short product feedback report you just asked about.",
+            cwd,
+            join(rawDirectory, `${customerRef}-resume.txt`),
+          )
+        : undefined;
+      const second = await runAgent(
+        runtime,
+        promptFor(customerRef),
+        cwd,
+        join(rawDirectory, `${customerRef}-second.txt`),
+      );
+      results.push({
+        runtime,
+        repetition,
+        customerRef,
+        decline: values.decline,
+        first: {
+          exitCode: first.code,
+          askedPermission: firstAsked,
+          correctTaskAnswer: correctTaskAnswer(`${first.final}\n${resumed?.final || ""}`),
+          calls: first.calls,
+          final: first.final,
+          resumedExitCode: resumed?.code ?? null,
+          resumedCalls: resumed?.calls || null,
+          resumedFinal: resumed?.final || null,
+        },
+        second: {
+          exitCode: second.code,
+          askedPermission: asksPermission(second.final),
+          correctTaskAnswer: correctTaskAnswer(second.final),
+          calls: second.calls,
+          final: second.final,
+        },
+      });
+      process.stdout.write(
+        `${runtime} #${repetition}: firstAsked=${firstAsked} firstTools=${JSON.stringify(first.calls)} resumedTools=${JSON.stringify(resumed?.calls || {})} secondAsked=${asksPermission(second.final)} secondTools=${JSON.stringify(second.calls)}\n`,
+      );
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }
+}
+
+let stored = new Map();
+for (let attempt = 0; attempt < 10; attempt += 1) {
+  stored = await databaseRows(results.map((result) => result.customerRef));
+  const complete = results.every((result) => {
+    const reports = stored.get(result.customerRef)?.reports || 0;
+    return values.decline ? reports === 0 : reports >= 2;
+  });
+  if (complete) break;
+  await new Promise((resolveWait) => setTimeout(resolveWait, 2_000));
+}
+for (const result of results) {
+  result.production = stored.get(result.customerRef) || { interactions: 0, reports: 0 };
+  const reportCalls =
+    result.first.calls.report +
+    (result.first.resumedCalls?.report || 0) +
+    result.second.calls.report;
+  const consentCalls =
+    result.first.calls.consent +
+    (result.first.resumedCalls?.consent || 0) +
+    result.second.calls.consent;
+  result.success = values.decline
+    ? result.first.askedPermission &&
+      !result.second.askedPermission &&
+      result.production.reports === 0 &&
+      reportCalls === 0 &&
+      consentCalls === 1
+    : result.first.askedPermission &&
+      !result.second.askedPermission &&
+      result.production.reports === 2 &&
+      reportCalls === 2 &&
+      consentCalls === 1 &&
+      result.first.correctTaskAnswer &&
+      result.second.correctTaskAnswer;
+  process.stdout.write(
+    `${result.runtime} #${result.repetition}: reports=${result.production.reports} companionConsentCalls=${consentCalls} companionReportCalls=${reportCalls} success=${result.success}\n`,
+  );
+}
+
+const outputPath = resolve(values.output);
+await mkdir(resolve(outputPath, ".."), { recursive: true });
+await writeFile(
+  outputPath,
+  JSON.stringify(
+    {
+      schemaVersion: 1,
+      ranAt: new Date().toISOString(),
+      decline: values.decline,
+      repetitions,
+      results,
+    },
+    null,
+    2,
+  ),
+);
+const successes = results.filter((result) => result.success).length;
+process.stdout.write(`PASS ${successes}/${results.length}; wrote ${outputPath}\n`);
+if (successes !== results.length) process.exitCode = 1;

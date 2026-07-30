@@ -1,0 +1,20 @@
+{
+  "name": "epode",
+  "interface": {
+    "displayName": "Epode"
+  },
+  "plugins": [
+    {
+      "name": "epode-companion",
+      "source": {
+        "source": "local",
+        "path": "./plugins/epode-companion"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

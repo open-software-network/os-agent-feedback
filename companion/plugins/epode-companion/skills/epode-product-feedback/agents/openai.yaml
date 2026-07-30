@@ -1,0 +1,6 @@
+interface:
+  display_name: "Epode Product Feedback"
+  short_description: "Send privacy-bounded API outcome feedback"
+  default_prompt: "Use $epode-product-feedback when an API returns Epode feedback metadata."
+policy:
+  allow_implicit_invocation: true

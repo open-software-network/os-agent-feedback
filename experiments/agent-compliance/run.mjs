@@ -180,6 +180,27 @@ function scenariosFor(suite) {
       },
     ];
   }
+  if (suite === "http-negotiation-sequence") {
+    return ["negotiated_two_phase", "negotiated_account_evidence"].map((copy) => ({
+      mode: "ask_once",
+      consentOwner: "epode",
+      placement: "response_body",
+      copy,
+      sequence: true,
+      freshSecondSession: true,
+    }));
+  }
+  if (suite === "http-negotiation-decline") {
+    return ["negotiated_two_phase", "negotiated_account_evidence"].map((copy) => ({
+      mode: "ask_once",
+      consentOwner: "epode",
+      placement: "response_body",
+      copy,
+      userDecision: "declined",
+      sequence: true,
+      freshSecondSession: true,
+    }));
+  }
   if (suite === "mcp-pilot") {
     return [
       { mode: "never_ask", placement: "mcp_negative_control", copy: "full_schema", surface: "mcp" },
