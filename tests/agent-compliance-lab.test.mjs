@@ -107,6 +107,76 @@ test("compliance lab enforces mode-specific consent and privacy", async () => {
   }
 });
 
+test("Epode-managed ask once turns later responses into never ask", async () => {
+  const lab = await startLabServer();
+  try {
+    const firstRun = lab.createRun({
+      mode: "ask_once",
+      consentOwner: "epode",
+      placement: "response_body",
+      copy: "full_schema",
+      customerRef: "customer_approved",
+    });
+    const firstProduct = await (await fetch(firstRun.productUrl)).json();
+    assert.equal(firstProduct._agentFeedback.mode, "ask_once");
+    assert.equal(firstProduct._agentFeedback.consentManagedBy, "epode");
+
+    const approved = await fetch(firstProduct._agentFeedback.submit.url, {
+      method: "POST",
+      headers: {
+        authorization: firstProduct._agentFeedback.submit.authorization,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        summary: "The queue recommendation was useful and clear.",
+        consent: {
+          userApproved: true,
+          approvalSource: "granted_now",
+          consentScope: firstProduct._agentFeedback.consentScope,
+        },
+      }),
+    });
+    assert.equal(approved.status, 201);
+    assert.equal(lab.getConsent("acme_queue", "customer_approved"), "approved");
+
+    const secondRun = lab.createRun({
+      mode: "ask_once",
+      consentOwner: "epode",
+      placement: "response_body",
+      copy: "full_schema",
+      customerRef: "customer_approved",
+    });
+    const secondProduct = await (await fetch(secondRun.productUrl)).json();
+    assert.equal(secondProduct._agentFeedback.configuredMode, "ask_once");
+    assert.equal(secondProduct._agentFeedback.mode, "never_ask");
+    assert.equal(secondProduct._agentFeedback.consentRequired, false);
+
+    const automatic = await fetch(secondProduct._agentFeedback.submit.url, {
+      method: "POST",
+      headers: {
+        authorization: secondProduct._agentFeedback.submit.authorization,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ summary: "The second queue recommendation was also useful." }),
+    });
+    assert.equal(automatic.status, 201);
+    assert.equal(lab.getRun(secondRun.id).report.consent, undefined);
+
+    const declinedRun = lab.createRun({
+      mode: "ask_once",
+      consentOwner: "epode",
+      placement: "response_body",
+      copy: "full_schema",
+      customerRef: "customer_declined",
+      preseedConsent: "declined",
+    });
+    const declinedProduct = await (await fetch(declinedRun.productUrl)).json();
+    assert.equal(declinedProduct._agentFeedback, undefined);
+  } finally {
+    await lab.close();
+  }
+});
+
 test("compliance lab records authenticated MCP product events", async () => {
   const lab = await startLabServer();
   try {

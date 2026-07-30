@@ -116,9 +116,25 @@ The file was fetched 0/3 on its own and 3/3 with a standing discovery rule. Epod
 
 The previous contract listed finding enums but omitted the required nested keys. That turned genuine compliance attempts into rejected reports. Exact schema information must travel with the receipt, and optional fields should be omitted when uncertain.
 
-### T5 — Consent needs a client-owned state machine
+### T5 — Ask-once consent belongs to Epode, but the first ask remains probabilistic
 
-Ask once requires durable storage under `consentScope`; Ask every time requires a fresh pause and response. Epode can validate the attestation but cannot manufacture a conversation continuation inside an independent one-shot agent.
+Epode should remember the decision for a stable opaque customer reference. After approval, later responses can be emitted as `never_ask`; after refusal, feedback should be disabled. The agent should not be responsible for durable consent memory. Epode still cannot manufacture the initial conversation pause inside an independent one-shot agent, and an agent-provided approval remains an attestation rather than independently verified human consent.
+
+## Server-managed ask-once follow-up
+
+The original consent experiment incorrectly asked the agent runtime to remember approval. A corrected lab stores approval under product plus opaque customer reference, then starts a completely fresh agent session for the next product interaction.
+
+| Condition | First permission/report | Later autonomous report |
+| --- | ---: | ---: |
+| Unknown consent, Codex default | 3/5 | — |
+| Unknown consent, `gpt-5.6-terra` | 2/5 | — |
+| Already approved, Codex default | — | 5/5 |
+| Already approved, `gpt-5.6-terra` | — | 4/5 |
+| Direct unknown → approved → fresh session sequence, Codex default | 2/5 | 2/2 conditional on approval |
+
+Across the two model pilots, first-time permission converted in 5/10 trials while previously approved customers produced autonomous reports in 9/10 fresh trials. Every customer task was answered correctly.
+
+This materially improves recurring feedback after a grant, and removes the unrealistic adapter-memory requirement. It does **not** improve the independent agent's likelihood of surfacing the first permission question enough to call Ask once reliable: the initial ask remains the dominant bottleneck. A refusal also needs a privacy-safe consent-decision action because the absence of a feedback report cannot distinguish refusal from ignored instructions.
 
 ## Implemented from this study
 
@@ -134,7 +150,7 @@ Ask once requires durable storage under `consentScope`; Ask every time requires 
 
 1. Complete the same matrix on Claude Code, Gemini CLI, and GitHub Copilot CLI, recording exact client/model versions.
 2. Run at least 30 randomized repetitions per winning/losing condition and calculate confidence intervals.
-3. Add denial and silence branches for both consent modes; verify no report is emitted.
+3. Add an Epode-owned consent-decision endpoint and test approval, denial, and silence independently; verify that refusal disables later feedback and silence does not create a decision.
 4. Test consent across a brand-new conversation to distinguish in-thread memory from durable runtime storage.
 5. Test cached, streamed, array, scalar, HTML, and header-only HTTP handoffs independently.
 6. Test MCP server instructions at different lengths and positions; keep critical action text in the first 512 characters for clients that prioritize or truncate startup guidance.
@@ -148,4 +164,3 @@ Ask once requires durable storage under `consentScope`; Ask every time requires 
 - Gemini CLI uses hierarchical `GEMINI.md` memory and explicit MCP/tool discovery. [Gemini CLI commands](https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/commands.md)
 - GitHub Copilot supports repository instructions and `AGENTS.md`/`CLAUDE.md`/`GEMINI.md` depending on surface. [Copilot custom instructions](https://docs.github.com/en/copilot/reference/custom-instructions-support)
 - `/llms.txt` is a proposal for curated inference-time website documentation, commonly used on demand; it is not an execution or consent protocol. [llms.txt proposal](https://github.com/AnswerDotAI/llms-txt)
-

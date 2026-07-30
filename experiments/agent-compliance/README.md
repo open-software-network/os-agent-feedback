@@ -38,6 +38,18 @@ node experiments/agent-compliance/run.mjs \
 
 node experiments/agent-compliance/run.mjs \
   --runtime codex \
+  --suite server-consent-transition \
+  --repetitions 5 \
+  --output .artifacts/agent-compliance/codex-server-consent-transition.json
+
+node experiments/agent-compliance/run.mjs \
+  --runtime codex \
+  --suite server-consent-preapproved \
+  --repetitions 5 \
+  --output .artifacts/agent-compliance/codex-server-consent-preapproved.json
+
+node experiments/agent-compliance/run.mjs \
+  --runtime codex \
   --suite mcp-pilot \
   --repetitions 3 \
   --output .artifacts/agent-compliance/codex-mcp.json
@@ -61,3 +73,5 @@ Set `CODEX_BIN` or `CLAUDE_BIN` to test another installation. Claude trials requ
 This tests behavioral compliance, not only protocol conformance. A correct product answer with no report is a feedback-compliance failure but a successful customer task. A runtime-level adapter is intentionally distinct from response-local instructions: it represents an installed Epode integration with higher instruction authority.
 
 Do not interpret `n=3` pilots as stable population estimates. Use them to eliminate weak channels, debug the harness, and choose larger randomized trials.
+
+For server-managed Ask once, the lab uses a stable opaque customer reference. A successful first approved report stores the grant in Epode; the next interaction is run in a fresh agent session and is emitted as `never_ask`. This separates first-time permission compliance from recurring autonomous-report compliance.
