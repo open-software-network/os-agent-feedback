@@ -125,14 +125,14 @@ async fn main() -> anyhow::Result<()> {
         }
         "read-observations" => {
             let rows = sqlx::query_as::<_, ObservationRow>(
-                r#"SELECT i.id, i.surface, i.operation, i.status_code, i.customer_ref,
+                r"SELECT i.id, i.surface, i.operation, i.status_code, i.customer_ref,
                 i.classification, i.confirmation_method, i.session_id,
                 s.source AS session_source, s.ref_hint AS session_hint, r.summary
                 FROM interactions_v2 i
                 LEFT JOIN sessions_v2 s ON s.id = i.session_id
                 LEFT JOIN feedback_reports r ON r.interaction_id = i.id
                 WHERE i.workspace_id = $1
-                ORDER BY i.occurred_at, i.client_sequence NULLS LAST, i.id"#,
+                ORDER BY i.occurred_at, i.client_sequence NULLS LAST, i.id",
             )
             .bind(workspace_id)
             .fetch_all(&pool)

@@ -1,3 +1,8 @@
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "crate-restricted visibility satisfies unreachable_pub in this binary-only crate"
+)]
+
 use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
@@ -7,12 +12,23 @@ use uuid::Uuid;
 
 use crate::{
     error::ApiError,
-    models::*,
+    models::{
+        ApiKeyPublic, CreateProductInput, CreateTeamInvitationInput, DashboardContext,
+        DashboardData, DashboardListState, DashboardSessionDetail, DeleteProductInput,
+        FeedbackInteractionItem, FeedbackInteractionsPage, FeedbackListInteractionsInput,
+        FeedbackListReportsInput, FeedbackOperationSummary, FeedbackReportItem,
+        FeedbackReportsPage, FeedbackReportsResponse, FeedbackSummary, FeedbackSurfaceSummary,
+        FeedbackWindow, InsightCount, Insights, InteractionTelemetryInput, PolicyInput, Product,
+        ProductAuth, ProductEnvironment, ProductFeedbackReport, ProductFeedbackReportInput,
+        ProductFeedbackReportWithInteraction, ProductInteraction, ProductSession, TeamInvitation,
+        TeamMember, TelemetryBatchInput, TelemetryBatchResult, UpdateFeedbackWorkflowInput,
+        UpdateNameInput, UpdateTeamMemberInput, Workspace, WorkspaceMembership,
+    },
     os_accounts::OsUser,
     security::{bearer_token, parse_capability, random_token, sha256, verify_capability},
 };
 
-pub fn clean(value: &str, max: usize) -> String {
+pub(crate) fn clean(value: &str, max: usize) -> String {
     value
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -52,7 +68,7 @@ fn slug(value: &str) -> String {
 fn database_conflict(error: sqlx::Error, message: &str) -> ApiError {
     if error
         .as_database_error()
-        .and_then(|db| db.code())
+        .and_then(sqlx::error::DatabaseError::code)
         .as_deref()
         == Some("23505")
     {
@@ -72,7 +88,7 @@ fn validated_name(value: &str, entity: &str) -> Result<String, ApiError> {
     Ok(name)
 }
 
-pub async fn get_or_create_workspace(
+pub(crate) async fn get_or_create_workspace(
     pool: &PgPool,
     os_user: &OsUser,
 ) -> Result<Workspace, ApiError> {
@@ -87,10 +103,10 @@ pub async fn get_or_create_workspace(
         let display = os_user.display_name.as_deref().unwrap_or(&os_user.handle);
         let name = format!("{} workspace", clean(display, 70));
         sqlx::query_as::<_, Workspace>(
-            r#"INSERT INTO workspaces (id, os_user_id, name, slug)
+            r"INSERT INTO workspaces (id, os_user_id, name, slug)
             VALUES ($1, $2, $3, $4)
             ON CONFLICT (os_user_id) DO UPDATE SET updated_at = workspaces.updated_at
-            RETURNING *"#,
+            RETURNING *",
         )
         .bind(Uuid::new_v4())
         .bind(&os_user.id)
@@ -111,14 +127,14 @@ async fn upsert_workspace_member(
 ) -> Result<(), ApiError> {
     let display_name = os_user.display_name.as_deref().unwrap_or(&os_user.handle);
     sqlx::query(
-        r#"INSERT INTO workspace_members
+        r"INSERT INTO workspace_members
         (workspace_id, os_user_id, handle, email, display_name, role)
         VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (workspace_id, os_user_id) DO UPDATE SET
           handle = EXCLUDED.handle,
           email = EXCLUDED.email,
           display_name = EXCLUDED.display_name,
-          updated_at = NOW()"#,
+          updated_at = NOW()",
     )
     .bind(workspace_id)
     .bind(&os_user.id)
@@ -164,7 +180,7 @@ async fn accept_invitation(
     let mut tx = pool.begin().await?;
     let display_name = os_user.display_name.as_deref().unwrap_or(&os_user.handle);
     sqlx::query(
-        r#"INSERT INTO workspace_members
+        r"INSERT INTO workspace_members
         (workspace_id, os_user_id, handle, email, display_name, role)
         VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (workspace_id, os_user_id) DO UPDATE SET
@@ -172,7 +188,7 @@ async fn accept_invitation(
           email = EXCLUDED.email,
           display_name = EXCLUDED.display_name,
           role = CASE WHEN workspace_members.role IN ('owner', 'admin') THEN workspace_members.role ELSE EXCLUDED.role END,
-          updated_at = NOW()"#,
+          updated_at = NOW()",
     )
     .bind(invitation.workspace_id)
     .bind(&os_user.id)
@@ -188,10 +204,10 @@ async fn accept_invitation(
     .execute(&mut *tx)
     .await?;
     let accepted = sqlx::query(
-        r#"UPDATE workspace_invitations
+        r"UPDATE workspace_invitations
         SET accepted_at = CASE WHEN invitee_kind = 'link' THEN NULL ELSE NOW() END,
           accepted_by_os_user_id = CASE WHEN invitee_kind = 'link' THEN NULL ELSE $1 END
-        WHERE id = $2 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()"#,
+        WHERE id = $2 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()",
     )
     .bind(&os_user.id)
     .bind(invitation.id)
@@ -206,15 +222,15 @@ async fn accept_invitation(
     Ok(invitation.workspace_id)
 }
 
-pub async fn accept_team_invitation(
+pub(crate) async fn accept_team_invitation(
     pool: &PgPool,
     os_user: &OsUser,
     invitation_id: Uuid,
 ) -> Result<Uuid, ApiError> {
     let invitation = sqlx::query_as::<_, TeamInvitation>(
-        r#"SELECT id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
+        r"SELECT id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
         role, created_at, expires_at FROM workspace_invitations
-        WHERE id = $1 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()"#,
+        WHERE id = $1 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()",
     )
     .bind(invitation_id)
     .fetch_optional(pool)
@@ -230,11 +246,11 @@ async fn accept_matching_invitations(pool: &PgPool, os_user: &OsUser) -> Result<
         .map(|value| value.trim().to_lowercase());
     let handle = os_user.handle.trim_start_matches('@').to_lowercase();
     let invitations = sqlx::query_as::<_, TeamInvitation>(
-        r#"SELECT id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
+        r"SELECT id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
         role, created_at, expires_at FROM workspace_invitations
         WHERE accepted_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()
           AND ((invitee_kind = 'handle' AND invitee_value = $1)
-            OR (invitee_kind = 'email' AND invitee_value = $2))"#,
+            OR (invitee_kind = 'email' AND invitee_value = $2))",
     )
     .bind(handle)
     .bind(email)
@@ -246,7 +262,7 @@ async fn accept_matching_invitations(pool: &PgPool, os_user: &OsUser) -> Result<
     Ok(())
 }
 
-pub async fn resolve_workspace_access(
+pub(crate) async fn resolve_workspace_access(
     pool: &PgPool,
     os_user: &OsUser,
     requested_workspace_id: Option<Uuid>,
@@ -254,8 +270,8 @@ pub async fn resolve_workspace_access(
     let personal_workspace = get_or_create_workspace(pool, os_user).await?;
     accept_matching_invitations(pool, os_user).await?;
     sqlx::query(
-        r#"UPDATE workspace_members SET handle = $1, email = $2, display_name = $3,
-        updated_at = NOW() WHERE os_user_id = $4"#,
+        r"UPDATE workspace_members SET handle = $1, email = $2, display_name = $3,
+        updated_at = NOW() WHERE os_user_id = $4",
     )
     .bind(clean(&os_user.handle, 80))
     .bind(
@@ -272,12 +288,12 @@ pub async fn resolve_workspace_access(
     .execute(pool)
     .await?;
     let memberships = sqlx::query_as::<_, WorkspaceMembership>(
-        r#"SELECT w.id AS workspace_id, w.name AS workspace_name,
+        r"SELECT w.id AS workspace_id, w.name AS workspace_name,
         w.slug AS workspace_slug, m.role
         FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id
         WHERE m.os_user_id = $1
         ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
-        m.joined_at, w.name"#,
+        m.joined_at, w.name",
     )
     .bind(&os_user.id)
     .fetch_all(pool)
@@ -321,7 +337,7 @@ fn validate_team_role(role: &str) -> Result<&str, ApiError> {
     }
 }
 
-pub async fn create_team_invitation(
+pub(crate) async fn create_team_invitation(
     pool: &PgPool,
     context: &DashboardContext,
     input: CreateTeamInvitationInput,
@@ -342,23 +358,23 @@ pub async fn create_team_invitation(
             ));
         }
         sqlx::query(
-            r#"UPDATE workspace_invitations SET revoked_at = NOW()
+            r"UPDATE workspace_invitations SET revoked_at = NOW()
             WHERE workspace_id = $1 AND invitee_kind = 'link'
-              AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at <= NOW()"#,
+              AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at <= NOW()",
         )
         .bind(context.workspace.id)
         .execute(pool)
         .await?;
         let invitation_id = Uuid::new_v4();
         if let Some(invitation) = sqlx::query_as::<_, TeamInvitation>(
-            r#"INSERT INTO workspace_invitations
+            r"INSERT INTO workspace_invitations
             (id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value, role, expires_at)
             VALUES ($1, $2, $3, 'link', $4, 'member', NOW() + INTERVAL '24 hours')
             ON CONFLICT (workspace_id) WHERE invitee_kind = 'link'
               AND accepted_at IS NULL AND revoked_at IS NULL
             DO NOTHING
             RETURNING id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
-            role, created_at, expires_at"#,
+            role, created_at, expires_at",
         )
         .bind(invitation_id)
         .bind(context.workspace.id)
@@ -370,11 +386,11 @@ pub async fn create_team_invitation(
             return Ok(invitation);
         }
         return sqlx::query_as::<_, TeamInvitation>(
-            r#"SELECT id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
+            r"SELECT id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
             role, created_at, expires_at FROM workspace_invitations
             WHERE workspace_id = $1 AND invitee_kind = 'link' AND role = 'member'
               AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()
-            ORDER BY created_at DESC LIMIT 1"#,
+            ORDER BY created_at DESC LIMIT 1",
         )
         .bind(context.workspace.id)
         .fetch_optional(pool)
@@ -405,9 +421,9 @@ pub async fn create_team_invitation(
         return Err(ApiError::conflict("This person is already a team member"));
     }
     sqlx::query(
-        r#"UPDATE workspace_invitations SET revoked_at = NOW()
+        r"UPDATE workspace_invitations SET revoked_at = NOW()
         WHERE workspace_id = $1 AND invitee_kind = $2 AND invitee_value = $3
-          AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at <= NOW()"#,
+          AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at <= NOW()",
     )
     .bind(context.workspace.id)
     .bind(invitee_kind)
@@ -415,11 +431,11 @@ pub async fn create_team_invitation(
     .execute(pool)
     .await?;
     sqlx::query_as::<_, TeamInvitation>(
-        r#"INSERT INTO workspace_invitations
+        r"INSERT INTO workspace_invitations
         (id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value, role, expires_at)
         VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '7 days')
         RETURNING id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
-        role, created_at, expires_at"#,
+        role, created_at, expires_at",
     )
     .bind(invitation_id)
     .bind(context.workspace.id)
@@ -432,7 +448,7 @@ pub async fn create_team_invitation(
     .map_err(|error| database_conflict(error, "An active invitation already exists"))
 }
 
-pub async fn update_team_member_role(
+pub(crate) async fn update_team_member_role(
     pool: &PgPool,
     context: &DashboardContext,
     os_user_id: &str,
@@ -456,8 +472,8 @@ pub async fn update_team_member_role(
         return Err(ApiError::forbidden("The owner role cannot be changed"));
     }
     sqlx::query_as::<_, TeamMember>(
-        r#"UPDATE workspace_members SET role = $1, updated_at = NOW()
-        WHERE workspace_id = $2 AND os_user_id = $3 RETURNING *"#,
+        r"UPDATE workspace_members SET role = $1, updated_at = NOW()
+        WHERE workspace_id = $2 AND os_user_id = $3 RETURNING *",
     )
     .bind(role)
     .bind(context.workspace.id)
@@ -467,7 +483,7 @@ pub async fn update_team_member_role(
     .map_err(Into::into)
 }
 
-pub async fn remove_team_member(
+pub(crate) async fn remove_team_member(
     pool: &PgPool,
     context: &DashboardContext,
     os_user_id: &str,
@@ -502,7 +518,7 @@ pub async fn remove_team_member(
     Ok(())
 }
 
-pub async fn transfer_team_ownership(
+pub(crate) async fn transfer_team_ownership(
     pool: &PgPool,
     context: &DashboardContext,
     new_owner_os_user_id: &str,
@@ -517,8 +533,8 @@ pub async fn transfer_team_ownership(
     }
     let mut tx = pool.begin().await?;
     let target_role = sqlx::query_scalar::<_, String>(
-        r#"SELECT role FROM workspace_members
-        WHERE workspace_id = $1 AND os_user_id = $2 FOR UPDATE"#,
+        r"SELECT role FROM workspace_members
+        WHERE workspace_id = $1 AND os_user_id = $2 FOR UPDATE",
     )
     .bind(context.workspace.id)
     .bind(new_owner_os_user_id)
@@ -529,8 +545,8 @@ pub async fn transfer_team_ownership(
         return Err(ApiError::conflict("This member already owns the team"));
     }
     let current_owner = sqlx::query_scalar::<_, String>(
-        r#"SELECT os_user_id FROM workspace_members
-        WHERE workspace_id = $1 AND role = 'owner' FOR UPDATE"#,
+        r"SELECT os_user_id FROM workspace_members
+        WHERE workspace_id = $1 AND role = 'owner' FOR UPDATE",
     )
     .bind(context.workspace.id)
     .fetch_one(&mut *tx)
@@ -541,11 +557,11 @@ pub async fn transfer_team_ownership(
         ));
     }
     sqlx::query(
-        r#"UPDATE workspace_members SET role = CASE
+        r"UPDATE workspace_members SET role = CASE
           WHEN os_user_id = $2 THEN 'admin'
           WHEN os_user_id = $3 THEN 'owner'
           ELSE role END, updated_at = NOW()
-        WHERE workspace_id = $1 AND os_user_id IN ($2, $3)"#,
+        WHERE workspace_id = $1 AND os_user_id IN ($2, $3)",
     )
     .bind(context.workspace.id)
     .bind(&context.user.id)
@@ -556,7 +572,7 @@ pub async fn transfer_team_ownership(
     Ok(())
 }
 
-pub async fn revoke_team_invitation(
+pub(crate) async fn revoke_team_invitation(
     pool: &PgPool,
     context: &DashboardContext,
     invitation_id: Uuid,
@@ -567,9 +583,9 @@ pub async fn revoke_team_invitation(
         ));
     }
     let invitation = sqlx::query_as::<_, TeamInvitation>(
-        r#"SELECT id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
+        r"SELECT id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
         role, created_at, expires_at FROM workspace_invitations
-        WHERE id = $1 AND workspace_id = $2 AND accepted_at IS NULL AND revoked_at IS NULL"#,
+        WHERE id = $1 AND workspace_id = $2 AND accepted_at IS NULL AND revoked_at IS NULL",
     )
     .bind(invitation_id)
     .bind(context.workspace.id)
@@ -588,7 +604,7 @@ pub async fn revoke_team_invitation(
     Ok(())
 }
 
-pub async fn agent_product_auth(
+pub(crate) async fn agent_product_auth(
     pool: &PgPool,
     headers: &HeaderMap,
 ) -> Result<ProductAuth, ApiError> {
@@ -599,7 +615,7 @@ pub async fn agent_product_auth(
     product_auth_for_key(pool, &key_hash, None).await
 }
 
-pub async fn read_product_auth(
+pub(crate) async fn read_product_auth(
     pool: &PgPool,
     headers: &HeaderMap,
 ) -> Result<ProductAuth, ApiError> {
@@ -624,9 +640,9 @@ async fn product_auth_for_key(
     required_kind: Option<&str>,
 ) -> Result<ProductAuth, ApiError> {
     let key = sqlx::query_as::<_, (Uuid, Uuid, Uuid, Option<DateTime<Utc>>)>(
-        r#"SELECT k.id, k.workspace_id, k.environment_id, k.expires_at FROM api_keys k
+        r"SELECT k.id, k.workspace_id, k.environment_id, k.expires_at FROM api_keys k
         WHERE k.key_hash = $1 AND k.revoked_at IS NULL
-          AND ($2::TEXT IS NULL OR k.kind = $2)"#,
+          AND ($2::TEXT IS NULL OR k.kind = $2)",
     )
     .bind(key_hash)
     .bind(required_kind)
@@ -659,7 +675,7 @@ async fn product_auth_for_key(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub async fn create_product(
+pub(crate) async fn create_product(
     pool: &PgPool,
     workspace_id: Uuid,
     input: CreateProductInput,
@@ -680,8 +696,8 @@ pub async fn create_product(
         return Err(ApiError::conflict("This workspace already has 25 products"));
     }
     let product = sqlx::query_as::<_, Product>(
-        r#"INSERT INTO products (id, workspace_id, name, slug)
-        VALUES ($1, $2, $3, $4) RETURNING *"#,
+        r"INSERT INTO products (id, workspace_id, name, slug)
+        VALUES ($1, $2, $3, $4) RETURNING *",
     )
     .bind(Uuid::new_v4())
     .bind(workspace_id)
@@ -691,9 +707,9 @@ pub async fn create_product(
     .await
     .map_err(|error| database_conflict(error, "A product with this name already exists"))?;
     let environment = sqlx::query_as::<_, ProductEnvironment>(
-        r#"INSERT INTO product_environments
+        r"INSERT INTO product_environments
         (id, workspace_id, product_id, name, slug)
-        VALUES ($1, $2, $3, $4, $5) RETURNING *"#,
+        VALUES ($1, $2, $3, $4, $5) RETURNING *",
     )
     .bind(Uuid::new_v4())
     .bind(workspace_id)
@@ -707,7 +723,7 @@ pub async fn create_product(
     Ok((product, environment))
 }
 
-pub async fn create_product_with_default_key(
+pub(crate) async fn create_product_with_default_key(
     pool: &PgPool,
     workspace_id: Uuid,
     input: CreateProductInput,
@@ -728,8 +744,8 @@ pub async fn create_product_with_default_key(
         return Err(ApiError::conflict("This workspace already has 25 products"));
     }
     let product = sqlx::query_as::<_, Product>(
-        r#"INSERT INTO products (id, workspace_id, name, slug)
-        VALUES ($1, $2, $3, $4) RETURNING *"#,
+        r"INSERT INTO products (id, workspace_id, name, slug)
+        VALUES ($1, $2, $3, $4) RETURNING *",
     )
     .bind(Uuid::new_v4())
     .bind(workspace_id)
@@ -739,9 +755,9 @@ pub async fn create_product_with_default_key(
     .await
     .map_err(|error| database_conflict(error, "A product with this name already exists"))?;
     let environment = sqlx::query_as::<_, ProductEnvironment>(
-        r#"INSERT INTO product_environments
+        r"INSERT INTO product_environments
         (id, workspace_id, product_id, name, slug)
-        VALUES ($1, $2, $3, 'Default', 'default') RETURNING *"#,
+        VALUES ($1, $2, $3, 'Default', 'default') RETURNING *",
     )
     .bind(Uuid::new_v4())
     .bind(workspace_id)
@@ -751,10 +767,10 @@ pub async fn create_product_with_default_key(
     let key_id = Uuid::new_v4();
     let secret = format!("af_live_{}_{}", key_id.simple(), random_token(""));
     let api_key = sqlx::query_as::<_, ApiKeyPublic>(
-        r#"INSERT INTO api_keys
+        r"INSERT INTO api_keys
         (id, workspace_id, environment_id, label, prefix, kind, key_hash)
         VALUES ($1, $2, $3, 'Default product key', $4, 'write', $5)
-        RETURNING id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at, expires_at"#,
+        RETURNING id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at, expires_at",
     )
     .bind(key_id)
     .bind(workspace_id)
@@ -767,15 +783,15 @@ pub async fn create_product_with_default_key(
     Ok((product, environment, api_key, secret))
 }
 
-pub async fn rename_workspace(
+pub(crate) async fn rename_workspace(
     pool: &PgPool,
     workspace_id: Uuid,
     input: UpdateNameInput,
 ) -> Result<Workspace, ApiError> {
     let name = validated_name(&input.name, "Team")?;
     let updated = sqlx::query_as::<_, Workspace>(
-        r#"UPDATE workspaces SET name = $1, slug = $2, updated_at = NOW()
-        WHERE id = $3 RETURNING *"#,
+        r"UPDATE workspaces SET name = $1, slug = $2, updated_at = NOW()
+        WHERE id = $3 RETURNING *",
     )
     .bind(&name)
     .bind(slug(&name))
@@ -786,7 +802,7 @@ pub async fn rename_workspace(
     updated.ok_or_else(|| ApiError::not_found("Team not found"))
 }
 
-pub async fn rename_product(
+pub(crate) async fn rename_product(
     pool: &PgPool,
     workspace_id: Uuid,
     product_id: Uuid,
@@ -794,8 +810,8 @@ pub async fn rename_product(
 ) -> Result<Product, ApiError> {
     let name = validated_name(&input.name, "Product")?;
     let updated = sqlx::query_as::<_, Product>(
-        r#"UPDATE products SET name = $1, slug = $2, updated_at = NOW()
-        WHERE id = $3 AND workspace_id = $4 RETURNING *"#,
+        r"UPDATE products SET name = $1, slug = $2, updated_at = NOW()
+        WHERE id = $3 AND workspace_id = $4 RETURNING *",
     )
     .bind(&name)
     .bind(slug(&name))
@@ -807,7 +823,7 @@ pub async fn rename_product(
     updated.ok_or_else(|| ApiError::not_found("Product not found"))
 }
 
-pub async fn delete_product(
+pub(crate) async fn delete_product(
     pool: &PgPool,
     workspace_id: Uuid,
     product_id: Uuid,
@@ -838,7 +854,7 @@ pub async fn delete_product(
     Ok(deleted)
 }
 
-pub async fn create_api_key(
+pub(crate) async fn create_api_key(
     pool: &PgPool,
     workspace_id: Uuid,
     environment_id: Uuid,
@@ -890,10 +906,10 @@ pub async fn create_api_key(
     let secret = format!("{key_prefix}{}_{}", key_id.simple(), random_token(""));
     let prefix = secret.chars().take(16).collect::<String>();
     let row = sqlx::query_as::<_, ApiKeyPublic>(
-        r#"INSERT INTO api_keys
+        r"INSERT INTO api_keys
         (id, workspace_id, environment_id, label, prefix, kind, key_hash, expires_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        RETURNING id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at, expires_at"#,
+        RETURNING id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at, expires_at",
     )
     .bind(key_id)
     .bind(workspace_id)
@@ -909,7 +925,7 @@ pub async fn create_api_key(
     Ok((row, secret))
 }
 
-pub async fn revoke_api_key(
+pub(crate) async fn revoke_api_key(
     pool: &PgPool,
     workspace_id: Uuid,
     key_id: Uuid,
@@ -922,17 +938,17 @@ pub async fn revoke_api_key(
     Ok(())
 }
 
-pub async fn rotate_api_key(
+pub(crate) async fn rotate_api_key(
     pool: &PgPool,
     workspace_id: Uuid,
     key_id: Uuid,
 ) -> Result<(ApiKeyPublic, String, DateTime<Utc>), ApiError> {
     let mut tx = pool.begin().await?;
     let old = sqlx::query_as::<_, (Uuid, Option<String>, String)>(
-        r#"SELECT environment_id, label, kind FROM api_keys
+        r"SELECT environment_id, label, kind FROM api_keys
         WHERE id = $1 AND workspace_id = $2 AND revoked_at IS NULL
           AND (expires_at IS NULL OR expires_at > NOW())
-        FOR UPDATE"#,
+        FOR UPDATE",
     )
     .bind(key_id)
     .bind(workspace_id)
@@ -953,10 +969,10 @@ pub async fn rotate_api_key(
         None
     };
     let successor = sqlx::query_as::<_, ApiKeyPublic>(
-        r#"INSERT INTO api_keys
+        r"INSERT INTO api_keys
         (id, workspace_id, environment_id, label, prefix, kind, key_hash, expires_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        RETURNING id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at, expires_at"#,
+        RETURNING id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at, expires_at",
     )
     .bind(successor_id)
     .bind(workspace_id)
@@ -970,9 +986,9 @@ pub async fn rotate_api_key(
     .await?;
     let overlap_expires_at = Utc::now() + Duration::hours(1);
     sqlx::query(
-        r#"UPDATE api_keys SET expires_at = CASE
+        r"UPDATE api_keys SET expires_at = CASE
           WHEN expires_at IS NULL OR expires_at > $3 THEN $3 ELSE expires_at END
-        WHERE id = $1 AND workspace_id = $2"#,
+        WHERE id = $1 AND workspace_id = $2",
     )
     .bind(key_id)
     .bind(workspace_id)
@@ -1053,6 +1069,10 @@ fn encode_feedback_cursor(occurred_at: DateTime<Utc>, id: Uuid) -> Result<String
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "database row counts are intentionally converted to f64 for display-only rates"
+)]
 fn rounded_rate(numerator: i64, denominator: i64) -> f64 {
     if denominator == 0 {
         0.0
@@ -1074,7 +1094,7 @@ async fn feedback_summary(
             .fetch_one(pool)
             .await?;
     let counts = sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
-        r#"SELECT COUNT(i.id), COUNT(r.id),
+        r"SELECT COUNT(i.id), COUNT(r.id),
         COUNT(i.id) FILTER (WHERE i.classification = 'confirmed'),
         COUNT(r.id) FILTER (WHERE r.workaround ->> 'used' = 'true'),
         COUNT(r.id) FILTER (WHERE EXISTS (
@@ -1083,20 +1103,20 @@ async fn feedback_summary(
         ))
         FROM interactions_v2 i
         LEFT JOIN feedback_reports r ON r.interaction_id = i.id
-        WHERE i.environment_id = $1 AND i.occurred_at >= $2"#,
+        WHERE i.environment_id = $1 AND i.occurred_at >= $2",
     )
     .bind(auth.environment.id)
     .bind(window.since)
     .fetch_one(pool)
     .await?;
     let operation_counts = sqlx::query_as::<_, (String, i64, i64)>(
-        r#"SELECT i.operation, COUNT(i.id), COUNT(r.id)
+        r"SELECT i.operation, COUNT(i.id), COUNT(r.id)
         FROM interactions_v2 i
         LEFT JOIN feedback_reports r ON r.interaction_id = i.id
         WHERE i.environment_id = $1 AND i.occurred_at >= $2
         GROUP BY i.operation
         ORDER BY COUNT(i.id) DESC, i.operation
-        LIMIT 20"#,
+        LIMIT 20",
     )
     .bind(auth.environment.id)
     .bind(window.since)
@@ -1113,9 +1133,9 @@ async fn feedback_summary(
         )
         .collect();
     let surfaces = sqlx::query_as::<_, (String, i64)>(
-        r#"SELECT surface, COUNT(*) FROM interactions_v2
+        r"SELECT surface, COUNT(*) FROM interactions_v2
         WHERE environment_id = $1 AND occurred_at >= $2
-        GROUP BY surface ORDER BY COUNT(*) DESC, surface"#,
+        GROUP BY surface ORDER BY COUNT(*) DESC, surface",
     )
     .bind(auth.environment.id)
     .bind(window.since)
@@ -1128,10 +1148,10 @@ async fn feedback_summary(
     })
     .collect();
     let impacts = sqlx::query_as::<_, (String, i64)>(
-        r#"SELECT COALESCE(r.impact, 'unspecified'), COUNT(*)
+        r"SELECT COALESCE(r.impact, 'unspecified'), COUNT(*)
         FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id
         WHERE i.environment_id = $1 AND i.occurred_at >= $2
-        GROUP BY COALESCE(r.impact, 'unspecified')"#,
+        GROUP BY COALESCE(r.impact, 'unspecified')",
     )
     .bind(auth.environment.id)
     .bind(window.since)
@@ -1140,11 +1160,11 @@ async fn feedback_summary(
     .into_iter()
     .collect();
     let finding_kinds = sqlx::query_as::<_, (String, i64)>(
-        r#"SELECT finding ->> 'kind', COUNT(*)
+        r"SELECT finding ->> 'kind', COUNT(*)
         FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id,
         LATERAL jsonb_array_elements(r.findings) finding
         WHERE i.environment_id = $1 AND i.occurred_at >= $2
-        GROUP BY finding ->> 'kind'"#,
+        GROUP BY finding ->> 'kind'",
     )
     .bind(auth.environment.id)
     .bind(window.since)
@@ -1153,12 +1173,12 @@ async fn feedback_summary(
     .into_iter()
     .collect();
     let severities = sqlx::query_as::<_, (String, i64)>(
-        r#"SELECT finding ->> 'severity', COUNT(*)
+        r"SELECT finding ->> 'severity', COUNT(*)
         FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id,
         LATERAL jsonb_array_elements(r.findings) finding
         WHERE i.environment_id = $1 AND i.occurred_at >= $2
           AND finding ? 'severity'
-        GROUP BY finding ->> 'severity'"#,
+        GROUP BY finding ->> 'severity'",
     )
     .bind(auth.environment.id)
     .bind(window.since)
@@ -1182,7 +1202,7 @@ async fn feedback_summary(
     })
 }
 
-pub async fn feedback_list_reports(
+pub(crate) async fn feedback_list_reports(
     pool: &PgPool,
     auth: &ProductAuth,
     input: FeedbackListReportsInput,
@@ -1223,12 +1243,13 @@ pub async fn feedback_list_reports(
         "severity",
     )?;
     let limit = feedback_limit(input.limit)?;
+    let page_size = usize::try_from(limit).map_err(ApiError::internal)?;
     let (window, retained_since) = feedback_window(auth.environment.retention_days, input.since);
     let cursor = decode_feedback_cursor(input.cursor.as_deref(), retained_since)?;
     let cursor_occurred_at = cursor.as_ref().map(|cursor| cursor.occurred_at);
     let cursor_id = cursor.as_ref().map(|cursor| cursor.id);
     let mut reports = sqlx::query_as::<_, FeedbackReportItem>(
-        r#"SELECT r.id, r.summary, r.impact, r.confidence, r.findings, r.workaround,
+        r"SELECT r.id, r.summary, r.impact, r.confidence, r.findings, r.workaround,
         i.operation, i.customer_ref, i.surface, i.duration_ms, i.status_code,
         i.occurred_at, r.created_at, i.id AS interaction_id
         FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id
@@ -1250,7 +1271,7 @@ pub async fn feedback_list_reports(
           AND ($8::TEXT IS NULL OR i.customer_ref = $8)
           AND ($9::TIMESTAMPTZ IS NULL OR (i.occurred_at, i.id) < ($9, $10))
         ORDER BY i.occurred_at DESC, i.id DESC
-        LIMIT $11"#,
+        LIMIT $11",
     )
     .bind(auth.environment.id)
     .bind(window.since)
@@ -1265,8 +1286,8 @@ pub async fn feedback_list_reports(
     .bind(limit + 1)
     .fetch_all(pool)
     .await?;
-    let next_cursor = if reports.len() > limit as usize {
-        let last = &reports[limit as usize - 1];
+    let next_cursor = if reports.len() > page_size {
+        let last = &reports[page_size - 1];
         Some(encode_feedback_cursor(
             last.occurred_at,
             last.interaction_id,
@@ -1274,7 +1295,7 @@ pub async fn feedback_list_reports(
     } else {
         None
     };
-    reports.truncate(limit as usize);
+    reports.truncate(page_size);
     Ok(FeedbackReportsResponse::Page(FeedbackReportsPage {
         reports,
         next_cursor,
@@ -1282,7 +1303,7 @@ pub async fn feedback_list_reports(
     }))
 }
 
-pub async fn feedback_list_interactions(
+pub(crate) async fn feedback_list_interactions(
     pool: &PgPool,
     auth: &ProductAuth,
     input: FeedbackListInteractionsInput,
@@ -1293,12 +1314,13 @@ pub async fn feedback_list_interactions(
         "surface",
     )?;
     let limit = feedback_limit(input.limit)?;
+    let page_size = usize::try_from(limit).map_err(ApiError::internal)?;
     let (window, retained_since) = feedback_window(auth.environment.retention_days, input.since);
     let cursor = decode_feedback_cursor(input.cursor.as_deref(), retained_since)?;
     let cursor_occurred_at = cursor.as_ref().map(|cursor| cursor.occurred_at);
     let cursor_id = cursor.as_ref().map(|cursor| cursor.id);
     let mut interactions = sqlx::query_as::<_, FeedbackInteractionItem>(
-        r#"SELECT i.id, i.operation, i.customer_ref, i.surface, i.classification,
+        r"SELECT i.id, i.operation, i.customer_ref, i.surface, i.classification,
         i.duration_ms, i.status_code, i.occurred_at
         FROM interactions_v2 i
         LEFT JOIN feedback_reports r ON r.interaction_id = i.id
@@ -1309,7 +1331,7 @@ pub async fn feedback_list_interactions(
           AND ($6::TEXT[] IS NULL OR i.surface = ANY($6))
           AND ($7::TIMESTAMPTZ IS NULL OR (i.occurred_at, i.id) < ($7, $8))
         ORDER BY i.occurred_at DESC, i.id DESC
-        LIMIT $9"#,
+        LIMIT $9",
     )
     .bind(auth.environment.id)
     .bind(window.since)
@@ -1322,13 +1344,13 @@ pub async fn feedback_list_interactions(
     .bind(limit + 1)
     .fetch_all(pool)
     .await?;
-    let next_cursor = if interactions.len() > limit as usize {
-        let last = &interactions[limit as usize - 1];
+    let next_cursor = if interactions.len() > page_size {
+        let last = &interactions[page_size - 1];
         Some(encode_feedback_cursor(last.occurred_at, last.id)?)
     } else {
         None
     };
-    interactions.truncate(limit as usize);
+    interactions.truncate(page_size);
     Ok(FeedbackInteractionsPage {
         interactions,
         next_cursor,
@@ -1336,7 +1358,7 @@ pub async fn feedback_list_interactions(
     })
 }
 
-pub async fn update_policy(
+pub(crate) async fn update_policy(
     pool: &PgPool,
     workspace_id: Uuid,
     input: PolicyInput,
@@ -1349,9 +1371,9 @@ pub async fn update_policy(
         ));
     }
     let updated = sqlx::query_as::<_, ProductEnvironment>(
-        r#"UPDATE product_environments SET feedback_mode = $1,
+        r"UPDATE product_environments SET feedback_mode = $1,
         collect_event_summaries = $2, retention_days = $3, updated_at = NOW()
-        WHERE id = $4 AND workspace_id = $5 RETURNING *"#,
+        WHERE id = $4 AND workspace_id = $5 RETURNING *",
     )
     .bind(input.feedback_mode)
     .bind(input.collect_event_summaries)
@@ -1363,10 +1385,13 @@ pub async fn update_policy(
     updated.ok_or_else(|| ApiError::not_found("Product environment not found"))
 }
 
-pub async fn purge_expired_product_data(pool: &PgPool, batch_size: i64) -> Result<u64, ApiError> {
+pub(crate) async fn purge_expired_product_data(
+    pool: &PgPool,
+    batch_size: i64,
+) -> Result<u64, ApiError> {
     let limit = batch_size.clamp(1, 10_000);
     let removed_interactions = sqlx::query_scalar::<_, i64>(
-        r#"WITH doomed AS (
+        r"WITH doomed AS (
           SELECT i.id FROM interactions_v2 i
           JOIN product_environments e ON e.id = i.environment_id
           WHERE i.occurred_at < NOW() - make_interval(days => e.retention_days)
@@ -1374,27 +1399,32 @@ pub async fn purge_expired_product_data(pool: &PgPool, batch_size: i64) -> Resul
           LIMIT $1
         ), removed AS (
           DELETE FROM interactions_v2 i USING doomed d WHERE i.id = d.id RETURNING 1
-        ) SELECT COUNT(*) FROM removed"#,
+        ) SELECT COUNT(*) FROM removed",
     )
     .bind(limit)
     .fetch_one(pool)
     .await?;
     let removed_sessions = sqlx::query_scalar::<_, i64>(
-        r#"WITH doomed AS (
+        r"WITH doomed AS (
           SELECT s.id FROM sessions_v2 s
           WHERE NOT EXISTS (SELECT 1 FROM interactions_v2 i WHERE i.session_id = s.id)
           ORDER BY s.last_seen_at
           LIMIT $1
         ), removed AS (
           DELETE FROM sessions_v2 s USING doomed d WHERE s.id = d.id RETURNING 1
-        ) SELECT COUNT(*) FROM removed"#,
+        ) SELECT COUNT(*) FROM removed",
     )
     .bind(limit)
     .fetch_one(pool)
     .await?;
-    Ok((removed_interactions + removed_sessions) as u64)
+    u64::try_from(removed_interactions + removed_sessions).map_err(ApiError::internal)
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "bounded dashboard percentages and integer-backed duration percentiles are intentionally rounded to whole-number metrics"
+)]
 async fn dashboard_insights(
     pool: &PgPool,
     environment_id: Option<Uuid>,
@@ -1406,7 +1436,7 @@ async fn dashboard_insights(
     let recent_start = now - Duration::days(COMPARISON_DAYS.into());
     let previous_start = recent_start - Duration::days(COMPARISON_DAYS.into());
     let counts = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64)>(
-        r#"SELECT
+        r"SELECT
           COUNT(i.id) FILTER (WHERE i.occurred_at >= $2),
           COUNT(i.id) FILTER (WHERE i.occurred_at >= $2 AND i.classification = 'confirmed'),
           COUNT(r.id) FILTER (WHERE i.occurred_at >= $2),
@@ -1423,7 +1453,7 @@ async fn dashboard_insights(
           COUNT(r.id) FILTER (WHERE i.occurred_at >= $4 AND i.occurred_at < $3)
         FROM interactions_v2 i
         LEFT JOIN feedback_reports r ON r.interaction_id = i.id
-        WHERE i.environment_id = $1 AND i.occurred_at >= $4"#,
+        WHERE i.environment_id = $1 AND i.occurred_at >= $4",
     )
     .bind(environment_id)
     .bind(window_start)
@@ -1432,11 +1462,11 @@ async fn dashboard_insights(
     .fetch_one(pool)
     .await?;
     let duration_percentiles = sqlx::query_as::<_, (Option<f64>, Option<f64>)>(
-        r#"SELECT
+        r"SELECT
           PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY duration_ms),
           PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms)
         FROM interactions_v2
-        WHERE environment_id = $1 AND occurred_at >= $2 AND duration_ms IS NOT NULL"#,
+        WHERE environment_id = $1 AND occurred_at >= $2 AND duration_ms IS NOT NULL",
     )
     .bind(environment_id)
     .bind(window_start)
@@ -1449,9 +1479,9 @@ async fn dashboard_insights(
     };
     let top_operations = insight_counts(
         sqlx::query_as::<_, (String, i64)>(
-            r#"SELECT operation, COUNT(*) FROM interactions_v2
+            r"SELECT operation, COUNT(*) FROM interactions_v2
             WHERE environment_id = $1 AND occurred_at >= $2
-            GROUP BY operation ORDER BY COUNT(*) DESC, operation LIMIT 8"#,
+            GROUP BY operation ORDER BY COUNT(*) DESC, operation LIMIT 8",
         )
         .bind(environment_id)
         .bind(window_start)
@@ -1460,9 +1490,9 @@ async fn dashboard_insights(
     );
     let surfaces = insight_counts(
         sqlx::query_as::<_, (String, i64)>(
-            r#"SELECT surface, COUNT(*) FROM interactions_v2
+            r"SELECT surface, COUNT(*) FROM interactions_v2
             WHERE environment_id = $1 AND occurred_at >= $2
-            GROUP BY surface ORDER BY COUNT(*) DESC, surface LIMIT 8"#,
+            GROUP BY surface ORDER BY COUNT(*) DESC, surface LIMIT 8",
         )
         .bind(environment_id)
         .bind(window_start)
@@ -1471,11 +1501,11 @@ async fn dashboard_insights(
     );
     let impacts = insight_counts(
         sqlx::query_as::<_, (String, i64)>(
-            r#"SELECT COALESCE(r.impact, 'unspecified'), COUNT(*)
+            r"SELECT COALESCE(r.impact, 'unspecified'), COUNT(*)
             FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id
             WHERE i.environment_id = $1 AND i.occurred_at >= $2
             GROUP BY COALESCE(r.impact, 'unspecified')
-            ORDER BY COUNT(*) DESC, COALESCE(r.impact, 'unspecified') LIMIT 8"#,
+            ORDER BY COUNT(*) DESC, COALESCE(r.impact, 'unspecified') LIMIT 8",
         )
         .bind(environment_id)
         .bind(window_start)
@@ -1484,12 +1514,12 @@ async fn dashboard_insights(
     );
     let finding_kinds = insight_counts(
         sqlx::query_as::<_, (String, i64)>(
-            r#"SELECT finding ->> 'kind', COUNT(*)
+            r"SELECT finding ->> 'kind', COUNT(*)
             FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id,
             LATERAL jsonb_array_elements(r.findings) finding
             WHERE i.environment_id = $1 AND i.occurred_at >= $2
             GROUP BY finding ->> 'kind'
-            ORDER BY COUNT(*) DESC, finding ->> 'kind' LIMIT 8"#,
+            ORDER BY COUNT(*) DESC, finding ->> 'kind' LIMIT 8",
         )
         .bind(environment_id)
         .bind(window_start)
@@ -1498,12 +1528,12 @@ async fn dashboard_insights(
     );
     let topics = insight_counts(
         sqlx::query_as::<_, (String, i64)>(
-            r#"SELECT finding ->> 'topic', COUNT(*)
+            r"SELECT finding ->> 'topic', COUNT(*)
             FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id,
             LATERAL jsonb_array_elements(r.findings) finding
             WHERE i.environment_id = $1 AND i.occurred_at >= $2
             GROUP BY finding ->> 'topic'
-            ORDER BY COUNT(*) DESC, finding ->> 'topic' LIMIT 8"#,
+            ORDER BY COUNT(*) DESC, finding ->> 'topic' LIMIT 8",
         )
         .bind(environment_id)
         .bind(window_start)
@@ -1512,13 +1542,13 @@ async fn dashboard_insights(
     );
     let blocking_topics = insight_counts(
         sqlx::query_as::<_, (String, i64)>(
-            r#"SELECT finding ->> 'topic', COUNT(*)
+            r"SELECT finding ->> 'topic', COUNT(*)
             FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id,
             LATERAL jsonb_array_elements(r.findings) finding
             WHERE i.environment_id = $1 AND i.occurred_at >= $2
               AND finding ->> 'severity' = 'blocking'
             GROUP BY finding ->> 'topic'
-            ORDER BY COUNT(*) DESC, finding ->> 'topic' LIMIT 8"#,
+            ORDER BY COUNT(*) DESC, finding ->> 'topic' LIMIT 8",
         )
         .bind(environment_id)
         .bind(window_start)
@@ -1561,7 +1591,7 @@ async fn dashboard_insights(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub async fn dashboard(
+pub(crate) async fn dashboard(
     pool: &PgPool,
     context: DashboardContext,
     selected_product_id: Option<Uuid>,
@@ -1579,7 +1609,7 @@ pub async fn dashboard(
     .await
 }
 
-pub async fn dashboard_with_limits(
+pub(crate) async fn dashboard_with_limits(
     pool: &PgPool,
     context: DashboardContext,
     selected_product_id: Option<Uuid>,
@@ -1632,28 +1662,28 @@ pub async fn dashboard_with_limits(
         .as_ref()
         .map(|environment| environment.id);
     let api_keys = sqlx::query_as::<_, ApiKeyPublic>(
-        r#"SELECT id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at, expires_at
+        r"SELECT id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at, expires_at
         FROM api_keys
         WHERE environment_id = $1
           AND revoked_at IS NULL
           AND (expires_at IS NULL OR expires_at > NOW())
-        ORDER BY created_at DESC"#,
+        ORDER BY created_at DESC",
     )
     .bind(environment_id)
     .fetch_all(pool)
     .await?;
     let interactions = sqlx::query_as::<_, ProductInteraction>(
-        r#"SELECT id, workspace_id, environment_id, api_key_id, session_id, surface, operation,
+        r"SELECT id, workspace_id, environment_id, api_key_id, session_id, surface, operation,
         status_code, duration_ms, customer_ref, classification, confirmation_method,
         runtime_hint, runtime_hint_source, occurred_at, created_at, updated_at
-        FROM interactions_v2 WHERE environment_id = $1 ORDER BY occurred_at DESC LIMIT $2"#,
+        FROM interactions_v2 WHERE environment_id = $1 ORDER BY occurred_at DESC LIMIT $2",
     )
     .bind(environment_id)
     .bind(interaction_limit)
     .fetch_all(pool)
     .await?;
     let reports = sqlx::query_as::<_, ProductFeedbackReportWithInteraction>(
-        r#"SELECT r.id, r.interaction_id, r.summary, r.impact, r.confidence,
+        r"SELECT r.id, r.interaction_id, r.summary, r.impact, r.confidence,
         r.findings, r.workaround, r.source, r.created_at,
         i.session_id, i.surface, i.operation, i.status_code, i.duration_ms,
         i.customer_ref, i.classification, i.confirmation_method, i.runtime_hint,
@@ -1663,15 +1693,15 @@ pub async fn dashboard_with_limits(
         w.updated_at AS workflow_updated_at
         FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id
         LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
-        WHERE i.environment_id = $1 ORDER BY r.created_at DESC LIMIT $2"#,
+        WHERE i.environment_id = $1 ORDER BY r.created_at DESC LIMIT $2",
     )
     .bind(environment_id)
     .bind(report_limit)
     .fetch_all(pool)
     .await?;
     let sessions = sqlx::query_as::<_, ProductSession>(
-        r#"SELECT id, workspace_id, environment_id, source, ref_hint, started_at, last_seen_at, created_at
-        FROM sessions_v2 WHERE environment_id = $1 ORDER BY last_seen_at DESC LIMIT $2"#,
+        r"SELECT id, workspace_id, environment_id, source, ref_hint, started_at, last_seen_at, created_at
+        FROM sessions_v2 WHERE environment_id = $1 ORDER BY last_seen_at DESC LIMIT $2",
     )
     .bind(environment_id)
     .bind(session_limit)
@@ -1680,10 +1710,10 @@ pub async fn dashboard_with_limits(
     let insights = dashboard_insights(pool, environment_id).await?;
     let (interactions_total, reports_total, sessions_total) =
         sqlx::query_as::<_, (i64, i64, i64)>(
-            r#"SELECT
+            r"SELECT
               (SELECT COUNT(*) FROM interactions_v2 WHERE environment_id = $1),
               (SELECT COUNT(*) FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id WHERE i.environment_id = $1),
-              (SELECT COUNT(*) FROM sessions_v2 WHERE environment_id = $1)"#,
+              (SELECT COUNT(*) FROM sessions_v2 WHERE environment_id = $1)",
         )
         .bind(environment_id)
         .fetch_one(pool)
@@ -1697,22 +1727,22 @@ pub async fn dashboard_with_limits(
         sessions_loaded: sessions.len(),
     };
     let team_members = sqlx::query_as::<_, TeamMember>(
-        r#"SELECT workspace_id, os_user_id, handle, email, display_name, role,
+        r"SELECT workspace_id, os_user_id, handle, email, display_name, role,
         joined_at, updated_at FROM workspace_members
         WHERE workspace_id = $1
         ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
-        LOWER(display_name), joined_at"#,
+        LOWER(display_name), joined_at",
     )
     .bind(context.workspace.id)
     .fetch_all(pool)
     .await?;
     let team_invitations = if context.role == "owner" || context.role == "admin" {
         sqlx::query_as::<_, TeamInvitation>(
-            r#"SELECT id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
+            r"SELECT id, workspace_id, invited_by_os_user_id, invitee_kind, invitee_value,
             role, created_at, expires_at FROM workspace_invitations
             WHERE workspace_id = $1 AND accepted_at IS NULL AND revoked_at IS NULL
               AND expires_at > NOW() AND invitee_kind <> 'link'
-            ORDER BY created_at DESC"#,
+            ORDER BY created_at DESC",
         )
         .bind(context.workspace.id)
         .fetch_all(pool)
@@ -1740,14 +1770,14 @@ pub async fn dashboard_with_limits(
     })
 }
 
-pub async fn dashboard_report_by_id(
+pub(crate) async fn dashboard_report_by_id(
     pool: &PgPool,
     workspace_id: Uuid,
     product_id: Uuid,
     report_id: Uuid,
 ) -> Result<ProductFeedbackReportWithInteraction, ApiError> {
     sqlx::query_as::<_, ProductFeedbackReportWithInteraction>(
-        r#"SELECT r.id, r.interaction_id, r.summary, r.impact, r.confidence,
+        r"SELECT r.id, r.interaction_id, r.summary, r.impact, r.confidence,
         r.findings, r.workaround, r.source, r.created_at,
         i.session_id, i.surface, i.operation, i.status_code, i.duration_ms,
         i.customer_ref, i.classification, i.confirmation_method, i.runtime_hint,
@@ -1759,7 +1789,7 @@ pub async fn dashboard_report_by_id(
         JOIN interactions_v2 i ON i.id = r.interaction_id
         JOIN product_environments e ON e.id = i.environment_id
         LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
-        WHERE r.id = $1 AND i.workspace_id = $2 AND e.product_id = $3"#,
+        WHERE r.id = $1 AND i.workspace_id = $2 AND e.product_id = $3",
     )
     .bind(report_id)
     .bind(workspace_id)
@@ -1769,7 +1799,7 @@ pub async fn dashboard_report_by_id(
     .ok_or_else(|| ApiError::not_found("Feedback report not found"))
 }
 
-pub async fn update_feedback_workflow(
+pub(crate) async fn update_feedback_workflow(
     pool: &PgPool,
     context: &DashboardContext,
     report_id: Uuid,
@@ -1823,7 +1853,7 @@ pub async fn update_feedback_workflow(
         }
     }
     let updated = sqlx::query(
-        r#"INSERT INTO feedback_report_workflow
+        r"INSERT INTO feedback_report_workflow
         (report_id, workspace_id, status, assignee_os_user_id, tags, internal_note,
          updated_by_os_user_id, updated_at)
         SELECT r.id, r.workspace_id, $4, $5, $6, $7, $8, NOW()
@@ -1837,7 +1867,7 @@ pub async fn update_feedback_workflow(
           tags = EXCLUDED.tags,
           internal_note = EXCLUDED.internal_note,
           updated_by_os_user_id = EXCLUDED.updated_by_os_user_id,
-          updated_at = NOW()"#,
+          updated_at = NOW()",
     )
     .bind(report_id)
     .bind(context.workspace.id)
@@ -1855,19 +1885,19 @@ pub async fn update_feedback_workflow(
     Ok(())
 }
 
-pub async fn dashboard_interaction_by_id(
+pub(crate) async fn dashboard_interaction_by_id(
     pool: &PgPool,
     workspace_id: Uuid,
     product_id: Uuid,
     interaction_id: Uuid,
 ) -> Result<ProductInteraction, ApiError> {
     sqlx::query_as::<_, ProductInteraction>(
-        r#"SELECT i.id, i.workspace_id, i.environment_id, i.api_key_id, i.session_id,
+        r"SELECT i.id, i.workspace_id, i.environment_id, i.api_key_id, i.session_id,
         i.surface, i.operation, i.status_code, i.duration_ms, i.customer_ref,
         i.classification, i.confirmation_method, i.runtime_hint, i.runtime_hint_source,
         i.occurred_at, i.created_at, i.updated_at
         FROM interactions_v2 i JOIN product_environments e ON e.id = i.environment_id
-        WHERE i.id = $1 AND i.workspace_id = $2 AND e.product_id = $3"#,
+        WHERE i.id = $1 AND i.workspace_id = $2 AND e.product_id = $3",
     )
     .bind(interaction_id)
     .bind(workspace_id)
@@ -1877,17 +1907,17 @@ pub async fn dashboard_interaction_by_id(
     .ok_or_else(|| ApiError::not_found("Interaction not found"))
 }
 
-pub async fn dashboard_session_by_id(
+pub(crate) async fn dashboard_session_by_id(
     pool: &PgPool,
     workspace_id: Uuid,
     product_id: Uuid,
     session_id: Uuid,
 ) -> Result<DashboardSessionDetail, ApiError> {
     let session = sqlx::query_as::<_, ProductSession>(
-        r#"SELECT s.id, s.workspace_id, s.environment_id, s.source, s.ref_hint,
+        r"SELECT s.id, s.workspace_id, s.environment_id, s.source, s.ref_hint,
         s.started_at, s.last_seen_at, s.created_at
         FROM sessions_v2 s JOIN product_environments e ON e.id = s.environment_id
-        WHERE s.id = $1 AND s.workspace_id = $2 AND e.product_id = $3"#,
+        WHERE s.id = $1 AND s.workspace_id = $2 AND e.product_id = $3",
     )
     .bind(session_id)
     .bind(workspace_id)
@@ -1896,17 +1926,17 @@ pub async fn dashboard_session_by_id(
     .await?
     .ok_or_else(|| ApiError::not_found("Session not found"))?;
     let interactions = sqlx::query_as::<_, ProductInteraction>(
-        r#"SELECT id, workspace_id, environment_id, api_key_id, session_id, surface,
+        r"SELECT id, workspace_id, environment_id, api_key_id, session_id, surface,
         operation, status_code, duration_ms, customer_ref, classification,
         confirmation_method, runtime_hint, runtime_hint_source, occurred_at, created_at, updated_at
         FROM interactions_v2 WHERE session_id = $1
-        ORDER BY occurred_at, client_sequence NULLS LAST, id"#,
+        ORDER BY occurred_at, client_sequence NULLS LAST, id",
     )
     .bind(session_id)
     .fetch_all(pool)
     .await?;
     let reports = sqlx::query_as::<_, ProductFeedbackReportWithInteraction>(
-        r#"SELECT r.id, r.interaction_id, r.summary, r.impact, r.confidence,
+        r"SELECT r.id, r.interaction_id, r.summary, r.impact, r.confidence,
         r.findings, r.workaround, r.source, r.created_at,
         i.session_id, i.surface, i.operation, i.status_code, i.duration_ms,
         i.customer_ref, i.classification, i.confirmation_method, i.runtime_hint,
@@ -1916,7 +1946,7 @@ pub async fn dashboard_session_by_id(
         w.updated_at AS workflow_updated_at
         FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id
         LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
-        WHERE i.session_id = $1 ORDER BY r.created_at"#,
+        WHERE i.session_id = $1 ORDER BY r.created_at",
     )
     .bind(session_id)
     .fetch_all(pool)
@@ -1964,13 +1994,13 @@ async fn resolve_v2_session(
     let session_id = Uuid::new_v4();
     let ref_hint = format!("session-{}", &session_id.simple().to_string()[..8]);
     let resolved = sqlx::query_scalar::<_, Uuid>(
-        r#"INSERT INTO sessions_v2
+        r"INSERT INTO sessions_v2
         (id, workspace_id, environment_id, source, ref_hash, ref_hint, started_at, last_seen_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
         ON CONFLICT (environment_id, source, ref_hash) DO UPDATE
         SET started_at = LEAST(sessions_v2.started_at, EXCLUDED.started_at),
             last_seen_at = GREATEST(sessions_v2.last_seen_at, EXCLUDED.last_seen_at)
-        RETURNING id"#,
+        RETURNING id",
     )
     .bind(session_id)
     .bind(workspace_id)
@@ -2036,7 +2066,7 @@ fn validate_telemetry(input: &InteractionTelemetryInput) -> Result<(), ApiError>
     Ok(())
 }
 
-pub async fn ingest_telemetry_batch(
+pub(crate) async fn ingest_telemetry_batch(
     pool: &PgPool,
     auth: &ProductAuth,
     input: TelemetryBatchInput,
@@ -2091,7 +2121,7 @@ async fn ingest_telemetry_event(
     };
     let confirmation_method = (event.surface == "mcp").then(|| "mcp".to_string());
     let row = sqlx::query_as::<_, ProductInteraction>(
-        r#"INSERT INTO interactions_v2
+        r"INSERT INTO interactions_v2
         (id, workspace_id, environment_id, api_key_id, session_id, surface, operation, status_code,
          duration_ms, customer_ref, classification, confirmation_method, runtime_hint,
          runtime_hint_source, client_sequence, occurred_at)
@@ -2119,7 +2149,7 @@ async fn ingest_telemetry_event(
         WHERE interactions_v2.environment_id = EXCLUDED.environment_id
         RETURNING id, workspace_id, environment_id, api_key_id, session_id, surface, operation,
           status_code, duration_ms, customer_ref, classification, confirmation_method,
-          runtime_hint, runtime_hint_source, occurred_at, created_at, updated_at"#,
+          runtime_hint, runtime_hint_source, occurred_at, created_at, updated_at",
     )
     .bind(event.interaction_id)
     .bind(auth.workspace.id)
@@ -2179,7 +2209,7 @@ fn contains_sensitive_report_text(value: &str) -> bool {
     forbidden_pattern || email_like
 }
 
-pub async fn submit_product_feedback(
+pub(crate) async fn submit_product_feedback(
     pool: &PgPool,
     capability: &str,
     input: ProductFeedbackReportInput,
@@ -2307,11 +2337,11 @@ pub async fn submit_product_feedback(
 
     let parsed = parse_capability(capability)?;
     let key = sqlx::query_as::<_, (Uuid, Vec<u8>, String, Uuid)>(
-        r#"SELECT k.workspace_id, k.key_hash, e.feedback_mode, k.environment_id
+        r"SELECT k.workspace_id, k.key_hash, e.feedback_mode, k.environment_id
         FROM api_keys k
         JOIN product_environments e ON e.id = k.environment_id
         WHERE k.id = $1 AND k.kind = 'write' AND k.revoked_at IS NULL
-          AND (k.expires_at IS NULL OR k.expires_at > NOW())"#,
+          AND (k.expires_at IS NULL OR k.expires_at > NOW())",
     )
     .bind(parsed.key_id)
     .fetch_optional(pool)
@@ -2360,7 +2390,7 @@ pub async fn submit_product_feedback(
 
     let mut tx = pool.begin().await?;
     let interaction = sqlx::query_as::<_, ProductInteraction>(
-        r#"INSERT INTO interactions_v2
+        r"INSERT INTO interactions_v2
         (id, workspace_id, environment_id, api_key_id, surface, operation, classification,
          confirmation_method, capability_nonce_hash, occurred_at)
         VALUES ($1, $2, $3, $4, 'unknown', 'pending', 'confirmed',
@@ -2373,7 +2403,7 @@ pub async fn submit_product_feedback(
         WHERE interactions_v2.environment_id = EXCLUDED.environment_id
         RETURNING id, workspace_id, environment_id, api_key_id, session_id, surface, operation,
           status_code, duration_ms, customer_ref, classification, confirmation_method,
-          runtime_hint, runtime_hint_source, occurred_at, created_at, updated_at"#,
+          runtime_hint, runtime_hint_source, occurred_at, created_at, updated_at",
     )
     .bind(claims.i)
     .bind(key.0)
@@ -2396,9 +2426,9 @@ pub async fn submit_product_feedback(
         return Ok((interaction, existing));
     }
     let report = sqlx::query_as::<_, ProductFeedbackReport>(
-        r#"INSERT INTO feedback_reports
+        r"INSERT INTO feedback_reports
         (id, workspace_id, interaction_id, summary, impact, confidence, findings, workaround)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *"#,
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *",
     )
     .bind(Uuid::new_v4())
     .bind(key.0)
@@ -2416,15 +2446,23 @@ pub async fn submit_product_feedback(
 
 #[cfg(test)]
 mod product_tests {
+    #![allow(
+        clippy::expect_used,
+        reason = "test failures should abort at the assertion site with explicit context"
+    )]
+
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     use sqlx::postgres::PgPoolOptions;
 
+    use crate::models::{CurrentUser, FeedbackConsentInput};
+
     use super::*;
 
     fn test_error(error: ApiError) -> anyhow::Error {
-        anyhow::anyhow!("{}: {}", error.status, error.message)
+        let ApiError { status, message } = error;
+        anyhow::anyhow!("{status}: {message}")
     }
 
     fn api_key_headers(secret: &str) -> anyhow::Result<HeaderMap> {
@@ -2445,9 +2483,11 @@ mod product_tests {
             exp: (now + Duration::hours(1)).timestamp(),
             n: format!("nonce-{}", Uuid::new_v4().simple()),
         };
-        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+        let payload = URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&claims).expect("capability claims should serialize"));
         let signing_input = format!("afr2_{}.{payload}", key_id.simple());
-        let mut mac = Hmac::<Sha256>::new_from_slice(&sha256(secret)).unwrap();
+        let mut mac = Hmac::<Sha256>::new_from_slice(&sha256(secret))
+            .expect("HMAC accepts SHA-256 key material");
         mac.update(signing_input.as_bytes());
         format!(
             "{signing_input}.{}",
@@ -2477,14 +2517,15 @@ mod product_tests {
         anyhow::ensure!(!encoded.contains(&id.to_string()));
         let decoded = decode_feedback_cursor(Some(&encoded), Utc::now() - Duration::days(1))
             .map_err(test_error)?
-            .unwrap();
+            .expect("encoded cursor should decode to a cursor");
         anyhow::ensure!(decoded.id == id);
         anyhow::ensure!(decoded.occurred_at == occurred_at);
-        let expired = decode_feedback_cursor(Some(&encoded), Utc::now()).unwrap_err();
+        let expired = decode_feedback_cursor(Some(&encoded), Utc::now())
+            .expect_err("cursor outside the retained window should be rejected");
         anyhow::ensure!(expired.status == StatusCode::GONE);
         anyhow::ensure!(
             decode_feedback_cursor(Some("not-a-cursor"), Utc::now() - Duration::days(1))
-                .unwrap_err()
+                .expect_err("malformed cursor should be rejected")
                 .status
                 == StatusCode::BAD_REQUEST
         );
@@ -2565,8 +2606,8 @@ mod product_tests {
         sqlx::migrate!().run(&pool).await?;
         let workspace_id = Uuid::new_v4();
         sqlx::query(
-            r#"INSERT INTO workspaces (id, os_user_id, name, slug)
-            VALUES ($1, $2, 'Consent acceptance', $3)"#,
+            r"INSERT INTO workspaces (id, os_user_id, name, slug)
+            VALUES ($1, $2, 'Consent acceptance', $3)",
         )
         .bind(workspace_id)
         .bind(format!("usr_consent_{}", workspace_id.simple()))
@@ -2636,7 +2677,7 @@ mod product_tests {
                     feedback_input("Missing consent must be rejected by the server.", None),
                 )
                 .await
-                .unwrap_err()
+                .expect_err("ask-once feedback without consent should be rejected")
                 .status
                     == StatusCode::FORBIDDEN
             );
@@ -2683,7 +2724,7 @@ mod product_tests {
                     ),
                 )
                 .await
-                .unwrap_err()
+                .expect_err("stored consent should not satisfy ask-always policy")
                 .status
                     == StatusCode::FORBIDDEN
             );
@@ -2717,7 +2758,7 @@ mod product_tests {
                     ),
                 )
                 .await
-                .unwrap_err()
+                .expect_err("read credentials should not submit feedback")
                 .status
                     == StatusCode::UNAUTHORIZED
             );
@@ -2742,7 +2783,7 @@ mod product_tests {
                     feedback_input("Disabled collection rejects this feedback report.", None),
                 )
                 .await
-                .unwrap_err()
+                .expect_err("disabled feedback collection should reject reports")
                 .status
                     == StatusCode::GONE
             );
@@ -2768,8 +2809,8 @@ mod product_tests {
 
         let workspace_id = Uuid::new_v4();
         sqlx::query(
-            r#"INSERT INTO workspaces (id, os_user_id, name, slug)
-            VALUES ($1, $2, 'Read key acceptance', $3)"#,
+            r"INSERT INTO workspaces (id, os_user_id, name, slug)
+            VALUES ($1, $2, 'Read key acceptance', $3)",
         )
         .bind(workspace_id)
         .bind(format!("usr_test_{}", workspace_id.simple()))
@@ -2822,10 +2863,14 @@ mod product_tests {
                 .await
                 .map_err(test_error)?;
             anyhow::ensure!(read_auth.api_key_id == read_key.id);
-            let read_on_write = agent_product_auth(&pool, &read_headers).await.unwrap_err();
+            let read_on_write = agent_product_auth(&pool, &read_headers)
+                .await
+                .expect_err("read credentials should not authorize writes");
             anyhow::ensure!(read_on_write.status == StatusCode::UNAUTHORIZED);
             anyhow::ensure!(read_on_write.message == "Invalid API key");
-            let write_on_read = read_product_auth(&pool, &write_headers).await.unwrap_err();
+            let write_on_read = read_product_auth(&pool, &write_headers)
+                .await
+                .expect_err("write credentials should not authorize feedback reads");
             anyhow::ensure!(write_on_read.status == StatusCode::UNAUTHORIZED);
             anyhow::ensure!(write_on_read.message == "Invalid API key");
 
@@ -2846,11 +2891,11 @@ mod product_tests {
             ];
             for (interaction_id, occurred_at, operation) in retained_times {
                 sqlx::query(
-                    r#"INSERT INTO interactions_v2
+                    r"INSERT INTO interactions_v2
                     (id, workspace_id, environment_id, api_key_id, surface, operation,
                      customer_ref, classification, confirmation_method, occurred_at)
                     VALUES ($1, $2, $3, $4, 'mcp', $5, 'acct_1',
-                            'confirmed', 'mcp', $6)"#,
+                            'confirmed', 'mcp', $6)",
                 )
                 .bind(interaction_id)
                 .bind(workspace_id)
@@ -3004,7 +3049,7 @@ mod product_tests {
                 None,
             )
             .await
-            .unwrap_err();
+            .expect_err("read credential limit should be enforced");
             anyhow::ensure!(read_cap.status == StatusCode::CONFLICT);
             let write_cap = create_api_key(
                 &pool,
@@ -3015,7 +3060,7 @@ mod product_tests {
                 None,
             )
             .await
-            .unwrap_err();
+            .expect_err("write credential limit should be enforced");
             anyhow::ensure!(write_cap.status == StatusCode::CONFLICT);
 
             sqlx::query(
@@ -3024,13 +3069,15 @@ mod product_tests {
             .bind(read_key.id)
             .execute(&pool)
             .await?;
-            let expired = read_product_auth(&pool, &read_headers).await.unwrap_err();
+            let expired = read_product_auth(&pool, &read_headers)
+                .await
+                .expect_err("expired read credentials should be rejected");
             anyhow::ensure!(expired.status == StatusCode::UNAUTHORIZED);
             anyhow::ensure!(expired.message == "API key expired");
             let invalid_headers = api_key_headers("af_read_missing")?;
             let invalid = read_product_auth(&pool, &invalid_headers)
                 .await
-                .unwrap_err();
+                .expect_err("unknown read credentials should be rejected");
             anyhow::ensure!(invalid.status == StatusCode::UNAUTHORIZED);
             anyhow::ensure!(invalid.message == "Invalid API key");
             anyhow::ensure!(expired.message != invalid.message);
@@ -3057,8 +3104,8 @@ mod product_tests {
 
         let workspace_id = Uuid::new_v4();
         let workspace = sqlx::query_as::<_, Workspace>(
-            r#"INSERT INTO workspaces (id, os_user_id, name, slug)
-            VALUES ($1, $2, 'Hierarchy acceptance', $3) RETURNING *"#,
+            r"INSERT INTO workspaces (id, os_user_id, name, slug)
+            VALUES ($1, $2, 'Hierarchy acceptance', $3) RETURNING *",
         )
         .bind(workspace_id)
         .bind(format!("usr_test_{}", workspace_id.simple()))
@@ -3180,7 +3227,9 @@ mod product_tests {
                 .await
                 .map_err(test_error)?;
             anyhow::ensure!(search_dashboard.products.len() == 2);
-            let current_product = search_dashboard.current_product.unwrap();
+            let current_product = search_dashboard
+                .current_product
+                .expect("selected search product should be present");
             anyhow::ensure!(current_product.id == search.id);
             anyhow::ensure!(current_product.name == "Search v2");
             anyhow::ensure!(search_dashboard.interactions.len() == 1);
@@ -3189,7 +3238,13 @@ mod product_tests {
             let docs_dashboard = dashboard(&pool, context(), Some(docs.id), None)
                 .await
                 .map_err(test_error)?;
-            anyhow::ensure!(docs_dashboard.current_product.unwrap().id == docs.id);
+            anyhow::ensure!(
+                docs_dashboard
+                    .current_product
+                    .expect("selected documentation product should be present")
+                    .id
+                    == docs.id
+            );
             anyhow::ensure!(docs_dashboard.interactions.is_empty());
             anyhow::ensure!(docs_dashboard.api_keys.is_empty());
 
@@ -3260,7 +3315,13 @@ mod product_tests {
                 .await
                 .map_err(test_error)?;
             anyhow::ensure!(remaining.products.len() == 1);
-            anyhow::ensure!(remaining.current_product.unwrap().id == docs.id);
+            anyhow::ensure!(
+                remaining
+                    .current_product
+                    .expect("remaining documentation product should be selected")
+                    .id
+                    == docs.id
+            );
 
             delete_product(
                 &pool,
@@ -3357,7 +3418,10 @@ mod product_tests {
                     id: owner.id.clone(),
                     handle: owner.handle.clone(),
                     email: owner.email.clone(),
-                    display_name: owner.display_name.clone().unwrap(),
+                    display_name: owner
+                        .display_name
+                        .clone()
+                        .expect("team owner fixture should have a display name"),
                 },
                 workspace: workspace.clone(),
                 role,
