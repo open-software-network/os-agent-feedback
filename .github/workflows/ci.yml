@@ -217,9 +217,8 @@ jobs:
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
           set -euo pipefail
-          results="$RESULTS"
-          echo "Job results: $results"
-          for result in $results; do
+          echo "Job results: $RESULTS"
+          for result in $RESULTS; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "::error::A required CI job reported '$result'."
               exit 1
