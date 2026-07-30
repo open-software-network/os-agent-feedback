@@ -4,6 +4,7 @@ import hmac
 import json
 import os
 import secrets
+import sys
 import threading
 import time
 import urllib.request
@@ -34,12 +35,17 @@ def resolve_consent(subject):
         f"{ENDPOINT}/api/v2/consent/state",
         data=json.dumps({"subject": subject}).encode(),
         method="POST",
-        headers={"authorization": f"Bearer {API_KEY}", "content-type": "application/json"},
+        headers={
+            "authorization": f"Bearer {API_KEY}",
+            "content-type": "application/json",
+            "user-agent": "epode-manual-http/1.0",
+        },
     )
     try:
         timeout = float(os.environ.get("AGENT_FEEDBACK_CONSENT_TIMEOUT_MS", "750")) / 1_000
         return json.loads(urllib.request.urlopen(request, timeout=timeout).read()).get("state", "unavailable")
-    except Exception:
+    except Exception as error:
+        print(f"[epode] consent state lookup failed: {error}", file=sys.stderr, flush=True)
         return "unavailable"
 
 def prepared(customer_ref=None):
