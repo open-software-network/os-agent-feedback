@@ -285,4 +285,20 @@ mod tests {
         assert_eq!(FingerprintGrouper.name(), "fingerprint");
         assert_eq!(FingerprintGrouper.version(), 1);
     }
+
+    #[test]
+    fn fingerprint_v1_key_is_a_golden_vector() {
+        let findings = [finding("defect", "search_failure", Some("major"))];
+        let assignment = assignment(
+            Uuid::from_u128(0x123e_4567_e89b_12d3_a456_4266_1417_4000),
+            "search_reports",
+            "mcp",
+            Some(503),
+            &findings,
+        );
+
+        // Changing this key requires bumping FingerprintGrouper::version() and
+        // planning a persisted report-group regroup.
+        assert_eq!(assignment.group_key, "6910e1b05a001949e02f04db6d67d013");
+    }
 }

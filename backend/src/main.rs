@@ -78,10 +78,11 @@ use crate::{
         feedback_list_interactions, feedback_list_reports, get_or_create_workspace,
         github_installation_workspace, ingest_telemetry_batch, list_github_installations,
         purge_expired_product_data, read_product_auth, record_feedback_consent_decision,
-        remove_team_member, rename_product, rename_workspace, resolve_workspace_access,
-        revoke_api_key, revoke_github_installation, revoke_team_invitation, rotate_api_key,
-        submit_product_feedback, transfer_team_ownership, update_feedback_workflow, update_policy,
-        update_team_member_role, upsert_github_installation,
+        regroup_report_groups, remove_team_member, rename_product, rename_workspace,
+        resolve_workspace_access, revoke_api_key, revoke_github_installation,
+        revoke_team_invitation, rotate_api_key, submit_product_feedback, transfer_team_ownership,
+        update_feedback_workflow, update_policy, update_team_member_role,
+        upsert_github_installation,
     },
 };
 
@@ -273,7 +274,22 @@ async fn main() -> anyhow::Result<()> {
             scanned = summary.scanned,
             grouped = summary.grouped,
             skipped = summary.skipped,
+            skipped_findings = summary.skipped_findings,
             "report group backfill completed"
+        );
+        return Ok(());
+    }
+    if command.as_deref() == Some("--regroup-report-groups") {
+        let summary = regroup_report_groups(&pool, &FingerprintGrouper)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        tracing::info!(
+            scanned = summary.scanned,
+            moved = summary.moved,
+            unchanged = summary.unchanged,
+            skipped = summary.skipped,
+            skipped_findings = summary.skipped_findings,
+            "report group regroup completed"
         );
         return Ok(());
     }

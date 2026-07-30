@@ -7,7 +7,7 @@ use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{Acquire, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
@@ -2168,21 +2168,41 @@ pub(crate) async fn ingest_telemetry_batch(
     }
     let mut accepted = 0;
     let mut dropped = 0;
+    let mut changed_interaction_ids = Vec::with_capacity(event_count);
+    let mut tx = pool.begin().await?;
     for event in input.events {
-        match ingest_telemetry_event(pool, auth, event).await {
-            Ok(()) => accepted += 1,
-            Err(error) if error.status.is_client_error() => dropped += 1,
+        let mut event_tx = tx.begin().await?;
+        match ingest_telemetry_event(&mut event_tx, auth, event).await {
+            Ok(changed_interaction_id) => {
+                event_tx.commit().await?;
+                if let Some(interaction_id) = changed_interaction_id {
+                    changed_interaction_ids.push(interaction_id);
+                }
+                accepted += 1;
+            }
+            Err(error) if error.status.is_client_error() => {
+                event_tx.rollback().await?;
+                dropped += 1;
+            }
             Err(error) => return Err(error),
         }
     }
+    regroup_changed_interaction_reports(&mut tx, &changed_interaction_ids).await?;
+    tx.commit().await?;
     Ok(TelemetryBatchResult { accepted, dropped })
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct TelemetryUpsertResult {
+    id: Uuid,
+    grouping_facts_changed: bool,
+}
+
 async fn ingest_telemetry_event(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     auth: &ProductAuth,
     event: InteractionTelemetryInput,
-) -> Result<(), ApiError> {
+) -> Result<Option<Uuid>, ApiError> {
     validate_telemetry(&event)?;
     let occurred_at = event.occurred_at.unwrap_or_else(Utc::now);
     if occurred_at > Utc::now() + Duration::minutes(5)
@@ -2193,9 +2213,8 @@ async fn ingest_telemetry_event(
         ));
     }
     let customer_ref = opaque_ref(event.customer_ref, "customerRef")?;
-    let mut tx = pool.begin().await?;
     let session_id = resolve_v2_session(
-        &mut tx,
+        tx,
         auth.workspace.id,
         auth.environment.id,
         event.session_ref,
@@ -2209,12 +2228,24 @@ async fn ingest_telemetry_event(
         "unclassified".to_string()
     };
     let confirmation_method = (event.surface == "mcp").then(|| "mcp".to_string());
-    let row = sqlx::query_as::<_, ProductInteraction>(
-        r"INSERT INTO interactions_v2
+    // The INSERT depends on the materialized `previous` CTE so PostgreSQL must
+    // lock and capture the pre-state before the upsert returns its post-state.
+    let row = sqlx::query_as::<_, TelemetryUpsertResult>(
+        r"WITH previous AS MATERIALIZED (
+          SELECT id, surface, operation, status_code
+          FROM interactions_v2
+          WHERE id = $1
+          FOR UPDATE
+        ),
+        upserted AS (
+          INSERT INTO interactions_v2
         (id, workspace_id, environment_id, api_key_id, session_id, surface, operation, status_code,
          duration_ms, customer_ref, classification, confirmation_method, runtime_hint,
          runtime_hint_source, client_sequence, occurred_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        SELECT COALESCE(p.id, input.id), $2, $3, $4, $5, $6, $7, $8,
+          $9, $10, $11, $12, $13, $14, $15, $16
+        FROM (VALUES ($1::uuid)) AS input(id)
+        LEFT JOIN previous p ON p.id = input.id
         ON CONFLICT (id) DO UPDATE SET
           api_key_id = COALESCE(interactions_v2.api_key_id, EXCLUDED.api_key_id),
           session_id = COALESCE(interactions_v2.session_id, EXCLUDED.session_id),
@@ -2236,9 +2267,16 @@ async fn ingest_telemetry_event(
           END,
           updated_at = NOW()
         WHERE interactions_v2.environment_id = EXCLUDED.environment_id
-        RETURNING id, workspace_id, environment_id, api_key_id, session_id, surface, operation,
-          status_code, duration_ms, customer_ref, classification, confirmation_method,
-          runtime_hint, runtime_hint_source, occurred_at, created_at, updated_at",
+          RETURNING id, surface, operation, status_code
+        )
+        SELECT u.id,
+          p.id IS NOT NULL AND (
+            p.surface IS DISTINCT FROM u.surface
+            OR p.operation IS DISTINCT FROM u.operation
+            OR p.status_code IS DISTINCT FROM u.status_code
+          ) AS grouping_facts_changed
+        FROM upserted u
+        LEFT JOIN previous p ON TRUE",
     )
     .bind(event.interaction_id)
     .bind(auth.workspace.id)
@@ -2256,14 +2294,65 @@ async fn ingest_telemetry_event(
     .bind(event.runtime_hint_source.map(|value| clean(&value, 60)))
     .bind(event.sequence)
     .bind(occurred_at)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
-    if row.is_none() {
-        return Err(ApiError::conflict(
-            "interactionId belongs to another workspace",
-        ));
+    let row =
+        row.ok_or_else(|| ApiError::conflict("interactionId belongs to another workspace"))?;
+    Ok(row.grouping_facts_changed.then_some(row.id))
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ChangedInteractionReportRow {
+    report_id: Uuid,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    operation: String,
+    surface: String,
+    status_code: Option<i32>,
+    findings: serde_json::Value,
+}
+
+async fn regroup_changed_interaction_reports(
+    tx: &mut Transaction<'_, Postgres>,
+    changed_interaction_ids: &[Uuid],
+) -> Result<(), ApiError> {
+    if changed_interaction_ids.is_empty() {
+        return Ok(());
     }
-    tx.commit().await?;
+
+    let reports = sqlx::query_as::<_, ChangedInteractionReportRow>(
+        r"SELECT r.id AS report_id, r.workspace_id, e.product_id,
+          i.operation, i.surface, i.status_code, r.findings
+        FROM interactions_v2 i
+        JOIN feedback_reports r
+          ON r.interaction_id = i.id AND r.workspace_id = i.workspace_id
+        JOIN product_environments e
+          ON e.id = i.environment_id AND e.workspace_id = i.workspace_id
+        WHERE i.id = ANY($1)",
+    )
+    .bind(changed_interaction_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    for report in reports {
+        let findings: Vec<FeedbackFindingInput> =
+            serde_json::from_value(report.findings).map_err(ApiError::internal)?;
+        assign_report_group(
+            tx,
+            &crate::grouping::FingerprintGrouper,
+            report.workspace_id,
+            report.report_id,
+            &GroupInput {
+                product_id: report.product_id,
+                operation: &report.operation,
+                surface: &report.surface,
+                status_code: report.status_code,
+                findings: &findings,
+            },
+        )
+        .await?;
+    }
+
     Ok(())
 }
 
@@ -2430,6 +2519,7 @@ pub(crate) struct BackfillSummary {
     pub(crate) scanned: u64,
     pub(crate) grouped: u64,
     pub(crate) skipped: u64,
+    pub(crate) skipped_findings: u64,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -2444,6 +2534,28 @@ struct UngroupedReportRow {
     status_code: Option<i32>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RegroupSummary {
+    pub(crate) scanned: u64,
+    pub(crate) moved: u64,
+    pub(crate) unchanged: u64,
+    pub(crate) skipped: u64,
+    pub(crate) skipped_findings: u64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct GroupedReportRow {
+    id: Uuid,
+    workspace_id: Uuid,
+    findings: serde_json::Value,
+    created_at: DateTime<Utc>,
+    product_id: Option<Uuid>,
+    operation: Option<String>,
+    surface: Option<String>,
+    status_code: Option<i32>,
+    current_group_key: String,
+}
+
 pub(crate) async fn assign_report_group(
     tx: &mut Transaction<'_, Postgres>,
     grouper: &dyn ReportGrouper,
@@ -2456,7 +2568,11 @@ pub(crate) async fn assign_report_group(
         r"INSERT INTO report_groups
         (id, workspace_id, product_id, group_key, grouper_name, grouper_version, explanation)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
-        ON CONFLICT (group_key) DO UPDATE SET updated_at = NOW()
+        ON CONFLICT (group_key) DO UPDATE SET
+          grouper_name = EXCLUDED.grouper_name,
+          grouper_version = EXCLUDED.grouper_version,
+          explanation = EXCLUDED.explanation,
+          updated_at = NOW()
         RETURNING id",
     )
     .bind(Uuid::new_v4())
@@ -2540,8 +2656,16 @@ pub(crate) async fn backfill_report_groups(
                 summary.skipped += 1;
                 continue;
             };
-            let findings: Vec<FeedbackFindingInput> =
-                serde_json::from_value(row.findings).map_err(ApiError::internal)?;
+            let Ok(findings) = serde_json::from_value::<Vec<FeedbackFindingInput>>(row.findings)
+            else {
+                summary.skipped += 1;
+                summary.skipped_findings += 1;
+                tracing::warn!(
+                    report_id = %row.id,
+                    "skipping report with unreadable findings during group backfill"
+                );
+                continue;
+            };
             assign_report_group(
                 &mut tx,
                 grouper,
@@ -2557,6 +2681,97 @@ pub(crate) async fn backfill_report_groups(
             )
             .await?;
             summary.grouped += 1;
+        }
+
+        tx.commit().await?;
+        cursor_created_at = Some(next_cursor.0);
+        cursor_id = Some(next_cursor.1);
+    }
+
+    Ok(summary)
+}
+
+pub(crate) async fn regroup_report_groups(
+    pool: &PgPool,
+    grouper: &dyn ReportGrouper,
+) -> Result<RegroupSummary, ApiError> {
+    const BATCH_SIZE: i64 = 500;
+
+    let mut summary = RegroupSummary::default();
+    let mut cursor_created_at = None;
+    let mut cursor_id = None;
+
+    loop {
+        let mut tx = pool.begin().await?;
+        let rows = sqlx::query_as::<_, GroupedReportRow>(
+            r"SELECT r.id, r.workspace_id, r.findings, r.created_at,
+              p.id AS product_id, i.operation, i.surface, i.status_code,
+              g.group_key AS current_group_key
+            FROM feedback_reports r
+            JOIN report_groups g ON g.id = r.group_id
+            LEFT JOIN interactions_v2 i
+              ON i.id = r.interaction_id AND i.workspace_id = r.workspace_id
+            LEFT JOIN product_environments e
+              ON e.id = i.environment_id AND e.workspace_id = r.workspace_id
+            LEFT JOIN products p
+              ON p.id = e.product_id AND p.workspace_id = r.workspace_id
+            WHERE r.group_id IS NOT NULL
+              AND (
+                $1::timestamptz IS NULL
+                OR r.created_at > $1
+                OR (r.created_at = $1 AND r.id > $2)
+              )
+            ORDER BY r.created_at, r.id
+            LIMIT $3",
+        )
+        .bind(cursor_created_at)
+        .bind(cursor_id)
+        .bind(BATCH_SIZE)
+        .fetch_all(&mut *tx)
+        .await?;
+        if rows.is_empty() {
+            tx.commit().await?;
+            break;
+        }
+
+        summary.scanned += u64::try_from(rows.len()).map_err(ApiError::internal)?;
+        let next_cursor = rows
+            .last()
+            .map(|row| (row.created_at, row.id))
+            .ok_or_else(|| ApiError::internal("regroup batch unexpectedly empty"))?;
+
+        for row in rows {
+            let (Some(product_id), Some(operation), Some(surface)) = (
+                row.product_id,
+                row.operation.as_deref(),
+                row.surface.as_deref(),
+            ) else {
+                summary.skipped += 1;
+                continue;
+            };
+            let Ok(findings) = serde_json::from_value::<Vec<FeedbackFindingInput>>(row.findings)
+            else {
+                summary.skipped += 1;
+                summary.skipped_findings += 1;
+                tracing::warn!(
+                    report_id = %row.id,
+                    "skipping report with unreadable findings during report regroup"
+                );
+                continue;
+            };
+            let input = GroupInput {
+                product_id,
+                operation,
+                surface,
+                status_code: row.status_code,
+                findings: &findings,
+            };
+            if grouper.assign(&input).group_key == row.current_group_key {
+                summary.unchanged += 1;
+                continue;
+            }
+            assign_report_group(&mut tx, grouper, row.workspace_id, row.id, &input).await?;
+            summary.moved += 1;
         }
 
         tx.commit().await?;
@@ -2631,9 +2846,11 @@ pub(crate) async fn submit_product_feedback(
         {
             return Err(ApiError::bad_request("Invalid finding severity"));
         }
+        finding.topic = clean(&finding.topic, 64)
+            .to_ascii_lowercase()
+            .replace(' ', "_");
         finding.detail = clean(&finding.detail, 350);
         if finding.topic.is_empty()
-            || finding.topic.len() > 64
             || !finding
                 .topic
                 .chars()
@@ -2898,6 +3115,55 @@ mod product_tests {
         }
     }
 
+    fn feedback_input_with_finding(summary: &str, topic: &str) -> ProductFeedbackReportInput {
+        let mut input = feedback_input(summary);
+        input.findings = vec![FeedbackFindingInput {
+            kind: "defect".into(),
+            topic: topic.into(),
+            severity: Some("major".into()),
+            detail: "Search failed for a valid request.".into(),
+        }];
+        input
+    }
+
+    fn mcp_telemetry_event(interaction_id: Uuid) -> InteractionTelemetryInput {
+        InteractionTelemetryInput {
+            interaction_id,
+            sequence: Some(1),
+            surface: "mcp".into(),
+            operation: "search_reports".into(),
+            status_code: Some(503),
+            duration_ms: Some(25),
+            customer_ref: None,
+            classification: Some("confirmed".into()),
+            confirmation_method: Some("mcp".into()),
+            runtime_hint: None,
+            runtime_hint_source: None,
+            session_ref: None,
+            session_source: None,
+            occurred_at: Some(Utc::now()),
+        }
+    }
+
+    #[derive(Debug)]
+    struct MetadataRefreshingGrouper;
+
+    impl ReportGrouper for MetadataRefreshingGrouper {
+        fn name(&self) -> &'static str {
+            "metadata-test"
+        }
+
+        fn version(&self) -> i32 {
+            2
+        }
+
+        fn assign(&self, input: &GroupInput<'_>) -> crate::grouping::GroupAssignment {
+            let mut assignment = crate::grouping::FingerprintGrouper.assign(input);
+            assignment.explanation = "refreshed grouper explanation".into();
+            assignment
+        }
+    }
+
     async fn github_test_workspace(pool: &PgPool, label: &str) -> anyhow::Result<Uuid> {
         let workspace_id = Uuid::new_v4();
         sqlx::query(
@@ -2990,6 +3256,310 @@ mod product_tests {
                     .fetch_one(&pool)
                     .await?;
             anyhow::ensure!(group_count == 1);
+
+            let mut tx = pool.begin().await?;
+            assign_report_group(
+                &mut tx,
+                &MetadataRefreshingGrouper,
+                workspace_id,
+                first_report.id,
+                &GroupInput {
+                    product_id: product.id,
+                    operation: "pending",
+                    surface: "unknown",
+                    status_code: None,
+                    findings: &[],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            tx.commit().await?;
+            let refreshed_identity = sqlx::query_as::<_, (String, i32, String)>(
+                r"SELECT grouper_name, grouper_version, explanation
+                FROM report_groups WHERE id = $1",
+            )
+            .bind(first_group)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                refreshed_identity
+                    == (
+                        "metadata-test".to_owned(),
+                        2,
+                        "refreshed grouper explanation".to_owned()
+                    )
+            );
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn feedback_topics_are_canonicalized_before_storage_and_grouping() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace_id = github_test_workspace(&pool, "Topic canonicalization test").await?;
+
+        let result = async {
+            let (_, environment) = create_product(
+                &pool,
+                workspace_id,
+                CreateProductInput {
+                    name: "Canonical topics".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let (write_key, write_secret) = create_api_key(
+                &pool,
+                workspace_id,
+                environment.id,
+                Some("Topic writer".into()),
+                Some("write".into()),
+                None,
+            )
+            .await
+            .map_err(test_error)?;
+
+            let capability = test_capability(&write_secret, write_key.id, Uuid::new_v4());
+            let (_, report) = submit_product_feedback(
+                &pool,
+                &capability,
+                feedback_input_with_finding(
+                    "A mixed-case topic is accepted and canonicalized.",
+                    "Auth Failure",
+                ),
+            )
+            .await
+            .map_err(test_error)?;
+            let stored_findings: serde_json::Value =
+                sqlx::query_scalar("SELECT findings FROM feedback_reports WHERE id = $1")
+                    .bind(report.id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(
+                stored_findings
+                    .pointer("/0/topic")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("auth_failure")
+            );
+            let explanation: String = sqlx::query_scalar(
+                r"SELECT g.explanation
+                FROM feedback_reports r
+                JOIN report_groups g ON g.id = r.group_id
+                WHERE r.id = $1",
+            )
+            .bind(report.id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(explanation.contains("defect/auth_failure"));
+
+            let invalid_capability = test_capability(&write_secret, write_key.id, Uuid::new_v4());
+            let invalid = submit_product_feedback(
+                &pool,
+                &invalid_capability,
+                feedback_input_with_finding(
+                    "A non-slug topic remains invalid after canonicalization.",
+                    "auth/failure",
+                ),
+            )
+            .await
+            .expect_err("slash-containing topics must remain invalid");
+            anyhow::ensure!(invalid.status == StatusCode::BAD_REQUEST);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn telemetry_late_fill_and_regroup_repair_placeholder_assignments() -> anyhow::Result<()>
+    {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace_id = github_test_workspace(&pool, "Late telemetry grouping test").await?;
+
+        let result = async {
+            let workspace =
+                sqlx::query_as::<_, Workspace>("SELECT * FROM workspaces WHERE id = $1")
+                    .bind(workspace_id)
+                    .fetch_one(&pool)
+                    .await?;
+            let (product, environment) = create_product(
+                &pool,
+                workspace_id,
+                CreateProductInput {
+                    name: "Late telemetry".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let (write_key, write_secret) = create_api_key(
+                &pool,
+                workspace_id,
+                environment.id,
+                Some("Late telemetry writer".into()),
+                Some("write".into()),
+                None,
+            )
+            .await
+            .map_err(test_error)?;
+            let auth = ProductAuth {
+                workspace,
+                environment: environment.clone(),
+                api_key_id: write_key.id,
+            };
+
+            let report_first_interaction = Uuid::new_v4();
+            let report_first_capability =
+                test_capability(&write_secret, write_key.id, report_first_interaction);
+            let (_, report_first) = submit_product_feedback(
+                &pool,
+                &report_first_capability,
+                feedback_input_with_finding(
+                    "This report arrives before its interaction telemetry.",
+                    "search_failure",
+                ),
+            )
+            .await
+            .map_err(test_error)?;
+            let placeholder_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(report_first.id)
+                    .fetch_one(&pool)
+                    .await?;
+            let placeholder_group = placeholder_group
+                .ok_or_else(|| anyhow::anyhow!("report-first fixture should have a group"))?;
+
+            let telemetry_result = ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![mcp_telemetry_event(report_first_interaction)],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(telemetry_result.accepted == 1);
+            anyhow::ensure!(telemetry_result.dropped == 0);
+            let regrouped_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(report_first.id)
+                    .fetch_one(&pool)
+                    .await?;
+            let regrouped_group = regrouped_group
+                .ok_or_else(|| anyhow::anyhow!("late-filled report should retain a group"))?;
+            anyhow::ensure!(regrouped_group != placeholder_group);
+            let regrouped_explanation: String =
+                sqlx::query_scalar("SELECT explanation FROM report_groups WHERE id = $1")
+                    .bind(regrouped_group)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(regrouped_explanation.contains("operation search_reports"));
+            anyhow::ensure!(regrouped_explanation.contains("surface mcp"));
+            anyhow::ensure!(regrouped_explanation.ends_with(" · 5xx"));
+
+            let telemetry_first_interaction = Uuid::new_v4();
+            ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![mcp_telemetry_event(telemetry_first_interaction)],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let telemetry_first_capability =
+                test_capability(&write_secret, write_key.id, telemetry_first_interaction);
+            let (_, telemetry_first_report) = submit_product_feedback(
+                &pool,
+                &telemetry_first_capability,
+                feedback_input_with_finding(
+                    "This matching report arrives after its interaction telemetry.",
+                    "search_failure",
+                ),
+            )
+            .await
+            .map_err(test_error)?;
+            let telemetry_first_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(telemetry_first_report.id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(telemetry_first_group == Some(regrouped_group));
+
+            let historical_interaction = Uuid::new_v4();
+            let historical_capability =
+                test_capability(&write_secret, write_key.id, historical_interaction);
+            let (_, historical_report) = submit_product_feedback(
+                &pool,
+                &historical_capability,
+                feedback_input_with_finding(
+                    "This historical report needs the explicit regroup repair.",
+                    "search_failure",
+                ),
+            )
+            .await
+            .map_err(test_error)?;
+            let historical_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(historical_report.id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(historical_group == Some(placeholder_group));
+            sqlx::query(
+                r"UPDATE interactions_v2
+                SET surface = 'mcp', operation = 'search_reports', status_code = 503,
+                  classification = 'confirmed', confirmation_method = 'mcp', updated_at = NOW()
+                WHERE id = $1",
+            )
+            .bind(historical_interaction)
+            .execute(&pool)
+            .await?;
+
+            let first_regroup = regroup_report_groups(&pool, &crate::grouping::FingerprintGrouper)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(first_regroup.moved >= 1);
+            anyhow::ensure!(first_regroup.unchanged >= 2);
+            let repaired_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(historical_report.id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(repaired_group == Some(regrouped_group));
+
+            let second_regroup = regroup_report_groups(&pool, &crate::grouping::FingerprintGrouper)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(second_regroup.moved == 0);
+            let group_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM report_groups WHERE product_id = $1")
+                    .bind(product.id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(group_count == 2);
             Ok::<(), anyhow::Error>(())
         }
         .await;
@@ -3053,16 +3623,53 @@ mod product_tests {
             .execute(&pool)
             .await?;
 
+            let malformed_interaction_id = Uuid::new_v4();
+            let malformed_report_id = Uuid::new_v4();
+            sqlx::query(
+                r"INSERT INTO interactions_v2
+                (id, workspace_id, environment_id, surface, operation, status_code,
+                 classification, confirmation_method, occurred_at)
+                VALUES ($1, $2, $3, 'mcp', 'search_reports', 503, 'confirmed', 'mcp', NOW())",
+            )
+            .bind(malformed_interaction_id)
+            .bind(workspace_id)
+            .bind(environment.id)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                r"INSERT INTO feedback_reports
+                (id, workspace_id, interaction_id, summary, findings)
+                VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(malformed_report_id)
+            .bind(workspace_id)
+            .bind(malformed_interaction_id)
+            .bind("This malformed report must not block later backfill rows.")
+            .bind(serde_json::json!([{
+                "kind": "defect",
+                "topic": "missing_detail"
+            }]))
+            .execute(&pool)
+            .await?;
+
             let first = backfill_report_groups(&pool, &crate::grouping::FingerprintGrouper)
                 .await
                 .map_err(test_error)?;
             anyhow::ensure!(first.grouped >= 1);
+            anyhow::ensure!(first.skipped >= 1);
+            anyhow::ensure!(first.skipped_findings >= 1);
             let first_group: Option<Uuid> =
                 sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
                     .bind(report_id)
                     .fetch_one(&pool)
                     .await?;
             anyhow::ensure!(first_group.is_some());
+            let malformed_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(malformed_report_id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(malformed_group.is_none());
             let first_group_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM report_groups")
                 .fetch_one(&pool)
                 .await?;
@@ -3079,6 +3686,7 @@ mod product_tests {
                 .fetch_one(&pool)
                 .await?;
             anyhow::ensure!(second.grouped == 0);
+            anyhow::ensure!(second.skipped_findings >= 1);
             anyhow::ensure!(second_group == first_group);
             anyhow::ensure!(second_group_count == first_group_count);
             Ok::<(), anyhow::Error>(())
