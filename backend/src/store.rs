@@ -12,18 +12,19 @@ use uuid::Uuid;
 
 use crate::{
     error::ApiError,
+    grouping::{GroupInput, ReportGrouper},
     models::{
         ApiKeyPublic, ConsentDecisionInput, ConsentStateInput, ConsentStateResponse,
         CreateProductInput, CreateTeamInvitationInput, DashboardContext, DashboardData,
-        DashboardListState, DashboardSessionDetail, DeleteProductInput, FeedbackInteractionItem,
-        FeedbackInteractionsPage, FeedbackListInteractionsInput, FeedbackListReportsInput,
-        FeedbackOperationSummary, FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse,
-        FeedbackSummary, FeedbackSurfaceSummary, FeedbackWindow, InsightCount, Insights,
-        InteractionTelemetryInput, PolicyInput, Product, ProductAuth, ProductEnvironment,
-        ProductFeedbackReport, ProductFeedbackReportInput, ProductFeedbackReportWithInteraction,
-        ProductInteraction, ProductSession, TeamInvitation, TeamMember, TelemetryBatchInput,
-        TelemetryBatchResult, UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput,
-        Workspace, WorkspaceMembership,
+        DashboardListState, DashboardSessionDetail, DeleteProductInput, FeedbackFindingInput,
+        FeedbackInteractionItem, FeedbackInteractionsPage, FeedbackListInteractionsInput,
+        FeedbackListReportsInput, FeedbackOperationSummary, FeedbackReportItem,
+        FeedbackReportsPage, FeedbackReportsResponse, FeedbackSummary, FeedbackSurfaceSummary,
+        FeedbackWindow, InsightCount, Insights, InteractionTelemetryInput, PolicyInput, Product,
+        ProductAuth, ProductEnvironment, ProductFeedbackReport, ProductFeedbackReportInput,
+        ProductFeedbackReportWithInteraction, ProductInteraction, ProductSession, TeamInvitation,
+        TeamMember, TelemetryBatchInput, TelemetryBatchResult, UpdateFeedbackWorkflowInput,
+        UpdateNameInput, UpdateTeamMemberInput, Workspace, WorkspaceMembership,
     },
     os_accounts::OsUser,
     security::{
@@ -2424,6 +2425,148 @@ pub(crate) async fn record_feedback_consent_decision(
     Ok((decision, key.1, claims.exp))
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct BackfillSummary {
+    pub(crate) scanned: u64,
+    pub(crate) grouped: u64,
+    pub(crate) skipped: u64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct UngroupedReportRow {
+    id: Uuid,
+    workspace_id: Uuid,
+    findings: serde_json::Value,
+    created_at: DateTime<Utc>,
+    product_id: Option<Uuid>,
+    operation: Option<String>,
+    surface: Option<String>,
+    status_code: Option<i32>,
+}
+
+pub(crate) async fn assign_report_group(
+    tx: &mut Transaction<'_, Postgres>,
+    grouper: &dyn ReportGrouper,
+    workspace_id: Uuid,
+    report_id: Uuid,
+    input: &GroupInput<'_>,
+) -> Result<Uuid, ApiError> {
+    let assignment = grouper.assign(input);
+    let group_id = sqlx::query_scalar::<_, Uuid>(
+        r"INSERT INTO report_groups
+        (id, workspace_id, product_id, group_key, grouper_name, grouper_version, explanation)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (group_key) DO UPDATE SET updated_at = NOW()
+        RETURNING id",
+    )
+    .bind(Uuid::new_v4())
+    .bind(workspace_id)
+    .bind(input.product_id)
+    .bind(assignment.group_key)
+    .bind(grouper.name())
+    .bind(grouper.version())
+    .bind(assignment.explanation)
+    .fetch_one(&mut **tx)
+    .await?;
+    let updated = sqlx::query(
+        "UPDATE feedback_reports SET group_id = $1 WHERE id = $2 AND workspace_id = $3",
+    )
+    .bind(group_id)
+    .bind(report_id)
+    .bind(workspace_id)
+    .execute(&mut **tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(ApiError::internal(
+            "report disappeared while assigning its group",
+        ));
+    }
+    Ok(group_id)
+}
+
+pub(crate) async fn backfill_report_groups(
+    pool: &PgPool,
+    grouper: &dyn ReportGrouper,
+) -> Result<BackfillSummary, ApiError> {
+    const BATCH_SIZE: i64 = 500;
+
+    let mut summary = BackfillSummary::default();
+    let mut cursor_created_at = None;
+    let mut cursor_id = None;
+
+    loop {
+        let mut tx = pool.begin().await?;
+        let rows = sqlx::query_as::<_, UngroupedReportRow>(
+            r"SELECT r.id, r.workspace_id, r.findings, r.created_at,
+              p.id AS product_id, i.operation, i.surface, i.status_code
+            FROM feedback_reports r
+            LEFT JOIN interactions_v2 i
+              ON i.id = r.interaction_id AND i.workspace_id = r.workspace_id
+            LEFT JOIN product_environments e
+              ON e.id = i.environment_id AND e.workspace_id = r.workspace_id
+            LEFT JOIN products p
+              ON p.id = e.product_id AND p.workspace_id = r.workspace_id
+            WHERE r.group_id IS NULL
+              AND (
+                $1::timestamptz IS NULL
+                OR r.created_at > $1
+                OR (r.created_at = $1 AND r.id > $2)
+              )
+            ORDER BY r.created_at, r.id
+            LIMIT $3",
+        )
+        .bind(cursor_created_at)
+        .bind(cursor_id)
+        .bind(BATCH_SIZE)
+        .fetch_all(&mut *tx)
+        .await?;
+        if rows.is_empty() {
+            tx.commit().await?;
+            break;
+        }
+
+        summary.scanned += u64::try_from(rows.len()).map_err(ApiError::internal)?;
+        let next_cursor = rows
+            .last()
+            .map(|row| (row.created_at, row.id))
+            .ok_or_else(|| ApiError::internal("backfill batch unexpectedly empty"))?;
+
+        for row in rows {
+            let (Some(product_id), Some(operation), Some(surface)) = (
+                row.product_id,
+                row.operation.as_deref(),
+                row.surface.as_deref(),
+            ) else {
+                summary.skipped += 1;
+                continue;
+            };
+            let findings: Vec<FeedbackFindingInput> =
+                serde_json::from_value(row.findings).map_err(ApiError::internal)?;
+            assign_report_group(
+                &mut tx,
+                grouper,
+                row.workspace_id,
+                row.id,
+                &GroupInput {
+                    product_id,
+                    operation,
+                    surface,
+                    status_code: row.status_code,
+                    findings: &findings,
+                },
+            )
+            .await?;
+            summary.grouped += 1;
+        }
+
+        tx.commit().await?;
+        cursor_created_at = Some(next_cursor.0);
+        cursor_id = Some(next_cursor.1);
+    }
+
+    Ok(summary)
+}
+
 pub(crate) async fn submit_product_feedback(
     pool: &PgPool,
     capability: &str,
@@ -2488,11 +2631,9 @@ pub(crate) async fn submit_product_feedback(
         {
             return Err(ApiError::bad_request("Invalid finding severity"));
         }
-        finding.topic = clean(&finding.topic, 64)
-            .to_ascii_lowercase()
-            .replace(' ', "_");
         finding.detail = clean(&finding.detail, 350);
         if finding.topic.is_empty()
+            || finding.topic.len() > 64
             || !finding
                 .topic
                 .chars()
@@ -2544,15 +2685,15 @@ pub(crate) async fn submit_product_feedback(
     } else {
         None
     };
-    let findings = serde_json::to_value(findings).map_err(ApiError::internal)?;
+    let findings_json = serde_json::to_value(&findings).map_err(ApiError::internal)?;
     let workaround = workaround
         .map(serde_json::to_value)
         .transpose()
         .map_err(ApiError::internal)?;
 
     let parsed = parse_capability(capability)?;
-    let key = sqlx::query_as::<_, (Uuid, Vec<u8>, String, Uuid)>(
-        r"SELECT k.workspace_id, k.key_hash, e.feedback_mode, k.environment_id
+    let key = sqlx::query_as::<_, (Uuid, Vec<u8>, String, Uuid, Uuid)>(
+        r"SELECT k.workspace_id, k.key_hash, e.feedback_mode, k.environment_id, e.product_id
         FROM api_keys k
         JOIN product_environments e ON e.id = k.environment_id
         WHERE k.id = $1 AND k.kind = 'write' AND k.revoked_at IS NULL
@@ -2664,9 +2805,23 @@ pub(crate) async fn submit_product_feedback(
     .bind(summary)
     .bind(input.impact)
     .bind(input.confidence)
-    .bind(findings)
+    .bind(findings_json)
     .bind(workaround)
     .fetch_one(&mut *tx)
+    .await?;
+    assign_report_group(
+        &mut tx,
+        &crate::grouping::FingerprintGrouper,
+        key.0,
+        report.id,
+        &GroupInput {
+            product_id: key.4,
+            operation: &interaction.operation,
+            surface: &interaction.surface,
+            status_code: interaction.status_code,
+            findings: &findings,
+        },
+    )
     .await?;
     tx.commit().await?;
     Ok((interaction, report))
@@ -2759,6 +2914,182 @@ mod product_tests {
         .execute(pool)
         .await?;
         Ok(workspace_id)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn matching_report_fingerprints_share_group_row() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace_id = github_test_workspace(&pool, "Report grouping test").await?;
+
+        let result = async {
+            let (product, environment) = create_product(
+                &pool,
+                workspace_id,
+                CreateProductInput {
+                    name: "Grouped feedback".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let (write_key, write_secret) = create_api_key(
+                &pool,
+                workspace_id,
+                environment.id,
+                Some("Grouping writer".into()),
+                Some("write".into()),
+                None,
+            )
+            .await
+            .map_err(test_error)?;
+
+            let first_capability = test_capability(&write_secret, write_key.id, Uuid::new_v4());
+            let second_capability = test_capability(&write_secret, write_key.id, Uuid::new_v4());
+            let (_, first_report) = submit_product_feedback(
+                &pool,
+                &first_capability,
+                feedback_input("The first matching report groups successfully."),
+            )
+            .await
+            .map_err(test_error)?;
+            let (_, second_report) = submit_product_feedback(
+                &pool,
+                &second_capability,
+                feedback_input("The second matching report groups successfully."),
+            )
+            .await
+            .map_err(test_error)?;
+
+            let first_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(first_report.id)
+                    .fetch_one(&pool)
+                    .await?;
+            let second_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(second_report.id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(first_group.is_some());
+            anyhow::ensure!(first_group == second_group);
+            let group_identity = sqlx::query_as::<_, (String, i32)>(
+                "SELECT grouper_name, grouper_version FROM report_groups WHERE id = $1",
+            )
+            .bind(first_group)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(group_identity == ("fingerprint".to_owned(), 1));
+            let group_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM report_groups WHERE product_id = $1")
+                    .bind(product.id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(group_count == 1);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn report_group_backfill_is_idempotent() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace_id = github_test_workspace(&pool, "Report backfill test").await?;
+
+        let result = async {
+            let (_, environment) = create_product(
+                &pool,
+                workspace_id,
+                CreateProductInput {
+                    name: "Backfilled feedback".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let interaction_id = Uuid::new_v4();
+            let report_id = Uuid::new_v4();
+            sqlx::query(
+                r"INSERT INTO interactions_v2
+                (id, workspace_id, environment_id, surface, operation, status_code,
+                 classification, confirmation_method, occurred_at)
+                VALUES ($1, $2, $3, 'mcp', 'search_reports', 503, 'confirmed', 'mcp', NOW())",
+            )
+            .bind(interaction_id)
+            .bind(workspace_id)
+            .bind(environment.id)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                r"INSERT INTO feedback_reports
+                (id, workspace_id, interaction_id, summary, findings)
+                VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(report_id)
+            .bind(workspace_id)
+            .bind(interaction_id)
+            .bind("This existing report should be grouped by the backfill.")
+            .bind(serde_json::json!([{
+                "kind": "defect",
+                "topic": "search_failure",
+                "severity": "major",
+                "detail": "Search failed for a valid request."
+            }]))
+            .execute(&pool)
+            .await?;
+
+            let first = backfill_report_groups(&pool, &crate::grouping::FingerprintGrouper)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(first.grouped >= 1);
+            let first_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(report_id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(first_group.is_some());
+            let first_group_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM report_groups")
+                .fetch_one(&pool)
+                .await?;
+
+            let second = backfill_report_groups(&pool, &crate::grouping::FingerprintGrouper)
+                .await
+                .map_err(test_error)?;
+            let second_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(report_id)
+                    .fetch_one(&pool)
+                    .await?;
+            let second_group_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM report_groups")
+                .fetch_one(&pool)
+                .await?;
+            anyhow::ensure!(second.grouped == 0);
+            anyhow::ensure!(second_group == first_group);
+            anyhow::ensure!(second_group_count == first_group_count);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await?;
+        result
     }
 
     #[tokio::test]
