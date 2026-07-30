@@ -305,3 +305,244 @@ goal of this branch.
 `RAILWAY_PROJECT_ID` comes from `vars.RAILWAY_PROJECT_ID` in all three workflows
 and is already externalized. Environment names (`staging` / `production`) are
 hardcoded throughout by design.
+
+---
+
+## Second pass — pre-gate resolution (Greptile P1)
+
+Scope: **only** the delta since `10ffcc5` / `f16d0f3` —
+`git diff HEAD -- .github/workflows/promote.yml`. Nothing else re-reviewed.
+`actionlint .github/workflows/*.yml` re-run → **green**. No `railway` command,
+no commit, no push, no edit.
+
+Settled and not re-litigated: the `api → epode-api` / `landing → epode` mapping
+(pass-1 B1 is **withdrawn** — root-caused to an unrelated API route rename), and
+the missing staging `epode` service (deferred to the control pane).
+
+Verdict on the delta: **0 blockers, 3 major, 3 minor, 2 nits.** The TOCTOU is
+genuinely fixed.
+
+### The TOCTOU fix holds (Q1)
+
+Traced every value that determines which bits ship:
+
+- `plan` (`:34-166`) carries **no `environment:`** key, so nothing gates it. It
+  does the GHCR login (`:99-104`) and the whole resolution (`:106-166`) there.
+- `deploy` (`:168`) consumes `matrix.digest` and `matrix.sha_short` only
+  (`:181-182`). Both originate from `resolved_rows`, built pre-gate at `:150-155`.
+- `FROM_TAG` — the only mutable-tag reference in the file — appears at
+  `:44, 57, 64, 65, 90, 117, 129, 130, 159` and **nowhere inside `deploy`**
+  (grep-confirmed). The deploy job no longer defines it at all; the deleted
+  `Prepare verified image references` step was the only post-gate reader.
+- `strategy.matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}` (`:176`) is
+  evaluated from `plan`'s completed output, so the values are frozen at plan
+  time regardless of how long the approval sits pending.
+- `${IMAGE}:production` (`:322`) is only ever written, never read.
+
+So the invariant "nothing that determines which bits ship executes inside a job
+carrying `environment: production`" **holds**, with one residual noted as m1
+below (Railway is handed a tag, not a digest).
+
+### Major
+
+#### S1 — no digest shape validation anywhere; two `null`s compare equal
+`.github/workflows/promote.yml:123-124, 143-148`
+
+`jq -r '.digest'` on a manifest lacking that key prints the literal string
+`null` and exits 0 — it does not fail, and it does not produce an empty string
+that `set -euo pipefail` would catch. If both `imagetools inspect` calls returned
+a manifest without `.digest`, `sha_digest` and `digest` are both `"null"`, the
+equality gate at `:145` **passes**, and `digest: "null"` is embedded into the
+matrix row and reaches `deploy` as `IMAGE_DIGEST_REF=…@null`.
+
+It still fails closed — `imagetools create` rejects `@null` at `:205-207`, before
+any Railway call — but it fails *after* the human approval, with an opaque
+docker error instead of a named one. The previous revision had a
+`^sha256:[0-9a-f]{64}$` guard on the resolved digest; this restructure dropped
+it and put nothing in its place. This is the one path where an unresolved digest
+survives the equality check.
+
+Second reason to want the guard: `digest` is currently the only registry-supplied
+value that reaches a `run:` body unvalidated. It is safe *today* because
+`IMAGE_DIGEST_REF` is used solely as a quoted argv (`:207`, `:323`) — but the
+file also contains a nested-eval site at `:249-251` (`script --command "…"`,
+whose string is re-parsed by the inner shell). `IMAGE_REF` is safe there only
+because `revision` is regex-validated at `:132`. If anyone ever moves
+`IMAGE_DIGEST_REF` into that command string, the missing regex becomes a command
+injection. Validate it now, while it costs one line.
+
+**Fix:** after `:144`, add
+`[[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Unresolved digest for $source."; exit 1; }`
+and the same for `$sha_digest` before comparing them.
+
+#### S2 — a short `resolved_rows` produces a green run that promotes nothing
+`.github/workflows/promote.yml:112-166`
+
+The loop feed is correct and I verified the semantics rather than assuming them:
+`done < <(jq -c '.[]' <<< "$ARTIFACT_ROWS")` is process substitution, so the body
+runs in the **current** shell. Probed locally — `exit 1` inside the body
+terminates the whole step and the code after the loop is never reached. A
+`jq … | while` pipe would have run the body in a subshell and silently discarded
+`resolved_rows`; that trap was avoided. Every in-loop failure path (`:118-121`,
+`:132-135`, `:139-142`, `:145-148`) therefore fails the job, closed. Good.
+
+The gap is the feed itself. A failure of the process substitution — malformed
+`ARTIFACT_ROWS`, jq missing, jq erroring — is caught by neither `set -e` nor
+`pipefail`. The loop simply runs zero times, `resolved_rows` stays `[]`, and
+`:165` emits `{"include":[]}` as a perfectly valid matrix. Depending on runner
+version that either skips `deploy` outright or errors on an empty vector; in the
+skip case the workflow ends **green having promoted nothing**, which an operator
+will read as a successful promotion.
+
+**Fix:** after the loop, assert the count round-trips:
+
+```bash
+if [[ "$(jq 'length' <<< "$resolved_rows")" -ne "$(jq 'length' <<< "$ARTIFACT_ROWS")" ]]; then
+  echo "::error::Resolved $(jq 'length' <<< "$resolved_rows") of $(jq 'length' <<< "$ARTIFACT_ROWS") requested artifacts."
+  exit 1
+fi
+```
+
+That single check also makes the "no empty digest reaches deploy" property
+structural rather than incidental.
+
+#### S3 — `deploy` matrix defaults to `fail-fast: true`, so a failing api leg cancels landing mid-Railway-poll
+`.github/workflows/promote.yml:175-176`
+
+Outside the literal delta (it was already so at `HEAD`), but it is the direct
+answer to Q6 and it is a real hazard for `artifact: all`. There is no `fail-fast`
+key on the `deploy` strategy, so the default `true` applies: if the api leg exits
+non-zero, GitHub **cancels** the in-flight landing leg. The landing leg's Railway
+mutation at `:238-252` has already been issued by then; only the tracking loop at
+`:260-313` is killed. Result: production landing has a new image, no
+success/failure verdict, no `Retag verified image as production` (`:318-323`), no
+step summary — the exact blind spot the freeze-poll loop exists to eliminate.
+
+The narrower question — can one artifact's failure make the *other* deploy a
+**wrong image**? — is **no**. Each leg's `IMAGE`, `IMAGE_REF` and
+`IMAGE_DIGEST_REF` derive from its own matrix row (`:179-182`), and a resolution
+failure aborts `plan` before any matrix exists, so nothing deploys at all. The
+isolation is sound; the cancellation behavior is not.
+
+**Fix:** add `fail-fast: false` under `strategy` on `deploy` (as `plan`'s
+predecessor jobs had in the first revision). A promotion already in flight should
+be allowed to report its outcome.
+
+### Minor
+
+#### s1 — Railway still resolves a mutable tag post-gate (residual, tiny window)
+`.github/workflows/promote.yml:202-207, 250`
+
+`Pin verified SHA tag` re-points `${IMAGE}:${sha_short}` at the verified digest,
+then Railway is given `source.image = "$IMAGE_REF"` — a **tag**. The bits Railway
+pulls are whatever that tag resolves to at pull time, not the digest this
+workflow verified. The pin immediately precedes the mutation so the window is
+seconds wide, and the only writer of that tag is a build of the identical commit,
+so this is genuinely minor and it is inherited from `main` rather than introduced
+here. It is, however, the last indirect mutable-tag dependency in the shipped
+path, so it belongs in the answer to Q1.
+
+**Fix (optional):** set `source.image` to `"$IMAGE_DIGEST_REF"` and compare
+`current_image` / `.meta.image` against the same digest ref. Keep the SHA-tag pin
+for human legibility. Worth confirming Railway's UI renders a digest ref
+acceptably before making the change.
+
+#### s2 — `GITHUB_ENV` write of `FROM_TAG` is shadowed by the job-level `env:` of the same name
+`.github/workflows/promote.yml:44` vs `:90`
+
+`FROM_TAG` is declared at job level from the raw input (`:44`), and the
+normalized 7-char value is written to `$GITHUB_ENV` (`:90`). Environment-file
+variables sit *below* workflow/job `env:` blocks in the runner's precedence
+order, so the later `Resolve source images` step very likely reads the
+**untruncated** input, not the truncation. Consequence: dispatching a 40-char SHA
+— explicitly advertised by the input description at `:16` — builds
+`source=…:<40 chars>`, which was never pushed, so the run dies at `:119` with
+"Image … does not exist". Fails closed, and `api`/`staging`/7-char paths are
+unaffected, so this is a usability defect, not a safety one. Inherited shape
+(`main` carried the same reliance with a comment claiming it worked), so I flag
+it as needing one empirical confirmation rather than asserting it outright.
+
+Note the delta also removed the old resolve job's defensive re-check
+("Resolved from-tag must be 'staging' or a 7-character…"), which is what would
+have caught this loudly.
+
+**Fix:** stop round-tripping through `GITHUB_ENV`. Emit
+`from_tag=$FROM_TAG` as a step output from `select`, and scope it to the
+consuming step where precedence is unambiguous:
+
+```yaml
+      - name: Resolve source images
+        env:
+          ARTIFACT_ROWS: ${{ steps.select.outputs.rows }}
+          FROM_TAG: ${{ steps.select.outputs.from_tag }}
+```
+
+Then drop `FROM_TAG` from the job-level `env:` block, leaving `select` to read
+`${{ inputs.from-tag }}` via its own step `env:`.
+
+#### s3 — empty-matrix path is unguarded at the consumer too
+`.github/workflows/promote.yml:176`
+
+Complementary to S2: `fromJSON` of `{"include":[]}` is valid input. If S2's count
+check is added this is unreachable, but a `needs.plan.outputs.matrix != '{"include":[]}'`
+condition on `deploy` would make the intent explicit. Optional.
+
+### Nits
+
+#### n4 — `contents: read` on `plan` is above the minimum (Q5)
+`.github/workflows/promote.yml:37-39`
+
+The widening from `permissions: {}` is justified: `imagetools inspect` against
+GHCR needs `packages: read`, and `plan` correctly does **not** take
+`packages: write` (it pushes nothing — both `imagetools create` calls live in
+`deploy`, `:205` and `:321`). But `plan` has no `actions/checkout` step and reads
+no repository content, so `contents: read` is unused. `packages: read` alone is
+the true minimum. Harmless; noting for exactness since the question was asked.
+
+#### n5 — the approval comment is accurate; it also corrects pass-1's m5
+`.github/workflows/promote.yml:172-173`
+
+"One GitHub approval covers all jobs queued for this environment in a run; only
+an individually re-run matrix leg gets its own approval." Both clauses check out:
+pending deployments are keyed by (run, environment), so approving `production`
+releases every job waiting on it at that moment — including all matrix legs, which
+queue together the instant `plan` completes — and re-running a single failed job
+creates a fresh pending deployment needing its own approval. The one nuance the
+sentence does not cover: a job that reaches the same environment *later* in the
+same run, after it resumed, does re-prompt. No such job exists here, and the word
+"queued" already carries the qualifier, so the comment is fine as written.
+
+This **supersedes pass-1 finding m5**, which asserted `artifact: all` would
+produce two separate approval prompts. That was wrong; one approval covers both
+legs. Since both legs' digests are frozen pre-gate, a single approval covering
+both is the correct semantics, not a gap.
+
+### Resolved by this delta (Q4 and pass-1 carryover)
+
+- **Pass-1 M1 (matrix job-output merge hazard) — fully resolved.** The
+  `api_digest` / `landing_digest` / … output keys are gone; per-artifact data now
+  rides inside the matrix rows themselves (`:150-155`), so there is no
+  last-leg-wins merge to reason about at all. This is a better fix than either
+  option I proposed.
+- **Pass-1 M2 (not actually table-driven) — resolved.** Adding `web` is now
+  literally one row at `:68-79`; nothing else in the file enumerates artifacts.
+- **Pass-1 m1 (inconsistent validation trust model) — resolved.** Validation and
+  consumption now live in the same job.
+- **Pass-1 m4 (`digest_output` / `sha_output` columns) — resolved.** Columns
+  deleted.
+- **No dangling references.** Grepped: `needs.` appears only at `:176`
+  (`needs.plan.outputs.matrix`); no `needs.resolve` survives. `plan`'s removed
+  `from_tag` output has no remaining consumer. `steps.select.outputs.rows`
+  (`:109`) and `steps.resolve.outputs.matrix` (`:41`) both resolve to live step
+  ids. `REGISTRY` is used at `:102`, `:116`, `:191`; workflow-level
+  `packages: write` is still required by `deploy`'s two `imagetools create` calls.
+  No orphaned env or permissions beyond n4.
+- **jq construction is injection-safe (Q3).** `artifact_rows` (`:68-79`) is a
+  constant literal. Every dynamic value enters jq via `--arg` / `--argjson`
+  (`:83-86`, `:150-155`) — never string-interpolated into a jq program — so a
+  hostile digest is JSON-escaped, and `jq -c` guarantees the single line that
+  makes the `$GITHUB_OUTPUT` writes at `:93`, `:166` injection-proof. `${{ matrix.digest }}`
+  at `:182` interpolates into a YAML **value** position evaluated after parsing,
+  so it cannot break out of the `env:` block, and it is never `eval`'d — it is
+  read only as `"$IMAGE_DIGEST_REF"` in quoted argv position. Safe today; see S1
+  for why I still want the regex.
