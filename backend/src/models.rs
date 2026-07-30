@@ -8,7 +8,105 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use utoipa::ToSchema;
 use uuid::Uuid;
+
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct HealthResponse {
+    pub status: String,
+    pub service: String,
+    pub database: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct FeedbackModesDiscovery {
+    pub never_ask: String,
+    pub ask_once: String,
+    pub ask_always: String,
+    pub off: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct TelemetryDiscovery {
+    pub url: String,
+    pub authentication: String,
+    pub delivery: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct FeedbackRequiredFieldsDiscovery {
+    pub summary: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FeedbackConsentDiscovery {
+    pub prompt: String,
+    pub ask_once_scope: String,
+    pub ask_always_scope: String,
+    pub on_refusal_or_no_response: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FeedbackSubmissionDiscovery {
+    pub url: String,
+    pub authentication: String,
+    pub required_fields: FeedbackRequiredFieldsDiscovery,
+    pub optional_fields: Vec<String>,
+    pub finding_kinds: Vec<String>,
+    pub finding_severities: Vec<String>,
+    pub consent: FeedbackConsentDiscovery,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct ClassificationDiscovery {
+    pub http: String,
+    pub mcp: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct McpDiscovery {
+    pub protocol_version: String,
+    pub transport: String,
+    pub discovery_method: String,
+    pub required_headers: Vec<String>,
+    pub transport_sessions: bool,
+    pub legacy_compatibility: Vec<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct IntegrationsDiscovery {
+    pub node: String,
+    pub python: String,
+    pub go: String,
+    pub rust: String,
+    pub protocol: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct ReliabilityDiscovery {
+    pub http: String,
+    pub mcp: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FeedbackDiscoveryResponse {
+    pub name: String,
+    pub version: u8,
+    pub purpose: String,
+    pub feedback_modes: FeedbackModesDiscovery,
+    pub telemetry: TelemetryDiscovery,
+    pub feedback_submission: FeedbackSubmissionDiscovery,
+    pub classification: ClassificationDiscovery,
+    pub mcp: McpDiscovery,
+    pub integrations: IntegrationsDiscovery,
+    pub reliability: ReliabilityDiscovery,
+    pub identity: String,
+    pub privacy: String,
+}
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
@@ -192,7 +290,7 @@ pub(crate) struct ProductInteraction {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProductFeedbackReport {
     pub id: Uuid,
@@ -201,10 +299,46 @@ pub(crate) struct ProductFeedbackReport {
     pub summary: String,
     pub impact: Option<String>,
     pub confidence: Option<f64>,
+    #[schema(value_type = Vec<FeedbackFinding>)]
     pub findings: Value,
+    #[schema(value_type = Option<FeedbackWorkaround>)]
     pub workaround: Option<Value>,
     pub source: String,
     pub created_at: DateTime<Utc>,
+}
+
+/// Schema-only view of legacy JSONB findings. Known fields are optional and
+/// additional properties remain allowed because stored output is passed through.
+#[derive(Debug, ToSchema)]
+#[allow(
+    dead_code,
+    reason = "this type exists only to describe permissive legacy JSONB output in OpenAPI"
+)]
+pub(crate) struct FeedbackFinding {
+    pub kind: Option<String>,
+    pub topic: Option<String>,
+    pub severity: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// Schema-only view of legacy JSONB workarounds. Known fields are optional and
+/// additional properties remain allowed because stored output is passed through.
+#[derive(Debug, ToSchema)]
+#[allow(
+    dead_code,
+    reason = "this type exists only to describe permissive legacy JSONB output in OpenAPI"
+)]
+pub(crate) struct FeedbackWorkaround {
+    pub used: Option<bool>,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProductFeedbackAcceptedResponse {
+    pub accepted: bool,
+    pub interaction_id: Uuid,
+    pub report: ProductFeedbackReport,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -369,20 +503,20 @@ pub(crate) enum FeedbackReportsResponse {
     Page(FeedbackReportsPage),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct TelemetryBatchInput {
     pub events: Vec<InteractionTelemetryInput>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TelemetryBatchResult {
     pub accepted: usize,
     pub dropped: usize,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct InteractionTelemetryInput {
     pub interaction_id: Uuid,
@@ -401,7 +535,7 @@ pub(crate) struct InteractionTelemetryInput {
     pub occurred_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct FeedbackFindingInput {
     pub kind: String,
@@ -410,14 +544,14 @@ pub(crate) struct FeedbackFindingInput {
     pub detail: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct FeedbackWorkaroundInput {
     pub used: bool,
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ProductFeedbackReportInput {
     pub summary: String,
@@ -429,7 +563,7 @@ pub(crate) struct ProductFeedbackReportInput {
     pub consent: Option<FeedbackConsentInput>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct FeedbackConsentInput {
     pub user_approved: bool,

@@ -8,7 +8,13 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde_json::json;
+use serde::Serialize;
+use utoipa::ToSchema;
+
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct ApiErrorEnvelope {
+    pub error: String,
+}
 
 #[derive(Debug)]
 pub(crate) struct ApiError {
@@ -56,7 +62,13 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, Json(json!({ "error": self.message }))).into_response()
+        (
+            self.status,
+            Json(ApiErrorEnvelope {
+                error: self.message,
+            }),
+        )
+            .into_response()
     }
 }
 

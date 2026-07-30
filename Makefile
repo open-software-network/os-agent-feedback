@@ -1,4 +1,4 @@
-.PHONY: help install node-install backend-install node-version-check backend-fmt-check backend-clippy backend-test biome-check biome-fix node-test landing-check sdk-node-test docs-validate docs-a11y check
+.PHONY: help install node-install backend-install node-version-check backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test landing-check sdk-node-test docs-validate docs-a11y types check
 
 .DEFAULT_GOAL := help
 
@@ -31,6 +31,18 @@ backend-clippy:  ## Run strict Clippy checks for every backend target
 backend-test:  ## Run the locked backend Rust test suite
 	cd backend && cargo test --locked
 
+backend-openapi:  ## Regenerate the committed backend OpenAPI document
+	@set -e; \
+		tmp_file=$$(mktemp -t epode-openapi); \
+		trap 'rm -f "$$tmp_file"' EXIT; \
+		(cd backend && cargo run --quiet --bin agent-feedback -- --print-openapi) > "$$tmp_file"; \
+		install -m 644 "$$tmp_file" backend/openapi.json
+
+backend-openapi-check:  ## Check the committed backend OpenAPI document for drift
+	@set -e; \
+		generated_spec=$$(cd backend && cargo run --quiet --bin agent-feedback -- --print-openapi); \
+		printf '%s\n' "$$generated_spec" | diff -u backend/openapi.json -
+
 # --- Node ---
 biome-check:  ## Check formatting and linting for Biome-managed files
 	pnpm check
@@ -59,6 +71,10 @@ docs-validate: node-version-check  ## Validate the Mintlify documentation
 docs-a11y: node-version-check  ## Run Mintlify accessibility checks
 	pnpm run docs:a11y
 
+# --- Generated API types ---
+types: node-version-check backend-openapi  ## Regenerate OpenAPI TypeScript types for the phase 2 web app
+	pnpm run gen:types
+
 # --- Combined ---
 # node-version-check runs first on purpose: the docs targets at the end hard-fail
 # on Node 25+, and without the early gate that failure arrives only after a full
@@ -66,4 +82,4 @@ docs-a11y: node-version-check  ## Run Mintlify accessibility checks
 # Do not run this with `make -j`: the backend targets serialize on cargo's build
 # directory lock anyway, and concurrent pnpm targets can race on node_modules if
 # the tree is stale.
-check: node-version-check backend-fmt-check backend-clippy backend-test biome-check node-test landing-check sdk-node-test docs-validate docs-a11y  ## Run all backend, Node, SDK, landing-page, and docs checks
+check: node-version-check backend-fmt-check backend-clippy backend-test backend-openapi-check biome-check node-test landing-check sdk-node-test docs-validate docs-a11y  ## Run all backend, OpenAPI, Node, SDK, landing-page, and docs checks

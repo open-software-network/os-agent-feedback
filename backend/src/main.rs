@@ -25,15 +25,24 @@ use tower_http::{
     services::ServeDir,
     trace::TraceLayer,
 };
+use utoipa::{
+    Modify, OpenApi,
+    openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, SecurityScheme},
+};
+use utoipa_axum::{router::OpenApiRouter, routes};
 use uuid::Uuid;
 
 use crate::{
-    error::ApiError,
+    error::{ApiError, ApiErrorEnvelope},
     models::{
-        CreateApiKeyInput, CreateProductInput, CreateTeamInvitationInput, CurrentUser,
-        DashboardContext, DeleteProductInput, FeedbackListInteractionsInput,
-        FeedbackListReportsInput, PolicyInput, ProductAuth, ProductFeedbackReportInput,
-        TelemetryBatchInput, UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput,
+        ClassificationDiscovery, CreateApiKeyInput, CreateProductInput, CreateTeamInvitationInput,
+        CurrentUser, DashboardContext, DeleteProductInput, FeedbackConsentDiscovery,
+        FeedbackDiscoveryResponse, FeedbackListInteractionsInput, FeedbackListReportsInput,
+        FeedbackModesDiscovery, FeedbackRequiredFieldsDiscovery, FeedbackSubmissionDiscovery,
+        HealthResponse, IntegrationsDiscovery, McpDiscovery, PolicyInput, ProductAuth,
+        ProductFeedbackAcceptedResponse, ProductFeedbackReportInput, ReliabilityDiscovery,
+        TelemetryBatchInput, TelemetryBatchResult, TelemetryDiscovery, UpdateFeedbackWorkflowInput,
+        UpdateNameInput, UpdateTeamMemberInput,
     },
     os_accounts::{
         ACCESS_COOKIE, OsAccountsClient, PKCE_COOKIE, REFRESH_COOKIE, STATE_COOKIE, TokenPair,
@@ -62,8 +71,154 @@ struct AppState {
 
 const TEAM_INVITE_COOKIE: &str = "af_team_invite";
 
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "Epode Agent Feedback API",
+        description = "Structured product feedback collection and workspace management API."
+    ),
+    modifiers(&SecuritySchemes)
+)]
+struct ApiDoc;
+
+struct SecuritySchemes;
+
+impl Modify for SecuritySchemes {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let components = openapi
+            .components
+            .get_or_insert_with(utoipa::openapi::Components::new);
+        components.add_security_scheme(
+            "api_key",
+            SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::with_description(
+                "x-api-key",
+                "Epode product API key.",
+            ))),
+        );
+        components.add_security_scheme(
+            "bearer_auth",
+            SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
+        );
+        components.add_security_scheme(
+            "session_cookie",
+            SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::with_description(
+                ACCESS_COOKIE,
+                "Epode dashboard session cookie.",
+            ))),
+        );
+    }
+}
+
+fn build_app_router() -> OpenApiRouter<Arc<AppState>> {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::HeaderName::from_static("x-api-key"),
+            header::HeaderName::from_static("x-workspace-id"),
+            header::HeaderName::from_static("mcp-protocol-version"),
+            header::HeaderName::from_static("mcp-method"),
+            header::HeaderName::from_static("mcp-name"),
+        ]);
+    let non_api_routes = Router::new()
+        .route("/", get(root_page))
+        .nest_service("/static", ServeDir::new("public"));
+    let mut api_document = ApiDoc::openapi();
+    // Cargo.toml has no license metadata, so omit utoipa's empty license object.
+    api_document.info.license = None;
+
+    OpenApiRouter::with_openapi(api_document)
+        .merge(non_api_routes.into())
+        .routes(routes!(health))
+        .routes(routes!(feedback_discovery_v2))
+        .route("/auth/start", get(auth_start))
+        .route("/auth/callback", get(auth_callback))
+        .route("/join/{invitation_id}", get(join_team_handler))
+        .route("/api/auth/logout", post(logout_handler))
+        .route("/api/dashboard", get(dashboard_handler))
+        .route(
+            "/api/dashboard/reports/{report_id}",
+            get(dashboard_report_handler).patch(update_feedback_workflow_handler),
+        )
+        .route(
+            "/api/dashboard/interactions/{interaction_id}",
+            get(dashboard_interaction_handler),
+        )
+        .route(
+            "/api/dashboard/sessions/{session_id}",
+            get(dashboard_session_handler),
+        )
+        .route("/api/products", post(create_product_handler))
+        .route(
+            "/api/products/{product_id}",
+            patch(rename_product_handler).delete(delete_product_handler),
+        )
+        .route("/api/team", patch(rename_team_handler))
+        .route(
+            "/api/team/invitations",
+            post(create_team_invitation_handler),
+        )
+        .route(
+            "/api/team/invitations/{invitation_id}",
+            delete(revoke_team_invitation_handler),
+        )
+        .route(
+            "/api/team/members/{os_user_id}",
+            patch(update_team_member_handler).delete(remove_team_member_handler),
+        )
+        .route(
+            "/api/team/ownership/{os_user_id}",
+            post(transfer_team_ownership_handler),
+        )
+        .route("/api/settings/api-keys", post(create_api_key_handler))
+        .route(
+            "/api/settings/api-keys/{key_id}",
+            delete(revoke_api_key_handler),
+        )
+        .route(
+            "/api/settings/api-keys/{key_id}/rotate",
+            post(rotate_api_key_handler),
+        )
+        .route("/api/settings/policy", post(update_policy_handler))
+        .routes(routes!(telemetry_batch_handler))
+        .routes(routes!(product_feedback_handler))
+        .route("/mcp", get(mcp_info).post(mcp_handler))
+        .layer(DefaultBodyLimit::max(64 * 1024))
+        .layer(cors)
+        .layer(CompressionLayer::new())
+        .layer(TraceLayer::new_for_http())
+        .layer(from_fn(security_headers))
+}
+
+pub(crate) fn openapi_spec_json() -> anyhow::Result<String> {
+    let (_router, openapi) = build_app_router().split_for_parts();
+    Ok(serde_json::to_string_pretty(&openapi)?)
+}
+
+#[allow(
+    clippy::print_stdout,
+    reason = "the OpenAPI CLI mode intentionally emits the generated document to stdout"
+)]
+fn print_openapi() -> anyhow::Result<()> {
+    println!("{}", openapi_spec_json()?);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if env::args().nth(1).as_deref() == Some("--print-openapi") {
+        print_openapi()?;
+        return Ok(());
+    }
+
     dotenvy::dotenv().ok();
     let production = env::var("RAILWAY_ENVIRONMENT").is_ok()
         || env::var("APP_ENV").as_deref() == Ok("production");
@@ -140,91 +295,8 @@ async fn main() -> anyhow::Result<()> {
     });
     spawn_retention_worker(state.pool.clone());
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PATCH,
-            Method::DELETE,
-            Method::OPTIONS,
-        ])
-        .allow_headers([
-            header::AUTHORIZATION,
-            header::CONTENT_TYPE,
-            header::HeaderName::from_static("x-api-key"),
-            header::HeaderName::from_static("x-workspace-id"),
-            header::HeaderName::from_static("mcp-protocol-version"),
-            header::HeaderName::from_static("mcp-method"),
-            header::HeaderName::from_static("mcp-name"),
-        ]);
-
-    let app = Router::new()
-        .route("/", get(root_page))
-        .route("/api/health", get(health))
-        .route(
-            "/.well-known/agent-feedback-v1.json",
-            get(feedback_discovery_v2),
-        )
-        .route("/auth/start", get(auth_start))
-        .route("/auth/callback", get(auth_callback))
-        .route("/join/{invitation_id}", get(join_team_handler))
-        .route("/api/auth/logout", post(logout_handler))
-        .route("/api/dashboard", get(dashboard_handler))
-        .route(
-            "/api/dashboard/reports/{report_id}",
-            get(dashboard_report_handler).patch(update_feedback_workflow_handler),
-        )
-        .route(
-            "/api/dashboard/interactions/{interaction_id}",
-            get(dashboard_interaction_handler),
-        )
-        .route(
-            "/api/dashboard/sessions/{session_id}",
-            get(dashboard_session_handler),
-        )
-        .route("/api/products", post(create_product_handler))
-        .route(
-            "/api/products/{product_id}",
-            patch(rename_product_handler).delete(delete_product_handler),
-        )
-        .route("/api/team", patch(rename_team_handler))
-        .route(
-            "/api/team/invitations",
-            post(create_team_invitation_handler),
-        )
-        .route(
-            "/api/team/invitations/{invitation_id}",
-            delete(revoke_team_invitation_handler),
-        )
-        .route(
-            "/api/team/members/{os_user_id}",
-            patch(update_team_member_handler).delete(remove_team_member_handler),
-        )
-        .route(
-            "/api/team/ownership/{os_user_id}",
-            post(transfer_team_ownership_handler),
-        )
-        .route("/api/settings/api-keys", post(create_api_key_handler))
-        .route(
-            "/api/settings/api-keys/{key_id}",
-            delete(revoke_api_key_handler),
-        )
-        .route(
-            "/api/settings/api-keys/{key_id}/rotate",
-            post(rotate_api_key_handler),
-        )
-        .route("/api/settings/policy", post(update_policy_handler))
-        .route("/api/v2/telemetry/batches", post(telemetry_batch_handler))
-        .route("/api/v2/reports", post(product_feedback_handler))
-        .route("/mcp", get(mcp_info).post(mcp_handler))
-        .nest_service("/static", ServeDir::new("public"))
-        .layer(DefaultBodyLimit::max(64 * 1024))
-        .layer(cors)
-        .layer(CompressionLayer::new())
-        .layer(TraceLayer::new_for_http())
-        .layer(from_fn(security_headers))
-        .with_state(state);
+    let (app, _openapi) = build_app_router().split_for_parts();
+    let app = app.with_state(state);
 
     let address = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(address).await?;
@@ -336,73 +408,140 @@ async fn read_page(path: &str, fallback: &str) -> String {
         .unwrap_or_else(|_| format!("<!doctype html><title>{fallback}</title><h1>{fallback}</h1>"))
 }
 
-async fn health(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+#[utoipa::path(
+    get,
+    path = "/api/health",
+    tag = "system",
+    responses(
+        (status = 200, description = "API and database are healthy", body = HealthResponse),
+        (status = 500, description = "Database health check failed", body = ApiErrorEnvelope)
+    )
+)]
+async fn health(State(state): State<Arc<AppState>>) -> Result<Json<HealthResponse>, ApiError> {
     sqlx::query_scalar::<_, i32>("SELECT 1")
         .fetch_one(&state.pool)
         .await?;
-    Ok(Json(
-        json!({ "status": "ok", "service": "agent-feedback", "database": "ok" }),
-    ))
+    Ok(Json(HealthResponse {
+        status: "ok".to_owned(),
+        service: "agent-feedback".to_owned(),
+        database: "ok".to_owned(),
+    }))
 }
 
-async fn feedback_discovery_v2(State(state): State<Arc<AppState>>) -> Json<Value> {
-    Json(json!({
-        "name": "Agent Feedback Protocol",
-        "version": 1,
-        "purpose": "Collect one structured product feedback report from a customer's independent agent.",
-        "feedbackModes": {
-            "never_ask": "The agent submits its own assessment autonomously without interrupting the user.",
-            "ask_once": "The agent asks once per product and agent runtime, then remembers approval or refusal.",
-            "ask_always": "The agent asks before every individual feedback report.",
-            "off": "No feedback contract is emitted."
+#[utoipa::path(
+    get,
+    path = "/.well-known/agent-feedback-v1.json",
+    tag = "ingest",
+    responses(
+        (
+            status = 200,
+            description = "Agent Feedback protocol discovery document",
+            body = FeedbackDiscoveryResponse
+        )
+    )
+)]
+async fn feedback_discovery_v2(
+    State(state): State<Arc<AppState>>,
+) -> Json<FeedbackDiscoveryResponse> {
+    Json(feedback_discovery(&state.public_base_url))
+}
+
+fn feedback_discovery(public_base_url: &str) -> FeedbackDiscoveryResponse {
+    FeedbackDiscoveryResponse {
+        name: "Agent Feedback Protocol".to_owned(),
+        version: 1,
+        purpose:
+            "Collect one structured product feedback report from a customer's independent agent."
+                .to_owned(),
+        feedback_modes: FeedbackModesDiscovery {
+            never_ask:
+                "The agent submits its own assessment autonomously without interrupting the user."
+                    .to_owned(),
+            ask_once: "The agent asks once per product and agent runtime, then remembers approval or refusal."
+                .to_owned(),
+            ask_always: "The agent asks before every individual feedback report.".to_owned(),
+            off: "No feedback contract is emitted.".to_owned(),
         },
-        "telemetry": {
-            "url": format!("{}/api/v2/telemetry/batches", state.public_base_url),
-            "authentication": "Bearer af_live_... company product key",
-            "delivery": "bounded, asynchronous, and non-blocking"
+        telemetry: TelemetryDiscovery {
+            url: format!("{public_base_url}/api/v2/telemetry/batches"),
+            authentication: "Bearer af_live_... company product key".to_owned(),
+            delivery: "bounded, asynchronous, and non-blocking".to_owned(),
         },
-        "feedbackSubmission": {
-            "url": format!("{}/api/v2/reports", state.public_base_url),
-            "authentication": "Bearer afr2_... short-lived interaction capability",
-            "requiredFields": {
-                "summary": "concise description of how the product contributed, 8 to 700 characters"
+        feedback_submission: FeedbackSubmissionDiscovery {
+            url: format!("{public_base_url}/api/v2/reports"),
+            authentication: "Bearer afr2_... short-lived interaction capability".to_owned(),
+            required_fields: FeedbackRequiredFieldsDiscovery {
+                summary:
+                    "concise description of how the product contributed, 8 to 700 characters"
+                        .to_owned(),
             },
-            "optionalFields": ["impact", "confidence", "findings", "workaround"],
-            "findingKinds": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"],
-            "findingSeverities": ["minor", "major", "blocking"],
-            "consent": {
-                "prompt": "May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.",
-                "askOnceScope": "per product and agent runtime; no user or agent identity is stored by Epode",
-                "askAlwaysScope": "per feedback report",
-                "onRefusalOrNoResponse": "do not submit"
-            }
+            optional_fields: ["impact", "confidence", "findings", "workaround"]
+                .map(str::to_owned)
+                .to_vec(),
+            finding_kinds: [
+                "strength",
+                "friction",
+                "defect",
+                "gap",
+                "suggestion",
+                "uncertainty",
+                "other",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            finding_severities: ["minor", "major", "blocking"]
+                .map(str::to_owned)
+                .to_vec(),
+            consent: FeedbackConsentDiscovery {
+                prompt: "May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.".to_owned(),
+                ask_once_scope:
+                    "per product and agent runtime; no user or agent identity is stored by Epode"
+                        .to_owned(),
+                ask_always_scope: "per feedback report".to_owned(),
+                on_refusal_or_no_response: "do not submit".to_owned(),
+            },
         },
-        "classification": {
-            "http": "unclassified until a feedback report is submitted",
-            "mcp": "confirmed immediately by protocol tool use"
+        classification: ClassificationDiscovery {
+            http: "unclassified until a feedback report is submitted".to_owned(),
+            mcp: "confirmed immediately by protocol tool use".to_owned(),
         },
-        "mcp": {
-            "protocolVersion": MCP_PROTOCOL_VERSION,
-            "transport": "stateless Streamable HTTP",
-            "discoveryMethod": "server/discover",
-            "requiredHeaders": ["MCP-Protocol-Version", "Mcp-Method", "Mcp-Name for named requests"],
-            "transportSessions": false,
-            "legacyCompatibility": ["2025-11-25"]
+        mcp: McpDiscovery {
+            protocol_version: MCP_PROTOCOL_VERSION.to_owned(),
+            transport: "stateless Streamable HTTP".to_owned(),
+            discovery_method: "server/discover".to_owned(),
+            required_headers: [
+                "MCP-Protocol-Version",
+                "Mcp-Method",
+                "Mcp-Name for named requests",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            transport_sessions: false,
+            legacy_compatibility: vec!["2025-11-25".to_owned()],
         },
-        "integrations": {
-            "node": format!("{}/static/agent-feedback-node-0.1.0.tgz", state.public_base_url),
-            "python": format!("{}/static/agent_feedback-0.1.0-py3-none-any.whl", state.public_base_url),
-            "go": format!("{}/static/agent-feedback-go-0.1.0.tar.gz", state.public_base_url),
-            "rust": format!("{}/static/agent-feedback-rust-0.1.0.tar.gz", state.public_base_url),
-            "protocol": format!("{}/static/agent-feedback-protocol-v1.zip", state.public_base_url)
+        integrations: IntegrationsDiscovery {
+            node: format!(
+                "{public_base_url}/static/agent-feedback-node-0.1.0.tgz"
+            ),
+            python: format!(
+                "{public_base_url}/static/agent_feedback-0.1.0-py3-none-any.whl"
+            ),
+            go: format!("{public_base_url}/static/agent-feedback-go-0.1.0.tar.gz"),
+            rust: format!(
+                "{public_base_url}/static/agent-feedback-rust-0.1.0.tar.gz"
+            ),
+            protocol: format!(
+                "{public_base_url}/static/agent-feedback-protocol-v1.zip"
+            ),
         },
-        "reliability": {
-            "http": "best effort for generic agents; deterministic with a feedback-aware runtime",
-            "mcp": "protocol-backed explicit feedback tool"
+        reliability: ReliabilityDiscovery {
+            http: "best effort for generic agents; deterministic with a feedback-aware runtime"
+                .to_owned(),
+            mcp: "protocol-backed explicit feedback tool".to_owned(),
         },
-        "identity": "Agent identity is neither required nor claimed. customerRef and runtime hints are optional opaque context.",
-        "privacy": "Never submit prompts, transcripts, secrets, credentials, personal data, customer content, or raw tool payloads."
-    }))
+        identity: "Agent identity is neither required nor claimed. customerRef and runtime hints are optional opaque context.".to_owned(),
+        privacy: "Never submit prompts, transcripts, secrets, credentials, personal data, customer content, or raw tool payloads.".to_owned(),
+    }
 }
 
 async fn auth_start(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
@@ -944,6 +1083,35 @@ fn safe_input<T: DeserializeOwned>(value: Value) -> Result<T, ApiError> {
         .map_err(|error| ApiError::bad_request(format!("Invalid request: {error}")))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v2/telemetry/batches",
+    tag = "ingest",
+    request_body = TelemetryBatchInput,
+    responses(
+        (
+            status = 202,
+            description = "Telemetry batch accepted",
+            body = TelemetryBatchResult
+        ),
+        (
+            status = 400,
+            description = "Invalid telemetry batch or malformed JSON body",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Invalid or expired product API key", body = ApiErrorEnvelope),
+        (status = 413, description = "Request body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "Request body is not JSON", body = String, content_type = "text/plain"),
+        (status = 500, description = "Telemetry ingestion failed", body = ApiErrorEnvelope)
+    ),
+    security(
+        ("api_key" = []),
+        ("bearer_auth" = [])
+    )
+)]
 async fn telemetry_batch_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -956,13 +1124,41 @@ async fn telemetry_batch_handler(
         safe_input::<TelemetryBatchInput>(value)?,
     )
     .await?;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(json!({ "accepted": result.accepted, "dropped": result.dropped })),
-    )
-        .into_response())
+    Ok((StatusCode::ACCEPTED, Json(result)).into_response())
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v2/reports",
+    tag = "ingest",
+    request_body = ProductFeedbackReportInput,
+    responses(
+        (
+            status = 200,
+            description = "Feedback report accepted",
+            body = ProductFeedbackAcceptedResponse
+        ),
+        (
+            status = 400,
+            description = "Invalid feedback report or malformed JSON body",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Invalid or expired interaction capability", body = ApiErrorEnvelope),
+        (status = 403, description = "Required user consent is missing or invalid", body = ApiErrorEnvelope),
+        (status = 409, description = "Interaction belongs to another product environment", body = ApiErrorEnvelope),
+        (status = 410, description = "Feedback collection is disabled", body = ApiErrorEnvelope),
+        (status = 413, description = "Request body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "Request body is not JSON", body = String, content_type = "text/plain"),
+        (status = 500, description = "Feedback submission failed", body = ApiErrorEnvelope)
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = [])
+    )
+)]
 async fn product_feedback_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -977,11 +1173,11 @@ async fn product_feedback_handler(
         safe_input::<ProductFeedbackReportInput>(value)?,
     )
     .await?;
-    let mut response = Json(json!({
-        "accepted": true,
-        "interactionId": interaction.id,
-        "report": report
-    }))
+    let mut response = Json(ProductFeedbackAcceptedResponse {
+        accepted: true,
+        interaction_id: interaction.id,
+        report,
+    })
     .into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
@@ -1417,10 +1613,46 @@ mod page_tests {
         reason = "test failures should abort at the assertion site"
     )]
 
+    use std::collections::BTreeSet;
+
     use axum::{body::to_bytes, http::StatusCode};
 
-    use super::{ApiError, mcp_auth_error, mcp_tool_allowed, mcp_tools, reveal_auth_error};
-    use serde_json::Value;
+    use super::{
+        ApiError, build_app_router, feedback_discovery, mcp_auth_error, mcp_tool_allowed,
+        mcp_tools, reveal_auth_error,
+    };
+    use serde_json::{Value, json};
+
+    // Chunk 1b route ledger; this must be empty when chunk 1b is complete.
+    const KNOWN_UNANNOTATED: &[&str] = &[
+        "GET /api/dashboard",
+        "GET /api/dashboard/interactions/{interaction_id}",
+        "GET /api/dashboard/reports/{report_id}",
+        "GET /api/dashboard/sessions/{session_id}",
+        "GET /auth/callback",
+        "GET /auth/start",
+        "GET /join/{invitation_id}",
+        "GET /mcp",
+        "POST /api/auth/logout",
+        "POST /api/products",
+        "POST /api/settings/api-keys",
+        "POST /api/settings/api-keys/{key_id}/rotate",
+        "POST /api/settings/policy",
+        "POST /api/team/invitations",
+        "POST /api/team/ownership/{os_user_id}",
+        "POST /mcp",
+        "PATCH /api/dashboard/reports/{report_id}",
+        "PATCH /api/products/{product_id}",
+        "PATCH /api/team",
+        "PATCH /api/team/members/{os_user_id}",
+        "DELETE /api/products/{product_id}",
+        "DELETE /api/settings/api-keys/{key_id}",
+        "DELETE /api/team/invitations/{invitation_id}",
+        "DELETE /api/team/members/{os_user_id}",
+    ];
+
+    const NON_API_ROUTES: &[&str] = &["GET /"];
+    const COVERAGE_GUARD_GUIDANCE: &str = "route registration form not understood by the coverage guard — teach `served_operations` about it or register the route with `.route(`";
 
     #[test]
     fn failed_authentication_message_is_revealed() {
@@ -1428,6 +1660,82 @@ mod page_tests {
         let revealed = reveal_auth_error(html);
         assert!(revealed.contains(r#"id="auth-error" class="auth-error">Try again"#));
         assert!(!revealed.contains("auth-error\" hidden"));
+    }
+
+    #[test]
+    fn feedback_discovery_document_matches_the_public_wire_contract() {
+        let actual = serde_json::to_value(feedback_discovery("https://epode.test")).unwrap();
+        let expected = json!({
+            "name": "Agent Feedback Protocol",
+            "version": 1,
+            "purpose": "Collect one structured product feedback report from a customer's independent agent.",
+            "feedbackModes": {
+                "never_ask": "The agent submits its own assessment autonomously without interrupting the user.",
+                "ask_once": "The agent asks once per product and agent runtime, then remembers approval or refusal.",
+                "ask_always": "The agent asks before every individual feedback report.",
+                "off": "No feedback contract is emitted."
+            },
+            "telemetry": {
+                "url": "https://epode.test/api/v2/telemetry/batches",
+                "authentication": "Bearer af_live_... company product key",
+                "delivery": "bounded, asynchronous, and non-blocking"
+            },
+            "feedbackSubmission": {
+                "url": "https://epode.test/api/v2/reports",
+                "authentication": "Bearer afr2_... short-lived interaction capability",
+                "requiredFields": {
+                    "summary": "concise description of how the product contributed, 8 to 700 characters"
+                },
+                "optionalFields": ["impact", "confidence", "findings", "workaround"],
+                "findingKinds": [
+                    "strength",
+                    "friction",
+                    "defect",
+                    "gap",
+                    "suggestion",
+                    "uncertainty",
+                    "other"
+                ],
+                "findingSeverities": ["minor", "major", "blocking"],
+                "consent": {
+                    "prompt": "May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.",
+                    "askOnceScope": "per product and agent runtime; no user or agent identity is stored by Epode",
+                    "askAlwaysScope": "per feedback report",
+                    "onRefusalOrNoResponse": "do not submit"
+                }
+            },
+            "classification": {
+                "http": "unclassified until a feedback report is submitted",
+                "mcp": "confirmed immediately by protocol tool use"
+            },
+            "mcp": {
+                "protocolVersion": "2026-07-28",
+                "transport": "stateless Streamable HTTP",
+                "discoveryMethod": "server/discover",
+                "requiredHeaders": [
+                    "MCP-Protocol-Version",
+                    "Mcp-Method",
+                    "Mcp-Name for named requests"
+                ],
+                "transportSessions": false,
+                "legacyCompatibility": ["2025-11-25"]
+            },
+            "integrations": {
+                "node": "https://epode.test/static/agent-feedback-node-0.1.0.tgz",
+                "python": "https://epode.test/static/agent_feedback-0.1.0-py3-none-any.whl",
+                "go": "https://epode.test/static/agent-feedback-go-0.1.0.tar.gz",
+                "rust": "https://epode.test/static/agent-feedback-rust-0.1.0.tar.gz",
+                "protocol": "https://epode.test/static/agent-feedback-protocol-v1.zip"
+            },
+            "reliability": {
+                "http": "best effort for generic agents; deterministic with a feedback-aware runtime",
+                "mcp": "protocol-backed explicit feedback tool"
+            },
+            "identity": "Agent identity is neither required nor claimed. customerRef and runtime hints are optional opaque context.",
+            "privacy": "Never submit prompts, transcripts, secrets, credentials, personal data, customer content, or raw tool payloads."
+        });
+
+        assert_eq!(actual, expected);
     }
 
     fn tool_names() -> Vec<String> {
@@ -1448,6 +1756,353 @@ mod page_tests {
         );
         assert!(!mcp_tool_allowed("agent_start_session"));
         assert!(mcp_tool_allowed("feedback_list_reports"));
+    }
+
+    fn documented_operations(openapi: &utoipa::openapi::OpenApi) -> Vec<(String, Option<String>)> {
+        openapi
+            .paths
+            .paths
+            .iter()
+            .flat_map(|(path, item)| {
+                [
+                    ("GET", item.get.as_ref()),
+                    ("POST", item.post.as_ref()),
+                    ("PUT", item.put.as_ref()),
+                    ("DELETE", item.delete.as_ref()),
+                    ("OPTIONS", item.options.as_ref()),
+                    ("HEAD", item.head.as_ref()),
+                    ("PATCH", item.patch.as_ref()),
+                    ("TRACE", item.trace.as_ref()),
+                ]
+                .into_iter()
+                .filter_map(move |(method, operation)| {
+                    operation.map(|operation| {
+                        (format!("{method} {path}"), operation.operation_id.clone())
+                    })
+                })
+            })
+            .collect()
+    }
+
+    fn route_builder_source() -> &'static str {
+        let (_, after_signature) = include_str!("main.rs")
+            .split_once("fn build_app_router()")
+            .expect("build_app_router source must be present");
+        let (builder, _) = after_signature
+            .split_once("pub(crate) fn openapi_spec_json")
+            .expect("openapi_spec_json must follow build_app_router");
+        builder
+    }
+
+    fn strip_rust_comments(source: &str) -> String {
+        let mut characters = source.chars().peekable();
+        let mut stripped = String::with_capacity(source.len());
+        let mut in_string = false;
+        let mut escaped = false;
+
+        while let Some(character) = characters.next() {
+            if in_string {
+                stripped.push(character);
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+
+            if character == '"' {
+                in_string = true;
+                stripped.push(character);
+                continue;
+            }
+
+            if character == '/' && characters.peek() == Some(&'/') {
+                characters.next();
+                stripped.push_str("  ");
+                for comment_character in characters.by_ref() {
+                    if comment_character == '\n' {
+                        stripped.push('\n');
+                        break;
+                    }
+                    stripped.push(' ');
+                }
+                continue;
+            }
+
+            if character == '/' && characters.peek() == Some(&'*') {
+                characters.next();
+                stripped.push_str("  ");
+                let mut depth = 1_u32;
+                while let Some(comment_character) = characters.next() {
+                    if comment_character == '\n' {
+                        stripped.push('\n');
+                    } else {
+                        stripped.push(' ');
+                    }
+
+                    if comment_character == '/' && characters.peek() == Some(&'*') {
+                        characters.next();
+                        stripped.push(' ');
+                        depth += 1;
+                    } else if comment_character == '*' && characters.peek() == Some(&'/') {
+                        characters.next();
+                        stripped.push(' ');
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                }
+                assert_eq!(depth, 0, "route builder source has an unterminated comment");
+                continue;
+            }
+
+            stripped.push(character);
+        }
+
+        stripped
+    }
+
+    fn guarded_route_builder_source() -> String {
+        const ALLOWED_REGISTRATION_FORMS: &[&str] = &[
+            ".merge(non_api_routes.into())",
+            ".nest_service(\"/static\", ServeDir::new(\"public\"))",
+        ];
+        const DENIED_REGISTRATION_FORMS: &[&str] = &[
+            ".route_service(",
+            ".nest(",
+            ".nest_service(",
+            ".merge(",
+            ".fallback(",
+            ".fallback_service(",
+            ".method_not_allowed_fallback(",
+        ];
+
+        let mut source = strip_rust_comments(route_builder_source());
+        for allowed in ALLOWED_REGISTRATION_FORMS {
+            assert_eq!(
+                source.matches(allowed).count(),
+                1,
+                "{COVERAGE_GUARD_GUIDANCE}: expected exactly one known exemption `{allowed}`"
+            );
+            source = source.replacen(allowed, "", 1);
+        }
+        for denied in DENIED_REGISTRATION_FORMS {
+            assert!(
+                !source.contains(denied),
+                "{COVERAGE_GUARD_GUIDANCE}: found unsupported `{denied}`"
+            );
+        }
+        source
+    }
+
+    fn route_calls(source: &str) -> Vec<&str> {
+        const MARKER: &str = ".route(";
+
+        let mut calls = Vec::new();
+        let mut cursor = 0;
+        while let Some(relative_start) = source[cursor..].find(MARKER) {
+            let arguments_start = cursor + relative_start + MARKER.len();
+            let mut depth = 1_u32;
+            let mut in_string = false;
+            let mut escaped = false;
+            let mut arguments_end = None;
+
+            for (relative_end, character) in source[arguments_start..].char_indices() {
+                if in_string {
+                    if escaped {
+                        escaped = false;
+                    } else if character == '\\' {
+                        escaped = true;
+                    } else if character == '"' {
+                        in_string = false;
+                    }
+                    continue;
+                }
+
+                match character {
+                    '"' => in_string = true,
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            arguments_end = Some(arguments_start + relative_end);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let arguments_end = arguments_end.expect("route call must have balanced parentheses");
+            calls.push(&source[arguments_start..arguments_end]);
+            cursor = arguments_end + 1;
+        }
+        calls
+    }
+
+    fn has_method_call(expression: &str, method: &str) -> bool {
+        let call = format!("{method}(");
+        expression.match_indices(&call).any(|(index, _)| {
+            index == 0
+                || !expression[..index]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+        })
+    }
+
+    fn served_operations(documented: &[(String, Option<String>)]) -> BTreeSet<String> {
+        const ROUTES_MARKER: &str = ".routes(routes!(";
+
+        let source = guarded_route_builder_source();
+        let mut served = BTreeSet::new();
+
+        for call in route_calls(&source) {
+            let call = call.trim_start();
+            assert!(
+                call.starts_with('"'),
+                "{COVERAGE_GUARD_GUIDANCE}: `.route` paths must be string literals"
+            );
+            let mut path_end = None;
+            let mut escaped = false;
+            for (offset, character) in call[1..].char_indices() {
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == '"' {
+                    path_end = Some(offset + 1);
+                    break;
+                }
+            }
+            let path_end = path_end.expect("route path string literal must be terminated");
+            let path = &call[1..path_end];
+            let method_router = call[path_end + 1..]
+                .trim_start()
+                .strip_prefix(',')
+                .expect("route call must include a method router");
+            assert!(
+                !has_method_call(method_router, "any")
+                    && !has_method_call(method_router, "on")
+                    && !method_router.contains("MethodRouter::new(")
+                    && !method_router.contains("MethodFilter::"),
+                "{COVERAGE_GUARD_GUIDANCE}: unsupported method router for `{path}`"
+            );
+
+            let mut recognized_method_count = 0_u8;
+            for (method_ident, method_name) in [
+                ("get", "GET"),
+                ("post", "POST"),
+                ("put", "PUT"),
+                ("delete", "DELETE"),
+                ("options", "OPTIONS"),
+                ("head", "HEAD"),
+                ("patch", "PATCH"),
+                ("trace", "TRACE"),
+            ] {
+                if has_method_call(method_router, method_ident) {
+                    served.insert(format!("{method_name} {path}"));
+                    recognized_method_count += 1;
+                }
+            }
+            assert!(
+                recognized_method_count > 0,
+                "{COVERAGE_GUARD_GUIDANCE}: no recognized method for `{path}`"
+            );
+        }
+
+        let mut remainder = source.as_str();
+        while let Some(marker_start) = remainder.find(ROUTES_MARKER) {
+            let handlers_start = marker_start + ROUTES_MARKER.len();
+            let after_marker = &remainder[handlers_start..];
+            let handlers_end = after_marker
+                .find(')')
+                .expect("routes! call must be terminated");
+            for handler in after_marker[..handlers_end]
+                .split(',')
+                .map(str::trim)
+                .filter(|handler| !handler.is_empty())
+            {
+                let matching = documented
+                    .iter()
+                    .filter(|(_, operation_id)| operation_id.as_deref() == Some(handler))
+                    .map(|(operation, _)| operation)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    matching.len(),
+                    1,
+                    "routes! handler {handler} must contribute exactly one OpenAPI operation"
+                );
+                served.insert(matching[0].clone());
+            }
+            remainder = &after_marker[handlers_end + 1..];
+        }
+
+        served
+    }
+
+    #[test]
+    fn route_scanner_ignores_commented_registrations() {
+        let source = strip_rust_comments(
+            r#"
+                // .route("/commented-line", get(handler))
+                Router::new()
+                    /* .route("/commented-block", post(handler)) */
+                    .route("/live", get(handler))
+            "#,
+        );
+        let calls = route_calls(&source);
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].contains("\"/live\""));
+    }
+
+    #[test]
+    fn openapi_document_covers_every_api_route_and_method() {
+        let (_router, openapi) = build_app_router().split_for_parts();
+        let documented = documented_operations(&openapi);
+        let spec = documented
+            .iter()
+            .map(|(operation, _)| operation.clone())
+            .collect::<BTreeSet<_>>();
+        let served = served_operations(&documented);
+        let known_unannotated = KNOWN_UNANNOTATED
+            .iter()
+            .map(|operation| (*operation).to_owned())
+            .collect::<BTreeSet<_>>();
+        let non_api = NON_API_ROUTES
+            .iter()
+            .map(|operation| (*operation).to_owned())
+            .collect::<BTreeSet<_>>();
+
+        assert!(
+            known_unannotated.is_subset(&served),
+            "KNOWN_UNANNOTATED contains operations the router does not serve: {:?}",
+            known_unannotated.difference(&served).collect::<Vec<_>>()
+        );
+        assert!(
+            known_unannotated.is_disjoint(&spec),
+            "KNOWN_UNANNOTATED contains operations that are already documented: {:?}",
+            known_unannotated.intersection(&spec).collect::<Vec<_>>()
+        );
+        assert!(
+            non_api.is_subset(&served),
+            "NON_API_ROUTES contains operations the router does not serve: {:?}",
+            non_api.difference(&served).collect::<Vec<_>>()
+        );
+
+        let served_that_require_spec = served
+            .difference(&known_unannotated)
+            .filter(|operation| !non_api.contains(*operation))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            spec, served_that_require_spec,
+            "served routes and OpenAPI operations diverged"
+        );
     }
 
     #[tokio::test]
