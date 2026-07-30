@@ -34,6 +34,11 @@ The company's Node SDK creates an interaction ID and signs a two-hour capability
         "required": ["summary"],
         "optional": ["impact", "confidence", "findings", "workaround", "consent"],
         "findingKinds": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"],
+        "findingRequired": ["kind", "topic", "detail"],
+        "findingOptional": ["severity"],
+        "findingTopicFormat": "lowercase_slug",
+        "workaroundRequired": ["used"],
+        "workaroundOptional": ["detail"],
         "maxFindings": 8
       }
     },

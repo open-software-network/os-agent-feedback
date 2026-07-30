@@ -25,6 +25,12 @@ agent identity.
 
 Every report requires fresh approval and `approvalSource: "granted_now"`. Stored consent is ignored.
 
+<Warning>
+Ask modes require a conversational runtime that notices the instruction, pauses, receives the user's answer,
+and resumes the pending report. A response envelope cannot force an independent HTTP agent to do this.
+When you need predictable Ask once or Ask every time behavior, use MCP or a feedback-aware runtime adapter.
+</Warning>
+
 ## Permission copy
 
 Use the concrete question carried by the protocol:
@@ -35,4 +41,3 @@ Use the concrete question carried by the protocol:
 Never infer approval from silence. Diagnostics validate ask-mode contracts but do not submit a report,
 because a diagnostic cannot impersonate the user.
 </Warning>
-

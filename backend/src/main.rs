@@ -45,9 +45,10 @@ use crate::{
     models::{
         ClassificationDiscovery, CreateApiKeyInput, CreateProductInput, CreateTeamInvitationInput,
         CurrentUser, DashboardContext, DashboardData, DashboardSessionDetail, DeleteProductInput,
-        FeedbackConsentDiscovery, FeedbackDiscoveryResponse, FeedbackListInteractionsInput,
-        FeedbackListReportsInput, FeedbackModesDiscovery, FeedbackRequiredFieldsDiscovery,
-        FeedbackSubmissionDiscovery, HealthResponse, IntegrationsDiscovery, McpDiscovery,
+        FeedbackConsentDiscovery, FeedbackDiscoveryResponse, FeedbackFindingShapeDiscovery,
+        FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackModesDiscovery,
+        FeedbackRequiredFieldsDiscovery, FeedbackSubmissionDiscovery,
+        FeedbackWorkaroundShapeDiscovery, HealthResponse, IntegrationsDiscovery, McpDiscovery,
         PolicyInput, ProductAuth, ProductFeedbackAcceptedResponse, ProductFeedbackReportInput,
         ReliabilityDiscovery, TelemetryBatchInput, TelemetryBatchResult, TelemetryDiscovery,
         UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput,
@@ -476,6 +477,16 @@ fn feedback_discovery(public_base_url: &str) -> FeedbackDiscoveryResponse {
             finding_severities: ["minor", "major", "blocking"]
                 .map(str::to_owned)
                 .to_vec(),
+            confidence_range: [0, 1],
+            finding_shape: FeedbackFindingShapeDiscovery {
+                required: ["kind", "topic", "detail"].map(str::to_owned).to_vec(),
+                optional: vec!["severity".to_owned()],
+                topic_format: "lowercase_slug".to_owned(),
+            },
+            workaround_shape: FeedbackWorkaroundShapeDiscovery {
+                required: vec!["used".to_owned()],
+                optional: vec!["detail".to_owned()],
+            },
             consent: FeedbackConsentDiscovery {
                 prompt: "May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.".to_owned(),
                 ask_once_scope:
@@ -2287,6 +2298,16 @@ mod page_tests {
                     "other"
                 ],
                 "findingSeverities": ["minor", "major", "blocking"],
+                "confidenceRange": [0, 1],
+                "findingShape": {
+                    "required": ["kind", "topic", "detail"],
+                    "optional": ["severity"],
+                    "topicFormat": "lowercase_slug"
+                },
+                "workaroundShape": {
+                    "required": ["used"],
+                    "optional": ["detail"]
+                },
                 "consent": {
                     "prompt": "May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.",
                     "askOnceScope": "per product and agent runtime; no user or agent identity is stored by Epode",

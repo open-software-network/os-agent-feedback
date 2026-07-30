@@ -21,7 +21,17 @@ An eligible JSON object appends `_agentFeedback` without wrapping the original r
       "url": "https://app.epode.ai/api/v2/reports",
       "method": "POST",
       "authorization": "Bearer afr2_...",
-      "contentType": "application/json"
+      "contentType": "application/json",
+      "reportSchema": {
+        "required": ["summary"],
+        "optional": ["impact", "confidence", "findings", "workaround", "consent"],
+        "confidenceRange": [0, 1],
+        "findingRequired": ["kind", "topic", "detail"],
+        "findingOptional": ["severity"],
+        "findingTopicFormat": "lowercase_slug",
+        "workaroundRequired": ["used"],
+        "workaroundOptional": ["detail"]
+      }
     },
     "privacy": "Never include prompts, transcripts, credentials, personal data, or raw product content.",
     "expiresAt": "2026-07-30T18:00:00.000Z"
@@ -29,7 +39,9 @@ An eligible JSON object appends `_agentFeedback` without wrapping the original r
 }
 ```
 
-The live envelope also carries the bounded report schema so an agent does not need a second documentation fetch.
+The live envelope carries the complete bounded report shape so an agent does not need a second documentation
+fetch and does not have to guess whether a finding uses `detail`, `description`, or another key. Optional fields
+should be omitted when the agent cannot form them exactly.
 
 ## Other response shapes
 
@@ -50,4 +62,3 @@ A generic HTTP agent may ignore this second-action instruction. A runtime that e
 5. submit only a bounded structured report before its final user response.
 
 The Node SDK exports `feedbackFromResponse`, `feedbackConsentAction`, and `submitProductFeedback` for this path.
-

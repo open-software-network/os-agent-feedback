@@ -14,7 +14,7 @@
     "consentScope": { "type": "string", "pattern": "^afcs1_[0-9a-f]{32}$" },
     "reliability": { "const": "best_effort_without_agent_adapter" },
     "when": { "enum": ["after_experience_known_before_final_response", "after_experience_known_and_consent_resolved", "after_experience_known_and_explicit_user_approval"] },
-    "instruction": { "type": "string", "minLength": 1, "maxLength": 1000 },
+    "instruction": { "type": "string", "minLength": 1, "maxLength": 2000 },
     "submit": {
       "type": "object",
       "additionalProperties": false,
@@ -27,13 +27,19 @@
         "reportSchema": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["required", "optional", "impacts", "findingKinds", "findingSeverities", "maxFindings"],
+          "required": ["required", "optional", "impacts", "findingKinds", "findingSeverities", "confidenceRange", "findingRequired", "findingOptional", "findingTopicFormat", "workaroundRequired", "workaroundOptional", "maxFindings"],
           "properties": {
             "required": { "const": ["summary"] },
             "optional": { "const": ["impact", "confidence", "findings", "workaround", "consent"] },
             "impacts": { "const": ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"] },
             "findingKinds": { "const": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"] },
             "findingSeverities": { "const": ["minor", "major", "blocking"] },
+            "confidenceRange": { "const": [0, 1] },
+            "findingRequired": { "const": ["kind", "topic", "detail"] },
+            "findingOptional": { "const": ["severity"] },
+            "findingTopicFormat": { "const": "lowercase_slug" },
+            "workaroundRequired": { "const": ["used"] },
+            "workaroundOptional": { "const": ["detail"] },
             "maxFindings": { "const": 8 }
           }
         }

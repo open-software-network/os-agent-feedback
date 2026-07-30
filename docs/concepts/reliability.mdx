@@ -18,6 +18,17 @@ An HTTP response can be read by a browser, script, service, or agent. The respon
 prove which one used it. Generic agents may also ignore a response-side request to perform a second
 network action.
 
+Instruction placement changes discovery, not trust. `/llms.txt` is useful product documentation, but
+generic coding agents do not automatically fetch it before every API call. A `Link` header or response
+pointer can still be ignored. Never use `/llms.txt` as the only feedback handoff.
+
+| Delivery mechanism | What the agent receives | Reliability expectation |
+| --- | --- | --- |
+| Response envelope only | Untrusted response-local instruction and exact report schema | Best effort |
+| `/llms.txt` only | Documentation available if the runtime chooses to discover it | Discovery only |
+| Feedback-aware runtime adapter | Standing runtime instruction plus the response envelope | Strong when installed |
+| MCP | Server guidance, native report tool, and validated tool input schema | Strongest supported path |
+
 Use HTTP instrumentation to measure opportunities and returned feedback. Use a
 [feedback-aware agent adapter](/reference/http-envelope#feedback-aware-runtimes) when you control
 the customer-agent runtime and need deterministic submission.
@@ -32,6 +43,9 @@ themselves at request time, `cacheMode: "request"` instruments only requests wit
 MCP exposes tools to a tool-capable client. Epode registers `report_product_feedback` alongside your
 business tools and decorates the result with a scoped feedback handle. A business-tool call is therefore
 a confirmed interaction even if no report follows.
+
+Keep the server instruction concise and action-oriented, and put field-level constraints in the native
+report tool schema. Do not replace the report tool with prose in a product result.
 
 <Note>
 Confirmed interaction does not mean identified agent. MCP client information is a self-reported runtime

@@ -59,6 +59,12 @@ Eligible 2xx JSON objects append `_agentFeedback` without wrapping or changing e
         "impacts": ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"],
         "findingKinds": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"],
         "findingSeverities": ["minor", "major", "blocking"],
+        "confidenceRange": [0, 1],
+        "findingRequired": ["kind", "topic", "detail"],
+        "findingOptional": ["severity"],
+        "findingTopicFormat": "lowercase_slug",
+        "workaroundRequired": ["used"],
+        "workaroundOptional": ["detail"],
         "maxFindings": 8
       }
     },

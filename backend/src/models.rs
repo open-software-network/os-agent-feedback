@@ -40,6 +40,20 @@ pub(crate) struct FeedbackRequiredFieldsDiscovery {
 
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct FeedbackFindingShapeDiscovery {
+    pub required: Vec<String>,
+    pub optional: Vec<String>,
+    pub topic_format: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct FeedbackWorkaroundShapeDiscovery {
+    pub required: Vec<String>,
+    pub optional: Vec<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct FeedbackConsentDiscovery {
     pub prompt: String,
     pub ask_once_scope: String,
@@ -56,6 +70,9 @@ pub(crate) struct FeedbackSubmissionDiscovery {
     pub optional_fields: Vec<String>,
     pub finding_kinds: Vec<String>,
     pub finding_severities: Vec<String>,
+    pub confidence_range: [u8; 2],
+    pub finding_shape: FeedbackFindingShapeDiscovery,
+    pub workaround_shape: FeedbackWorkaroundShapeDiscovery,
     pub consent: FeedbackConsentDiscovery,
 }
 

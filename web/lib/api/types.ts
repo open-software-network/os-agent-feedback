@@ -541,6 +541,11 @@ export interface components {
             severity?: string | null;
             topic: string;
         };
+        FeedbackFindingShapeDiscovery: {
+            optional: string[];
+            required: string[];
+            topicFormat: string;
+        };
         FeedbackModesDiscovery: {
             ask_always: string;
             ask_once: string;
@@ -552,12 +557,15 @@ export interface components {
         };
         FeedbackSubmissionDiscovery: {
             authentication: string;
+            confidenceRange: number[];
             consent: components["schemas"]["FeedbackConsentDiscovery"];
             findingKinds: string[];
             findingSeverities: string[];
+            findingShape: components["schemas"]["FeedbackFindingShapeDiscovery"];
             optionalFields: string[];
             requiredFields: components["schemas"]["FeedbackRequiredFieldsDiscovery"];
             url: string;
+            workaroundShape: components["schemas"]["FeedbackWorkaroundShapeDiscovery"];
         };
         /**
          * @description Schema-only view of legacy JSONB workarounds. Known fields are optional and
@@ -570,6 +578,10 @@ export interface components {
         FeedbackWorkaroundInput: {
             detail?: string | null;
             used: boolean;
+        };
+        FeedbackWorkaroundShapeDiscovery: {
+            optional: string[];
+            required: string[];
         };
         HealthResponse: {
             database: string;

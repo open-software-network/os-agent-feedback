@@ -153,12 +153,15 @@ function assertEnvelope(envelope) {
   assert.equal(envelope.mode, "never_ask");
   assert.equal(envelope.requested, true);
   assert.equal(envelope.reliability, "best_effort_without_agent_adapter");
-  assert.match(envelope.instruction, /autonomously/i);
+  assert.match(envelope.instruction, /before your final response/i);
   assert.match(envelope.instruction, /do not ask the human/i);
+  assert.match(envelope.instruction, /topic:lowercase_slug/i);
   assert.equal(envelope.submit.url, `${backendUrl}/api/v2/reports`);
   assert.equal(envelope.submit.method, "POST");
   assert.match(envelope.submit.authorization, /^Bearer afr2_/);
   assert.deepEqual(envelope.submit.reportSchema.required, ["summary"]);
+  assert.deepEqual(envelope.submit.reportSchema.findingRequired, ["kind", "topic", "detail"]);
+  assert.deepEqual(envelope.submit.reportSchema.workaroundRequired, ["used"]);
   assert.equal(envelope.submit.reportSchema.maxFindings, 8);
   assert.doesNotMatch(JSON.stringify(envelope), /af_live_/);
 }

@@ -38,8 +38,11 @@ The server registers `report_product_feedback` and decorates product-tool result
 The product-tool call is confirmed immediately with confirmation method `mcp`. The later report enriches that
 same interaction.
 
+Put the outcome action near the start of the MCP server's `instructions`, and keep the full report shape in the
+native `report_product_feedback` input schema. The result-local `_agentFeedback` block supplies the scoped
+handle and timing; it is not a substitute for registering the tool.
+
 ## 2025 compatibility
 
 A server may accept the `2025-11-25` initialize handshake as a stateless compatibility fallback. Modern requests
 must never depend on that fallback or introduce transport-session state.
-

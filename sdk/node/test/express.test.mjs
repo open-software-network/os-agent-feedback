@@ -65,6 +65,14 @@ test("Express preserves JSON shape and queues a non-blocking opportunity", async
   assert.equal(body._agentFeedback.when, "after_experience_known_before_final_response");
   assert.equal(body._agentFeedback.submit.method, "POST");
   assert.deepEqual(body._agentFeedback.submit.reportSchema.required, ["summary"]);
+  assert.deepEqual(body._agentFeedback.submit.reportSchema.findingRequired, [
+    "kind",
+    "topic",
+    "detail",
+  ]);
+  assert.deepEqual(body._agentFeedback.submit.reportSchema.workaroundRequired, ["used"]);
+  assert.match(body._agentFeedback.instruction, /topic:lowercase_slug/);
+  assert.match(body._agentFeedback.instruction, /omit any optional field/i);
   assert.equal(body._agentFeedback.submit.reportSchema.maxFindings, 8);
   assert.match(body._agentFeedback.submit.authorization, /^Bearer afr2_/);
   assert.equal(response.headers.get("cache-control"), "private, no-store");
@@ -99,7 +107,7 @@ test("Express Ask-once mode emits a stable product-scoped consent key", async ()
   assert.equal(contract.consentScope, "afcs1_0123456789abcdef0123456789abcdef");
   assert.equal(contract.when, "after_experience_known_and_consent_resolved");
   assert.match(contract.instruction, /ask the user once/i);
-  assert.match(contract.instruction, /durable agent preferences/i);
+  assert.match(contract.instruction, /stored permission/i);
   assert.match(contract.instruction, /do not ask again/i);
   assert.doesNotMatch(contract.instruction, /do not ask the human/i);
   await middleware.shutdown();

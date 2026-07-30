@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -144,6 +145,11 @@ func TestAskModesExposeDistinctConsentPolicies(t *testing.T) {
 	if !strings.Contains(envelope.Instruction, "ask the user once") ||
 		!strings.Contains(envelope.Instruction, "do not ask again") {
 		t.Fatalf("wrong ask instruction: %s", envelope.Instruction)
+	}
+	if !strings.Contains(envelope.Instruction, "topic:lowercase_slug") ||
+		!reflect.DeepEqual(envelope.Submit.ReportSchema.FindingRequired, []string{"kind", "topic", "detail"}) ||
+		!reflect.DeepEqual(envelope.Submit.ReportSchema.WorkaroundRequired, []string{"used"}) {
+		t.Fatalf("incomplete report shape: %#v", envelope.Submit.ReportSchema)
 	}
 	if FeedbackConsentAction(&envelope, "") != "ask" ||
 		FeedbackConsentAction(&envelope, "approved") != "submit" ||

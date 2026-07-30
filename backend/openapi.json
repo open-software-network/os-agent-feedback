@@ -3721,6 +3721,31 @@
         },
         "additionalProperties": false
       },
+      "FeedbackFindingShapeDiscovery": {
+        "type": "object",
+        "required": [
+          "required",
+          "optional",
+          "topicFormat"
+        ],
+        "properties": {
+          "optional": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "required": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "topicFormat": {
+            "type": "string"
+          }
+        }
+      },
       "FeedbackModesDiscovery": {
         "type": "object",
         "required": [
@@ -3764,11 +3789,22 @@
           "optionalFields",
           "findingKinds",
           "findingSeverities",
+          "confidenceRange",
+          "findingShape",
+          "workaroundShape",
           "consent"
         ],
         "properties": {
           "authentication": {
             "type": "string"
+          },
+          "confidenceRange": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
           },
           "consent": {
             "$ref": "#/components/schemas/FeedbackConsentDiscovery"
@@ -3785,6 +3821,9 @@
               "type": "string"
             }
           },
+          "findingShape": {
+            "$ref": "#/components/schemas/FeedbackFindingShapeDiscovery"
+          },
           "optionalFields": {
             "type": "array",
             "items": {
@@ -3796,6 +3835,9 @@
           },
           "url": {
             "type": "string"
+          },
+          "workaroundShape": {
+            "$ref": "#/components/schemas/FeedbackWorkaroundShapeDiscovery"
           }
         }
       },
@@ -3834,6 +3876,27 @@
           }
         },
         "additionalProperties": false
+      },
+      "FeedbackWorkaroundShapeDiscovery": {
+        "type": "object",
+        "required": [
+          "required",
+          "optional"
+        ],
+        "properties": {
+          "optional": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "required": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
       },
       "HealthResponse": {
         "type": "object",

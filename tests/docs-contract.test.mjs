@@ -207,6 +207,8 @@ test("docs explain the product/customer-agent boundary and evidence model", asyn
     /does not label ordinary HTTP traffic as agent traffic without evidence/i,
   );
   assert.match(reliability, /MCP.*confirmed/i);
+  assert.match(reliability, /Never use `\/llms\.txt` as the only feedback handoff/i);
+  assert.match(reliability, /native report tool/i);
   assert.match(privacy, /does not identify an agent/i);
   assert.match(privacy, /prompts or transcripts/i);
 });
