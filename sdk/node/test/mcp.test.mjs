@@ -47,11 +47,12 @@ test("MCP instrumentation decorates business tools and registers structured feed
     feedbackHandle,
     summary: "The search result completed the task with useful context.",
     impact: "helped",
+    sessionLabel: "Search investigation",
     findings: [{ kind: "strength", topic: "relevance", detail: "The top result answered the question." }],
   });
   assert.equal(report.structuredContent.accepted, true);
   assert.deepEqual(reports, [
-    { summary: "The search result completed the task with useful context.", impact: "helped", findings: [{ kind: "strength", topic: "relevance", detail: "The top result answered the question." }] },
+    { summary: "The search result completed the task with useful context.", impact: "helped", sessionLabel: "Search investigation", findings: [{ kind: "strength", topic: "relevance", detail: "The top result answered the question." }] },
   ]);
   await instrumentation.shutdown();
   assert.equal(telemetry[0].events[0].classification, "confirmed");

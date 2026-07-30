@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 type FeedbackFinding struct {
@@ -28,6 +29,7 @@ type FeedbackWorkaround struct {
 
 type FeedbackReport struct {
 	Summary        string              `json:"summary"`
+	SessionLabel   string              `json:"sessionLabel,omitempty"`
 	Impact         string              `json:"impact,omitempty"`
 	Confidence     *float64            `json:"confidence,omitempty"`
 	Findings       []FeedbackFinding   `json:"findings,omitempty"`
@@ -119,6 +121,9 @@ func validEnvelope(envelope *Envelope) bool {
 
 func feedbackSubmissionBody(envelope *Envelope, report FeedbackReport) []byte {
 	bodyValue := map[string]any{"summary": report.Summary}
+	if report.SessionLabel != "" {
+		bodyValue["sessionLabel"] = report.SessionLabel
+	}
 	if report.Impact != "" {
 		bodyValue["impact"] = report.Impact
 	}
@@ -161,6 +166,11 @@ func SubmitProductFeedback(ctx context.Context, envelope *Envelope, report Feedb
 	report.Summary = strings.TrimSpace(report.Summary)
 	if len(report.Summary) < 8 || len(report.Summary) > 700 {
 		return nil, errors.New("summary must contain 8 to 700 characters")
+	}
+	hadSessionLabel := report.SessionLabel != ""
+	report.SessionLabel = strings.TrimSpace(report.SessionLabel)
+	if hadSessionLabel && (utf8.RuneCountInString(report.SessionLabel) < 2 || utf8.RuneCountInString(report.SessionLabel) > 80) {
+		return nil, errors.New("sessionLabel must contain 2 to 80 characters")
 	}
 	validImpact := map[string]bool{"": true, "helped": true, "helped_with_friction": true, "neutral": true, "hindered": true, "blocked": true, "unknown": true}
 	if !validImpact[report.Impact] {

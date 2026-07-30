@@ -194,6 +194,7 @@ pub struct ProductFeedbackReport {
     pub workspace_id: Uuid,
     pub interaction_id: Uuid,
     pub summary: String,
+    pub session_label: Option<String>,
     pub impact: Option<String>,
     pub confidence: Option<f64>,
     pub findings: Value,
@@ -208,6 +209,7 @@ pub struct ProductFeedbackReportWithInteraction {
     pub id: Uuid,
     pub interaction_id: Uuid,
     pub summary: String,
+    pub session_label: Option<String>,
     pub impact: Option<String>,
     pub confidence: Option<f64>,
     pub findings: Value,
@@ -282,6 +284,7 @@ pub struct FeedbackWindow {
 pub struct FeedbackReportItem {
     pub id: Uuid,
     pub summary: String,
+    pub session_label: Option<String>,
     pub impact: Option<String>,
     pub confidence: Option<f64>,
     pub findings: Value,
@@ -415,6 +418,7 @@ pub struct FeedbackWorkaroundInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProductFeedbackReportInput {
     pub summary: String,
+    pub session_label: Option<String>,
     pub impact: Option<String>,
     pub confidence: Option<f64>,
     #[serde(default)]

@@ -132,6 +132,7 @@ function assertEnvelope(envelope) {
   assert.equal(envelope.submit.method, "POST");
   assert.match(envelope.submit.authorization, /^Bearer afr2_/);
   assert.deepEqual(envelope.submit.reportSchema.required, ["summary"]);
+  assert.deepEqual(envelope.submit.reportSchema.optional, ["sessionLabel", "impact", "confidence", "findings", "workaround", "consent"]);
   assert.equal(envelope.submit.reportSchema.maxFindings, 8);
   assert.doesNotMatch(JSON.stringify(envelope), /af_live_/);
 }

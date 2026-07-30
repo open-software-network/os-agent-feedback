@@ -11,7 +11,7 @@ The company's Node SDK creates an interaction ID and signs a two-hour capability
 1. An eligible successful product response receives a compact `_agentFeedback` instruction.
 2. A bounded background queue sends opportunity metadata to `POST /api/v2/telemetry/batches` with the private company product key.
 3. The customer agent uses the normal result.
-4. The agent submits a required narrative `summary` plus optional impact, findings, workaround, and confidence to `POST /api/v2/reports` with the scoped capability. Ask modes also include a nested consent attestation.
+4. The agent submits a required narrative `summary` plus an optional descriptive `sessionLabel`, impact, findings, workaround, and confidence to `POST /api/v2/reports` with the scoped capability. The label never determines session membership. Ask modes also include a nested consent attestation.
 5. The Rust service verifies the capability, promotes the interaction to confirmed, and stores the first review idempotently.
 
 ```json
@@ -32,7 +32,7 @@ The company's Node SDK creates an interaction ID and signs a two-hour capability
       "contentType": "application/json",
       "reportSchema": {
         "required": ["summary"],
-        "optional": ["impact", "confidence", "findings", "workaround", "consent"],
+        "optional": ["sessionLabel", "impact", "confidence", "findings", "workaround", "consent"],
         "findingKinds": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"],
         "maxFindings": 8
       }

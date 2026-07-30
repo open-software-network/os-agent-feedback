@@ -1228,7 +1228,7 @@ pub async fn feedback_list_reports(
     let cursor_occurred_at = cursor.as_ref().map(|cursor| cursor.occurred_at);
     let cursor_id = cursor.as_ref().map(|cursor| cursor.id);
     let mut reports = sqlx::query_as::<_, FeedbackReportItem>(
-        r#"SELECT r.id, r.summary, r.impact, r.confidence, r.findings, r.workaround,
+        r#"SELECT r.id, r.summary, r.session_label, r.impact, r.confidence, r.findings, r.workaround,
         i.operation, i.customer_ref, i.surface, i.duration_ms, i.status_code,
         i.occurred_at, r.created_at, i.id AS interaction_id
         FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id
@@ -1653,7 +1653,7 @@ pub async fn dashboard_with_limits(
     .fetch_all(pool)
     .await?;
     let reports = sqlx::query_as::<_, ProductFeedbackReportWithInteraction>(
-        r#"SELECT r.id, r.interaction_id, r.summary, r.impact, r.confidence,
+        r#"SELECT r.id, r.interaction_id, r.summary, r.session_label, r.impact, r.confidence,
         r.findings, r.workaround, r.source, r.created_at,
         i.session_id, i.surface, i.operation, i.status_code, i.duration_ms,
         i.customer_ref, i.classification, i.confirmation_method, i.runtime_hint,
@@ -1747,7 +1747,7 @@ pub async fn dashboard_report_by_id(
     report_id: Uuid,
 ) -> Result<ProductFeedbackReportWithInteraction, ApiError> {
     sqlx::query_as::<_, ProductFeedbackReportWithInteraction>(
-        r#"SELECT r.id, r.interaction_id, r.summary, r.impact, r.confidence,
+        r#"SELECT r.id, r.interaction_id, r.summary, r.session_label, r.impact, r.confidence,
         r.findings, r.workaround, r.source, r.created_at,
         i.session_id, i.surface, i.operation, i.status_code, i.duration_ms,
         i.customer_ref, i.classification, i.confirmation_method, i.runtime_hint,
@@ -1905,7 +1905,7 @@ pub async fn dashboard_session_by_id(
     .fetch_all(pool)
     .await?;
     let reports = sqlx::query_as::<_, ProductFeedbackReportWithInteraction>(
-        r#"SELECT r.id, r.interaction_id, r.summary, r.impact, r.confidence,
+        r#"SELECT r.id, r.interaction_id, r.summary, r.session_label, r.impact, r.confidence,
         r.findings, r.workaround, r.source, r.created_at,
         i.session_id, i.surface, i.operation, i.status_code, i.duration_ms,
         i.customer_ref, i.classification, i.confirmation_method, i.runtime_hint,
@@ -2166,6 +2166,19 @@ fn contains_sensitive_report_text(value: &str) -> bool {
     forbidden_pattern || email_like
 }
 
+fn normalize_session_label(value: Option<&str>) -> Result<Option<String>, ApiError> {
+    let label = value.map(|label| label.split_whitespace().collect::<Vec<_>>().join(" "));
+    if label
+        .as_ref()
+        .is_some_and(|label| !(2..=80).contains(&label.chars().count()))
+    {
+        return Err(ApiError::bad_request(
+            "sessionLabel must contain 2 to 80 characters",
+        ));
+    }
+    Ok(label)
+}
+
 pub async fn submit_product_feedback(
     pool: &PgPool,
     capability: &str,
@@ -2178,6 +2191,15 @@ pub async fn submit_product_feedback(
         ));
     }
     if contains_sensitive_report_text(&summary) {
+        return Err(ApiError::bad_request(
+            "The feedback report appears to contain sensitive data",
+        ));
+    }
+    let session_label = normalize_session_label(input.session_label.as_deref())?;
+    if session_label
+        .as_deref()
+        .is_some_and(contains_sensitive_report_text)
+    {
         return Err(ApiError::bad_request(
             "The feedback report appears to contain sensitive data",
         ));
@@ -2384,13 +2406,14 @@ pub async fn submit_product_feedback(
     }
     let report = sqlx::query_as::<_, ProductFeedbackReport>(
         r#"INSERT INTO feedback_reports
-        (id, workspace_id, interaction_id, summary, impact, confidence, findings, workaround)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *"#,
+        (id, workspace_id, interaction_id, summary, session_label, impact, confidence, findings, workaround)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *"#,
     )
     .bind(Uuid::new_v4())
     .bind(key.0)
     .bind(claims.i)
     .bind(summary)
+    .bind(session_label)
     .bind(input.impact)
     .bind(input.confidence)
     .bind(findings)
@@ -2448,6 +2471,7 @@ mod product_tests {
     ) -> ProductFeedbackReportInput {
         ProductFeedbackReportInput {
             summary: summary.into(),
+            session_label: None,
             impact: Some("helped".into()),
             confidence: Some(0.95),
             findings: vec![],
@@ -2475,6 +2499,23 @@ mod product_tests {
                 .status
                 == StatusCode::BAD_REQUEST
         );
+        Ok(())
+    }
+
+    #[test]
+    fn session_labels_use_unicode_code_point_limits() -> anyhow::Result<()> {
+        anyhow::ensure!(normalize_session_label(None).map_err(test_error)?.is_none());
+        for invalid in ["   ".to_string(), "😀".to_string(), "😀".repeat(81)] {
+            anyhow::ensure!(
+                normalize_session_label(Some(&invalid)).unwrap_err().status
+                    == StatusCode::BAD_REQUEST
+            );
+        }
+        for valid in ["😀😀".to_string(), "😀".repeat(80)] {
+            anyhow::ensure!(
+                normalize_session_label(Some(&valid)).map_err(test_error)? == Some(valid)
+            );
+        }
         Ok(())
     }
 
@@ -2594,13 +2635,24 @@ mod product_tests {
             .map_err(test_error)?;
 
             let autonomous = test_capability(&write_secret, write_key.id, Uuid::new_v4());
-            submit_product_feedback(
-                &pool,
-                &autonomous,
-                feedback_input("The autonomous report was accepted successfully.", None),
-            )
-            .await
-            .map_err(test_error)?;
+            let mut first_input =
+                feedback_input("The autonomous report was accepted successfully.", None);
+            first_input.session_label = Some("First investigation".into());
+            let (_, first_report) = submit_product_feedback(&pool, &autonomous, first_input)
+                .await
+                .map_err(test_error)?;
+            let mut duplicate_input =
+                feedback_input("A duplicate report must not replace the first.", None);
+            duplicate_input.session_label = Some("Different investigation".into());
+            let (_, duplicate_report) =
+                submit_product_feedback(&pool, &autonomous, duplicate_input)
+                    .await
+                    .map_err(test_error)?;
+            anyhow::ensure!(duplicate_report.id == first_report.id);
+            anyhow::ensure!(duplicate_report.summary == first_report.summary);
+            anyhow::ensure!(
+                duplicate_report.session_label.as_deref() == Some("First investigation")
+            );
 
             update_policy(
                 &pool,

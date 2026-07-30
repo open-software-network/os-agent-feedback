@@ -20,6 +20,7 @@ export interface FeedbackWorkaround {
 
 export interface ProductFeedbackReport {
   summary: string;
+  sessionLabel?: string;
   impact?: FeedbackImpact;
   confidence?: number;
   findings?: FeedbackFinding[];
@@ -46,6 +47,7 @@ export interface ProductFeedbackSubmission {
   report?: {
     id?: string;
     summary?: string;
+    sessionLabel?: string;
     impact?: FeedbackImpact;
     confidence?: number;
     findings?: FeedbackFinding[];
@@ -192,6 +194,8 @@ export async function submitProductFeedback(
   }
   const summary = report.summary.trim();
   if (summary.length < 8 || summary.length > 700) throw new Error("summary must contain 8 to 700 characters");
+  const sessionLabel = report.sessionLabel?.trim();
+  if (Object.hasOwn(report, "sessionLabel") && (sessionLabel === undefined || Array.from(sessionLabel).length < 2 || Array.from(sessionLabel).length > 80)) throw new Error("sessionLabel must contain 2 to 80 characters");
   if (report.impact && !["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"].includes(report.impact)) throw new Error("invalid impact");
   if (report.confidence !== undefined && (report.confidence < 0 || report.confidence > 1)) throw new Error("confidence must be between 0 and 1");
   if ((report.findings?.length || 0) > 8) throw new Error("findings cannot contain more than 8 items");
@@ -228,6 +232,7 @@ export async function submitProductFeedback(
     },
     body: JSON.stringify({
       summary,
+      ...(sessionLabel !== undefined ? { sessionLabel } : {}),
       ...(report.impact ? { impact: report.impact } : {}),
       ...(report.confidence !== undefined ? { confidence: report.confidence } : {}),
       ...(report.findings ? { findings: report.findings } : {}),

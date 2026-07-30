@@ -55,7 +55,7 @@ Eligible 2xx JSON objects append `_agentFeedback` without wrapping or changing e
       "contentType": "application/json",
       "reportSchema": {
         "required": ["summary"],
-        "optional": ["impact", "confidence", "findings", "workaround", "consent"],
+        "optional": ["sessionLabel", "impact", "confidence", "findings", "workaround", "consent"],
         "impacts": ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"],
         "findingKinds": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"],
         "findingSeverities": ["minor", "major", "blocking"],
@@ -130,7 +130,7 @@ Content-Type: application/json
 }
 ```
 
-Only `summary` is required in `never_ask` mode. `impact`, `confidence`, up to eight typed findings, and `workaround` are optional. A report can express several simultaneous observations instead of forcing success/partial/failure. Unknown fields, prompts, transcripts, credentials, personal data, and raw tool or product data are rejected. Duplicate submissions return the first accepted report.
+Only `summary` is required in `never_ask` mode. `sessionLabel` is optional descriptive report metadata (2–80 characters); it is never used to correlate or select a session. `impact`, `confidence`, up to eight typed findings, and `workaround` are optional. A report can express several simultaneous observations instead of forcing success/partial/failure. Unknown fields, prompts, transcripts, credentials, personal data, and raw tool or product data are rejected. Duplicate submissions return the first accepted report.
 
 Consent modes add a machine-verifiable `consent` attestation to the report body. This is an assertion by the submitting agent runtime, not proof of a human identity:
 

@@ -114,6 +114,11 @@ def submit_product_feedback(
     summary = str(report.get("summary", "")).strip()
     if not 8 <= len(summary) <= 700:
         raise ValueError("summary must contain 8 to 700 characters")
+    session_label = report.get("sessionLabel")
+    if session_label is not None:
+        session_label = str(session_label).strip()
+        if not 2 <= len(session_label) <= 80:
+            raise ValueError("sessionLabel must contain 2 to 80 characters")
     impact = report.get("impact")
     if impact is not None and impact not in {"helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"}:
         raise ValueError("invalid impact")
@@ -149,6 +154,7 @@ def submit_product_feedback(
     }
     body = {
         "summary": summary,
+        **({"sessionLabel": session_label} if session_label is not None else {}),
         **({"impact": impact} if impact is not None else {}),
         **({"confidence": confidence} if confidence is not None else {}),
         **({"findings": findings} if findings else {}),

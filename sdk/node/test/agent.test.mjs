@@ -23,7 +23,7 @@ const envelope = {
     contentType: "application/json",
     reportSchema: {
       required: ["summary"],
-      optional: ["impact", "confidence", "findings", "workaround", "consent"],
+      optional: ["sessionLabel", "impact", "confidence", "findings", "workaround", "consent"],
       impacts: ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"],
       findingKinds: ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"],
       findingSeverities: ["minor", "major", "blocking"],
@@ -88,6 +88,26 @@ test("feedback-aware adapter rejects untrusted submission origins", async () => 
     ),
     /untrusted origin/,
   );
+});
+
+test("session labels use Unicode code-point limits and reject supplied blanks", async () => {
+  for (const sessionLabel of ["", "   ", "😀", "😀".repeat(81)]) {
+    await assert.rejects(
+      submitProductFeedback(envelope, { summary: "This report summary is long enough.", sessionLabel }),
+      /sessionLabel must contain 2 to 80 characters/,
+    );
+  }
+  for (const sessionLabel of ["😀😀", "😀".repeat(80)]) {
+    const requests = [];
+    await submitProductFeedback(envelope, { summary: "This report summary is long enough.", sessionLabel }, {
+      allowedSubmitOrigins: ["https://feedback.test"],
+      fetch: async (_url, init) => {
+        requests.push(JSON.parse(init.body));
+        return Response.json({ accepted: true });
+      },
+    });
+    assert.equal(requests[0].sessionLabel, sessionLabel);
+  }
 });
 
 test("feedback-aware adapter resolves and enforces both consent modes", async () => {

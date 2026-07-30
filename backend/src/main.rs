@@ -334,7 +334,7 @@ async fn feedback_discovery_v2(State(state): State<Arc<AppState>>) -> Json<Value
             "requiredFields": {
                 "summary": "concise description of how the product contributed, 8 to 700 characters"
             },
-            "optionalFields": ["impact", "confidence", "findings", "workaround"],
+            "optionalFields": ["sessionLabel", "impact", "confidence", "findings", "workaround"],
             "findingKinds": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"],
             "findingSeverities": ["minor", "major", "blocking"],
             "consent": {

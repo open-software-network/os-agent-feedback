@@ -293,7 +293,7 @@ func (r *Runtime) prepare(now time.Time) (preparedInteraction, error) {
 				ContentType:   "application/json",
 				ReportSchema: ReportSchema{
 					Required:          []string{"summary"},
-					Optional:          []string{"impact", "confidence", "findings", "workaround", "consent"},
+					Optional:          []string{"sessionLabel", "impact", "confidence", "findings", "workaround", "consent"},
 					Impacts:           []string{"helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"},
 					FindingKinds:      []string{"strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"},
 					FindingSeverities: []string{"minor", "major", "blocking"},

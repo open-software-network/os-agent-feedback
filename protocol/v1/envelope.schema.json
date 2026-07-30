@@ -30,7 +30,7 @@
           "required": ["required", "optional", "impacts", "findingKinds", "findingSeverities", "maxFindings"],
           "properties": {
             "required": { "const": ["summary"] },
-            "optional": { "const": ["impact", "confidence", "findings", "workaround", "consent"] },
+            "optional": { "const": ["sessionLabel", "impact", "confidence", "findings", "workaround", "consent"] },
             "impacts": { "const": ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"] },
             "findingKinds": { "const": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"] },
             "findingSeverities": { "const": ["minor", "major", "blocking"] },

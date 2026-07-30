@@ -135,6 +135,10 @@ function instrumentServer(
       inputSchema: z.object({
         feedbackHandle: z.string().startsWith("afr2_"),
         summary: z.string().min(8).max(700),
+        sessionLabel: z.string().trim().refine(
+          (label) => Array.from(label).length >= 2 && Array.from(label).length <= 80,
+          "sessionLabel must contain 2 to 80 characters",
+        ).optional(),
         impact: z.enum(["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"]).optional(),
         confidence: z.number().min(0).max(1).optional(),
         findings: z.array(z.object({
@@ -168,9 +172,10 @@ function instrumentServer(
         idempotentHint: true,
       },
     },
-    async ({ feedbackHandle, summary, impact, confidence, findings, workaround, userApproved, approvalSource }: {
+    async ({ feedbackHandle, summary, sessionLabel, impact, confidence, findings, workaround, userApproved, approvalSource }: {
       feedbackHandle: string;
       summary: string;
+      sessionLabel?: string;
       impact?: string;
       confidence?: number;
       findings?: Array<{ kind: string; topic: string; severity?: string; detail: string }>;
@@ -215,6 +220,7 @@ function instrumentServer(
             },
             body: JSON.stringify({
               summary,
+              sessionLabel,
               impact,
               confidence,
               findings,

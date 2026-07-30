@@ -348,7 +348,7 @@ impl Runtime {
                     content_type: "application/json".into(),
                     report_schema: ReportSchema {
                         required: vec!["summary".into()],
-                        optional: vec!["impact".into(), "confidence".into(), "findings".into(), "workaround".into(), "consent".into()],
+                        optional: vec!["sessionLabel".into(), "impact".into(), "confidence".into(), "findings".into(), "workaround".into(), "consent".into()],
                         impacts: vec!["helped".into(), "helped_with_friction".into(), "neutral".into(), "hindered".into(), "blocked".into(), "unknown".into()],
                         finding_kinds: vec!["strength".into(), "friction".into(), "defect".into(), "gap".into(), "suggestion".into(), "uncertainty".into(), "other".into()],
                         finding_severities: vec!["minor".into(), "major".into(), "blocking".into()],
@@ -854,6 +854,8 @@ pub struct FeedbackWorkaround {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FeedbackReport {
     pub summary: String,
+    #[serde(rename = "sessionLabel", skip_serializing_if = "Option::is_none")]
+    pub session_label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub impact: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1010,6 +1012,14 @@ pub async fn submit_product_feedback(
     if !(8..=700).contains(&report.summary.len()) {
         return Err(SubmitError::InvalidSummary);
     }
+    report.session_label = report.session_label.map(|label| label.trim().to_string());
+    if report
+        .session_label
+        .as_ref()
+        .is_some_and(|label| !(2..=80).contains(&label.chars().count()))
+    {
+        return Err(SubmitError::InvalidSessionLabel);
+    }
     if report.impact.as_deref().is_some_and(|impact| {
         !matches!(
             impact,
@@ -1115,6 +1125,7 @@ pub enum SubmitError {
     InvalidApprovalSource,
     FreshApprovalRequired,
     InvalidSummary,
+    InvalidSessionLabel,
     InvalidImpact,
     InvalidConfidence,
     InvalidFindings,
@@ -1143,6 +1154,9 @@ impl std::fmt::Display for SubmitError {
                 )
             }
             Self::InvalidSummary => write!(formatter, "summary must contain 8 to 700 characters"),
+            Self::InvalidSessionLabel => {
+                write!(formatter, "sessionLabel must contain 2 to 80 characters")
+            }
             Self::InvalidImpact => write!(formatter, "invalid impact"),
             Self::InvalidConfidence => write!(formatter, "confidence must be between 0 and 1"),
             Self::InvalidFindings => write!(formatter, "invalid findings"),
@@ -1253,6 +1267,10 @@ mod tests {
         assert!(prepared.envelope.consent_required);
         assert_eq!(prepared.envelope.consent_policy, "once");
         assert_eq!(
+            prepared.envelope.submit.report_schema.optional[0],
+            "sessionLabel"
+        );
+        assert_eq!(
             prepared.envelope.consent_scope.as_deref(),
             Some("afcs1_0123456789abcdef0123456789abcdef")
         );
@@ -1291,6 +1309,7 @@ mod tests {
 
         let report = FeedbackReport {
             summary: "The product completed the task.".into(),
+            session_label: Some("Search investigation".into()),
             impact: Some("helped".into()),
             confidence: None,
             findings: vec![],

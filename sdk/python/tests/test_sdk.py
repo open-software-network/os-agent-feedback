@@ -153,6 +153,10 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
             feedback_mode="ask_once",
         ))
         envelope = runtime.prepare()["envelope"]
+        self.assertEqual(
+            envelope["submit"]["reportSchema"]["optional"],
+            ["sessionLabel", "impact", "confidence", "findings", "workaround", "consent"],
+        )
         self.assertTrue(envelope["requested"])
         self.assertTrue(envelope["consentRequired"])
         self.assertEqual(envelope["consentPolicy"], "once")

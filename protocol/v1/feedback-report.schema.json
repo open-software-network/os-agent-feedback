@@ -7,6 +7,7 @@
   "required": ["summary"],
   "properties": {
     "summary": { "type": "string", "minLength": 8, "maxLength": 700 },
+    "sessionLabel": { "type": "string", "minLength": 2, "maxLength": 80 },
     "impact": { "enum": ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"] },
     "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
     "findings": {

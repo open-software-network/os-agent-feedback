@@ -52,7 +52,7 @@ export interface FeedbackEnvelope {
     contentType: "application/json";
     reportSchema: {
       required: readonly ["summary"];
-      optional: readonly ["impact", "confidence", "findings", "workaround", "consent"];
+      optional: readonly ["sessionLabel", "impact", "confidence", "findings", "workaround", "consent"];
       impacts: readonly ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"];
       findingKinds: readonly ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"];
       findingSeverities: readonly ["minor", "major", "blocking"];
@@ -327,7 +327,7 @@ export class AgentFeedbackRuntime<Request = unknown> {
           contentType: "application/json",
           reportSchema: {
             required: ["summary"],
-            optional: ["impact", "confidence", "findings", "workaround", "consent"],
+            optional: ["sessionLabel", "impact", "confidence", "findings", "workaround", "consent"],
             impacts: ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"],
             findingKinds: ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"],
             findingSeverities: ["minor", "major", "blocking"],

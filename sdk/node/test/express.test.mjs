@@ -64,6 +64,7 @@ test("Express preserves JSON shape and queues a non-blocking opportunity", async
   assert.equal(body._agentFeedback.when, "after_experience_known_before_final_response");
   assert.equal(body._agentFeedback.submit.method, "POST");
   assert.deepEqual(body._agentFeedback.submit.reportSchema.required, ["summary"]);
+  assert.deepEqual(body._agentFeedback.submit.reportSchema.optional, ["sessionLabel", "impact", "confidence", "findings", "workaround", "consent"]);
   assert.equal(body._agentFeedback.submit.reportSchema.maxFindings, 8);
   assert.match(body._agentFeedback.submit.authorization, /^Bearer afr2_/);
   assert.equal(response.headers.get("cache-control"), "private, no-store");

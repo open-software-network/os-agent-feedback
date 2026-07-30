@@ -36,7 +36,7 @@ def handoff(port: int, variant: str) -> dict:
             "contentType": "application/json",
             "reportSchema": {
                 "required": ["summary"],
-                "optional": ["impact", "confidence", "findings", "workaround", "consent"],
+                "optional": ["sessionLabel", "impact", "confidence", "findings", "workaround", "consent"],
                 "impacts": ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"],
                 "findingKinds": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"],
                 "findingSeverities": ["minor", "major", "blocking"],
