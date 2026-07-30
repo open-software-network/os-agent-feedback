@@ -1,0 +1,57 @@
+---
+title: "Rust Axum and Tower"
+description: "Add Epode as a Tower layer around selected Axum routes."
+---
+
+## Install
+
+Until the crate registry release is available, vendor the production artifact:
+
+```bash
+mkdir -p vendor/agent-feedback-rust
+curl -fsSL https://app.epode.ai/static/agent-feedback-rust-0.1.0.tar.gz \
+  | tar -xz -C vendor/agent-feedback-rust
+```
+
+```toml
+[dependencies]
+agent-feedback = { path = "vendor/agent-feedback-rust" }
+```
+
+## Configure once
+
+Construct the layer inside a Tokio runtime:
+
+```rust
+use agent_feedback::{AgentFeedbackLayer, Options};
+use axum::{routing::get, Router};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let feedback = AgentFeedbackLayer::new(
+        Options::new(std::env::var("AGENT_FEEDBACK_KEY")?)
+            .include(["/search", "/docs/**"])
+            .customer_ref(|request| authenticated_account_id(request)),
+    )?;
+
+    let app = Router::new()
+        .route("/search", get(search_handler))
+        .layer(feedback.clone());
+
+    // Start Axum, then call feedback.shutdown().await during graceful shutdown.
+    Ok(())
+}
+```
+
+## Server-rendered HTML
+
+Finite bodies with an exact bounded size can be instrumented. Streams and unknown-size bodies remain untouched.
+If an advertised safe body fails while being read, the middleware returns an explicit non-empty 500 instead
+of disguising the body failure as a success.
+
+## Verify
+
+Send one request to each included surface, then verify the response contract and Setup telemetry. Call
+`feedback.shutdown().await` during graceful shutdown; it has a two-second bound and returns delivery failures.
+
+[View the runnable Rust example](https://github.com/open-software-network/os-epode/tree/main/examples/setup-matrix-rust)

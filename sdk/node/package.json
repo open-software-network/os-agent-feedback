@@ -43,8 +43,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test test/*.test.mjs",
-    "prepack": "npm test"
+    "test": "pnpm run build && node --test test/*.test.mjs",
+    "prepack": "pnpm run test"
   },
   "dependencies": {
     "fastify-plugin": "^5.1.0",
@@ -56,9 +56,15 @@
     "fastify": ">=4 <6"
   },
   "peerDependenciesMeta": {
-    "@modelcontextprotocol/server": { "optional": true },
-    "express": { "optional": true },
-    "fastify": { "optional": true }
+    "@modelcontextprotocol/server": {
+      "optional": true
+    },
+    "express": {
+      "optional": true
+    },
+    "fastify": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@modelcontextprotocol/server": "^2.0.0",

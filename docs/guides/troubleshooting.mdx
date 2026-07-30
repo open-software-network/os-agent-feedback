@@ -1,0 +1,43 @@
+---
+title: "Troubleshooting"
+description: "Diagnose missing telemetry, missing feedback, consent errors, and response-shape issues."
+---
+
+<AccordionGroup>
+  <Accordion title="Setup says no telemetry">
+    Confirm the deployed process has a current `af_live_...` write key, the request hits an included route,
+    the response is eligible 2xx JSON/HTML/header content, and `AGENT_FEEDBACK_ENABLED` is not `false`.
+    Send a real request, wait for the background queue, then use **Check now**.
+  </Accordion>
+  <Accordion title="I see opportunities but no feedback">
+    This is expected for generic HTTP agents, which may ignore response-side side-effect instructions.
+    Verify the contract with the doctor or a feedback-aware runtime. MCP is the reliable explicit-tool path.
+  </Accordion>
+  <Accordion title="The report is rejected for consent">
+    Ensure Collection policy and deployed `AGENT_FEEDBACK_MODE` match. Ask once requires the exact returned
+    `consentScope` and `granted_now` or `stored_grant`. Ask every time requires fresh `granted_now` and no scope.
+    Never ask must omit consent.
+  </Accordion>
+  <Accordion title="My response was not modified">
+    Errors, redirects, streams, binaries, assets, health routes, excluded routes, and unsafe bodies are intentionally
+    untouched. JSON arrays and scalar values use headers instead of body mutation.
+  </Accordion>
+  <Accordion title="The SDK says the key is invalid">
+    Create a new write key in Setup. Old key formats cannot sign `afr2_` capabilities. Rotate keys through the
+    dashboard; the prior key overlaps for one hour so you can deploy safely.
+  </Accordion>
+  <Accordion title="MCP requests fail version or header checks">
+    Modern requests must use `2026-07-28`, carry matching version/method/name headers and request metadata, and
+    avoid `Mcp-Session-Id`. Use `server/discover` before other methods.
+  </Accordion>
+  <Accordion title="The MCP feedback tool is temporarily unavailable">
+    When the tool returns `retryable: true`, retry exactly once with the same `feedbackHandle` and identical
+    report. Do not retry non-retryable validation or consent failures. Epode's idempotency returns the first
+    accepted report if the original success response was lost.
+  </Accordion>
+</AccordionGroup>
+
+## Still stuck?
+
+Capture only the normalized route/tool name, response status, SDK/runtime version, and error message. Do not send
+product keys, prompts, transcripts, customer content, raw tool inputs, or raw tool outputs.

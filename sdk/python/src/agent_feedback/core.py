@@ -12,6 +12,7 @@ import secrets
 import threading
 import time
 import urllib.request
+import urllib.error
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -71,6 +72,8 @@ class AgentFeedbackOptions:
     runtime_hint: Callable[[Any], str | None] | None = None
     flush_interval: float = 0.5
     max_queue_size: int = 1_000
+    telemetry_timeout: float = 10.0
+    max_telemetry_attempts: int = 5
     sender: Callable[[str, dict[str, str], bytes], None] | None = None
 
 
@@ -119,16 +122,22 @@ class _TelemetryQueue:
             "user-agent": "agent-feedback-python/0.1.0",
         }
         body = json.dumps({"events": batch}, separators=(",", ":")).encode()
-        try:
-            if self.options.sender:
-                self.options.sender(url, headers, body)
-            else:
-                request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-                with urllib.request.urlopen(request, timeout=3):
-                    pass
-        except Exception:
-            # Telemetry is intentionally lossy and never affects the product response.
-            return
+        for attempt in range(self.options.max_telemetry_attempts):
+            try:
+                if self.options.sender:
+                    self.options.sender(url, headers, body)
+                else:
+                    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+                    with urllib.request.urlopen(request, timeout=self.options.telemetry_timeout):
+                        pass
+                return
+            except urllib.error.HTTPError as error:
+                if error.code not in {408, 429} and error.code < 500:
+                    return
+            except Exception:
+                pass
+            if attempt + 1 < self.options.max_telemetry_attempts:
+                time.sleep(min(8.0, 0.5 * (2**attempt)))
 
     def shutdown(self) -> None:
         self.stop.set()
@@ -146,6 +155,8 @@ class AgentFeedback:
         options.endpoint = options.endpoint.rstrip("/")
         self.options = options
         self.telemetry = _TelemetryQueue(options)
+        self._sequence = 0
+        self._sequence_lock = threading.Lock()
 
     @property
     def enabled(self) -> bool:
@@ -275,8 +286,12 @@ class AgentFeedback:
         context: Mapping[str, str] | None = None,
     ) -> None:
         context = context or {}
+        with self._sequence_lock:
+            self._sequence += 1
+            sequence = self._sequence
         event: dict[str, Any] = {
             "interactionId": prepared["interactionId"],
+            "sequence": sequence,
             "surface": surface,
             "operation": operation,
             "statusCode": status_code,

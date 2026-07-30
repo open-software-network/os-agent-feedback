@@ -1,0 +1,64 @@
+---
+title: "Language-neutral HTTP"
+description: "Implement the small Epode HTTP contract in any server language."
+---
+
+Use the manual protocol only when a first-party SDK is unavailable. Your implementation needs standard
+HTTP, JSON, UUIDs, SHA-256, HMAC-SHA256, and base64url encoding.
+
+## Download the contract
+
+```bash
+curl -fsSLO https://app.epode.ai/static/agent-feedback-protocol-v1.zip
+unzip agent-feedback-protocol-v1.zip
+```
+
+The archive contains the protocol guide, JSON Schemas, and a deterministic signing vector.
+
+Keep the same server-only configuration used by first-party SDKs:
+
+```bash
+AGENT_FEEDBACK_KEY=af_live_...
+AGENT_FEEDBACK_MODE=never_ask
+```
+
+## Implement the response path
+
+<Steps>
+  <Step title="Validate configuration at startup">
+    Require a v2 `af_live_...` product key. Read `AGENT_FEEDBACK_MODE`; never place the key in a browser.
+  </Step>
+  <Step title="Select eligible responses">
+    Include only configured product routes. Exclude errors, redirects, assets, health/metrics, streams,
+    binaries, and Epode's own endpoints.
+  </Step>
+  <Step title="Sign a capability locally">
+    Follow the exact compact claim order and signing vector in `protocol/v1/conformance.json`. The capability
+    must expire within two hours and contain no customer or product data.
+  </Step>
+  <Step title="Add the handoff">
+    Append `_agentFeedback` to JSON objects without wrapping them. Use the `Agent-Feedback` header for arrays,
+    scalars, or immutable shapes. Add `Cache-Control: private, no-store`.
+  </Step>
+  <Step title="Queue telemetry">
+    Send opportunity telemetry in bounded background batches. Never wait on Epode before returning your response.
+  </Step>
+</Steps>
+
+## HTML
+
+For safe, finite server-rendered HTML, embed the same envelope:
+
+```html
+<script id="agent-feedback" type="application/json">{"v":1,"mode":"never_ask"}</script>
+```
+
+Serialize the full valid envelope and escape it for an HTML script-data context. If safe mutation is not possible,
+use the response header contract.
+
+## Verify
+
+Run the signing vector, validate produced envelopes against `envelope.schema.json`, simulate Epode downtime,
+and verify that a duplicate report returns the first accepted result. See [Protocol overview](/reference/overview).
+
+[View the runnable language-neutral HTTP example](https://github.com/open-software-network/os-epode/tree/main/examples/setup-matrix-manual-http)

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import test from "node:test";
 
 const dashboardScript = await readFile(
@@ -35,29 +34,14 @@ const dropLegacyDataMigration = await readFile(
   new URL("../backend/migrations/0016_drop_legacy_prototype_data.sql", import.meta.url),
   "utf8",
 );
-const backendMain = await readFile(
-  new URL("../backend/src/main.rs", import.meta.url),
-  "utf8",
-);
-const backendStore = await readFile(
-  new URL("../backend/src/store.rs", import.meta.url),
-  "utf8",
-);
-const backendModels = await readFile(
-  new URL("../backend/src/models.rs", import.meta.url),
-  "utf8",
-);
-const appAuth = await readFile(
-  new URL("../app/auth.ts", import.meta.url),
-  "utf8",
-);
-
+const backendMain = await readFile(new URL("../backend/src/main.rs", import.meta.url), "utf8");
+const backendStore = await readFile(new URL("../backend/src/store.rs", import.meta.url), "utf8");
+const backendModels = await readFile(new URL("../backend/src/models.rs", import.meta.url), "utf8");
 test("the root URL is the canonical signed-in app", () => {
   assert.match(backendMain, /\.route\("\/", get\(root_page\)\)/);
   assert.doesNotMatch(backendMain, /\.route\("\/app"/);
   assert.match(backendMain, /format!\("\/\?view=team&team=\{workspace_id\}"\)/);
   assert.match(dashboardScript, /location\.assign\("\/auth\/start"\)/);
-  assert.match(appAuth, /requireAppUser\(returnTo = "\/"\)/);
   assert.doesNotMatch(backendMain, /"\/app"\.into\(\)/);
 });
 
@@ -117,8 +101,14 @@ test("collection policy distinguishes remembered and per-report consent", () => 
   assert.match(neverAskMigration, /'never_ask', 'ask_once', 'ask_always', 'off'/);
   assert.doesNotMatch(neverAskMigration, /'ask'/);
   assert.match(consentModesMigration, /SET feedback_mode = 'ask_always'/);
-  assert.match(dashboardScript, /AGENT_FEEDBACK_MODE=\$\{dashboard\.currentEnvironment\?\.feedbackMode/);
-  assert.doesNotMatch(dashboardScript, /<p class="eyebrow">RETENTION<\/p>|Data lifetime|Retention period|day retention/);
+  assert.match(
+    dashboardScript,
+    /AGENT_FEEDBACK_MODE=\$\{dashboard\.currentEnvironment\?\.feedbackMode/,
+  );
+  assert.doesNotMatch(
+    dashboardScript,
+    /<p class="eyebrow">RETENTION<\/p>|Data lifetime|Retention period|day retention/,
+  );
   assert.match(dashboardScript, /retentionDays: dashboard\.currentEnvironment\.retentionDays/);
 });
 
@@ -130,10 +120,18 @@ test("setup offers one guided install with a manual fallback", () => {
   assert.match(dashboardScript, /Send one real interaction/);
 });
 
+test("setup links to the public Mintlify documentation", () => {
+  assert.match(dashboardScript, /https:\/\/docs\.epode\.ai/);
+  assert.match(dashboardScript, /Read the integration docs/);
+});
+
 test("installation is ready without a setup generation step", () => {
   assert.match(dashboardScript, /Installation ready/);
   assert.match(dashboardScript, /Default product key/);
-  assert.match(dashboardScript, /!dashboard\.apiKeys\.some\(\(key\) => keyKind\(key\) === "write"\)/);
+  assert.match(
+    dashboardScript,
+    /!dashboard\.apiKeys\.some\(\(key\) => keyKind\(key\) === "write"\)/,
+  );
   assert.doesNotMatch(dashboardScript, /Generate installation/);
   assert.doesNotMatch(dashboardScript, /data-create-key/);
   assert.doesNotMatch(dashboardScript, /Choose an integration and generate its installation first/);
@@ -149,15 +147,27 @@ test("setup warns about legacy keys and keeps rotation visible", () => {
   assert.match(dashboardScript, /legacy key and cannot produce valid afr2 capabilities/i);
   assert.match(dashboardScript, /V2 integrations will fail boot validation/);
   assert.match(dashboardScript, /current key will keep working for one hour/);
-  assert.match(dashboardScript, /update the <code>AGENT_FEEDBACK_KEY<\/code> server environment variable/);
+  assert.match(
+    dashboardScript,
+    /update the <code>AGENT_FEEDBACK_KEY<\/code> server environment variable/,
+  );
   assert.match(dashboardScript, /Create new key[\s\S]*<details class="existing-connections">/);
-  assert.doesNotMatch(dashboardScript, /<details class="existing-connections">[\s\S]*Create new key/);
+  assert.doesNotMatch(
+    dashboardScript,
+    /<details class="existing-connections">[\s\S]*Create new key/,
+  );
 });
 
 test("rotating a key uses the atomic overlap endpoint", () => {
-  assert.match(dashboardScript, /const rotated = dashboard\.apiKeys\.find\(\(key\) => key\.id === target\.dataset\.revokeKey\)/);
+  assert.match(
+    dashboardScript,
+    /const rotated = dashboard\.apiKeys\.find\(\(key\) => key\.id === target\.dataset\.revokeKey\)/,
+  );
   assert.match(dashboardScript, /const kind = keyKind\(rotated\)/);
-  assert.match(dashboardScript, /api\/settings\/api-keys\/\$\{target\.dataset\.revokeKey\}\/rotate/);
+  assert.match(
+    dashboardScript,
+    /api\/settings\/api-keys\/\$\{target\.dataset\.revokeKey\}\/rotate/,
+  );
   assert.doesNotMatch(dashboardScript, /target\.dataset\.revokeKey\}.*method: "DELETE"/);
   assert.match(dashboardScript, /within one hour/);
 });
@@ -166,7 +176,10 @@ test("key rows surface kind, expiry, and last-used", () => {
   assert.match(dashboardScript, /function keyKind\(key\)/);
   assert.match(dashboardScript, /class="key-kind \$\{esc\(keyKind\(key\)\)\}"/);
   assert.match(dashboardScript, /expires \$\{key\.expiresAt \? date\(key\.expiresAt\) : "never"\}/);
-  assert.match(dashboardScript, /key\.lastUsedAt \? `last used \$\{date\(key\.lastUsedAt\)\}` : "never used"/);
+  assert.match(
+    dashboardScript,
+    /key\.lastUsedAt \? `last used \$\{date\(key\.lastUsedAt\)\}` : "never used"/,
+  );
   assert.match(dashboardStyles, /\.key-kind/);
   assert.match(dashboardStyles, /\.key-kind\.read/);
 });
@@ -176,9 +189,15 @@ test("read keys are created with a 90-day default expiry and an explicit never o
   assert.match(dashboardScript, /<option value="7776000" selected>90 days<\/option>/);
   assert.match(dashboardScript, /<option value="never">Never<\/option>/);
   assert.match(dashboardScript, /kind: "read"/);
-  assert.match(dashboardScript, /if \(expiresIn !== "never"\) payload\.expiresInSeconds = Number\(expiresIn\)/);
+  assert.match(
+    dashboardScript,
+    /if \(expiresIn !== "never"\) payload\.expiresInSeconds = Number\(expiresIn\)/,
+  );
   assert.match(dashboardScript, /Save this read key now/);
-  assert.match(dashboardScript, /rememberSetupSecret\(dashboard\.currentEnvironment\.id, body\.secret, "read"\)/);
+  assert.match(
+    dashboardScript,
+    /rememberSetupSecret\(dashboard\.currentEnvironment\.id, body\.secret, "read"\)/,
+  );
 });
 
 test("read keys ship per-client MCP config snippets, not a server env variable", () => {
@@ -205,12 +224,15 @@ test("new products receive their product key automatically", () => {
 
 test("owners and admins can rename teams and products without replacing their IDs", () => {
   assert.match(backendMain, /\.route\("\/api\/team", patch\(rename_team_handler\)\)/);
-  assert.match(backendMain, /"\/api\/products\/\{product_id\}"[\s\S]*patch\(rename_product_handler\)/);
+  assert.match(
+    backendMain,
+    /"\/api\/products\/\{product_id\}"[\s\S]*patch\(rename_product_handler\)/,
+  );
   assert.match(backendMain, /async fn rename_team_handler[\s\S]*require_workspace_editor/);
   assert.match(backendMain, /async fn rename_product_handler[\s\S]*require_workspace_editor/);
-  assert.match(backendStore, /pub async fn rename_workspace/);
+  assert.match(backendStore, /pub(?:\(crate\))? async fn rename_workspace/);
   assert.match(backendStore, /UPDATE workspaces SET name = \$1, slug = \$2/);
-  assert.match(backendStore, /pub async fn rename_product/);
+  assert.match(backendStore, /pub(?:\(crate\))? async fn rename_product/);
   assert.match(backendStore, /UPDATE products SET name = \$1, slug = \$2/);
   assert.match(dashboardScript, /data-rename-team/);
   assert.match(dashboardScript, /data-rename-product/);
@@ -219,9 +241,12 @@ test("owners and admins can rename teams and products without replacing their ID
 test("owners and admins can permanently delete a product with exact-name confirmation", () => {
   assert.match(backendMain, /patch\(rename_product_handler\)\.delete\(delete_product_handler\)/);
   assert.match(backendMain, /async fn delete_product_handler[\s\S]*require_workspace_editor/);
-  assert.match(backendStore, /pub async fn delete_product/);
+  assert.match(backendStore, /pub(?:\(crate\))? async fn delete_product/);
   assert.match(backendStore, /input\.confirmation\.trim\(\) != product\.name/);
-  assert.match(backendStore, /DELETE FROM products WHERE id = \$1 AND workspace_id = \$2 RETURNING \*/);
+  assert.match(
+    backendStore,
+    /DELETE FROM products WHERE id = \$1 AND workspace_id = \$2 RETURNING \*/,
+  );
   assert.equal((productDeletionMigration.match(/ON DELETE CASCADE/g) || []).length, 3);
   assert.match(dashboardScript, /data-delete-product/);
   assert.match(dashboardScript, /permanently delete this product and all of its data/);
@@ -257,15 +282,34 @@ test("setup communicates the HTTP and MCP evidence models separately", () => {
 test("every enabled setup choice has a fresh executable E2E example", async () => {
   const expected = {
     mcp: ["node-mcp", "manual-mcp"],
-    api: ["node-express", "node-fastify", "python-asgi", "python-wsgi", "go", "rust", "manual-http"],
-    website: ["node-express", "node-fastify", "python-asgi", "python-wsgi", "go", "rust", "manual-http"],
+    api: [
+      "node-express",
+      "node-fastify",
+      "python-asgi",
+      "python-wsgi",
+      "go",
+      "rust",
+      "manual-http",
+    ],
+    website: [
+      "node-express",
+      "node-fastify",
+      "python-asgi",
+      "python-wsgi",
+      "go",
+      "rust",
+      "manual-http",
+    ],
   };
   for (const [surface, integrations] of Object.entries(expected)) {
     const start = dashboardScript.indexOf(`  ${surface}: [`);
     const end = dashboardScript.indexOf("  ],", start);
     const block = dashboardScript.slice(start, end);
     assert.ok(start >= 0 && end > start, `missing ${surface} setup block`);
-    assert.deepEqual([...block.matchAll(/\["([^"]+)"/g)].map((match) => match[1]), integrations);
+    assert.deepEqual(
+      [...block.matchAll(/\["([^"]+)"/g)].map((match) => match[1]),
+      integrations,
+    );
   }
   const fixtures = [
     "setup-matrix-node-express/index.js",
@@ -278,15 +322,26 @@ test("every enabled setup choice has a fresh executable E2E example", async () =
     "setup-matrix-node-mcp/index.js",
     "setup-matrix-manual-mcp/server.py",
   ];
-  await Promise.all(fixtures.map((fixture) => access(new URL(`../examples/${fixture}`, import.meta.url))));
-  assert.match(await readFile(new URL("setup-matrix-e2e.mjs", import.meta.url), "utf8"), /expected\.size, 16/);
+  await Promise.all(
+    fixtures.map((fixture) => access(new URL(`../examples/${fixture}`, import.meta.url))),
+  );
+  assert.match(
+    await readFile(new URL("setup-matrix-e2e.mjs", import.meta.url), "utf8"),
+    /expected\.size, 16/,
+  );
 });
 
 test("legacy prototype records and UI are removed", () => {
   for (const table of ["feedback_receipts", "feedback", "agent_events", "agent_sessions"]) {
     assert.match(dropLegacyDataMigration, new RegExp(`DROP TABLE IF EXISTS ${table}`));
   }
-  assert.doesNotMatch(dashboardScript, /legacyFeedback|legacySessions|legacyEvents|data-toggle-legacy/);
+  assert.doesNotMatch(
+    dashboardScript,
+    /legacyFeedback|legacySessions|legacyEvents|data-toggle-legacy/,
+  );
   assert.doesNotMatch(backendModels, /legacy_feedback|legacy_sessions|legacy_events/);
-  assert.doesNotMatch(backendMain, /\.route\("\/api\/v1\/|V1_WRITES_ENABLED|async fn start_session_handler/);
+  assert.doesNotMatch(
+    backendMain,
+    /\.route\("\/api\/v1\/|V1_WRITES_ENABLED|async fn start_session_handler/,
+  );
 });

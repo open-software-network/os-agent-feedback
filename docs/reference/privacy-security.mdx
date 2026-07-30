@@ -1,0 +1,41 @@
+---
+title: "Privacy and security"
+description: "Keep product keys private and feedback reports intentionally bounded."
+---
+
+## Never submit
+
+- prompts or transcripts;
+- credentials, tokens, cookies, or authentication payloads;
+- names, email addresses, or other personal data;
+- raw customer content;
+- raw tool inputs or outputs;
+- full product responses;
+- unknown report fields.
+
+Epode rejects unknown fields and common sensitive patterns recursively. Your product and the submitting runtime are
+still responsible for keeping sensitive material out of summaries and finding details.
+
+## Product key
+
+The `af_live_...` key belongs only in trusted server configuration. SDKs derive a signing key with SHA-256 and use
+it to create a scoped `afr2_...` capability locally. The capability contains no customer or product data.
+
+## Capability
+
+- scoped to one interaction;
+- expires within two hours;
+- write-only;
+- accepts one idempotent report;
+- rejected when forged, expired, or used for a different interaction.
+
+## Agent and customer identity
+
+Epode does not identify an agent. HTTP runtime headers and MCP client information are unverified hints. Optional
+`customerRef` and session references are opaque values supplied by your own authenticated product context.
+
+## Origin safety
+
+Agent-side HTTP helpers require an explicit allowlist of HTTPS submit origins. MCP servers validate every present
+browser `Origin` against an explicit allowlist. Empty MCP origin allowlists reject browser-originated requests.
+

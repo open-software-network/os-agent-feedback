@@ -1,0 +1,60 @@
+---
+title: "Go net/http"
+description: "Use standard-library middleware with net/http or a compatible router."
+---
+
+## Install
+
+```bash
+go get github.com/open-software-network/os-epode/sdk/go@latest
+```
+
+## Configure once
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "net/http"
+    "os"
+
+    agentfeedback "github.com/open-software-network/os-epode/sdk/go"
+)
+
+func main() {
+    router := http.NewServeMux()
+    router.HandleFunc("GET /search", searchHandler)
+
+    feedback, err := agentfeedback.New(agentfeedback.Options{
+        APIKey: os.Getenv("AGENT_FEEDBACK_KEY"),
+        Include: []string{"/search", "/docs/**"},
+        CustomerRef: func(r *http.Request) string {
+            return accountID(r.Context()) // optional opaque ID
+        },
+    })
+    if err != nil { log.Fatal(err) }
+    defer func() {
+        if err := feedback.Shutdown(context.Background()); err != nil {
+            log.Printf("Epode telemetry shutdown: %v", err)
+        }
+    }()
+
+    log.Fatal(http.ListenAndServe(":8080", feedback.Middleware(router)))
+}
+```
+
+## Server-rendered HTML
+
+Finite HTML bodies on included routes receive the embedded contract. Responses larger than the capture
+limit, streams detected through `Flush`, and unsafe bodies pass through byte-for-byte.
+
+The default capture limit is 1 MiB. Set `MaxResponseBodyBytes` to another positive value when needed.
+
+## Verify
+
+Send one API and one HTML request, then confirm the response contract and the Setup telemetry status.
+Call `Shutdown` during graceful server shutdown so queued telemetry can flush.
+
+[View the runnable Go example](https://github.com/open-software-network/os-epode/tree/main/examples/setup-matrix-go)

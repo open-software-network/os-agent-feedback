@@ -29,12 +29,26 @@ use uuid::Uuid;
 
 use crate::{
     error::ApiError,
-    models::*,
+    models::{
+        CreateApiKeyInput, CreateProductInput, CreateTeamInvitationInput, CurrentUser,
+        DashboardContext, DeleteProductInput, FeedbackListInteractionsInput,
+        FeedbackListReportsInput, PolicyInput, ProductAuth, ProductFeedbackReportInput,
+        TelemetryBatchInput, UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput,
+    },
     os_accounts::{
         ACCESS_COOKIE, OsAccountsClient, PKCE_COOKIE, REFRESH_COOKIE, STATE_COOKIE, TokenPair,
     },
     security::{bearer_token, clear_cookie, cookie, http_only_cookie, reject_sensitive_fields},
-    store::*,
+    store::{
+        accept_team_invitation, agent_product_auth, create_api_key,
+        create_product_with_default_key, create_team_invitation, dashboard_interaction_by_id,
+        dashboard_report_by_id, dashboard_session_by_id, dashboard_with_limits, delete_product,
+        feedback_list_interactions, feedback_list_reports, get_or_create_workspace,
+        ingest_telemetry_batch, purge_expired_product_data, read_product_auth, remove_team_member,
+        rename_product, rename_workspace, resolve_workspace_access, revoke_api_key,
+        revoke_team_invitation, rotate_api_key, submit_product_feedback, transfer_team_ownership,
+        update_feedback_workflow, update_policy, update_team_member_role,
+    },
 };
 
 #[derive(Clone)]
@@ -89,8 +103,21 @@ async fn main() -> anyhow::Result<()> {
     let accounts = OsAccountsClient::from_env(&public_base_url)?;
     let database_url =
         env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL is required"))?;
+    let database_max_connections = match env::var("DATABASE_MAX_CONNECTIONS") {
+        Ok(value) => value
+            .parse::<u32>()
+            .map_err(|_| anyhow::anyhow!("DATABASE_MAX_CONNECTIONS must be an integer"))?,
+        Err(env::VarError::NotPresent) => 10,
+        Err(env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("DATABASE_MAX_CONNECTIONS must be valid Unicode")
+        }
+    };
+    anyhow::ensure!(
+        (1..=100).contains(&database_max_connections),
+        "DATABASE_MAX_CONNECTIONS must be between 1 and 100"
+    );
     let pool = PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(database_max_connections)
         .connect(&database_url)
         .await?;
     sqlx::migrate!().run(&pool).await?;
@@ -210,7 +237,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn spawn_retention_worker(pool: PgPool) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3_600));
+        let mut interval = tokio::time::interval(std::time::Duration::from_hours(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
@@ -254,20 +281,26 @@ async fn security_headers(request: Request<Body>, next: Next) -> Response {
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("install Ctrl+C handler")
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(?error, "failed to listen for Ctrl+C");
+            std::future::pending::<()>().await;
+        }
     };
     #[cfg(unix)]
     let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("install signal handler")
-            .recv()
-            .await;
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                tracing::error!(?error, "failed to listen for SIGTERM");
+                std::future::pending::<()>().await;
+            }
+        }
     };
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
-    tokio::select! { _ = ctrl_c => {}, _ = terminate => {} }
+    tokio::select! { () = ctrl_c => {}, () = terminate => {} }
 }
 
 #[derive(Deserialize)]
@@ -285,12 +318,12 @@ async fn root_page(headers: HeaderMap, Query(query): Query<RootPageQuery>) -> Ht
     };
     let mut html = read_page(page, "Epode").await;
     if page == "public/index.html" && query.auth.as_deref() == Some("failed") {
-        html = reveal_auth_error(html);
+        html = reveal_auth_error(&html);
     }
     Html(html)
 }
 
-fn reveal_auth_error(html: String) -> String {
+fn reveal_auth_error(html: &str) -> String {
     html.replace(
         "id=\"auth-error\" class=\"auth-error\" hidden",
         "id=\"auth-error\" class=\"auth-error\"",
@@ -378,11 +411,11 @@ async fn auth_start(State(state): State<Arc<AppState>>) -> Result<Response, ApiE
     let mut response = Redirect::to(login_url.as_str()).into_response();
     append_cookie(
         &mut response,
-        http_only_cookie(PKCE_COOKIE, &verifier, 600, state.secure_cookies),
+        &http_only_cookie(PKCE_COOKIE, &verifier, 600, state.secure_cookies),
     )?;
     append_cookie(
         &mut response,
-        http_only_cookie(STATE_COOKIE, &oauth_state, 600, state.secure_cookies),
+        &http_only_cookie(STATE_COOKIE, &oauth_state, 600, state.secure_cookies),
     )?;
     Ok(response)
 }
@@ -407,38 +440,37 @@ async fn auth_callback(
     if !valid {
         return auth_failure(&state);
     }
-    let tokens = match state
+    let Ok(tokens) = state
         .accounts
         .exchange_code(
             query.code.as_deref().unwrap_or_default(),
             verifier.as_deref().unwrap_or_default(),
         )
         .await
-    {
-        Ok(tokens) => tokens,
-        Err(_) => return auth_failure(&state),
+    else {
+        return auth_failure(&state);
     };
-    let user = match state.accounts.profile(&tokens.access_token).await {
-        Ok(user) => user,
-        Err(_) => return auth_failure(&state),
+    let Ok(user) = state.accounts.profile(&tokens.access_token).await else {
+        return auth_failure(&state);
     };
     get_or_create_workspace(&state.pool, &user).await?;
     let invite_id =
         cookie(&headers, TEAM_INVITE_COOKIE).and_then(|value| Uuid::parse_str(&value).ok());
-    let redirect = if let Some(invite_id) = invite_id {
-        match accept_team_invitation(&state.pool, &user, invite_id).await {
-            Ok(workspace_id) => format!("/?view=team&team={workspace_id}"),
-            Err(_) => "/?view=team&invite=invalid".into(),
-        }
-    } else {
-        "/".into()
+    let redirect = match invite_id {
+        Some(invite_id) => accept_team_invitation(&state.pool, &user, invite_id)
+            .await
+            .map_or_else(
+                |_| "/?view=team&invite=invalid".into(),
+                |workspace_id| format!("/?view=team&team={workspace_id}"),
+            ),
+        None => "/".into(),
     };
     let mut response = Redirect::to(&redirect).into_response();
     attach_token_cookies(&mut response, &state, &tokens)?;
     clear_flow_cookies(&mut response, &state)?;
     append_cookie(
         &mut response,
-        clear_cookie(TEAM_INVITE_COOKIE, state.secure_cookies),
+        &clear_cookie(TEAM_INVITE_COOKIE, state.secure_cookies),
     )?;
     Ok(response)
 }
@@ -450,7 +482,7 @@ async fn join_team_handler(
     let mut response = Redirect::to("/auth/start").into_response();
     append_cookie(
         &mut response,
-        http_only_cookie(
+        &http_only_cookie(
             TEAM_INVITE_COOKIE,
             &invitation_id.to_string(),
             7 * 24 * 60 * 60,
@@ -465,19 +497,19 @@ fn auth_failure(state: &AppState) -> Result<Response, ApiError> {
     clear_flow_cookies(&mut response, state)?;
     append_cookie(
         &mut response,
-        clear_cookie(ACCESS_COOKIE, state.secure_cookies),
+        &clear_cookie(ACCESS_COOKIE, state.secure_cookies),
     )?;
     append_cookie(
         &mut response,
-        clear_cookie(REFRESH_COOKIE, state.secure_cookies),
+        &clear_cookie(REFRESH_COOKIE, state.secure_cookies),
     )?;
     Ok(response)
 }
 
-fn append_cookie(response: &mut Response, value: String) -> Result<(), ApiError> {
+fn append_cookie(response: &mut Response, value: &str) -> Result<(), ApiError> {
     response.headers_mut().append(
         header::SET_COOKIE,
-        HeaderValue::from_str(&value).map_err(ApiError::internal)?,
+        HeaderValue::from_str(value).map_err(ApiError::internal)?,
     );
     Ok(())
 }
@@ -489,7 +521,7 @@ fn attach_token_cookies(
 ) -> Result<(), ApiError> {
     append_cookie(
         response,
-        http_only_cookie(
+        &http_only_cookie(
             ACCESS_COOKIE,
             &tokens.access_token,
             900,
@@ -498,7 +530,7 @@ fn attach_token_cookies(
     )?;
     append_cookie(
         response,
-        http_only_cookie(
+        &http_only_cookie(
             REFRESH_COOKIE,
             &tokens.refresh_token,
             2_592_000,
@@ -508,8 +540,8 @@ fn attach_token_cookies(
 }
 
 fn clear_flow_cookies(response: &mut Response, state: &AppState) -> Result<(), ApiError> {
-    append_cookie(response, clear_cookie(PKCE_COOKIE, state.secure_cookies))?;
-    append_cookie(response, clear_cookie(STATE_COOKIE, state.secure_cookies))
+    append_cookie(response, &clear_cookie(PKCE_COOKIE, state.secure_cookies))?;
+    append_cookie(response, &clear_cookie(STATE_COOKIE, state.secure_cookies))
 }
 
 async fn dashboard_auth(
@@ -588,11 +620,11 @@ async fn logout_handler(
     let mut response = Json(json!({ "authenticated": false })).into_response();
     append_cookie(
         &mut response,
-        clear_cookie(ACCESS_COOKIE, state.secure_cookies),
+        &clear_cookie(ACCESS_COOKIE, state.secure_cookies),
     )?;
     append_cookie(
         &mut response,
-        clear_cookie(REFRESH_COOKIE, state.secure_cookies),
+        &clear_cookie(REFRESH_COOKIE, state.secure_cookies),
     )?;
     Ok(response)
 }
@@ -986,9 +1018,9 @@ fn mcp_complete_result(mut value: Value, modern: bool) -> Value {
     value
 }
 
-fn mcp_tool_result(payload: Value, is_error: bool, modern: bool) -> Value {
+fn mcp_tool_result(payload: &Value, is_error: bool, modern: bool) -> Value {
     let mut value = json!({
-        "content": [{ "type": "text", "text": serde_json::to_string_pretty(&payload).unwrap_or_default() }],
+        "content": [{ "type": "text", "text": serde_json::to_string_pretty(payload).unwrap_or_default() }],
         "structuredContent": payload,
     });
     if is_error {
@@ -997,17 +1029,17 @@ fn mcp_tool_result(payload: Value, is_error: bool, modern: bool) -> Value {
     mcp_complete_result(value, modern)
 }
 
-fn mcp_ok(id: Value, result: Value) -> Json<Value> {
+fn mcp_ok(id: &Value, result: &Value) -> Json<Value> {
     Json(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
 }
-fn mcp_error(id: Value, code: i32, message: impl Into<String>) -> Json<Value> {
+fn mcp_error(id: &Value, code: i32, message: impl Into<String>) -> Json<Value> {
     Json(
         json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message.into() } }),
     )
 }
 
 fn mcp_error_response(
-    id: Value,
+    id: &Value,
     status: StatusCode,
     code: i32,
     message: impl Into<String>,
@@ -1028,7 +1060,7 @@ async fn mcp_product_auth(pool: &PgPool, headers: &HeaderMap) -> Result<ProductA
     read_product_auth(pool, headers).await
 }
 
-fn mcp_auth_error(id: Value, error: ApiError) -> Response {
+fn mcp_auth_error(id: &Value, error: ApiError) -> Response {
     mcp_error_response(id, error.status, -32001, error.message, None)
 }
 
@@ -1060,7 +1092,7 @@ fn validate_modern_mcp_request(headers: &HeaderMap, body: &Value) -> Option<Resp
         .and_then(|value| value.to_str().ok());
     if body_version.is_none() || header_version != body_version {
         return Some(mcp_error_response(
-            id,
+            &id,
             StatusCode::BAD_REQUEST,
             -32020,
             "Required MCP protocol version metadata is missing or mismatched",
@@ -1069,7 +1101,7 @@ fn validate_modern_mcp_request(headers: &HeaderMap, body: &Value) -> Option<Resp
     }
     if body_version != Some(MCP_PROTOCOL_VERSION) {
         return Some(mcp_error_response(
-            id,
+            &id,
             StatusCode::BAD_REQUEST,
             -32022,
             "Unsupported protocol version",
@@ -1084,7 +1116,7 @@ fn validate_modern_mcp_request(headers: &HeaderMap, body: &Value) -> Option<Resp
         .is_some_and(Value::is_object)
     {
         return Some(mcp_error_response(
-            id,
+            &id,
             StatusCode::BAD_REQUEST,
             -32602,
             "Client capabilities are required in request _meta",
@@ -1096,7 +1128,7 @@ fn validate_modern_mcp_request(headers: &HeaderMap, body: &Value) -> Option<Resp
         .and_then(|value| value.to_str().ok());
     if method.is_empty() || header_method != Some(method) {
         return Some(mcp_error_response(
-            id,
+            &id,
             StatusCode::BAD_REQUEST,
             -32020,
             "Required Mcp-Method header is missing or mismatched",
@@ -1113,7 +1145,7 @@ fn validate_modern_mcp_request(headers: &HeaderMap, body: &Value) -> Option<Resp
             .and_then(decode_mcp_header);
         if header_name.as_deref() != body_name {
             return Some(mcp_error_response(
-                id,
+                &id,
                 StatusCode::BAD_REQUEST,
                 -32020,
                 "Required Mcp-Name header is missing, malformed, or mismatched",
@@ -1139,7 +1171,7 @@ async fn mcp_handler(
             .any(|allowed| allowed == origin)
     {
         return mcp_error_response(
-            id,
+            &id,
             StatusCode::FORBIDDEN,
             -32000,
             "Origin is not allowed",
@@ -1159,7 +1191,7 @@ async fn mcp_handler(
         .is_some_and(|version| version != MCP_PROTOCOL_VERSION && version != "2025-11-25")
     {
         return mcp_error_response(
-            id,
+            &id,
             StatusCode::BAD_REQUEST,
             -32022,
             "Unsupported protocol version",
@@ -1175,8 +1207,8 @@ async fn mcp_handler(
     }
     match body.get("method").and_then(Value::as_str) {
         Some("initialize") if !modern => mcp_ok(
-            id,
-            json!({
+            &id,
+            &json!({
                 "protocolVersion": "2025-11-25",
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": mcp_server_info(),
@@ -1185,8 +1217,8 @@ async fn mcp_handler(
         )
         .into_response(),
         Some("server/discover") if modern => mcp_ok(
-            id,
-            json!({
+            &id,
+            &json!({
                 "resultType": "complete",
                 "supportedVersions": [MCP_PROTOCOL_VERSION],
                 "capabilities": { "tools": { "listChanged": false } },
@@ -1200,7 +1232,7 @@ async fn mcp_handler(
         Some("tools/list") => {
             let _auth = match mcp_product_auth(&state.pool, &headers).await {
                 Ok(auth) => auth,
-                Err(error) => return mcp_auth_error(id, error),
+                Err(error) => return mcp_auth_error(&id, error),
             };
             let mut result = json!({ "tools": mcp_tools() });
             if modern {
@@ -1209,13 +1241,13 @@ async fn mcp_handler(
                 result["ttlMs"] = json!(300_000);
                 result["cacheScope"] = json!("private");
             }
-            mcp_ok(id, result).into_response()
+            mcp_ok(&id, &result).into_response()
         }
         Some("notifications/initialized") if !modern => StatusCode::ACCEPTED.into_response(),
         Some("tools/call") => {
             let auth = match mcp_product_auth(&state.pool, &headers).await {
                 Ok(auth) => auth,
-                Err(error) => return mcp_auth_error(id, error),
+                Err(error) => return mcp_auth_error(&id, error),
             };
             let name = body
                 .pointer("/params/name")
@@ -1223,8 +1255,8 @@ async fn mcp_handler(
                 .unwrap_or("");
             if !mcp_tool_allowed(name) {
                 return mcp_ok(
-                    id,
-                    mcp_tool_result(json!({ "error": "Unknown MCP tool" }), true, modern),
+                    &id,
+                    &mcp_tool_result(&json!({ "error": "Unknown MCP tool" }), true, modern),
                 )
                 .into_response();
             }
@@ -1234,8 +1266,8 @@ async fn mcp_handler(
                 .unwrap_or_else(|| json!({}));
             if let Err(message) = reject_sensitive_fields(&arguments) {
                 return mcp_ok(
-                    id,
-                    mcp_tool_result(json!({ "error": message }), true, modern),
+                    &id,
+                    &mcp_tool_result(&json!({ "error": message }), true, modern),
                 )
                 .into_response();
             }
@@ -1263,18 +1295,20 @@ async fn mcp_handler(
                 _ => Err(ApiError::not_found("Unknown MCP tool")),
             };
             match result {
-                Ok(payload) => mcp_ok(id, mcp_tool_result(payload, false, modern)).into_response(),
+                Ok(payload) => {
+                    mcp_ok(&id, &mcp_tool_result(&payload, false, modern)).into_response()
+                }
                 Err(error) => mcp_ok(
-                    id,
-                    mcp_tool_result(json!({ "error": error.message }), true, modern),
+                    &id,
+                    &mcp_tool_result(&json!({ "error": error.message }), true, modern),
                 )
                 .into_response(),
             }
         }
         _ if modern => {
-            mcp_error_response(id, StatusCode::NOT_FOUND, -32601, "Unknown method", None)
+            mcp_error_response(&id, StatusCode::NOT_FOUND, -32601, "Unknown method", None)
         }
-        _ => mcp_error(id, -32601, "Unknown method").into_response(),
+        _ => mcp_error(&id, -32601, "Unknown method").into_response(),
     }
 }
 
@@ -1377,6 +1411,12 @@ fn mcp_read_tools() -> Value {
 
 #[cfg(test)]
 mod page_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        reason = "test failures should abort at the assertion site"
+    )]
+
     use axum::{body::to_bytes, http::StatusCode};
 
     use super::{ApiError, mcp_auth_error, mcp_tool_allowed, mcp_tools, reveal_auth_error};
@@ -1385,7 +1425,7 @@ mod page_tests {
     #[test]
     fn failed_authentication_message_is_revealed() {
         let html = r#"<p id="auth-error" class="auth-error" hidden>Try again</p>"#;
-        let revealed = reveal_auth_error(html.into());
+        let revealed = reveal_auth_error(html);
         assert!(revealed.contains(r#"id="auth-error" class="auth-error">Try again"#));
         assert!(!revealed.contains("auth-error\" hidden"));
     }
@@ -1414,7 +1454,7 @@ mod page_tests {
     async fn invalid_and_expired_mcp_auth_are_distinct_unauthorized_responses() {
         for message in ["Invalid API key", "API key expired"] {
             let response = mcp_auth_error(
-                Value::from(1),
+                &Value::from(1),
                 ApiError::new(StatusCode::UNAUTHORIZED, message),
             );
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);

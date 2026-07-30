@@ -20,6 +20,7 @@
           "operation": { "type": "string", "minLength": 1, "maxLength": 160 },
           "statusCode": { "type": "integer", "minimum": 100, "maximum": 599 },
           "durationMs": { "type": "integer", "minimum": 0 },
+          "sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
           "customerRef": { "type": "string", "minLength": 1, "maxLength": 160 },
           "classification": { "enum": ["unclassified", "confirmed"] },
           "confirmationMethod": { "enum": ["mcp"] },

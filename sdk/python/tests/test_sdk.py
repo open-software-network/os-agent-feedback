@@ -60,6 +60,37 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["_agentFeedback"]["reliability"], "best_effort_without_agent_adapter")
         middleware.shutdown()
         self.assertEqual(telemetry[0]["events"][0]["classification"], "unclassified")
+        self.assertEqual(telemetry[0]["events"][0]["sequence"], 1)
+
+    def test_telemetry_retries_transient_delivery_without_changing_event(self) -> None:
+        attempts = 0
+        delivered: list[dict] = []
+
+        def sender(_url: str, _headers: dict[str, str], body: bytes) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise TimeoutError("temporarily unavailable")
+            delivered.append(json.loads(body))
+
+        runtime = AgentFeedback(AgentFeedbackOptions(
+            api_key=KEY,
+            endpoint="https://feedback.test",
+            flush_interval=3600,
+            sender=sender,
+        ))
+        prepared = runtime.prepare()
+        runtime.record(
+            prepared,
+            surface="http_json",
+            operation="/search",
+            status_code=200,
+            duration_ms=1,
+        )
+        runtime.shutdown()
+        self.assertEqual(attempts, 3)
+        self.assertEqual(delivered[0]["events"][0]["interactionId"], prepared["interactionId"])
+        self.assertEqual(delivered[0]["events"][0]["sequence"], 1)
 
     def test_wsgi_safe_header_fallback(self) -> None:
         def app(_environ, start_response):

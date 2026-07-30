@@ -1,0 +1,105 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "maple",
+  "name": "Epode",
+  "description": "Collect structured product feedback from the independent agents using your API, website, or MCP server.",
+  "colors": {
+    "primary": "#1D4ED8",
+    "light": "#68C4FF",
+    "dark": "#3B82F6"
+  },
+  "logo": {
+    "light": "/logo.svg",
+    "dark": "/logo.svg"
+  },
+  "favicon": "/logo.svg",
+  "navbar": {
+    "links": [
+      { "label": "Dashboard", "href": "https://app.epode.ai" },
+      { "label": "GitHub", "href": "https://github.com/open-software-network/os-epode" }
+    ],
+    "primary": { "type": "button", "label": "Open Epode", "href": "https://app.epode.ai" }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Start here",
+            "pages": ["index", "quickstart", "integrations/choose"]
+          },
+          {
+            "group": "Understand Epode",
+            "pages": [
+              "concepts/how-it-works",
+              "concepts/reliability",
+              "concepts/feedback-modes",
+              "concepts/customers-and-sessions"
+            ]
+          },
+          {
+            "group": "HTTP and websites",
+            "pages": [
+              "integrations/node-express",
+              "integrations/node-fastify",
+              "integrations/python-asgi",
+              "integrations/python-wsgi",
+              "integrations/go-http",
+              "integrations/rust-axum",
+              "integrations/manual-http"
+            ]
+          },
+          {
+            "group": "MCP",
+            "pages": [
+              "integrations/node-mcp",
+              "integrations/manual-mcp"
+            ]
+          },
+          {
+            "group": "Operate",
+            "pages": [
+              "guides/verify",
+              "guides/real-world-patterns",
+              "guides/read-the-data",
+              "guides/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Protocol reference",
+        "groups": [
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/overview",
+              "reference/http-envelope",
+              "reference/feedback-report",
+              "reference/mcp-2026-07-28",
+              "reference/configuration",
+              "reference/privacy-security"
+            ]
+          }
+        ]
+      }
+    ],
+    "global": {
+      "anchors": [
+        { "anchor": "Dashboard", "icon": "chart-line", "href": "https://app.epode.ai" },
+        { "anchor": "Status", "icon": "signal", "href": "https://app.epode.ai/api/health" }
+      ]
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/open-software-network/os-epode"
+    }
+  },
+  "seo": {
+    "metatags": {
+      "canonical": "https://docs.epode.ai"
+    }
+  }
+}

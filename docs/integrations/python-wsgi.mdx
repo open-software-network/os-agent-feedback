@@ -1,0 +1,49 @@
+---
+title: "Python WSGI"
+description: "Add the conservative header-based handoff to Flask, Django WSGI, Bottle, or Pyramid."
+---
+
+## Install
+
+```bash
+python -m pip install https://app.epode.ai/static/agent_feedback-0.1.0-py3-none-any.whl
+```
+
+## Configure once
+
+```python
+import os
+from flask import Flask, jsonify, request
+from agent_feedback import AgentFeedbackWSGI
+
+app = Flask(__name__)
+
+@app.get("/search")
+def search_endpoint():
+    return jsonify(results=search(request.args.get("q", "")))
+
+app.wsgi_app = AgentFeedbackWSGI(
+    app.wsgi_app,
+    api_key=os.environ["AGENT_FEEDBACK_KEY"],
+    include=("/search", "/docs/*"),
+    customer_ref=lambda environ: environ.get("account_id"),  # optional opaque ID
+)
+```
+
+The conservative WSGI adapter uses the `Agent-Feedback` response header for finite responses. It does
+not buffer or mutate the application body.
+
+## Server-rendered HTML
+
+Included HTML pages use that same response-header handoff. The page body remains byte-for-byte unchanged,
+which is safer for WSGI applications that calculate content length or stream an iterable response.
+
+## Verify
+
+```bash
+curl -sSI 'https://your-product.example/search?q=epode-test' | grep -i agent-feedback
+```
+
+Decode the base64url header only in a trusted agent runtime. Do not expose or reuse the company product key.
+
+[View the runnable WSGI example](https://github.com/open-software-network/os-epode/tree/main/examples/setup-matrix-python-wsgi)

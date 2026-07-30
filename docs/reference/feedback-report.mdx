@@ -1,0 +1,64 @@
+---
+title: "Feedback report"
+description: "The bounded outcome schema submitted by a customer agent."
+---
+
+Only `summary` is required in Never ask mode.
+
+```json
+{
+  "summary": "The status result answered the question but required a retry.",
+  "impact": "helped_with_friction",
+  "confidence": 0.92,
+  "findings": [
+    {
+      "kind": "strength",
+      "topic": "accuracy",
+      "detail": "The final status was correct."
+    },
+    {
+      "kind": "friction",
+      "topic": "latency",
+      "severity": "minor",
+      "detail": "The first request timed out."
+    }
+  ],
+  "workaround": {
+    "used": true,
+    "detail": "The agent retried once."
+  }
+}
+```
+
+## Fields
+
+| Field | Rules |
+| --- | --- |
+| `summary` | Required, 8–700 characters |
+| `impact` | `helped`, `helped_with_friction`, `neutral`, `hindered`, `blocked`, or `unknown` |
+| `confidence` | Number from 0 to 1 |
+| `findings` | Up to eight bounded findings |
+| `findings[].kind` | `strength`, `friction`, `defect`, `gap`, `suggestion`, `uncertainty`, or `other` |
+| `findings[].topic` | Normalized lowercase slug |
+| `findings[].severity` | Optional `minor`, `major`, or `blocking` |
+| `workaround` | If `used` is true, a bounded detail is required |
+| `consent` | Required only by Ask once or Ask every time |
+
+## Consent attestation
+
+Ask once:
+
+```json
+{
+  "userApproved": true,
+  "approvalSource": "stored_grant",
+  "consentScope": "afcs1_0123456789abcdef0123456789abcdef"
+}
+```
+
+Ask every time requires `approvalSource: "granted_now"` and must omit `consentScope`. Never ask must omit
+`consent` completely.
+
+Unknown fields and common sensitive-data patterns are rejected recursively. Duplicate submissions return
+the first accepted report.
+

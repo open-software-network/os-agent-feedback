@@ -1,0 +1,41 @@
+---
+title: "Language-neutral MCP"
+description: "Implement the Epode binding on a stateless MCP 2026-07-28 server."
+---
+
+Use this path when your MCP server is not written in Node.
+
+## Download the contract
+
+```bash
+curl -fsSLO https://app.epode.ai/static/agent-feedback-protocol-v1.zip
+unzip agent-feedback-protocol-v1.zip
+```
+
+## Required behavior
+
+1. Implement stateless MCP `2026-07-28` and `server/discover`.
+2. Validate every present HTTP `Origin` against an explicit allowlist.
+3. Require matching `MCP-Protocol-Version`, `Mcp-Method`, and, for named calls, `Mcp-Name`.
+4. Require current protocol metadata in `params._meta` for every request.
+5. Return `resultType: "complete"`, server identity metadata, and deterministic tool-list cache hints.
+6. Emit confirmed telemetry when a normal product tool completes.
+7. Decorate the product result with `_agentFeedback` and a scoped `feedbackHandle`.
+8. Register `report_product_feedback` and forward its bounded report with the capability.
+
+If delivery returns `retryable: true`, tell the agent to retry exactly once with the same handle and report.
+Do not retry validation, consent, or other non-retryable failures.
+
+<Warning>
+Do not treat MCP client information or a transport connection as agent identity. Do not create transport
+sessions for modern requests.
+</Warning>
+
+## Verify
+
+Test discovery, unsupported-version errors, origin rejection, header/body version consistency, deterministic
+`tools/list`, a product-tool call, feedback-tool submission, idempotency, and the 2025-11-25 compatibility path.
+
+See [MCP 2026-07-28 reference](/reference/mcp-2026-07-28) for the exact contract.
+
+[View the runnable language-neutral MCP example](https://github.com/open-software-network/os-epode/tree/main/examples/setup-matrix-manual-mcp)

@@ -1,7 +1,4 @@
 .git
-.next
-.vinext
-.wrangler
 dist
 node_modules
 **/node_modules

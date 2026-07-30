@@ -1,0 +1,109 @@
+---
+title: "Node + Express"
+description: "Instrument selected Express JSON and HTML responses with one global middleware."
+---
+
+## Install
+
+```bash
+npm install https://app.epode.ai/static/agent-feedback-node-0.1.0.tgz express
+```
+
+Node 20 or newer is required.
+
+## Configure once
+
+Register Epode before the included route handlers:
+
+```ts
+import express from "express";
+import { agentFeedback } from "@agent-feedback/node/express";
+
+const app = express();
+
+app.use(agentFeedback({
+  apiKey: process.env.AGENT_FEEDBACK_KEY,
+  include: ["/search", "/docs/*"],
+  customerRef: req => req.user?.accountId, // optional opaque ID
+}));
+
+app.get("/search", async (req, res) => {
+  res.json({ results: await search(req.query.q) });
+});
+
+app.listen(Number(process.env.PORT || 3000));
+```
+
+No route wrapper or response call is required. The middleware derives the normalized operation from
+the Express route.
+
+## Cached APIs
+
+The default `cacheMode: "safe"` does not silently turn a response with `public`, `max-age`, `s-maxage`,
+`immutable`, or `stale-while-revalidate` into a private response. It skips those responses and logs one
+configuration warning.
+
+If ordinary callers share a CDN response but feedback-aware agent callers can opt in, use request mode:
+
+```ts
+app.use(agentFeedback({
+  apiKey: process.env.AGENT_FEEDBACK_KEY,
+  include: ["/v1/search"],
+  cacheMode: "request",
+  customerRef: req => req.user?.accountId,
+  sessionRef: req => req.get("x-agent-run-id"),
+}));
+```
+
+The agent caller sends `Agent-Feedback-Request: 1`. Only that request receives feedback metadata and
+becomes `private, no-store`; the public response keeps its existing cache policy. Use
+`cacheMode: "private"` only when disabling shared caching on every included response is intentional.
+
+## Async jobs
+
+Instrument the result, not every polling response:
+
+```ts
+app.use(agentFeedback({
+  apiKey: process.env.AGENT_FEEDBACK_KEY,
+  include: ["/v1/crawls/*"],
+  shouldInstrument: (_req, response) =>
+    response.body?.status === "completed",
+  sessionRef: req => req.get("x-agent-run-id"),
+}));
+```
+
+Creation responses, in-progress polls, and failures remain untouched. The terminal result asks for one
+assessment after the agent can judge the experience.
+
+## Server-rendered HTML
+
+Use the same middleware and include the HTML route:
+
+```ts
+app.use(agentFeedback({
+  apiKey: process.env.AGENT_FEEDBACK_KEY,
+  include: ["/agent-docs", "/docs/*"],
+}));
+```
+
+Eligible HTML receives an embedded `<script id="agent-feedback" type="application/json">` contract.
+It does not change the visible page.
+
+## Verify
+
+```bash
+npx agent-feedback-doctor https://your-product.example/search?q=epode-test
+```
+
+The doctor checks shape preservation, the scoped capability, submission origin, and telemetry. In
+`never_ask`, it submits one synthetic review. In ask modes, it validates consent without claiming approval.
+
+## What is not instrumented
+
+Errors, redirects, health and metrics routes, assets, streams, binary responses, and routes outside
+`include` remain untouched. JSON arrays and scalar values use response headers instead of being wrapped.
+
+[View the runnable Express example](https://github.com/open-software-network/os-epode/tree/main/examples/setup-matrix-node-express)
+
+[View the cached search API example](https://github.com/open-software-network/os-epode/tree/main/examples/icp-search-express)

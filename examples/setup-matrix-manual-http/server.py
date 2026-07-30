@@ -13,12 +13,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 API_KEY = os.environ["AGENT_FEEDBACK_KEY"]
 ENDPOINT = os.environ.get("AGENT_FEEDBACK_URL", "https://app.epode.ai").rstrip("/")
 KEY_ID = API_KEY.split("_", 3)[2]
+SEQUENCE = 0
+SEQUENCE_LOCK = threading.Lock()
 
 def b64(value):
     return base64.urlsafe_b64encode(value).decode().rstrip("=")
 
 def prepared():
+    global SEQUENCE
     interaction_id = str(uuid.uuid4())
+    with SEQUENCE_LOCK:
+        SEQUENCE += 1
+        sequence = SEQUENCE
     issued = int(time.time())
     expires = issued + 7200
     claims = {"v": 1, "i": interaction_id, "iat": issued, "exp": expires, "n": b64(secrets.token_bytes(18))}
@@ -26,7 +32,7 @@ def prepared():
     signing_input = f"afr2_{KEY_ID}.{payload}"
     signing_key = hashlib.sha256(API_KEY.encode()).digest()
     signature = b64(hmac.new(signing_key, signing_input.encode(), hashlib.sha256).digest())
-    return interaction_id, {
+    return interaction_id, sequence, {
         "v": 1, "mode": "never_ask", "requested": True,
         "consentRequired": False, "consentPolicy": "none",
         "reliability": "best_effort_without_agent_adapter",
@@ -37,16 +43,16 @@ def prepared():
         "expiresAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(expires)),
     }
 
-def telemetry(interaction_id, surface, operation):
-    body = json.dumps({"events": [{"interactionId": interaction_id, "surface": surface, "operation": operation, "statusCode": 200, "durationMs": 1, "classification": "unclassified", "occurredAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}]}).encode()
+def telemetry(interaction_id, sequence, surface, operation):
+    body = json.dumps({"events": [{"interactionId": interaction_id, "sequence": sequence, "surface": surface, "operation": operation, "statusCode": 200, "durationMs": 1, "classification": "unclassified", "occurredAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}]}).encode()
     request = urllib.request.Request(f"{ENDPOINT}/api/v2/telemetry/batches", data=body, method="POST", headers={"authorization": f"Bearer {API_KEY}", "content-type": "application/json", "user-agent": "epode-manual-http/1.0"})
-    for attempt in range(3):
+    for attempt in range(5):
         try:
-            urllib.request.urlopen(request, timeout=3).read()
+            urllib.request.urlopen(request, timeout=10).read()
             return
         except Exception:
-            if attempt < 2:
-                time.sleep(0.5 * (attempt + 1))
+            if attempt < 4:
+                time.sleep(min(8, 0.5 * (2 ** attempt)))
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -54,7 +60,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200); self.end_headers(); self.wfile.write(b"ok"); return
         if self.path not in {"/search", "/docs/test"}:
             self.send_response(404); self.end_headers(); return
-        interaction_id, envelope = prepared()
+        interaction_id, sequence, envelope = prepared()
         if self.path == "/search":
             payload = json.dumps({"stack": "manual-http", "answer": "manual-http-result", "_agentFeedback": envelope}).encode()
             content_type, surface = "application/json", "http_json"
@@ -67,7 +73,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("content-length", str(len(payload)))
         self.send_header("cache-control", "private, no-store")
         self.end_headers(); self.wfile.write(payload)
-        threading.Thread(target=telemetry, args=(interaction_id, surface, self.path), daemon=True).start()
+        threading.Thread(target=telemetry, args=(interaction_id, sequence, surface, self.path), daemon=True).start()
 
     def log_message(self, *_args): pass
 

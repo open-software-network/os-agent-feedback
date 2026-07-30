@@ -1,0 +1,44 @@
+---
+title: "Real-world integration patterns"
+description: "Choose outcome boundaries and session references for search, crawl, browser, docs, and authenticated operations products."
+---
+
+The best configuration follows the product interaction the customer agent already performs. Do not invent
+an agent identity or an Epode-only session.
+
+| Product pattern | Observe | Ask for feedback | Session reference |
+| --- | --- | --- | --- |
+| Search or retrieval API | Selected result responses | Each agent-requested result | Existing agent run ID, if available |
+| Async crawl or export | Terminal result | Completed or failed outcome the agent can evaluate | Existing job or run ID |
+| Browser automation MCP | All browser tools | Close/finalize, or another real journey boundary | Browser session ID |
+| Documentation MCP | Resolve and query tools | Answer-bearing query | Agent run ID |
+| Email, payments, or issue MCP | Selected side-effecting tools | Each completed business operation | Authenticated workflow ID |
+
+## Search APIs with shared caching
+
+If ordinary traffic shares a CDN response, use `cacheMode: "request"`. A feedback-aware caller sends
+`Agent-Feedback-Request: 1`; public callers keep the public cache policy.
+
+[Run the search example](https://github.com/open-software-network/os-epode/tree/main/examples/icp-search-express)
+
+## Async APIs
+
+Use `shouldInstrument` to expose feedback only when the body reaches a terminal status. This avoids asking
+the agent to evaluate a job it has not used yet.
+
+[Run the crawl example](https://github.com/open-software-network/os-epode/tree/main/examples/icp-crawl-fastify)
+
+## Stateful MCP without micro-feedback
+
+Use `includeTools` for the complete trace and `feedbackTools` for the final boundary. A result-aware
+`sessionRef` extractor groups the session-creation result with later calls.
+
+[Run the browser example](https://github.com/open-software-network/os-epode/tree/main/examples/icp-browser-mcp)
+
+## Authenticated, sensitive operations
+
+Derive `customerRef` from verified API or OAuth context, never an email address or a tool argument. Epode
+rejects feedback containing likely personal data, secrets, prompts, transcripts, or raw product content.
+The agent may retry the same handle with a safe abstract summary.
+
+[Run the authenticated operations example](https://github.com/open-software-network/os-epode/tree/main/examples/icp-operations-mcp)

@@ -1,0 +1,29 @@
+---
+title: "Read the data"
+description: "Interpret Home, Feedback, and Sessions without overclaiming agent identity."
+---
+
+## Home
+
+- **Opportunities** are eligible HTTP, HTML, header, and MCP responses delivered.
+- **Confirmed** means MCP protocol evidence or a returned scoped feedback capability.
+- **Confirmation rate** is confirmed interactions divided by opportunities.
+- **Feedback rate** is reports divided by confirmed interactions.
+- **Latency** uses durations supplied by product integrations.
+
+Do not interpret opportunities as unique agents, people, or customers.
+
+## Feedback
+
+One report can contain multiple typed findings. Use workflow status, assignee, tags, and internal notes to triage
+the report without changing the original agent submission.
+
+Impact describes the net product outcome. Findings preserve the detail: strength, friction, defect, gap,
+suggestion, uncertainty, or other. A workaround records whether the agent needed another path.
+
+## Sessions
+
+Sessions group interactions only when your product or MCP sends an explicit stable reference. They are useful for
+multi-step product journeys, but are not identities. If continuity is unavailable, the correct representation is
+independent interactions—not a guessed session.
+

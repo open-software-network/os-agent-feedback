@@ -1,0 +1,76 @@
+---
+title: "Node + Fastify"
+description: "Instrument selected Fastify JSON and HTML responses with one registered plugin."
+---
+
+## Install
+
+```bash
+npm install https://app.epode.ai/static/agent-feedback-node-0.1.0.tgz fastify
+```
+
+## Configure once
+
+```ts
+import Fastify from "fastify";
+import { agentFeedback } from "@agent-feedback/node/fastify";
+
+const app = Fastify();
+
+await app.register(agentFeedback({
+  apiKey: process.env.AGENT_FEEDBACK_KEY,
+  include: ["/search", "/docs/*"],
+  customerRef: req => req.user?.accountId, // optional opaque ID
+}));
+
+app.get("/search", async request => ({
+  results: await search(request.query.q),
+}));
+
+await app.listen({ port: Number(process.env.PORT || 3000) });
+```
+
+## Async jobs and polling
+
+Use `shouldInstrument` to wait until the response contains an outcome the agent can evaluate:
+
+```ts
+await app.register(agentFeedback({
+  apiKey: process.env.AGENT_FEEDBACK_KEY,
+  include: ["/v1/crawls/*"],
+  shouldInstrument: (_request, response) =>
+    response.body?.status === "completed",
+  customerRef: request => request.user?.teamId,
+  sessionRef: request => request.headers["x-agent-run-id"],
+}));
+```
+
+The default `cacheMode: "safe"` skips explicitly shared-cacheable responses instead of overwriting their
+cache policy. Use `cacheMode: "request"` when only callers sending `Agent-Feedback-Request: 1` should be
+instrumented, or `cacheMode: "private"` when every included response is already private.
+
+## Server-rendered HTML
+
+Include your server HTML path. JSON objects receive `_agentFeedback`; HTML receives an embedded machine
+contract; arrays and scalars use headers.
+
+```ts
+await app.register(agentFeedback({
+  apiKey: process.env.AGENT_FEEDBACK_KEY,
+  include: ["/agent-docs", "/docs/*"],
+}));
+```
+
+## Verify
+
+```bash
+npx agent-feedback-doctor https://your-product.example/search?q=epode-test
+```
+
+<Tip>
+Keep the plugin global and narrow `include` to product surfaces that customer agents actually use.
+</Tip>
+
+[View the runnable Fastify example](https://github.com/open-software-network/os-epode/tree/main/examples/setup-matrix-node-fastify)
+
+[View the async crawl example](https://github.com/open-software-network/os-epode/tree/main/examples/icp-crawl-fastify)

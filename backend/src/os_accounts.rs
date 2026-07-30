@@ -1,3 +1,8 @@
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "crate-restricted visibility satisfies unreachable_pub in this binary-only crate"
+)]
+
 use std::env;
 
 use axum::http::HeaderMap;
@@ -10,14 +15,14 @@ use crate::{
     security::{cookie, random_token, sha256},
 };
 
-pub const ACCESS_COOKIE: &str = "af_oa_access";
-pub const REFRESH_COOKIE: &str = "af_oa_refresh";
-pub const PKCE_COOKIE: &str = "af_oa_pkce";
-pub const STATE_COOKIE: &str = "af_oa_state";
+pub(crate) const ACCESS_COOKIE: &str = "af_oa_access";
+pub(crate) const REFRESH_COOKIE: &str = "af_oa_refresh";
+pub(crate) const PKCE_COOKIE: &str = "af_oa_pkce";
+pub(crate) const STATE_COOKIE: &str = "af_oa_state";
 const TOKEN_EXPIRED: i64 = 3001;
 
 #[derive(Clone)]
-pub struct OsAccountsClient {
+pub(crate) struct OsAccountsClient {
     portal_url: Url,
     api_url: Url,
     client_id: String,
@@ -26,13 +31,13 @@ pub struct OsAccountsClient {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct TokenPair {
+pub(crate) struct TokenPair {
     pub access_token: String,
     pub refresh_token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OsUser {
+pub(crate) struct OsUser {
     pub id: String,
     pub handle: String,
     pub email: Option<String>,
@@ -40,7 +45,7 @@ pub struct OsUser {
     pub avatar_url: Option<String>,
 }
 
-pub struct ResolvedSession {
+pub(crate) struct ResolvedSession {
     pub user: OsUser,
     pub rotated_tokens: Option<TokenPair>,
 }
@@ -54,7 +59,7 @@ struct Envelope<T> {
 }
 
 impl OsAccountsClient {
-    pub fn from_env(public_base_url: &str) -> anyhow::Result<Self> {
+    pub(crate) fn from_env(public_base_url: &str) -> anyhow::Result<Self> {
         let portal_url = Url::parse(&required_env("OS_ACCOUNTS_URL")?)?;
         let api_url = Url::parse(&required_env("OS_ACCOUNTS_API_URL")?)?;
         let client_id = required_env("OS_ACCOUNTS_CLIENT_ID")?;
@@ -75,7 +80,7 @@ impl OsAccountsClient {
         })
     }
 
-    pub fn new_flow(&self) -> anyhow::Result<(String, String, Url)> {
+    pub(crate) fn new_flow(&self) -> anyhow::Result<(String, String, Url)> {
         let verifier = random_token("");
         let state = random_token("");
         let challenge = URL_SAFE_NO_PAD.encode(sha256(&verifier));
@@ -91,7 +96,11 @@ impl OsAccountsClient {
         Ok((verifier, state, login))
     }
 
-    pub async fn exchange_code(&self, code: &str, verifier: &str) -> Result<TokenPair, ApiError> {
+    pub(crate) async fn exchange_code(
+        &self,
+        code: &str,
+        verifier: &str,
+    ) -> Result<TokenPair, ApiError> {
         self.post_envelope(
             "/auth/token",
             serde_json::json!({
@@ -104,7 +113,7 @@ impl OsAccountsClient {
         .await
     }
 
-    pub async fn resolve(&self, headers: &HeaderMap) -> Result<ResolvedSession, ApiError> {
+    pub(crate) async fn resolve(&self, headers: &HeaderMap) -> Result<ResolvedSession, ApiError> {
         let access = cookie(headers, ACCESS_COOKIE);
         let refresh = cookie(headers, REFRESH_COOKIE);
         if let Some(access) = access {
@@ -141,7 +150,7 @@ impl OsAccountsClient {
         })
     }
 
-    pub async fn profile(&self, access_token: &str) -> Result<OsUser, ApiError> {
+    pub(crate) async fn profile(&self, access_token: &str) -> Result<OsUser, ApiError> {
         let envelope = self.get_me(access_token).await?;
         if !envelope.success {
             return Err(ApiError::unauthorized());
@@ -151,7 +160,7 @@ impl OsAccountsClient {
         Ok(user)
     }
 
-    pub async fn logout(&self, refresh_token: Option<&str>) {
+    pub(crate) async fn logout(&self, refresh_token: Option<&str>) {
         let Some(refresh_token) = refresh_token else {
             return;
         };
@@ -229,6 +238,12 @@ fn required_env(key: &str) -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        reason = "test failures should abort at the assertion site"
+    )]
+
     use super::*;
 
     #[test]

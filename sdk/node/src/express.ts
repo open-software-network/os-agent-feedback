@@ -1,12 +1,12 @@
 import type { NextFunction, Request, RequestHandler, Response } from "express";
 
 import {
+  type AgentFeedbackOptions,
   AgentFeedbackRuntime,
   encodedEnvelope,
   injectHtml,
   isPlainObject,
   normalizeOperation,
-  type AgentFeedbackOptions,
   type PreparedInteraction,
   type ProductSurface,
 } from "./core.js";
@@ -25,9 +25,7 @@ export type AgentFeedbackExpress = RequestHandler & {
   wrap(operation: string, handler: RequestHandler): RequestHandler;
 };
 
-export function agentFeedback(
-  options: AgentFeedbackOptions<Request>,
-): AgentFeedbackExpress {
+export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeedbackExpress {
   const runtime = new AgentFeedbackRuntime(options);
 
   const middleware = ((request: InstrumentedRequest, response: Response, next: NextFunction) => {
@@ -43,7 +41,7 @@ export function agentFeedback(
       return `${request.baseUrl || ""}${path || request.path || "/"}`;
     };
 
-    const attach = (surface: ProductSurface): Instrumentation | undefined => {
+    const attach = (surface: ProductSurface, body?: unknown): Instrumentation | undefined => {
       if (instrumentation) return instrumentation;
       if (
         response.statusCode < 200 ||
@@ -53,21 +51,29 @@ export function agentFeedback(
       ) {
         return undefined;
       }
+      if (
+        !runtime.shouldInstrumentHttp({
+          request,
+          surface: surface as Exclude<ProductSurface, "mcp">,
+          statusCode: response.statusCode,
+          body,
+          requestOptIn: request.get("agent-feedback-request") === "1",
+          cacheControl: String(response.getHeader("cache-control") || ""),
+        })
+      ) {
+        return undefined;
+      }
       instrumentation = {
         prepared: runtime.prepare(),
         surface,
-        operation:
-          request[operationOverride] || normalizeOperation(routePath()),
+        operation: request[operationOverride] || normalizeOperation(routePath()),
       };
       response.setHeader("Cache-Control", "private, no-store");
       return instrumentation;
     };
 
     const attachHeaders = (current: Instrumentation): void => {
-      response.setHeader(
-        "Agent-Feedback",
-        encodedEnvelope(current.prepared.envelope),
-      );
+      response.setHeader("Agent-Feedback", encodedEnvelope(current.prepared.envelope));
       response.append(
         "Link",
         `<${runtime.endpoint}/.well-known/agent-feedback-v1.json>; rel="agent-feedback"; type="application/json"`,
@@ -82,12 +88,12 @@ export function agentFeedback(
           );
           return originalJson(body);
         }
-        const current = attach("http_json");
+        const current = attach("http_json", body);
         return originalJson(
           current ? { ...body, _agentFeedback: current.prepared.envelope } : body,
         );
       }
-      const current = attach("http_headers");
+      const current = attach("http_headers", body);
       if (current) attachHeaders(current);
       return originalJson(body);
     }) as Response["json"];
@@ -95,17 +101,15 @@ export function agentFeedback(
     response.send = ((body?: unknown) => {
       const contentType = String(response.getHeader("content-type") || "");
       if (typeof body === "string" && contentType.includes("text/html")) {
-        const current = attach("http_html");
-        return originalSend(
-          current ? injectHtml(body, current.prepared.envelope) : body,
-        );
+        const current = attach("http_html", body);
+        return originalSend(current ? injectHtml(body, current.prepared.envelope) : body);
       }
       if (
         !instrumentation &&
         contentType.includes("application/json") &&
         (typeof body === "string" || body === null)
       ) {
-        const current = attach("http_headers");
+        const current = attach("http_headers", body);
         if (current) attachHeaders(current);
       }
       return originalSend(body);
@@ -133,7 +137,8 @@ export function agentFeedback(
   }) as AgentFeedbackExpress;
 
   middleware.shutdown = () => runtime.shutdown();
-  middleware.wrap = (operation: string, handler: RequestHandler): RequestHandler =>
+  middleware.wrap =
+    (operation: string, handler: RequestHandler): RequestHandler =>
     (request, response, next) => {
       (request as InstrumentedRequest)[operationOverride] = operation;
       return handler(request, response, next);

@@ -30,6 +30,8 @@ app.use(agentFeedback({
 
 Compatible JSON objects receive `_agentFeedback`. HTML receives an embedded `application/json` handoff. Arrays and scalar JSON responses use `Agent-Feedback` and `Link` headers. Errors, redirects, streams, binary responses, assets, health routes, and unrelated routes are untouched. These HTTP opportunities remain unclassified unless the scoped receipt returns.
 
+The default `cacheMode: "safe"` skips responses with an explicit shared-cache policy instead of silently disabling their CDN behavior. Use `cacheMode: "request"` to instrument only requests carrying `Agent-Feedback-Request: 1`, or `cacheMode: "private"` when every included response is intentionally private. Use `shouldInstrument(req, response)` for terminal async-job results.
+
 ## Fastify
 
 ```ts
@@ -53,6 +55,10 @@ import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 
 const feedback = createMcpInstrumentation({
   apiKey: process.env.AGENT_FEEDBACK_KEY!,
+  includeTools: ["browser_*"],
+  feedbackTools: ["browser_close"],
+  sessionRef: (args, _context, result) =>
+    args.sessionId || result?.structuredContent?.sessionId,
 });
 
 const mcp = createMcpHandler(() => {
@@ -69,6 +75,10 @@ app.all("/mcp", (req, res) => handleMcp(req, res, req.body));
 ```
 
 The official handler implements `server/discover`, per-request protocol metadata, `Mcp-Method`/`Mcp-Name` validation, cache hints, and the required `resultType` field. Its legacy fallback keeps 2025-era clients working without transport-session state. Business-tool results are decorated automatically and `report_product_feedback` is registered for the customer agent. MCP tool use is a confirmed agent interaction.
+
+`includeTools` controls which business tools become interactions. `feedbackTools` narrows feedback requests to meaningful outcome boundaries while retaining the whole journey in Sessions. `shouldRequestFeedback` can make that decision from the completed result. Extractors receive `(arguments, context, result?)`, which supports grouping a session-creation call by the ID it returns.
+
+Background telemetry uses a bounded queue, a 30-second background-only timeout, and bounded exponential retry. The MCP report tool uses a 10-second timeout and tells the agent to retry exactly once when a transient failure is safe to retry. Neither path delays or fails the normal product result.
 
 `instrumentMcp(server, options)` remains available for existing long-lived or legacy server objects.
 

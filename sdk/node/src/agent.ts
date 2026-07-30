@@ -2,8 +2,21 @@ import { Buffer } from "node:buffer";
 
 import type { FeedbackEnvelope } from "./core.js";
 
-export type FeedbackImpact = "helped" | "helped_with_friction" | "neutral" | "hindered" | "blocked" | "unknown";
-export type FeedbackFindingKind = "strength" | "friction" | "defect" | "gap" | "suggestion" | "uncertainty" | "other";
+export type FeedbackImpact =
+  | "helped"
+  | "helped_with_friction"
+  | "neutral"
+  | "hindered"
+  | "blocked"
+  | "unknown";
+export type FeedbackFindingKind =
+  | "strength"
+  | "friction"
+  | "defect"
+  | "gap"
+  | "suggestion"
+  | "uncertainty"
+  | "other";
 export type FeedbackSeverity = "minor" | "major" | "blocking";
 
 export interface FeedbackFinding {
@@ -56,8 +69,7 @@ export interface ProductFeedbackSubmission {
   [key: string]: unknown;
 }
 
-const DEFAULT_SUBMIT_ORIGIN =
-  "https://app.epode.ai";
+const DEFAULT_SUBMIT_ORIGIN = "https://app.epode.ai";
 
 export type StoredFeedbackConsent = "approved" | "refused";
 export type FeedbackConsentAction = "submit" | "ask" | "skip";
@@ -86,25 +98,30 @@ function object(value: unknown): value is Record<string, unknown> {
 
 function validConsentContract(value: Record<string, unknown>): boolean {
   const scope = value.consentScope;
-  const validScope =
-    typeof scope === "string" && /^afcs1_[0-9a-f]{32}$/.test(scope);
+  const validScope = typeof scope === "string" && /^afcs1_[0-9a-f]{32}$/.test(scope);
   if (value.mode === "never_ask") {
-    return value.consentRequired === false &&
+    return (
+      value.consentRequired === false &&
       value.consentPolicy === "none" &&
       value.when === "after_experience_known_before_final_response" &&
-      scope === undefined;
+      scope === undefined
+    );
   }
   if (value.mode === "ask_once") {
-    return value.consentRequired === true &&
+    return (
+      value.consentRequired === true &&
       value.consentPolicy === "once" &&
       value.when === "after_experience_known_and_consent_resolved" &&
-      validScope;
+      validScope
+    );
   }
   if (value.mode === "ask_always") {
-    return value.consentRequired === true &&
+    return (
+      value.consentRequired === true &&
       value.consentPolicy === "always" &&
       value.when === "after_experience_known_and_explicit_user_approval" &&
-      scope === undefined;
+      scope === undefined
+    );
   }
   return false;
 }
@@ -126,10 +143,7 @@ function parseEnvelope(value: unknown): FeedbackEnvelope | undefined {
 }
 
 function envelopeFromHtml(html: string): FeedbackEnvelope | undefined {
-  const match =
-    /<script[^>]+id=["']agent-feedback["'][^>]*>([\s\S]*?)<\/script>/i.exec(
-      html,
-    );
+  const match = /<script[^>]+id=["']agent-feedback["'][^>]*>([\s\S]*?)<\/script>/i.exec(html);
   if (!match?.[1]) return undefined;
   try {
     return parseEnvelope(JSON.parse(match[1]));
@@ -160,9 +174,7 @@ export function feedbackFromResponse(
   const encoded = response.headers.get("agent-feedback");
   if (!encoded) return undefined;
   try {
-    return parseEnvelope(
-      JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")),
-    );
+    return parseEnvelope(JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")));
   } catch {
     return undefined;
   }
@@ -193,34 +205,54 @@ export async function submitProductFeedback(
     throw new Error("Ask-every-time submission requires fresh approval");
   }
   const summary = report.summary.trim();
-  if (summary.length < 8 || summary.length > 700) throw new Error("summary must contain 8 to 700 characters");
+  if (summary.length < 8 || summary.length > 700)
+    throw new Error("summary must contain 8 to 700 characters");
   const sessionLabel = report.sessionLabel?.trim();
-  if (Object.hasOwn(report, "sessionLabel") && (sessionLabel === undefined || Array.from(sessionLabel).length < 2 || Array.from(sessionLabel).length > 80)) throw new Error("sessionLabel must contain 2 to 80 characters");
-  if (report.impact && !["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"].includes(report.impact)) throw new Error("invalid impact");
-  if (report.confidence !== undefined && (report.confidence < 0 || report.confidence > 1)) throw new Error("confidence must be between 0 and 1");
-  if ((report.findings?.length || 0) > 8) throw new Error("findings cannot contain more than 8 items");
+  if (
+    Object.hasOwn(report, "sessionLabel") &&
+    (sessionLabel === undefined ||
+      Array.from(sessionLabel).length < 2 ||
+      Array.from(sessionLabel).length > 80)
+  )
+    throw new Error("sessionLabel must contain 2 to 80 characters");
+  if (
+    report.impact &&
+    !["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"].includes(
+      report.impact,
+    )
+  )
+    throw new Error("invalid impact");
+  if (report.confidence !== undefined && (report.confidence < 0 || report.confidence > 1))
+    throw new Error("confidence must be between 0 and 1");
+  if ((report.findings?.length || 0) > 8)
+    throw new Error("findings cannot contain more than 8 items");
   for (const finding of report.findings || []) {
-    if (!["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"].includes(finding.kind)) throw new Error("invalid finding kind");
-    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(finding.topic)) throw new Error("finding topic must be a normalized slug");
-    if (finding.severity && !["minor", "major", "blocking"].includes(finding.severity)) throw new Error("invalid finding severity");
+    if (
+      !["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"].includes(
+        finding.kind,
+      )
+    )
+      throw new Error("invalid finding kind");
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(finding.topic))
+      throw new Error("finding topic must be a normalized slug");
+    if (finding.severity && !["minor", "major", "blocking"].includes(finding.severity))
+      throw new Error("invalid finding severity");
     const detail = finding.detail.trim();
-    if (detail.length < 3 || detail.length > 350) throw new Error("finding detail must contain 3 to 350 characters");
+    if (detail.length < 3 || detail.length > 350)
+      throw new Error("finding detail must contain 3 to 350 characters");
   }
-  if (report.workaround?.used && !report.workaround.detail?.trim()) throw new Error("workaround detail is required when a workaround was used");
+  if (report.workaround?.used && !report.workaround.detail?.trim())
+    throw new Error("workaround detail is required when a workaround was used");
 
   const submitUrl = new URL(parsed.submit.url);
   if (submitUrl.protocol !== "https:") {
     throw new Error("Agent Feedback submissions require HTTPS");
   }
   const allowedOrigins = new Set(
-    (options.allowedSubmitOrigins || [DEFAULT_SUBMIT_ORIGIN]).map(
-      (value) => new URL(value).origin,
-    ),
+    (options.allowedSubmitOrigins || [DEFAULT_SUBMIT_ORIGIN]).map((value) => new URL(value).origin),
   );
   if (!allowedOrigins.has(submitUrl.origin)) {
-    throw new Error(
-      `Refusing to submit feedback to untrusted origin ${submitUrl.origin}`,
-    );
+    throw new Error(`Refusing to submit feedback to untrusted origin ${submitUrl.origin}`);
   }
 
   const response = await (options.fetch || globalThis.fetch)(submitUrl, {

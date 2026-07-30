@@ -18,7 +18,7 @@ let app = Router::new()
     .layer(feedback.clone());
 ```
 
-Finite Axum JSON and HTML bodies are instrumented. Bodies without an exact bounded size—including streams—are left untouched. If a body that advertised a safe exact size fails while being read, middleware returns an explicit non-empty `500` instead of disguising the failure as an empty success. Telemetry enqueue is bounded and never blocks the product response; `shutdown` has a two-second bound, reports delivery failure, and flushes every queued batch on success. Construct `AgentFeedbackLayer` inside a Tokio runtime; construction returns `Error::MissingTokioRuntime` otherwise.
+Finite Axum JSON and HTML bodies are instrumented. Bodies without an exact bounded size—including streams—are left untouched. If a body that advertised a safe exact size fails while being read, middleware returns an explicit non-empty `500` instead of disguising the failure as an empty success. Telemetry enqueue is bounded, carries a monotonic process-local sequence, and never blocks the product response. Background delivery has a 10-second request deadline; `shutdown` has a two-second bound, reports delivery failure, and flushes every queued batch on success. Construct `AgentFeedbackLayer` inside a Tokio runtime; construction returns `Error::MissingTokioRuntime` otherwise.
 
 `feedback_from_response` and `submit_product_feedback` provide the deterministic, allow-listed customer-agent path.
 

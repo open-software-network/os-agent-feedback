@@ -1,4 +1,9 @@
-use std::env;
+#![allow(
+    clippy::print_stdout,
+    reason = "this database setup CLI communicates its results through standard output"
+)]
+
+use std::{env, time::Duration};
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -18,6 +23,21 @@ struct StoredRow {
     workaround: Option<serde_json::Value>,
 }
 
+#[derive(sqlx::FromRow)]
+struct ObservationRow {
+    id: Uuid,
+    surface: String,
+    operation: String,
+    status_code: Option<i32>,
+    customer_ref: Option<String>,
+    classification: String,
+    confirmation_method: Option<String>,
+    session_id: Option<Uuid>,
+    session_source: Option<String>,
+    session_hint: Option<String>,
+    summary: Option<String>,
+}
+
 fn required(name: &str) -> anyhow::Result<String> {
     env::var(name).map_err(|_| anyhow::anyhow!("{name} is required"))
 }
@@ -32,7 +52,8 @@ async fn main() -> anyhow::Result<()> {
         .nth(1)
         .ok_or_else(|| anyhow::anyhow!("seed, read, or delete is required"))?;
     let pool: PgPool = PgPoolOptions::new()
-        .max_connections(2)
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(10))
         .connect(&required("DATABASE_URL")?)
         .await?;
     if action == "delete-all-tests" {
@@ -86,10 +107,10 @@ async fn main() -> anyhow::Result<()> {
         }
         "read" => {
             let rows = sqlx::query_as::<_, StoredRow>(
-                r#"SELECT i.id, i.surface, i.operation, i.classification, i.confirmation_method,
+                r"SELECT i.id, i.surface, i.operation, i.classification, i.confirmation_method,
                 r.summary, r.impact, r.findings, r.workaround
                 FROM interactions_v2 i JOIN feedback_reports r ON r.interaction_id = i.id
-                WHERE i.workspace_id = $1 ORDER BY r.summary"#,
+                WHERE i.workspace_id = $1 ORDER BY r.summary",
             )
             .bind(workspace_id)
             .fetch_all(&pool)
@@ -100,6 +121,40 @@ async fn main() -> anyhow::Result<()> {
                 "summary": row.summary, "impact": row.impact,
                 "findings": row.findings, "workaround": row.workaround,
             })).collect();
+            println!("{}", serde_json::to_string(&output)?);
+        }
+        "read-observations" => {
+            let rows = sqlx::query_as::<_, ObservationRow>(
+                r"SELECT i.id, i.surface, i.operation, i.status_code, i.customer_ref,
+                i.classification, i.confirmation_method, i.session_id,
+                s.source AS session_source, s.ref_hint AS session_hint, r.summary
+                FROM interactions_v2 i
+                LEFT JOIN sessions_v2 s ON s.id = i.session_id
+                LEFT JOIN feedback_reports r ON r.interaction_id = i.id
+                WHERE i.workspace_id = $1
+                ORDER BY i.occurred_at, i.client_sequence NULLS LAST, i.id",
+            )
+            .bind(workspace_id)
+            .fetch_all(&pool)
+            .await?;
+            let output: Vec<_> = rows
+                .into_iter()
+                .map(|row| {
+                    json!({
+                        "id": row.id,
+                        "surface": row.surface,
+                        "operation": row.operation,
+                        "statusCode": row.status_code,
+                        "customerRef": row.customer_ref,
+                        "classification": row.classification,
+                        "confirmationMethod": row.confirmation_method,
+                        "sessionId": row.session_id,
+                        "sessionSource": row.session_source,
+                        "sessionHint": row.session_hint,
+                        "summary": row.summary,
+                    })
+                })
+                .collect();
             println!("{}", serde_json::to_string(&output)?);
         }
         "delete" => {
