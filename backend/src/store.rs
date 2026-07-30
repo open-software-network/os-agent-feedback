@@ -2529,6 +2529,9 @@ pub(crate) struct BackfillSummary {
     pub(crate) grouped: u64,
     pub(crate) skipped: u64,
     pub(crate) skipped_findings: u64,
+    /// False when a batch cap stopped the run before the table was walked out,
+    /// so the caller can tell "nothing left to do" from "more remains".
+    pub(crate) exhausted: bool,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -2609,17 +2612,31 @@ pub(crate) async fn assign_report_group(
     Ok(group_id)
 }
 
+/// Groups every report that has no group yet.
+///
+/// `max_batches` bounds the run: `None` walks the table to completion (the
+/// manual CLI path), while `Some(n)` stops after `n` batches and reports
+/// `exhausted = false`. Startup uses the bounded form so a large table cannot
+/// wedge boot — the next boot, or a manual rerun, continues from where it
+/// stopped, because the scan filters on `group_id IS NULL`.
 pub(crate) async fn backfill_report_groups(
     pool: &PgPool,
     grouper: &dyn ReportGrouper,
+    max_batches: Option<u32>,
 ) -> Result<BackfillSummary, ApiError> {
     const BATCH_SIZE: i64 = 500;
 
     let mut summary = BackfillSummary::default();
     let mut cursor_created_at = None;
     let mut cursor_id = None;
+    let mut batches_run: u32 = 0;
 
     loop {
+        if max_batches.is_some_and(|limit| batches_run >= limit) {
+            summary.exhausted = false;
+            return Ok(summary);
+        }
+        batches_run += 1;
         let mut tx = pool.begin().await?;
         let rows = sqlx::query_as::<_, UngroupedReportRow>(
             r"SELECT r.id, r.workspace_id, r.findings, r.created_at,
@@ -2647,6 +2664,7 @@ pub(crate) async fn backfill_report_groups(
         .await?;
         if rows.is_empty() {
             tx.commit().await?;
+            summary.exhausted = true;
             break;
         }
 
@@ -3661,7 +3679,7 @@ mod product_tests {
             .execute(&pool)
             .await?;
 
-            let first = backfill_report_groups(&pool, &crate::grouping::FingerprintGrouper)
+            let first = backfill_report_groups(&pool, &crate::grouping::FingerprintGrouper, None)
                 .await
                 .map_err(test_error)?;
             anyhow::ensure!(first.grouped >= 1);
@@ -3683,7 +3701,7 @@ mod product_tests {
                 .fetch_one(&pool)
                 .await?;
 
-            let second = backfill_report_groups(&pool, &crate::grouping::FingerprintGrouper)
+            let second = backfill_report_groups(&pool, &crate::grouping::FingerprintGrouper, None)
                 .await
                 .map_err(test_error)?;
             let second_group: Option<Uuid> =
