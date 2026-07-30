@@ -6,6 +6,7 @@ const feedback = agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
   endpoint: process.env.AGENT_FEEDBACK_URL,
   include: ["/search", "/docs/*"],
+  customerRef: (request) => request.get("x-customer-ref"),
 });
 app.use(feedback);
 app.get("/search", (_request, response) => response.json({ stack: "node-express", answer: "express-result" }));

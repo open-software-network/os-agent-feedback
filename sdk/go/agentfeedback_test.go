@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -83,9 +82,9 @@ func TestMiddlewarePreservesShapeAndQueuesOpportunity(t *testing.T) {
 
 func TestAgentHelperRejectsUntrustedOrigin(t *testing.T) {
 	envelope := &Envelope{
-		V: 1, Mode: FeedbackNeverAsk, Requested: true, ConsentPolicy: "none",
+		V: 1, Mode: FeedbackNeverAsk, State: "feedback_ready", Requested: true, ConsentPolicy: "none",
 		When: "after_experience_known_before_final_response",
-		Submit: SubmitContract{
+		Submit: &SubmitContract{
 			URL: "https://evil.test/reports", Method: http.MethodPost,
 			Authorization: "Bearer afr2_test.payload.signature", ContentType: "application/json",
 		}}
@@ -107,16 +106,13 @@ func TestAgentHelperRejectsMalformedConsentContracts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	malformed := prepared.Envelope
+	malformed := *prepared.Envelope
 	malformed.ConsentRequired = false
-	if validEnvelope(&malformed) || FeedbackConsentAction(&malformed, "approved") != "skip" {
+	if validEnvelope(&malformed) || FeedbackConsentAction(&malformed) != "skip" {
 		t.Fatal("malformed ask-always contract was accepted")
 	}
-	malformed = prepared.Envelope
-	malformed.Mode = FeedbackAskOnce
-	malformed.ConsentPolicy = "once"
-	malformed.When = "after_experience_known_and_consent_resolved"
-	malformed.ConsentScope = ""
+	malformed = *prepared.Envelope
+	malformed.RequiredAction = nil
 	if validEnvelope(&malformed) {
 		t.Fatal("ask-once contract without a scope was accepted")
 	}
@@ -136,31 +132,27 @@ func TestAskModesExposeDistinctConsentPolicies(t *testing.T) {
 	if !envelope.Requested || !envelope.ConsentRequired {
 		t.Fatalf("ask contract is not requested with consent: %#v", envelope)
 	}
-	if envelope.ConsentPolicy != "once" || envelope.ConsentScope != "afcs1_0123456789abcdef0123456789abcdef" {
-		t.Fatalf("wrong ask-once scope: %#v", envelope)
+	if envelope.State != "consent_required" || envelope.ConsentPolicy != "once" || envelope.ConsentManagedBy != "epode" {
+		t.Fatalf("wrong ask-once state: %#v", envelope)
 	}
 	if envelope.When != "after_experience_known_and_consent_resolved" {
 		t.Fatalf("wrong ask timing: %s", envelope.When)
 	}
-	if !strings.Contains(envelope.Instruction, "ask the user once") ||
-		!strings.Contains(envelope.Instruction, "do not ask again") {
+	if !strings.HasPrefix(envelope.Instruction, "Ask the user exactly this question") ||
+		!strings.Contains(envelope.Instruction, "Do not assume an answer") {
 		t.Fatalf("wrong ask instruction: %s", envelope.Instruction)
 	}
-	if !strings.Contains(envelope.Instruction, "topic:lowercase_slug") ||
-		!reflect.DeepEqual(envelope.Submit.ReportSchema.FindingRequired, []string{"kind", "topic", "detail"}) ||
-		!reflect.DeepEqual(envelope.Submit.ReportSchema.WorkaroundRequired, []string{"used"}) {
-		t.Fatalf("incomplete report shape: %#v", envelope.Submit.ReportSchema)
+	if envelope.Submit != nil || envelope.RequiredAction == nil {
+		t.Fatalf("report schema was exposed before approval: %#v", envelope)
 	}
-	if FeedbackConsentAction(&envelope, "") != "ask" ||
-		FeedbackConsentAction(&envelope, "approved") != "submit" ||
-		FeedbackConsentAction(&envelope, "refused") != "skip" {
-		t.Fatal("ask-once decision was not resolved correctly")
+	if FeedbackConsentAction(envelope) != "ask" {
+		t.Fatal("ask-once question was not surfaced")
 	}
-	_, err = SubmitProductFeedback(context.Background(), &envelope, FeedbackReport{
+	_, err = SubmitProductFeedback(context.Background(), envelope, FeedbackReport{
 		Summary: "The product completed the task.", Impact: "helped",
 	}, []string{"https://feedback.test"}, nil)
-	if err == nil || !strings.Contains(err.Error(), "explicit user approval") {
-		t.Fatalf("ask helper did not enforce approval: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "invalid Agent Feedback") {
+		t.Fatalf("report helper accepted a consent-only contract: %v", err)
 	}
 
 	always, err := New(Options{APIKey: conformanceKey, FeedbackMode: FeedbackAskAlways})
@@ -172,38 +164,29 @@ func TestAskModesExposeDistinctConsentPolicies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if alwaysPrepared.Envelope.ConsentPolicy != "always" || alwaysPrepared.Envelope.ConsentScope != "" {
+	if alwaysPrepared.Envelope.ConsentPolicy != "always" || alwaysPrepared.Envelope.Submit != nil {
 		t.Fatalf("wrong ask-always policy: %#v", alwaysPrepared.Envelope)
 	}
-	if !strings.Contains(alwaysPrepared.Envelope.Instruction, "every future report") {
-		t.Fatalf("ask-always does not require fresh permission: %s", alwaysPrepared.Envelope.Instruction)
+	if !strings.Contains(alwaysPrepared.Envelope.Instruction, "Do not assume an answer") {
+		t.Fatalf("ask-always is not question-first: %s", alwaysPrepared.Envelope.Instruction)
 	}
-	if FeedbackConsentAction(&alwaysPrepared.Envelope, "approved") != "ask" {
+	if FeedbackConsentAction(alwaysPrepared.Envelope) != "ask" {
 		t.Fatal("ask-always incorrectly reused stored approval")
 	}
 
-	askOnceBody := map[string]any{}
-	_ = json.Unmarshal(feedbackSubmissionBody(&envelope, FeedbackReport{
-		Summary: "The product completed the task.", UserApproved: true,
-		ApprovalSource: "stored_grant",
-	}), &askOnceBody)
-	askOnceConsent := askOnceBody["consent"].(map[string]any)
-	if askOnceConsent["userApproved"] != true ||
-		askOnceConsent["approvalSource"] != "stored_grant" ||
-		askOnceConsent["consentScope"] != envelope.ConsentScope {
-		t.Fatalf("wrong ask-once attestation: %#v", askOnceConsent)
+	ready, err := New(Options{APIKey: conformanceKey, FeedbackMode: FeedbackNeverAsk})
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	askAlwaysBody := map[string]any{}
-	_ = json.Unmarshal(feedbackSubmissionBody(&alwaysPrepared.Envelope, FeedbackReport{
-		Summary: "The product completed the task.", UserApproved: true,
-		ApprovalSource: "granted_now",
-	}), &askAlwaysBody)
-	askAlwaysConsent := askAlwaysBody["consent"].(map[string]any)
-	if askAlwaysConsent["userApproved"] != true ||
-		askAlwaysConsent["approvalSource"] != "granted_now" ||
-		askAlwaysConsent["consentScope"] != nil {
-		t.Fatalf("wrong ask-always attestation: %#v", askAlwaysConsent)
+	defer ready.Shutdown(context.Background())
+	readyPrepared, err := ready.prepare(time.Unix(1_715_000_000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]any{}
+	_ = json.Unmarshal(feedbackSubmissionBody(readyPrepared.Envelope, FeedbackReport{Summary: "The product completed the task."}), &body)
+	if _, exists := body["consent"]; exists {
+		t.Fatal("report body still contains consent")
 	}
 }
 

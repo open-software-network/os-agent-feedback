@@ -17,6 +17,6 @@ const mcp = createMcpHandler(() => {
 
 The customer's MCP client can see and call the feedback tool explicitly. A business-tool call is immediately a confirmed interaction; the later feedback tool links a structured report with a narrative, optional impact, findings, workaround, and confidence.
 
-Set `AGENT_FEEDBACK_MODE=never_ask` to submit autonomously, `ask_once` to remember approval or refusal under the returned `consentScope`, or `ask_always` to require `approvalSource: "granted_now"` for every report.
+Set `AGENT_FEEDBACK_MODE=never_ask` to submit autonomously, `ask_once` to let Epode remember approval or refusal by opaque `customerRef`, or `ask_always` to ask before each report. Both ask modes expose only `record_product_feedback_consent` first and reveal `report_product_feedback` after approval.
 
 This example intentionally does not claim to identify the agent. MCP client information remains a self-reported runtime hint, and Epode records each tool call as its own interaction unless the product supplies an explicit application-level continuity handle.

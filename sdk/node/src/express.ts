@@ -28,8 +28,16 @@ export type AgentFeedbackExpress = RequestHandler & {
 export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeedbackExpress {
   const runtime = new AgentFeedbackRuntime(options);
 
-  const middleware = ((request: InstrumentedRequest, response: Response, next: NextFunction) => {
+  const middleware = (async (
+    request: InstrumentedRequest,
+    response: Response,
+    next: NextFunction,
+  ) => {
     const started = performance.now();
+    const requestContext = runtime.context(request);
+    const consentState = runtime.matches(request.originalUrl || request.url)
+      ? await runtime.resolveConsent(requestContext.customerRef)
+      : "unavailable";
     let instrumentation: Instrumentation | undefined;
     let recorded = false;
     const originalJson = response.json.bind(response);
@@ -64,7 +72,10 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
         return undefined;
       }
       instrumentation = {
-        prepared: runtime.prepare(),
+        prepared: runtime.prepare({
+          customerRef: requestContext.customerRef,
+          consentState,
+        }),
         surface,
         operation: request[operationOverride] || normalizeOperation(routePath()),
       };
@@ -73,6 +84,7 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
     };
 
     const attachHeaders = (current: Instrumentation): void => {
+      if (!current.prepared.envelope) return;
       response.setHeader("Agent-Feedback", encodedEnvelope(current.prepared.envelope));
       response.append(
         "Link",
@@ -90,7 +102,9 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
         }
         const current = attach("http_json", body);
         return originalJson(
-          current ? { ...body, _agentFeedback: current.prepared.envelope } : body,
+          current?.prepared.envelope
+            ? { ...body, _agentFeedback: current.prepared.envelope }
+            : body,
         );
       }
       const current = attach("http_headers", body);
@@ -102,7 +116,9 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
       const contentType = String(response.getHeader("content-type") || "");
       if (typeof body === "string" && contentType.includes("text/html")) {
         const current = attach("http_html", body);
-        return originalSend(current ? injectHtml(body, current.prepared.envelope) : body);
+        return originalSend(
+          current?.prepared.envelope ? injectHtml(body, current.prepared.envelope) : body,
+        );
       }
       if (
         !instrumentation &&
@@ -118,18 +134,17 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
     response.once("finish", () => {
       if (!instrumentation || recorded) return;
       recorded = true;
-      const context = runtime.context(request);
       runtime.record(instrumentation.prepared, {
         surface: instrumentation.surface,
         operation: instrumentation.operation,
         statusCode: response.statusCode,
         durationMs: Math.max(0, Math.round(performance.now() - started)),
-        customerRef: context.customerRef,
+        customerRef: requestContext.customerRef,
         classification: "unclassified",
-        runtimeHint: context.runtimeHint,
-        runtimeHintSource: context.runtimeHint ? "http" : undefined,
-        sessionRef: context.sessionRef,
-        sessionSource: context.sessionRef ? "customer" : undefined,
+        runtimeHint: requestContext.runtimeHint,
+        runtimeHintSource: requestContext.runtimeHint ? "http" : undefined,
+        sessionRef: requestContext.sessionRef,
+        sessionSource: requestContext.sessionRef ? "customer" : undefined,
       });
     });
 

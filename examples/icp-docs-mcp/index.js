@@ -11,7 +11,7 @@ const feedback = createMcpInstrumentation({
   includeTools: ["resolve_library", "query_docs"],
   feedbackTools: ["query_docs"],
   sessionRef: (arguments_) => arguments_?.runId,
-  customerRef: (_arguments, context) => context.authInfo?.extra?.accountId || "acct_docs_demo",
+  customerRef: (_arguments, context) => context.http?.authInfo?.extra?.accountId || "acct_docs_demo",
 });
 
 function productServer() {

@@ -2,7 +2,7 @@
 
 Epode tells companies whether their product actually worked for the independent customer agents using it.
 
-A company instruments selected API, website, or MCP surfaces once. Every SDK creates the same short-lived, write-only interaction receipt locally and adds the same feedback contract to eligible successful responses. The product response never waits for Agent Feedback. After the customer agent understands the product's contribution, it can submit:
+A company instruments selected API, website, or MCP surfaces once. Every SDK creates a short-lived, write-only interaction receipt locally and adds the same feedback contract to eligible successful responses. Telemetry is always asynchronous. Ask once performs a bounded consent-state lookup on a cache miss and safely omits feedback instructions if Epode is unavailable. After the customer agent understands the product's contribution, it can submit:
 
 ```json
 {
@@ -42,16 +42,13 @@ app.use(agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
   feedbackMode: "ask_once", // or use AGENT_FEEDBACK_MODE from Setup
   include: ["/search", "/docs/*"],
-  customerRef: req => req.user?.accountId, // optional opaque ID
+  customerRef: req => req.user?.accountId, // stable opaque ID; required for durable Ask once
 }));
 ```
 
-No handler changes, primary-path network call, relay endpoint, or agent account is required.
+No handler changes, relay endpoint, agent account, or agent-side preference store is required.
 
-Collection has four modes. `never_ask` submits autonomously without interrupting the user. `ask_once` asks once per
-product and agent runtime, then remembers approval or refusal under an opaque product-scoped key.
-`ask_always` requests fresh permission for every report. `off` emits no feedback contract. Epode
-does not receive the stored ask-once preference or treat it as an identity.
+Collection has four modes. `never_ask` submits autonomously without interrupting the user. `ask_once` first emits only the exact permission question and a two-value decision action. Epode stores `approved` or `declined` for the product plus an opaque HMAC-derived customer subject; agents store nothing. Approval reveals a separate report contract, refusal suppresses future asks, and silence stores no decision. `ask_always` uses the same question-first two-step flow for every report. `off` emits no feedback contract.
 
 ## Repository
 

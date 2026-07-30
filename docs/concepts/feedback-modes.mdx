@@ -9,26 +9,24 @@ Configure the product's mode in **Collection policy**, then deploy the matching
 | Dashboard label | Environment value | Agent behavior |
 | --- | --- | --- |
 | Never ask | `never_ask` | Submit the agent's own bounded assessment without interrupting the user |
-| Ask once | `ask_once` | Ask once for this product in this agent runtime; remember approval or refusal locally |
-| Ask every time | `ask_always` | Ask before each report |
+| Ask once | `ask_once` | Ask once; Epode remembers approval or refusal for this product and opaque customer reference |
+| Ask every time | `ask_always` | Ask before each report using the same two-step decision flow |
 | Off | `off` | Emit no feedback contract and reject reports |
 
 ## Ask once
 
-The response includes an opaque `consentScope`. The agent runtime—not Epode—stores approval or
-refusal under that scope. A later approved report uses `approvalSource: "stored_grant"`.
+An unknown customer receives only the exact question and an `approved|declined` decision action. The report schema is not present yet. Epode stores the decision by product plus an opaque HMAC-derived subject from `customerRef`; the raw value never appears in the feedback contract. After approval, the decision action returns a normal autonomous report contract. After refusal, future responses emit no feedback request.
 
-Rotating a product key produces a new scope, so an agent may ask again. The scope is not a user or
-agent identity.
+`customerRef` must be a stable opaque ID from the product's existing authentication. Do not use a name or email. Without it, the SDK safely falls back to per-interaction permission and warns that Ask once cannot be remembered.
 
 ## Ask every time
 
-Every report requires fresh approval and `approvalSource: "granted_now"`. Stored consent is ignored.
+Every report starts with the question-only contract. Approval reveals a report contract for that interaction only. No consent fields are included in the report body.
 
 <Warning>
 Ask modes require a conversational runtime that notices the instruction, pauses, receives the user's answer,
 and resumes the pending report. A response envelope cannot force an independent HTTP agent to do this.
-When you need predictable Ask once or Ask every time behavior, use MCP or a feedback-aware runtime adapter.
+The question-first shape was the only tested generic-agent variant to ask, record, and continue reliably across the validation matrix. An independent agent can still ignore response metadata; no protocol can force compliance.
 </Warning>
 
 ## Permission copy

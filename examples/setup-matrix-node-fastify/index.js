@@ -6,6 +6,7 @@ await app.register(agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
   endpoint: process.env.AGENT_FEEDBACK_URL,
   include: ["/search", "/docs/*"],
+  customerRef: (request) => request.headers["x-customer-ref"],
 }));
 app.get("/search", async () => ({ stack: "node-fastify", answer: "fastify-result" }));
 app.get("/docs/test", async (_request, reply) => reply.type("text/html").send("<!doctype html><html><head><title>Fastify docs</title></head><body>fastify-docs-result</body></html>"));

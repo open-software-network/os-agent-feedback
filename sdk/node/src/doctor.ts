@@ -4,9 +4,11 @@ import { Buffer } from "node:buffer";
 
 type Envelope = {
   mode?: string;
+  configuredMode?: string;
+  state?: string;
   consentRequired?: boolean;
   consentPolicy?: string;
-  consentScope?: string;
+  consentManagedBy?: string;
   when?: string;
   submit?: {
     url?: string;
@@ -16,6 +18,16 @@ type Envelope = {
     reportSchema?: Record<string, unknown>;
   };
   instruction?: string;
+  requiredAction?: {
+    type?: string;
+    question?: string;
+    submitDecision?: {
+      url?: string;
+      method?: string;
+      authorization?: string;
+      bodySchema?: { decision?: string[] };
+    };
+  };
 };
 
 function fail(message: string): never {
@@ -55,7 +67,37 @@ async function main(): Promise<void> {
     }
   }
   if (!envelope?.instruction) fail("Response is missing feedback instructions");
+  if (envelope.state === "consent_required") {
+    const action = envelope.requiredAction;
+    const validOnce =
+      envelope.mode === "ask_once" &&
+      envelope.consentRequired === true &&
+      envelope.consentPolicy === "once" &&
+      envelope.when === "after_experience_known_and_consent_resolved";
+    const validAlways =
+      envelope.mode === "ask_always" &&
+      envelope.consentRequired === true &&
+      envelope.consentPolicy === "always" &&
+      envelope.when === "after_experience_known_and_explicit_user_approval";
+    if (
+      (!validOnce && !validAlways) ||
+      envelope.consentManagedBy !== "epode" ||
+      envelope.submit !== undefined ||
+      action?.type !== "ask_user" ||
+      action.submitDecision?.method !== "POST" ||
+      !action.submitDecision.authorization?.startsWith("Bearer afr2_") ||
+      action.submitDecision.bodySchema?.decision?.join(",") !== "approved,declined"
+    ) {
+      fail("Response has an invalid question-first consent contract");
+    }
+    console.log("PASS response injection");
+    console.log(`PASS ${envelope.mode} question-first decision contract`);
+    console.log("PASS report schema withheld until approval");
+    console.log("PASS synthetic decision skipped; the doctor cannot impersonate the user");
+    return;
+  }
   if (
+    envelope.state !== "feedback_ready" ||
     !envelope.submit?.url ||
     envelope.submit.method !== "POST" ||
     !envelope.submit.authorization?.startsWith("Bearer afr2_") ||
@@ -63,31 +105,10 @@ async function main(): Promise<void> {
   ) {
     fail("Response has an incomplete feedback submission contract");
   }
-  const consentMode = envelope.mode === "ask_once" || envelope.mode === "ask_always";
-  if (consentMode) {
-    const validOnce =
-      envelope.mode === "ask_once" &&
-      envelope.consentRequired === true &&
-      envelope.consentPolicy === "once" &&
-      /^afcs1_[0-9a-f]{32}$/.test(envelope.consentScope || "") &&
-      envelope.when === "after_experience_known_and_consent_resolved";
-    const validAlways =
-      envelope.mode === "ask_always" &&
-      envelope.consentRequired === true &&
-      envelope.consentPolicy === "always" &&
-      envelope.consentScope === undefined &&
-      envelope.when === "after_experience_known_and_explicit_user_approval";
-    if (!validOnce && !validAlways) fail("Response has an invalid consent contract");
-    console.log("PASS response injection");
-    console.log(`PASS ${envelope.mode} consent contract`);
-    console.log("PASS synthetic review skipped; the doctor cannot impersonate user consent");
-    return;
-  }
   if (
     envelope.mode !== "never_ask" ||
     envelope.consentRequired !== false ||
     envelope.consentPolicy !== "none" ||
-    envelope.consentScope !== undefined ||
     envelope.when !== "after_experience_known_before_final_response"
   ) {
     fail("Response has an invalid Never ask feedback contract");

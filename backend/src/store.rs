@@ -13,19 +13,23 @@ use uuid::Uuid;
 use crate::{
     error::ApiError,
     models::{
-        ApiKeyPublic, CreateProductInput, CreateTeamInvitationInput, DashboardContext,
-        DashboardData, DashboardListState, DashboardSessionDetail, DeleteProductInput,
-        FeedbackInteractionItem, FeedbackInteractionsPage, FeedbackListInteractionsInput,
-        FeedbackListReportsInput, FeedbackOperationSummary, FeedbackReportItem,
-        FeedbackReportsPage, FeedbackReportsResponse, FeedbackSummary, FeedbackSurfaceSummary,
-        FeedbackWindow, InsightCount, Insights, InteractionTelemetryInput, PolicyInput, Product,
-        ProductAuth, ProductEnvironment, ProductFeedbackReport, ProductFeedbackReportInput,
-        ProductFeedbackReportWithInteraction, ProductInteraction, ProductSession, TeamInvitation,
-        TeamMember, TelemetryBatchInput, TelemetryBatchResult, UpdateFeedbackWorkflowInput,
-        UpdateNameInput, UpdateTeamMemberInput, Workspace, WorkspaceMembership,
+        ApiKeyPublic, ConsentDecisionInput, ConsentStateInput, ConsentStateResponse,
+        CreateProductInput, CreateTeamInvitationInput, DashboardContext, DashboardData,
+        DashboardListState, DashboardSessionDetail, DeleteProductInput, FeedbackInteractionItem,
+        FeedbackInteractionsPage, FeedbackListInteractionsInput, FeedbackListReportsInput,
+        FeedbackOperationSummary, FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse,
+        FeedbackSummary, FeedbackSurfaceSummary, FeedbackWindow, InsightCount, Insights,
+        InteractionTelemetryInput, PolicyInput, Product, ProductAuth, ProductEnvironment,
+        ProductFeedbackReport, ProductFeedbackReportInput, ProductFeedbackReportWithInteraction,
+        ProductInteraction, ProductSession, TeamInvitation, TeamMember, TelemetryBatchInput,
+        TelemetryBatchResult, UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput,
+        Workspace, WorkspaceMembership,
     },
     os_accounts::OsUser,
-    security::{bearer_token, parse_capability, random_token, sha256, verify_capability},
+    security::{
+        bearer_token, parse_capability, random_token, sha256, valid_consent_subject,
+        verify_capability,
+    },
 };
 
 pub(crate) fn clean(value: &str, max: usize) -> String {
@@ -2209,6 +2213,121 @@ fn contains_sensitive_report_text(value: &str) -> bool {
     forbidden_pattern || email_like
 }
 
+pub(crate) async fn feedback_consent_state(
+    pool: &PgPool,
+    auth: &ProductAuth,
+    input: ConsentStateInput,
+) -> Result<ConsentStateResponse, ApiError> {
+    if !valid_consent_subject(&input.subject) {
+        return Err(ApiError::bad_request("Invalid opaque consent subject"));
+    }
+    if auth.environment.feedback_mode != "ask_once" {
+        return Ok(ConsentStateResponse {
+            state: if auth.environment.feedback_mode == "never_ask" {
+                "approved".to_owned()
+            } else {
+                "unknown".to_owned()
+            },
+        });
+    }
+    let state = sqlx::query_scalar::<_, String>(
+        "SELECT decision FROM feedback_consent_subjects WHERE environment_id = $1 AND subject = $2",
+    )
+    .bind(auth.environment.id)
+    .bind(input.subject)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or_else(|| "unknown".to_owned());
+    Ok(ConsentStateResponse { state })
+}
+
+pub(crate) async fn record_feedback_consent_decision(
+    pool: &PgPool,
+    capability: &str,
+    input: ConsentDecisionInput,
+) -> Result<(String, String, i64), ApiError> {
+    if !["approved", "declined"].contains(&input.decision.as_str()) {
+        return Err(ApiError::bad_request(
+            "decision must be approved or declined",
+        ));
+    }
+    let parsed = parse_capability(capability)?;
+    let key = sqlx::query_as::<_, (Vec<u8>, String, Uuid)>(
+        r"SELECT k.key_hash, e.feedback_mode, k.environment_id
+        FROM api_keys k
+        JOIN product_environments e ON e.id = k.environment_id
+        WHERE k.id = $1 AND k.kind = 'write' AND k.revoked_at IS NULL
+          AND (k.expires_at IS NULL OR k.expires_at > NOW())",
+    )
+    .bind(parsed.key_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(ApiError::unauthorized)?;
+    let claims = verify_capability(parsed, &key.0, Utc::now())?;
+    if !["ask_once", "ask_always"].contains(&key.1.as_str()) {
+        return Err(ApiError::conflict(
+            "This product does not currently require a consent decision",
+        ));
+    }
+    if key.1 == "ask_once"
+        && claims
+            .s
+            .as_deref()
+            .is_some_and(|subject| !valid_consent_subject(subject))
+    {
+        return Err(ApiError::bad_request("Invalid opaque consent subject"));
+    }
+
+    let mut tx = pool.begin().await?;
+    let existing = sqlx::query_as::<_, (String,)>(
+        "SELECT decision FROM feedback_consent_interactions WHERE interaction_id = $1 FOR UPDATE",
+    )
+    .bind(claims.i)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let decision = if let Some((decision,)) = existing {
+        decision
+    } else {
+        let durable_decision = if key.1 == "ask_once"
+            && let Some(subject) = claims.s.as_deref()
+        {
+            sqlx::query(
+                r"INSERT INTO feedback_consent_subjects (environment_id, subject, decision)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (environment_id, subject) DO NOTHING",
+            )
+            .bind(key.2)
+            .bind(subject)
+            .bind(&input.decision)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query_scalar::<_, String>(
+                "SELECT decision FROM feedback_consent_subjects WHERE environment_id = $1 AND subject = $2",
+            )
+            .bind(key.2)
+            .bind(subject)
+            .fetch_one(&mut *tx)
+            .await?
+        } else {
+            input.decision.clone()
+        };
+        sqlx::query(
+            r"INSERT INTO feedback_consent_interactions
+            (interaction_id, environment_id, subject, decision)
+            VALUES ($1, $2, $3, $4)",
+        )
+        .bind(claims.i)
+        .bind(key.2)
+        .bind(claims.s.as_deref())
+        .bind(&durable_decision)
+        .execute(&mut *tx)
+        .await?;
+        durable_decision
+    };
+    tx.commit().await?;
+    Ok((decision, key.1, claims.exp))
+}
+
 pub(crate) async fn submit_product_feedback(
     pool: &PgPool,
     capability: &str,
@@ -2350,38 +2469,51 @@ pub(crate) async fn submit_product_feedback(
     let claims = verify_capability(parsed.clone(), &key.1, Utc::now())?;
     match key.2.as_str() {
         "off" => return Err(ApiError::gone("Feedback collection is disabled")),
-        "never_ask" => {
-            if input.consent.is_some() {
-                return Err(ApiError::bad_request(
-                    "Never-ask reports must not include a consent attestation",
-                ));
-            }
-        }
+        "never_ask" => {}
         "ask_once" => {
-            let consent = input.consent.as_ref().ok_or_else(|| {
-                ApiError::forbidden("This product requires a user consent attestation")
-            })?;
-            let expected_scope = format!("afcs1_{}", parsed.key_id.simple());
-            if !consent.user_approved
-                || !["granted_now", "stored_grant"].contains(&consent.approval_source.as_str())
-                || consent.consent_scope.as_deref() != Some(expected_scope.as_str())
-            {
+            let approved = if let Some(subject) = claims.s.as_deref() {
+                sqlx::query_scalar::<_, bool>(
+                    r"SELECT EXISTS (
+                      SELECT 1 FROM feedback_consent_subjects
+                      WHERE environment_id = $1 AND subject = $2 AND decision = 'approved'
+                    )",
+                )
+                .bind(key.3)
+                .bind(subject)
+                .fetch_one(pool)
+                .await?
+            } else {
+                sqlx::query_scalar::<_, bool>(
+                    r"SELECT EXISTS (
+                      SELECT 1 FROM feedback_consent_interactions
+                      WHERE environment_id = $1 AND interaction_id = $2 AND decision = 'approved'
+                    )",
+                )
+                .bind(key.3)
+                .bind(claims.i)
+                .fetch_one(pool)
+                .await?
+            };
+            if !approved {
                 return Err(ApiError::forbidden(
-                    "Ask-once feedback requires explicit or stored approval for this product",
+                    "Ask-once feedback requires an approved Epode consent decision",
                 ));
             }
         }
         "ask_always" => {
-            let consent = input
-                .consent
-                .as_ref()
-                .ok_or_else(|| ApiError::forbidden("This product requires fresh user approval"))?;
-            if !consent.user_approved
-                || consent.approval_source != "granted_now"
-                || consent.consent_scope.is_some()
-            {
+            let approved = sqlx::query_scalar::<_, bool>(
+                r"SELECT EXISTS (
+                  SELECT 1 FROM feedback_consent_interactions
+                  WHERE environment_id = $1 AND interaction_id = $2 AND decision = 'approved'
+                )",
+            )
+            .bind(key.3)
+            .bind(claims.i)
+            .fetch_one(pool)
+            .await?;
+            if !approved {
                 return Err(ApiError::forbidden(
-                    "Ask-every-time feedback requires fresh user approval",
+                    "Ask-every-time feedback requires an approved decision for this interaction",
                 ));
             }
         }
@@ -2456,7 +2588,7 @@ mod product_tests {
     use sha2::Sha256;
     use sqlx::postgres::PgPoolOptions;
 
-    use crate::models::{CurrentUser, FeedbackConsentInput};
+    use crate::models::{ConsentDecisionInput, CurrentUser};
 
     use super::*;
 
@@ -2474,7 +2606,12 @@ mod product_tests {
         Ok(headers)
     }
 
-    fn test_capability(secret: &str, key_id: Uuid, interaction_id: Uuid) -> String {
+    fn test_capability_with_subject(
+        secret: &str,
+        key_id: Uuid,
+        interaction_id: Uuid,
+        subject: Option<&str>,
+    ) -> String {
         let now = Utc::now();
         let claims = crate::security::CapabilityClaims {
             v: 1,
@@ -2482,6 +2619,7 @@ mod product_tests {
             iat: now.timestamp(),
             exp: (now + Duration::hours(1)).timestamp(),
             n: format!("nonce-{}", Uuid::new_v4().simple()),
+            s: subject.map(str::to_owned),
         };
         let payload = URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&claims).expect("capability claims should serialize"));
@@ -2495,17 +2633,17 @@ mod product_tests {
         )
     }
 
-    fn feedback_input(
-        summary: &str,
-        consent: Option<FeedbackConsentInput>,
-    ) -> ProductFeedbackReportInput {
+    fn test_capability(secret: &str, key_id: Uuid, interaction_id: Uuid) -> String {
+        test_capability_with_subject(secret, key_id, interaction_id, None)
+    }
+
+    fn feedback_input(summary: &str) -> ProductFeedbackReportInput {
         ProductFeedbackReportInput {
             summary: summary.into(),
             impact: Some("helped".into()),
             confidence: Some(0.95),
             findings: vec![],
             workaround: None,
-            consent,
         }
     }
 
@@ -2652,7 +2790,7 @@ mod product_tests {
             submit_product_feedback(
                 &pool,
                 &autonomous,
-                feedback_input("The autonomous report was accepted successfully.", None),
+                feedback_input("The autonomous report was accepted successfully."),
             )
             .await
             .map_err(test_error)?;
@@ -2669,30 +2807,38 @@ mod product_tests {
             )
             .await
             .map_err(test_error)?;
-            let once_capability = test_capability(&write_secret, write_key.id, Uuid::new_v4());
+            let once_subject = format!("afsub1_{}", "a".repeat(43));
+            let once_capability = test_capability_with_subject(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&once_subject),
+            );
             anyhow::ensure!(
                 submit_product_feedback(
                     &pool,
                     &once_capability,
-                    feedback_input("Missing consent must be rejected by the server.", None),
+                    feedback_input("Missing consent must be rejected by the server."),
                 )
                 .await
                 .expect_err("ask-once feedback without consent should be rejected")
                 .status
                     == StatusCode::FORBIDDEN
             );
-            let once_scope = format!("afcs1_{}", write_key.id.simple());
+            let (decision, mode, _) = record_feedback_consent_decision(
+                &pool,
+                &once_capability,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(decision == "approved" && mode == "ask_once");
             submit_product_feedback(
                 &pool,
                 &once_capability,
-                feedback_input(
-                    "Stored product approval accepted this useful report.",
-                    Some(FeedbackConsentInput {
-                        user_approved: true,
-                        approval_source: "stored_grant".into(),
-                        consent_scope: Some(once_scope),
-                    }),
-                ),
+                feedback_input("Stored product approval accepted this useful report."),
             )
             .await
             .map_err(test_error)?;
@@ -2714,31 +2860,26 @@ mod product_tests {
                 submit_product_feedback(
                     &pool,
                     &always_capability,
-                    feedback_input(
-                        "Stored consent cannot authorize ask every time reports.",
-                        Some(FeedbackConsentInput {
-                            user_approved: true,
-                            approval_source: "stored_grant".into(),
-                            consent_scope: Some(format!("afcs1_{}", write_key.id.simple())),
-                        }),
-                    ),
+                    feedback_input("Missing fresh permission cannot authorize this report."),
                 )
                 .await
                 .expect_err("stored consent should not satisfy ask-always policy")
                 .status
                     == StatusCode::FORBIDDEN
             );
+            record_feedback_consent_decision(
+                &pool,
+                &always_capability,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
             submit_product_feedback(
                 &pool,
                 &always_capability,
-                feedback_input(
-                    "Fresh approval accepted this ask every time report.",
-                    Some(FeedbackConsentInput {
-                        user_approved: true,
-                        approval_source: "granted_now".into(),
-                        consent_scope: None,
-                    }),
-                ),
+                feedback_input("Fresh approval accepted this ask every time report."),
             )
             .await
             .map_err(test_error)?;
@@ -2748,14 +2889,7 @@ mod product_tests {
                 submit_product_feedback(
                     &pool,
                     &read_capability,
-                    feedback_input(
-                        "Read keys must never write feedback reports.",
-                        Some(FeedbackConsentInput {
-                            user_approved: true,
-                            approval_source: "granted_now".into(),
-                            consent_scope: None,
-                        }),
-                    ),
+                    feedback_input("Read keys must never write feedback reports."),
                 )
                 .await
                 .expect_err("read credentials should not submit feedback")
@@ -2780,7 +2914,7 @@ mod product_tests {
                 submit_product_feedback(
                     &pool,
                     &off_capability,
-                    feedback_input("Disabled collection rejects this feedback report.", None),
+                    feedback_input("Disabled collection rejects this feedback report."),
                 )
                 .await
                 .expect_err("disabled feedback collection should reject reports")

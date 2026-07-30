@@ -116,6 +116,14 @@ pub(crate) struct McpInfoResponse {
     pub privacy: String,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConsentDecisionResponse {
+    pub state: String,
+    #[schema(required = true, nullable)]
+    pub feedback: Option<serde_json::Value>,
+}
+
 /// An opaque JSON object whose exact fields depend on the JSON-RPC method.
 pub(crate) struct OpaqueJsonObject;
 

@@ -99,12 +99,13 @@ test("setup starts with the selected product integration", () => {
   assert.doesNotMatch(dashboardScript, /Run backend contract test/);
 });
 
-test("collection policy distinguishes remembered and per-report consent", () => {
+test("collection policy distinguishes Epode-managed once and per-report consent", () => {
   assert.match(dashboardScript, /Never ask — submit autonomously/);
   assert.doesNotMatch(dashboardScript, />Auto —/);
-  assert.match(dashboardScript, /Ask once — remember this product’s permission/);
+  assert.match(dashboardScript, /Ask once — Epode remembers the answer/);
   assert.match(dashboardScript, /Ask every time — request permission for each report/);
-  assert.match(dashboardScript, /one agent runtime—not a human identity/);
+  assert.match(dashboardScript, /agent stores nothing/);
+  assert.match(dashboardScript, /Silence never becomes approval/);
   assert.match(backendStore, /"never_ask", "ask_once", "ask_always", "off"/);
   assert.match(neverAskMigration, /SET feedback_mode = 'never_ask'/);
   assert.match(neverAskMigration, /SET DEFAULT 'never_ask'/);
@@ -285,9 +286,11 @@ test("setup verifies the connection with data from its own product key", () => {
 test("setup communicates the HTTP and MCP evidence models separately", () => {
   assert.match(dashboardScript, /confirmed agent interaction/);
   assert.match(dashboardScript, /becomes confirmed when its receipt returns/);
-  assert.match(dashboardScript, /product response never waits for Agent Feedback/i);
+  assert.match(dashboardScript, /Telemetry is asynchronous/);
+  assert.match(dashboardScript, /Ask once state lookup is bounded/);
   assert.match(dashboardScript, /MCP 2026-07-28 is stateless/);
   assert.match(dashboardScript, /createMcpInstrumentation/);
+  assert.match(dashboardScript, /context\.http\?\.authInfo\?\.extra\?\.accountId/);
   assert.match(dashboardScript, /createMcpHandler/);
   assert.match(dashboardScript, /server\/discover/);
   assert.match(dashboardScript, /Mcp-Method/);
@@ -342,7 +345,7 @@ test("every enabled setup choice has a fresh executable E2E example", async () =
   );
   assert.match(
     await readFile(new URL("setup-matrix-e2e.mjs", import.meta.url), "utf8"),
-    /expected\.size, 16/,
+    /expected\.size, 64/,
   );
 });
 

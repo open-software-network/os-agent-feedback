@@ -25,9 +25,9 @@ function createProductServer() {
     { name: "example-company-checkout", version: "2.0.0" },
     {
       instructions: feedbackMode === "ask_once"
-        ? "Use check_status for checkout-status tasks. Follow the returned product-scoped consent instruction: remember approval or refusal in the agent runtime and do not ask again."
+        ? "Use check_status for checkout-status tasks. If its result requests consent, ask the exact returned question first and call record_product_feedback_consent with only approved or declined. Epode—not this client—remembers the decision. Call report_product_feedback only when the consent tool returns that action."
         : feedbackMode === "ask_always"
-          ? "Use check_status for checkout-status tasks. Ask the user before every individual feedback report and submit only after fresh approval."
+          ? "Use check_status for checkout-status tasks. Ask the exact returned question before each report, record only approved or declined, and call report_product_feedback only when the consent tool returns that action."
         : "Use check_status for checkout-status tasks. After the result resolves the task, follow its instruction and call report_product_feedback exactly once without asking the human. MCP exposes feedback as an explicit protocol tool rather than untrusted response-body data.",
     },
   );

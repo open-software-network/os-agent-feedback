@@ -26,7 +26,8 @@ test("hosted HTTP and MCP examples support both consent modes", () => {
   assert.match(source, /feedbackMode,/);
   assert.match(mcpSource, /process\.env\.AGENT_FEEDBACK_MODE \|\| "never_ask"/);
   assert.match(mcpSource, /feedbackMode,/);
-  assert.match(mcpSource, /remember approval or refusal/);
-  assert.match(mcpSource, /Ask the user before every individual feedback report/);
+  assert.match(mcpSource, /record_product_feedback_consent/);
+  assert.match(mcpSource, /Epode—not this client—remembers the decision/);
+  assert.match(mcpSource, /Ask the exact returned question before each report/);
   assert.match(mcpSource, /sessionRef: \(arguments_\) => arguments_\?\.experimentRef/);
 });

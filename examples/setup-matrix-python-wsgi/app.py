@@ -23,6 +23,7 @@ app.wsgi_app = AgentFeedbackWSGI(
     api_key=os.environ["AGENT_FEEDBACK_KEY"],
     endpoint=os.environ.get("AGENT_FEEDBACK_URL", "https://app.epode.ai"),
     include=("/search", "/docs/*"),
+    customer_ref=lambda environ: environ.get("HTTP_X_CUSTOMER_REF"),
 )
 
 if __name__ == "__main__":

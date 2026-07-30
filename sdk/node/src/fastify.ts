@@ -17,6 +17,8 @@ type RequestState = {
   prepared?: PreparedInteraction;
   surface?: ProductSurface;
   operation?: string;
+  context: { customerRef?: string; sessionRef?: string; runtimeHint?: string };
+  consentState: Awaited<ReturnType<AgentFeedbackRuntime<FastifyRequest>["resolveConsent"]>>;
 };
 
 export type AgentFeedbackFastifyPlugin = FastifyPluginAsync & {
@@ -31,7 +33,14 @@ export function agentFeedback(
 
   const implementation = async (app: FastifyInstance) => {
     app.addHook("onRequest", async (request) => {
-      states.set(request, { started: performance.now() });
+      const context = runtime.context(request);
+      states.set(request, {
+        started: performance.now(),
+        context,
+        consentState: runtime.matches(request.url)
+          ? await runtime.resolveConsent(context.customerRef)
+          : "unavailable",
+      });
     });
 
     const attach = (
@@ -67,7 +76,10 @@ export function agentFeedback(
       ) {
         return undefined;
       }
-      state.prepared = runtime.prepare();
+      state.prepared = runtime.prepare({
+        customerRef: state.context.customerRef,
+        consentState: state.consentState,
+      });
       state.surface = surface;
       state.operation = normalizeOperation(request.routeOptions?.url || request.url);
       reply.header("cache-control", "private, no-store");
@@ -78,6 +90,7 @@ export function agentFeedback(
       reply: { header(name: string, value: string): unknown },
       prepared: PreparedInteraction,
     ): void => {
+      if (!prepared.envelope) return;
       reply.header("agent-feedback", encodedEnvelope(prepared.envelope));
       reply.header(
         "link",
@@ -93,8 +106,8 @@ export function agentFeedback(
           );
           return payload;
         }
-        const state = attach(request, reply, "http_json", payload);
-        return state?.prepared ? { ...payload, _agentFeedback: state.prepared.envelope } : payload;
+        const prepared = attach(request, reply, "http_json", payload)?.prepared;
+        return prepared?.envelope ? { ...payload, _agentFeedback: prepared.envelope } : payload;
       }
       const state = attach(request, reply, "http_headers", payload);
       if (state?.prepared) headers(reply, state.prepared);
@@ -104,8 +117,8 @@ export function agentFeedback(
     app.addHook("onSend", async (request, reply, payload) => {
       const contentType = String(reply.getHeader("content-type") || "");
       if (typeof payload === "string" && contentType.includes("text/html")) {
-        const state = attach(request, reply, "http_html", payload);
-        return state?.prepared ? injectHtml(payload, state.prepared.envelope) : payload;
+        const prepared = attach(request, reply, "http_html", payload)?.prepared;
+        return prepared?.envelope ? injectHtml(payload, prepared.envelope) : payload;
       }
       if (!states.get(request)?.prepared && contentType.includes("application/json")) {
         const state = attach(request, reply, "http_headers", payload);
@@ -117,18 +130,17 @@ export function agentFeedback(
     app.addHook("onResponse", async (request, reply) => {
       const state = states.get(request);
       if (!state?.prepared || !state.surface || !state.operation) return;
-      const context = runtime.context(request);
       runtime.record(state.prepared, {
         surface: state.surface,
         operation: state.operation,
         statusCode: reply.statusCode,
         durationMs: Math.max(0, Math.round(performance.now() - state.started)),
-        customerRef: context.customerRef,
+        customerRef: state.context.customerRef,
         classification: "unclassified",
-        runtimeHint: context.runtimeHint,
-        runtimeHintSource: context.runtimeHint ? "http" : undefined,
-        sessionRef: context.sessionRef,
-        sessionSource: context.sessionRef ? "customer" : undefined,
+        runtimeHint: state.context.runtimeHint,
+        runtimeHintSource: state.context.runtimeHint ? "http" : undefined,
+        sessionRef: state.context.sessionRef,
+        sessionSource: state.context.sessionRef ? "customer" : undefined,
       });
     });
 

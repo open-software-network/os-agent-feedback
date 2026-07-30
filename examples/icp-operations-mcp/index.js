@@ -12,7 +12,7 @@ const feedback = createMcpInstrumentation({
   feedbackTools: ["send_email", "create_payment_link", "update_issue"],
   sessionRef: (arguments_) => arguments_?.workflowId,
   // In production this comes from verified OAuth context, never tool input.
-  customerRef: (_arguments, context) => context.authInfo?.extra?.accountId || "acct_operations_demo",
+  customerRef: (_arguments, context) => context.http?.authInfo?.extra?.accountId || "acct_operations_demo",
 });
 
 function productServer() {

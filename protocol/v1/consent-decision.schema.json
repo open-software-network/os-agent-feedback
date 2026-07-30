@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://app.epode.ai/protocol/v1/consent-decision.schema.json",
+  "title": "Epode feedback consent decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decision"],
+  "properties": {
+    "decision": { "enum": ["approved", "declined"] }
+  }
+}

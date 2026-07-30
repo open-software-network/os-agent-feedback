@@ -34,22 +34,6 @@
       },
       "if": { "properties": { "used": { "const": true } } },
       "then": { "required": ["detail"] }
-    },
-    "consent": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["userApproved", "approvalSource"],
-      "properties": {
-        "userApproved": { "const": true },
-        "approvalSource": { "enum": ["granted_now", "stored_grant"] },
-        "consentScope": { "type": "string", "pattern": "^afcs1_[0-9a-f]{32}$" }
-      },
-      "allOf": [
-        {
-          "if": { "properties": { "approvalSource": { "const": "stored_grant" } } },
-          "then": { "required": ["consentScope"] }
-        }
-      ]
     }
   }
 }

@@ -24,6 +24,8 @@ pub(crate) struct CapabilityClaims {
     pub iat: i64,
     pub exp: i64,
     pub n: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +91,11 @@ pub(crate) fn verify_capability(
     if parsed.claims.v != 1
         || parsed.claims.n.len() < 16
         || parsed.claims.n.len() > 128
+        || parsed
+            .claims
+            .s
+            .as_deref()
+            .is_some_and(|subject| !valid_consent_subject(subject))
         || issued_at > now + Duration::minutes(5)
         || expires_at <= now
         || expires_at - issued_at > Duration::hours(2)
@@ -97,6 +104,15 @@ pub(crate) fn verify_capability(
         return Err(ApiError::unauthorized());
     }
     Ok(parsed.claims)
+}
+
+pub(crate) fn valid_consent_subject(value: &str) -> bool {
+    value.strip_prefix("afsub1_").is_some_and(|suffix| {
+        suffix.len() == 43
+            && suffix
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "-_".contains(character))
+    })
 }
 
 pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<String> {
@@ -222,6 +238,7 @@ mod tests {
             iat: now.timestamp(),
             exp: (now + Duration::hours(2)).timestamp(),
             n: "0123456789abcdef".into(),
+            s: None,
         };
         let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
         let input = format!("afr2_{}.{payload}", key_id.simple());
