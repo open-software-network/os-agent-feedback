@@ -196,9 +196,7 @@ describe("BFF request header policy", () => {
       }),
       { params: Promise.resolve({ path: ["v2", "consent", "decisions"] }) },
     );
-    expect(lastRequest().headers.authorization).toBe(
-      "Bearer afr2_capability.payload.signature",
-    );
+    expect(lastRequest().headers.authorization).toBe("Bearer afr2_capability.payload.signature");
 
     await proxyApiPost(
       new NextRequest("https://app.epode.ai/api/v2/reports", {
