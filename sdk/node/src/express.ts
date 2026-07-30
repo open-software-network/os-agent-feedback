@@ -1,12 +1,12 @@
 import type { NextFunction, Request, RequestHandler, Response } from "express";
 
 import {
+  type AgentFeedbackOptions,
   AgentFeedbackRuntime,
   encodedEnvelope,
   injectHtml,
   isPlainObject,
   normalizeOperation,
-  type AgentFeedbackOptions,
   type PreparedInteraction,
   type ProductSurface,
 } from "./core.js";
@@ -25,9 +25,7 @@ export type AgentFeedbackExpress = RequestHandler & {
   wrap(operation: string, handler: RequestHandler): RequestHandler;
 };
 
-export function agentFeedback(
-  options: AgentFeedbackOptions<Request>,
-): AgentFeedbackExpress {
+export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeedbackExpress {
   const runtime = new AgentFeedbackRuntime(options);
 
   const middleware = ((request: InstrumentedRequest, response: Response, next: NextFunction) => {
@@ -68,18 +66,14 @@ export function agentFeedback(
       instrumentation = {
         prepared: runtime.prepare(),
         surface,
-        operation:
-          request[operationOverride] || normalizeOperation(routePath()),
+        operation: request[operationOverride] || normalizeOperation(routePath()),
       };
       response.setHeader("Cache-Control", "private, no-store");
       return instrumentation;
     };
 
     const attachHeaders = (current: Instrumentation): void => {
-      response.setHeader(
-        "Agent-Feedback",
-        encodedEnvelope(current.prepared.envelope),
-      );
+      response.setHeader("Agent-Feedback", encodedEnvelope(current.prepared.envelope));
       response.append(
         "Link",
         `<${runtime.endpoint}/.well-known/agent-feedback-v1.json>; rel="agent-feedback"; type="application/json"`,
@@ -108,9 +102,7 @@ export function agentFeedback(
       const contentType = String(response.getHeader("content-type") || "");
       if (typeof body === "string" && contentType.includes("text/html")) {
         const current = attach("http_html", body);
-        return originalSend(
-          current ? injectHtml(body, current.prepared.envelope) : body,
-        );
+        return originalSend(current ? injectHtml(body, current.prepared.envelope) : body);
       }
       if (
         !instrumentation &&
@@ -145,7 +137,8 @@ export function agentFeedback(
   }) as AgentFeedbackExpress;
 
   middleware.shutdown = () => runtime.shutdown();
-  middleware.wrap = (operation: string, handler: RequestHandler): RequestHandler =>
+  middleware.wrap =
+    (operation: string, handler: RequestHandler): RequestHandler =>
     (request, response, next) => {
       (request as InstrumentedRequest)[operationOverride] = operation;
       return handler(request, response, next);

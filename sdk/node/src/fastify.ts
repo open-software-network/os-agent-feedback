@@ -2,12 +2,12 @@ import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from "fastif
 import fastifyPlugin from "fastify-plugin";
 
 import {
+  type AgentFeedbackOptions,
   AgentFeedbackRuntime,
   encodedEnvelope,
   injectHtml,
   isPlainObject,
   normalizeOperation,
-  type AgentFeedbackOptions,
   type PreparedInteraction,
   type ProductSurface,
 } from "./core.js";
@@ -94,9 +94,7 @@ export function agentFeedback(
           return payload;
         }
         const state = attach(request, reply, "http_json", payload);
-        return state?.prepared
-          ? { ...payload, _agentFeedback: state.prepared.envelope }
-          : payload;
+        return state?.prepared ? { ...payload, _agentFeedback: state.prepared.envelope } : payload;
       }
       const state = attach(request, reply, "http_headers", payload);
       if (state?.prepared) headers(reply, state.prepared);
@@ -107,9 +105,7 @@ export function agentFeedback(
       const contentType = String(reply.getHeader("content-type") || "");
       if (typeof payload === "string" && contentType.includes("text/html")) {
         const state = attach(request, reply, "http_html", payload);
-        return state?.prepared
-          ? injectHtml(payload, state.prepared.envelope)
-          : payload;
+        return state?.prepared ? injectHtml(payload, state.prepared.envelope) : payload;
       }
       if (!states.get(request)?.prepared && contentType.includes("application/json")) {
         const state = attach(request, reply, "http_headers", payload);

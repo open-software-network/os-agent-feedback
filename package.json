@@ -10,6 +10,8 @@
     "url": "https://github.com/open-software-network/os-epode.git"
   },
   "scripts": {
+    "check": "biome check .",
+    "check:fix": "biome check --fix .",
     "test": "node --test tests/*.test.mjs",
     "build:artifacts": "bash tests/build-hosted-artifacts.sh",
     "test:setup-matrix": "node tests/setup-matrix-e2e.mjs",
@@ -19,6 +21,7 @@
     "test:docs-loop": "pnpm run docs:validate && pnpm run docs:a11y && node --test tests/docs-contract.test.mjs && SETUP_MATRIX_BACKEND_URL=https://agent-feedback-api-v2-canary.up.railway.app SETUP_MATRIX_DB_ENVIRONMENT=v2-canary node tests/setup-matrix-e2e.mjs"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.4.12",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
     "mint": "4.2.734"

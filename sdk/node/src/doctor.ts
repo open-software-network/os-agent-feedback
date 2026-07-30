@@ -65,12 +65,14 @@ async function main(): Promise<void> {
   }
   const consentMode = envelope.mode === "ask_once" || envelope.mode === "ask_always";
   if (consentMode) {
-    const validOnce = envelope.mode === "ask_once" &&
+    const validOnce =
+      envelope.mode === "ask_once" &&
       envelope.consentRequired === true &&
       envelope.consentPolicy === "once" &&
       /^afcs1_[0-9a-f]{32}$/.test(envelope.consentScope || "") &&
       envelope.when === "after_experience_known_and_consent_resolved";
-    const validAlways = envelope.mode === "ask_always" &&
+    const validAlways =
+      envelope.mode === "ask_always" &&
       envelope.consentRequired === true &&
       envelope.consentPolicy === "always" &&
       envelope.consentScope === undefined &&
@@ -100,7 +102,13 @@ async function main(): Promise<void> {
       summary: "The integration doctor verified this product response end to end.",
       impact: "helped",
       confidence: 1,
-      findings: [{ kind: "strength", topic: "integration", detail: "Response discovery and feedback submission both worked." }],
+      findings: [
+        {
+          kind: "strength",
+          topic: "integration",
+          detail: "Response discovery and feedback submission both worked.",
+        },
+      ],
       workaround: { used: false },
     }),
     signal: AbortSignal.timeout(10_000),

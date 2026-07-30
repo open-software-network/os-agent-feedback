@@ -2,18 +2,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const landingHtml = await readFile(
-  new URL("../landing-page/index.html", import.meta.url),
-  "utf8",
-);
-const appHtml = await readFile(
-  new URL("../landing-page/app/index.html", import.meta.url),
-  "utf8",
-);
-const landingCss = await readFile(
-  new URL("../landing-page/styles.css", import.meta.url),
-  "utf8",
-);
+const landingHtml = await readFile(new URL("../landing-page/index.html", import.meta.url), "utf8");
+const appHtml = await readFile(new URL("../landing-page/app/index.html", import.meta.url), "utf8");
+const landingCss = await readFile(new URL("../landing-page/styles.css", import.meta.url), "utf8");
 
 test("the static landing page contains the Epode product contract", () => {
   assert.match(landingHtml, /Epode — product feedback from customer agents/i);
@@ -24,10 +15,7 @@ test("the static landing page contains the Epode product contract", () => {
   assert.match(landingHtml, /helped_with_friction/);
   assert.match(landingHtml, /strength/);
   assert.doesNotMatch(landingHtml, /OS Accounts|Open Software Account/);
-  assert.doesNotMatch(
-    landingHtml,
-    /codex-preview|react-loading-skeleton|Building your site/i,
-  );
+  assert.doesNotMatch(landingHtml, /codex-preview|react-loading-skeleton|Building your site/i);
 });
 
 // The stylesheet is the largest hand-written artifact here and is linked by
@@ -42,10 +30,7 @@ test("the landing page is actually styled", () => {
 test("links and redirects to the canonical app origin", () => {
   assert.match(landingHtml, /https:\/\/app\.epode\.ai\/auth\/start/);
   assert.match(landingHtml, /https:\/\/docs\.epode\.ai/);
-  assert.doesNotMatch(
-    landingHtml,
-    /agent-feedback-api-production\.up\.railway\.app/,
-  );
+  assert.doesNotMatch(landingHtml, /agent-feedback-api-production\.up\.railway\.app/);
   assert.match(
     appHtml,
     /<meta[^>]+http-equiv="refresh"[^>]+content="0;url=https:\/\/app\.epode\.ai\/auth\/start"/i,

@@ -26,10 +26,10 @@ test("MCP instrumentation decorates business tools and registers structured feed
         return new Response("{}", { status: 202 });
       }
       reports.push(JSON.parse(init.body));
-      return new Response(
-        JSON.stringify({ accepted: true, interactionId: "interaction" }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
+      return new Response(JSON.stringify({ accepted: true, interactionId: "interaction" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
     },
   });
   server.registerTool("search", {}, async () => ({
@@ -47,11 +47,19 @@ test("MCP instrumentation decorates business tools and registers structured feed
     feedbackHandle,
     summary: "The search result completed the task with useful context.",
     impact: "helped",
-    findings: [{ kind: "strength", topic: "relevance", detail: "The top result answered the question." }],
+    findings: [
+      { kind: "strength", topic: "relevance", detail: "The top result answered the question." },
+    ],
   });
   assert.equal(report.structuredContent.accepted, true);
   assert.deepEqual(reports, [
-    { summary: "The search result completed the task with useful context.", impact: "helped", findings: [{ kind: "strength", topic: "relevance", detail: "The top result answered the question." }] },
+    {
+      summary: "The search result completed the task with useful context.",
+      impact: "helped",
+      findings: [
+        { kind: "strength", topic: "relevance", detail: "The top result answered the question." },
+      ],
+    },
   ]);
   await instrumentation.shutdown();
   assert.equal(telemetry[0].events[0].classification, "confirmed");
@@ -231,8 +239,14 @@ test("MCP Ask-always mode requires fresh approval for every report", async () =>
   assert.match(contract.instruction, /Ask again before every future report/i);
   assert.doesNotMatch(contract.instruction, /autonomously/i);
   assert.match(result.content.at(-1).text, /Ask permission for this report/i);
-  assert.match(tools.get("report_product_feedback").configuration.description, /individual report/i);
-  assert.doesNotMatch(tools.get("report_product_feedback").configuration.description, /autonomously/i);
+  assert.match(
+    tools.get("report_product_feedback").configuration.description,
+    /individual report/i,
+  );
+  assert.doesNotMatch(
+    tools.get("report_product_feedback").configuration.description,
+    /autonomously/i,
+  );
 
   const feedbackHandle = contract.feedbackHandle;
   const withoutApproval = await tools.get("report_product_feedback").handler({

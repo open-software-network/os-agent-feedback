@@ -56,9 +56,15 @@
     "fastify": ">=4 <6"
   },
   "peerDependenciesMeta": {
-    "@modelcontextprotocol/server": { "optional": true },
-    "express": { "optional": true },
-    "fastify": { "optional": true }
+    "@modelcontextprotocol/server": {
+      "optional": true
+    },
+    "express": {
+      "optional": true
+    },
+    "fastify": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
