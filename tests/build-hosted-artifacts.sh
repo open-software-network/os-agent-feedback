@@ -7,8 +7,8 @@ python_bin="${PYTHON_BIN:-$(command -v python3.11 || command -v python3)}"
 
 (
   cd "$repo_root/sdk/node"
-  npm install --ignore-scripts
-  npm pack --pack-destination "$artifacts"
+  pnpm --filter @agent-feedback/node install --ignore-scripts
+  pnpm pack --pack-destination "$artifacts"
 )
 
 "$python_bin" -m pip wheel --no-deps "$repo_root/sdk/python" --wheel-dir "$artifacts"
@@ -35,8 +35,5 @@ for required in README.md conformance.json envelope.schema.json feedback-report.
     exit 1
   }
 done
-
-cp "$artifacts"/agent-feedback-* "$repo_root/public/"
-cp "$artifacts"/agent_feedback-*.whl "$repo_root/public/"
 
 echo "PASS hosted SDK artifacts rebuilt from current source"

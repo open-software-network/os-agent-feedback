@@ -1,3 +1,8 @@
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "crate-restricted visibility satisfies unreachable_pub in this binary-only crate"
+)]
+
 use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
@@ -13,7 +18,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CapabilityClaims {
+pub(crate) struct CapabilityClaims {
     pub v: u8,
     pub i: Uuid,
     pub iat: i64,
@@ -22,24 +27,24 @@ pub struct CapabilityClaims {
 }
 
 #[derive(Debug, Clone)]
-pub struct ParsedCapability {
+pub(crate) struct ParsedCapability {
     pub key_id: Uuid,
     pub claims: CapabilityClaims,
     pub signing_input: String,
     pub signature: Vec<u8>,
 }
 
-pub fn random_token(prefix: &str) -> String {
+pub(crate) fn random_token(prefix: &str) -> String {
     let mut bytes = [0_u8; 32];
     rand::rng().fill_bytes(&mut bytes);
     format!("{prefix}{}", URL_SAFE_NO_PAD.encode(bytes))
 }
 
-pub fn sha256(value: &str) -> Vec<u8> {
+pub(crate) fn sha256(value: &str) -> Vec<u8> {
     Sha256::digest(value.as_bytes()).to_vec()
 }
 
-pub fn parse_capability(token: &str) -> Result<ParsedCapability, ApiError> {
+pub(crate) fn parse_capability(token: &str) -> Result<ParsedCapability, ApiError> {
     let encoded = token
         .strip_prefix("afr2_")
         .ok_or_else(ApiError::unauthorized)?;
@@ -67,7 +72,7 @@ pub fn parse_capability(token: &str) -> Result<ParsedCapability, ApiError> {
     })
 }
 
-pub fn verify_capability(
+pub(crate) fn verify_capability(
     parsed: ParsedCapability,
     key_hash: &[u8],
     now: DateTime<Utc>,
@@ -94,7 +99,7 @@ pub fn verify_capability(
     Ok(parsed.claims)
 }
 
-pub fn bearer_token(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<String> {
     headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
@@ -112,7 +117,7 @@ pub fn bearer_token(headers: &HeaderMap) -> Option<String> {
         })
 }
 
-pub fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+pub(crate) fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get("cookie")
         .and_then(|value| value.to_str().ok())
@@ -124,21 +129,21 @@ pub fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
         })
 }
 
-pub fn http_only_cookie(name: &str, value: &str, max_age: u64, secure: bool) -> String {
+pub(crate) fn http_only_cookie(name: &str, value: &str, max_age: u64, secure: bool) -> String {
     format!(
         "{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{}",
         if secure { "; Secure" } else { "" }
     )
 }
 
-pub fn clear_cookie(name: &str, secure: bool) -> String {
+pub(crate) fn clear_cookie(name: &str, secure: bool) -> String {
     format!(
         "{name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{}",
         if secure { "; Secure" } else { "" }
     )
 }
 
-pub fn reject_sensitive_fields(value: &serde_json::Value) -> Result<(), &'static str> {
+pub(crate) fn reject_sensitive_fields(value: &serde_json::Value) -> Result<(), &'static str> {
     const FORBIDDEN: &[&str] = &[
         "prompt",
         "prompts",
@@ -188,6 +193,12 @@ pub fn reject_sensitive_fields(value: &serde_json::Value) -> Result<(), &'static
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        reason = "test failures should abort at the assertion site"
+    )]
+
     use super::*;
 
     #[test]

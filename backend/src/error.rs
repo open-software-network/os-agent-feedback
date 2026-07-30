@@ -1,3 +1,8 @@
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "crate-restricted visibility satisfies unreachable_pub in this binary-only crate"
+)]
+
 use axum::{
     Json,
     http::StatusCode,
@@ -6,44 +11,44 @@ use axum::{
 use serde_json::json;
 
 #[derive(Debug)]
-pub struct ApiError {
+pub(crate) struct ApiError {
     pub status: StatusCode,
     pub message: String,
 }
 
 impl ApiError {
-    pub fn new(status: StatusCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
             status,
             message: message.into(),
         }
     }
 
-    pub fn bad_request(message: impl Into<String>) -> Self {
+    pub(crate) fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, message)
     }
 
-    pub fn unauthorized() -> Self {
+    pub(crate) fn unauthorized() -> Self {
         Self::new(StatusCode::UNAUTHORIZED, "Authentication required")
     }
 
-    pub fn forbidden(message: impl Into<String>) -> Self {
+    pub(crate) fn forbidden(message: impl Into<String>) -> Self {
         Self::new(StatusCode::FORBIDDEN, message)
     }
 
-    pub fn not_found(message: impl Into<String>) -> Self {
+    pub(crate) fn not_found(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, message)
     }
 
-    pub fn conflict(message: impl Into<String>) -> Self {
+    pub(crate) fn conflict(message: impl Into<String>) -> Self {
         Self::new(StatusCode::CONFLICT, message)
     }
 
-    pub fn gone(message: impl Into<String>) -> Self {
+    pub(crate) fn gone(message: impl Into<String>) -> Self {
         Self::new(StatusCode::GONE, message)
     }
 
-    pub fn internal(error: impl std::fmt::Display) -> Self {
+    pub(crate) fn internal(error: impl std::fmt::Display) -> Self {
         tracing::error!(error = %error, "internal server error");
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
     }

@@ -12,25 +12,157 @@ const dashboard = {
   workspace: { id: "workspace-1", name: "Acme" },
   workspaceMemberships: [{ workspaceId: "workspace-1", workspaceName: "Acme" }],
   currentRole: "owner",
-  teamMembers: [{ osUserId: "user-1", displayName: "Avery", email: "avery@example.com", role: "owner" }],
+  teamMembers: [
+    { osUserId: "user-1", displayName: "Avery", email: "avery@example.com", role: "owner" },
+  ],
   teamInvitations: [],
   products: [{ id: "product-1", name: "Search API" }],
   currentProduct: { id: "product-1", name: "Search API" },
-  environments: [{ id: "environment-1", productId: "product-1", feedbackMode: "never_ask", retentionDays: 30 }],
-  currentEnvironment: { id: "environment-1", productId: "product-1", feedbackMode: "never_ask", retentionDays: 30 },
-  apiKeys: [
-    { id: "key-1", prefix: "af_live_1234abcd", label: "Default product key", kind: "write", createdAt: iso(-120), expiresAt: null, lastUsedAt: iso(-4) },
-    { id: "key-2", prefix: "af_read_5678beef", label: "Repo read key", kind: "read", createdAt: iso(-60), expiresAt: iso(129_600), lastUsedAt: null },
+  environments: [
+    { id: "environment-1", productId: "product-1", feedbackMode: "never_ask", retentionDays: 30 },
   ],
-  sessions: [{ id: "session-1", source: "product", refHint: "sess_01H", startedAt: iso(-20), lastSeenAt: iso(-5) }],
+  currentEnvironment: {
+    id: "environment-1",
+    productId: "product-1",
+    feedbackMode: "never_ask",
+    retentionDays: 30,
+  },
+  apiKeys: [
+    {
+      id: "key-1",
+      prefix: "af_live_1234abcd",
+      label: "Default product key",
+      kind: "write",
+      createdAt: iso(-120),
+      expiresAt: null,
+      lastUsedAt: iso(-4),
+    },
+    {
+      id: "key-2",
+      prefix: "af_read_5678beef",
+      label: "Repo read key",
+      kind: "read",
+      createdAt: iso(-60),
+      expiresAt: iso(129_600),
+      lastUsedAt: null,
+    },
+  ],
+  sessions: [
+    {
+      id: "session-1",
+      source: "product",
+      refHint: "sess_01H",
+      startedAt: iso(-20),
+      lastSeenAt: iso(-5),
+    },
+  ],
   interactions: [
-    { id: "interaction-1", apiKeyId: "key-1", sessionId: "session-1", surface: "http_json", operation: "search", statusCode: 200, durationMs: 320, customerRef: "acct_42", classification: "confirmed", confirmationMethod: "feedback_report", runtimeHint: "codex", runtimeHintSource: "user-agent", occurredAt: iso(-20) },
-    { id: "interaction-2", apiKeyId: "key-1", sessionId: "session-1", surface: "mcp", operation: "fetch_document", statusCode: null, durationMs: 810, customerRef: "acct_42", classification: "confirmed", confirmationMethod: "mcp", runtimeHint: "mcp-client", runtimeHintSource: "client_info", occurredAt: iso(-10) },
-    { id: "interaction-3", apiKeyId: "key-1", sessionId: null, surface: "http_json", operation: "search", statusCode: 200, durationMs: 190, customerRef: null, classification: "unclassified", confirmationMethod: null, runtimeHint: null, runtimeHintSource: null, occurredAt: iso(-3) },
+    {
+      id: "interaction-1",
+      apiKeyId: "key-1",
+      sessionId: "session-1",
+      surface: "http_json",
+      operation: "search",
+      statusCode: 200,
+      durationMs: 320,
+      customerRef: "acct_42",
+      classification: "confirmed",
+      confirmationMethod: "feedback_report",
+      runtimeHint: "codex",
+      runtimeHintSource: "user-agent",
+      occurredAt: iso(-20),
+    },
+    {
+      id: "interaction-2",
+      apiKeyId: "key-1",
+      sessionId: "session-1",
+      surface: "mcp",
+      operation: "fetch_document",
+      statusCode: null,
+      durationMs: 810,
+      customerRef: "acct_42",
+      classification: "confirmed",
+      confirmationMethod: "mcp",
+      runtimeHint: "mcp-client",
+      runtimeHintSource: "client_info",
+      occurredAt: iso(-10),
+    },
+    {
+      id: "interaction-3",
+      apiKeyId: "key-1",
+      sessionId: null,
+      surface: "http_json",
+      operation: "search",
+      statusCode: 200,
+      durationMs: 190,
+      customerRef: null,
+      classification: "unclassified",
+      confirmationMethod: null,
+      runtimeHint: null,
+      runtimeHintSource: null,
+      occurredAt: iso(-3),
+    },
   ],
   reports: [
-    { id: "report-1", interactionId: "interaction-1", sessionId: "session-1", summary: "The result answered the question with a small pagination detour.", impact: "helped_with_friction", confidence: 0.92, findings: [{ kind: "strength", topic: "relevance", detail: "The result answered the question." }, { kind: "friction", topic: "pagination", severity: "minor", detail: "A second page was required." }], workaround: { used: true, detail: "The agent requested the next page." }, source: "customer_agent", surface: "http_json", operation: "search", statusCode: 200, durationMs: 320, customerRef: "acct_42", classification: "confirmed", confirmationMethod: "feedback_report", runtimeHint: "codex", runtimeHintSource: "user-agent", occurredAt: iso(-20), createdAt: iso(-18) },
-    { id: "report-2", interactionId: "interaction-2", sessionId: "session-1", summary: "The document could not be opened and no fallback was available.", impact: "blocked", confidence: 0.99, findings: [{ kind: "defect", topic: "document_access", severity: "blocking", detail: "The document could not be opened." }], workaround: { used: false }, source: "customer_agent", surface: "mcp", operation: "fetch_document", statusCode: null, durationMs: 810, customerRef: "acct_42", classification: "confirmed", confirmationMethod: "mcp", runtimeHint: "mcp-client", runtimeHintSource: "client_info", occurredAt: iso(-10), createdAt: iso(-8) },
+    {
+      id: "report-1",
+      interactionId: "interaction-1",
+      sessionId: "session-1",
+      summary: "The result answered the question with a small pagination detour.",
+      impact: "helped_with_friction",
+      confidence: 0.92,
+      findings: [
+        { kind: "strength", topic: "relevance", detail: "The result answered the question." },
+        {
+          kind: "friction",
+          topic: "pagination",
+          severity: "minor",
+          detail: "A second page was required.",
+        },
+      ],
+      workaround: { used: true, detail: "The agent requested the next page." },
+      source: "customer_agent",
+      surface: "http_json",
+      operation: "search",
+      statusCode: 200,
+      durationMs: 320,
+      customerRef: "acct_42",
+      classification: "confirmed",
+      confirmationMethod: "feedback_report",
+      runtimeHint: "codex",
+      runtimeHintSource: "user-agent",
+      occurredAt: iso(-20),
+      createdAt: iso(-18),
+    },
+    {
+      id: "report-2",
+      interactionId: "interaction-2",
+      sessionId: "session-1",
+      summary: "The document could not be opened and no fallback was available.",
+      impact: "blocked",
+      confidence: 0.99,
+      findings: [
+        {
+          kind: "defect",
+          topic: "document_access",
+          severity: "blocking",
+          detail: "The document could not be opened.",
+        },
+      ],
+      workaround: { used: false },
+      source: "customer_agent",
+      surface: "mcp",
+      operation: "fetch_document",
+      statusCode: null,
+      durationMs: 810,
+      customerRef: "acct_42",
+      classification: "confirmed",
+      confirmationMethod: "mcp",
+      runtimeHint: "mcp-client",
+      runtimeHintSource: "client_info",
+      occurredAt: iso(-10),
+      createdAt: iso(-8),
+    },
   ],
   insights: {
     windowDays: 30,
@@ -50,25 +182,68 @@ const dashboard = {
     reportsWithWorkarounds: 1,
     p50DurationMs: 320,
     p95DurationMs: 810,
-    topOperations: [{ name: "search", count: 2 }, { name: "fetch_document", count: 1 }],
-    surfaces: [{ name: "http_json", count: 2 }, { name: "mcp", count: 1 }],
-    impacts: [{ name: "helped_with_friction", count: 1 }, { name: "blocked", count: 1 }],
-    findingKinds: [{ name: "strength", count: 1 }, { name: "friction", count: 1 }, { name: "defect", count: 1 }],
-    topics: [{ name: "relevance", count: 1 }, { name: "pagination", count: 1 }, { name: "document_access", count: 1 }],
+    topOperations: [
+      { name: "search", count: 2 },
+      { name: "fetch_document", count: 1 },
+    ],
+    surfaces: [
+      { name: "http_json", count: 2 },
+      { name: "mcp", count: 1 },
+    ],
+    impacts: [
+      { name: "helped_with_friction", count: 1 },
+      { name: "blocked", count: 1 },
+    ],
+    findingKinds: [
+      { name: "strength", count: 1 },
+      { name: "friction", count: 1 },
+      { name: "defect", count: 1 },
+    ],
+    topics: [
+      { name: "relevance", count: 1 },
+      { name: "pagination", count: 1 },
+      { name: "document_access", count: 1 },
+    ],
     blockingTopics: [{ name: "document_access", count: 1 }],
   },
-  listState: { interactionsTotal: 3, reportsTotal: 2, sessionsTotal: 1, interactionsLoaded: 3, reportsLoaded: 2, sessionsLoaded: 1 },
+  listState: {
+    interactionsTotal: 3,
+    reportsTotal: 2,
+    sessionsTotal: 1,
+    interactionsLoaded: 3,
+    reportsLoaded: 2,
+    sessionsLoaded: 1,
+  },
 };
 
 function button(dataset = {}, attributes = []) {
   return { dataset, hasAttribute: (name) => attributes.includes(name) };
 }
 
-async function loadDashboard({ href = "https://app.epode.ai/?view=feedback", fetchImpl, promptImpl } = {}) {
-  const heading = { focused: false, setAttribute() {}, focus() { this.focused = true; } };
+async function loadDashboard({
+  href = "https://app.epode.ai/?view=feedback",
+  fetchImpl,
+  promptImpl,
+} = {}) {
+  const heading = {
+    focused: false,
+    setAttribute() {},
+    focus() {
+      this.focused = true;
+    },
+  };
   const elements = new Map([
     ["#page", { innerHTML: "", setAttribute() {}, querySelector: () => heading }],
-    ["#notice", { textContent: "", hidden: true, setAttribute(name, value) { this[name] = value; } }],
+    [
+      "#notice",
+      {
+        textContent: "",
+        hidden: true,
+        setAttribute(name, value) {
+          this[name] = value;
+        },
+      },
+    ],
     ["#account", { innerHTML: "" }],
     ["#product-scope", { innerHTML: "" }],
     ["#signout", { addEventListener() {} }],
@@ -77,27 +252,46 @@ async function loadDashboard({ href = "https://app.epode.ai/?view=feedback", fet
   const document = {
     querySelector: (selector) => elements.get(selector) || null,
     querySelectorAll: () => [],
-    addEventListener: (name, handler) => { handlers[name] = handler; },
+    addEventListener: (name, handler) => {
+      handlers[name] = handler;
+    },
     createElement: () => ({ value: "", style: {}, setAttribute() {}, select() {}, remove() {} }),
     execCommand: () => true,
     body: { appendChild() {} },
   };
-  const location = { href, origin: "https://app.epode.ai", assigned: null, assign(value) { this.assigned = value; } };
+  const location = {
+    href,
+    origin: "https://app.epode.ai",
+    assigned: null,
+    assign(value) {
+      this.assigned = value;
+    },
+  };
   const context = vm.createContext({
     console,
     document,
-    window: { addEventListener: (name, handler) => { handlers[`window:${name}`] = handler; } },
+    window: {
+      addEventListener: (name, handler) => {
+        handlers[`window:${name}`] = handler;
+      },
+    },
     location,
     history: { pushState() {}, replaceState() {} },
     navigator: { clipboard: { writeText: async () => {} } },
     sessionStorage: { getItem: () => null, setItem() {} },
-    fetch: fetchImpl || (async () => ({ ok: true, status: 200, json: async () => structuredClone(dashboard) })),
+    fetch:
+      fetchImpl ||
+      (async () => ({ ok: true, status: 200, json: async () => structuredClone(dashboard) })),
     URL,
     URLSearchParams,
     Headers,
     FormData: class {
-      constructor(form) { this.data = form?.formData || new Map(); }
-      get(name) { return this.data.get(name) ?? null; }
+      constructor(form) {
+        this.data = form?.formData || new Map();
+      }
+      get(name) {
+        return this.data.get(name) ?? null;
+      }
     },
     Intl,
     Date,
@@ -110,7 +304,15 @@ async function loadDashboard({ href = "https://app.epode.ai/?view=feedback", fet
   });
   vm.runInContext(source, context);
   await new Promise((resolve) => setTimeout(resolve, 10));
-  return { context, handlers, heading, location, notice: elements.get("#notice"), page: elements.get("#page"), productScope: elements.get("#product-scope") };
+  return {
+    context,
+    handlers,
+    heading,
+    location,
+    notice: elements.get("#notice"),
+    page: elements.get("#page"),
+    productScope: elements.get("#product-scope"),
+  };
 }
 
 test("feedback, interaction, and session explorers render and preserve linked context", async () => {
@@ -139,7 +341,10 @@ test("the latest team navigation wins when dashboard responses arrive out of ord
   const stateFor = (id) => ({
     ...structuredClone(dashboard),
     workspace: { id, name: id },
-    workspaceMemberships: ["workspace-1", "workspace-b", "workspace-c"].map((workspaceId) => ({ workspaceId, workspaceName: workspaceId })),
+    workspaceMemberships: ["workspace-1", "workspace-b", "workspace-c"].map((workspaceId) => ({
+      workspaceId,
+      workspaceName: workspaceId,
+    })),
   });
   let initial = true;
   const fetchImpl = async (path) => {
@@ -151,9 +356,13 @@ test("the latest team navigation wins when dashboard responses arrive out of ord
     return await new Promise((resolve) => pending.set(workspace, resolve));
   };
   const { context, handlers } = await loadDashboard({ fetchImpl });
-  const older = handlers.change({ target: { id: "workspace-select", value: "workspace-b", dataset: {} } });
+  const older = handlers.change({
+    target: { id: "workspace-select", value: "workspace-b", dataset: {} },
+  });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  const latest = handlers.change({ target: { id: "workspace-select", value: "workspace-c", dataset: {} } });
+  const latest = handlers.change({
+    target: { id: "workspace-select", value: "workspace-c", dataset: {} },
+  });
   await new Promise((resolve) => setTimeout(resolve, 0));
   pending.get("workspace-c")({ ok: true, status: 200, json: async () => stateFor("workspace-c") });
   await latest;
@@ -193,12 +402,18 @@ test("facets and investigation shortcuts change the loaded explorer", async () =
 
   await handlers.click({ target: { closest: () => button({ view: "home" }) } });
   assert.match(page.innerHTML, /Where to look next/);
-  await handlers.click({ target: { closest: () => button({ investigateView: "interactions", investigateFilter: "unreviewed" }) } });
+  await handlers.click({
+    target: {
+      closest: () => button({ investigateView: "interactions", investigateFilter: "unreviewed" }),
+    },
+  });
   assert.match(page.innerHTML, /Confirmed without feedback/);
 });
 
 test("malformed deep links and delayed searches cannot corrupt navigation state", async () => {
-  const { context, handlers } = await loadDashboard({ href: "https://app.epode.ai/?view=unknown&report=missing&filter=garbage&surface=bogus&range=forever" });
+  const { context, handlers } = await loadDashboard({
+    href: "https://app.epode.ai/?view=unknown&report=missing&filter=garbage&surface=bogus&range=forever",
+  });
   assert.equal(vm.runInContext("currentView", context), "home");
   assert.equal(vm.runInContext("selectedReport", context), null);
   assert.equal(vm.runInContext("explorerPrimary", context), "all");
@@ -213,7 +428,11 @@ test("malformed deep links and delayed searches cannot corrupt navigation state"
 });
 
 test("a failed initial data request shows retry UI without reloading forever", async () => {
-  const { location, page } = await loadDashboard({ fetchImpl: async () => { throw new Error("network offline"); } });
+  const { location, page } = await loadDashboard({
+    fetchImpl: async () => {
+      throw new Error("network offline");
+    },
+  });
   assert.match(page.innerHTML, /could not load/i);
   assert.match(page.innerHTML, /Try again/);
   assert.equal(location.assigned, null);
@@ -245,8 +464,19 @@ test("setup lists key kinds with expiry and last-used, and rotating a read key k
         ok: true,
         status: 200,
         json: async () => ({
-          secret: old.kind === "read" ? "af_read_9999aaaa9999aaaa9999aaaa9999aaaa_rotated_secret_value" : "af_live_9999aaaa9999aaaa9999aaaa9999aaaa_rotated_secret_value",
-          apiKey: { id: `key-${rotated.length + 2}`, prefix: old.kind === "read" ? "af_read_9999aaaa" : "af_live_9999aaaa", label: old.label, kind: old.kind, createdAt: iso(0), expiresAt: old.kind === "read" ? iso(129_600) : null, lastUsedAt: null },
+          secret:
+            old.kind === "read"
+              ? "af_read_9999aaaa9999aaaa9999aaaa9999aaaa_rotated_secret_value"
+              : "af_live_9999aaaa9999aaaa9999aaaa9999aaaa_rotated_secret_value",
+          apiKey: {
+            id: `key-${rotated.length + 2}`,
+            prefix: old.kind === "read" ? "af_read_9999aaaa" : "af_live_9999aaaa",
+            label: old.label,
+            kind: old.kind,
+            createdAt: iso(0),
+            expiresAt: old.kind === "read" ? iso(129_600) : null,
+            lastUsedAt: null,
+          },
         }),
       };
     }
@@ -288,7 +518,15 @@ test("creating a read key posts kind and expiry and shows the shown-once secret"
         status: 200,
         json: async () => ({
           secret: "af_read_bbbbccccbbbbccccbbbbccccbbbbcccc_fresh_secret_value",
-          apiKey: { id: "key-4", prefix: "af_read_bbbbcccc", label: body.label, kind: "read", createdAt: iso(0), expiresAt: null, lastUsedAt: null },
+          apiKey: {
+            id: "key-4",
+            prefix: "af_read_bbbbcccc",
+            label: body.label,
+            kind: "read",
+            createdAt: iso(0),
+            expiresAt: null,
+            lastUsedAt: null,
+          },
         }),
       };
     }
@@ -296,7 +534,10 @@ test("creating a read key posts kind and expiry and shows the shown-once secret"
   };
   const { handlers, page } = await loadDashboard({ fetchImpl });
   await handlers.click({ target: { closest: () => button({ view: "setup" }) } });
-  const form = new Map([["label", "CI read key"], ["expiresIn", "never"]]);
+  const form = new Map([
+    ["label", "CI read key"],
+    ["expiresIn", "never"],
+  ]);
   await handlers.submit({ preventDefault() {}, target: { id: "read-key-form", formData: form } });
   assert.equal(created.length, 1);
   assert.equal(created[0].kind, "read");
@@ -316,14 +557,22 @@ test("owners can rename the team and current product in place", async () => {
       state.workspace.name = name;
       state.workspaceMemberships[0].workspaceName = name;
       calls.push([path, name]);
-      return { ok: true, status: 200, json: async () => ({ workspace: structuredClone(state.workspace) }) };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ workspace: structuredClone(state.workspace) }),
+      };
     }
     if (path === "/api/products/product-1" && options.method === "PATCH") {
       const { name } = JSON.parse(options.body);
       state.currentProduct.name = name;
       state.products[0].name = name;
       calls.push([path, name]);
-      return { ok: true, status: 200, json: async () => ({ product: structuredClone(state.currentProduct) }) };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ product: structuredClone(state.currentProduct) }),
+      };
     }
     return { ok: true, status: 200, json: async () => structuredClone(state) };
   };
@@ -340,7 +589,10 @@ test("owners can rename the team and current product in place", async () => {
   assert.match(productScope.innerHTML, /Rename product/);
   await handlers.click({ target: { closest: () => button({}, ["data-rename-product"]) } });
   assert.match(productScope.innerHTML, /Search v2/);
-  assert.deepEqual(calls, [["/api/team", "Platform"], ["/api/products/product-1", "Search v2"]]);
+  assert.deepEqual(calls, [
+    ["/api/team", "Platform"],
+    ["/api/products/product-1", "Search v2"],
+  ]);
 });
 
 test("product deletion requires the exact name and switches to the next product", async () => {
@@ -354,7 +606,11 @@ test("product deletion requires the exact name and switches to the next product"
       calls.push([path, confirmation]);
       state.products = state.products.filter((product) => product.id !== "product-1");
       state.currentProduct = state.products[0];
-      state.currentEnvironment = { ...state.currentEnvironment, id: "environment-2", productId: "product-2" };
+      state.currentEnvironment = {
+        ...state.currentEnvironment,
+        id: "environment-2",
+        productId: "product-2",
+      };
       state.environments = [state.currentEnvironment];
       state.apiKeys = [];
       state.sessions = [];

@@ -2,6 +2,8 @@
 name = "agent-feedback"
 version = "0.1.0"
 edition = "2024"
+# Explicit floor: `Duration::from_hours` (main.rs) is a recent stabilization.
+rust-version = "1.95"
 
 [dependencies]
 anyhow = "1"
@@ -21,6 +23,46 @@ tower-http = { version = "0.6", features = ["compression-full", "cors", "fs", "t
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+# Baseline groups
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# Correctness: no silent panics in production code
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+
+# Quality
+await_holding_lock = "deny"
+float_cmp = "deny"
+mem_forget = "deny"
+wildcard_imports = "warn"
+redundant_clone = "warn"
+inefficient_to_string = "warn"
+
+# Too noisy for this structure
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+
+# The backend's HTTP handlers are intentionally kept intact in this lint-only
+# change; splitting them is a larger refactor that belongs in a separate chunk.
+too_many_lines = "allow"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

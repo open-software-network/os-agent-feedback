@@ -1,0 +1,269 @@
+name: Promote API
+
+on:
+  workflow_dispatch:
+    inputs:
+      from-tag:
+        description: Source tag to promote; use staging or a 7-40 character lowercase SHA tag.
+        required: false
+        default: staging
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: promote-production
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/open-software-network/os-epode-api
+  RAILWAY_CLI_VERSION: 5.30.1
+
+jobs:
+  resolve:
+    name: Resolve source image
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.source.outputs.digest }}
+      sha_short: ${{ steps.source.outputs.sha_short }}
+    env:
+      FROM_TAG: ${{ inputs.from-tag }}
+    steps:
+      - name: Validate source tag
+        run: |
+          set -euo pipefail
+          if [[ "$FROM_TAG" != "staging" && ! "$FROM_TAG" =~ ^[0-9a-f]{7,40}$ ]]; then
+            echo "::error::from-tag must be 'staging' or a 7-40 character lowercase hexadecimal SHA tag."
+            exit 1
+          fi
+          # Images are only ever tagged with --short=7 (build-api.yml), so a
+          # longer SHA is valid input that would otherwise fail later with a
+          # confusing "image does not exist". Truncate instead.
+          # GITHUB_ENV, not GITHUB_OUTPUT: the later steps read $FROM_TAG from
+          # the job environment, so the truncation has to land there.
+          if [[ "$FROM_TAG" != "staging" ]]; then
+            echo "FROM_TAG=${FROM_TAG:0:7}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve source to immutable SHA tag
+        id: source
+        run: |
+          set -euo pipefail
+          source="${IMAGE}:${FROM_TAG}"
+          if ! docker buildx imagetools inspect "$source" --raw > /dev/null 2>&1; then
+            echo "::error::Image $source does not exist."
+            exit 1
+          fi
+
+          digest=$(docker buildx imagetools inspect "$source" \
+            --format '{{ json .Manifest }}' | jq -r '.digest')
+          revision=$(docker buildx imagetools inspect "$source" \
+            --format '{{ json .Image }}' \
+            | jq -r 'first(.. | objects | select(.config?.Labels?["org.opencontainers.image.revision"] != null) | .config.Labels["org.opencontainers.image.revision"]) // empty')
+
+          if [[ -z "$revision" && "$FROM_TAG" =~ ^[0-9a-f]{7,40}$ ]]; then
+            revision="$FROM_TAG"
+          fi
+          if [[ ! "$revision" =~ ^[0-9a-f]{7,40}$ ]]; then
+            echo "::error::Could not resolve a commit SHA from $source."
+            exit 1
+          fi
+
+          sha_short="${revision:0:7}"
+          sha_ref="${IMAGE}:${sha_short}"
+          if ! docker buildx imagetools inspect "$sha_ref" --raw > /dev/null 2>&1; then
+            echo "::error::Concrete SHA image $sha_ref does not exist."
+            exit 1
+          fi
+          sha_digest=$(docker buildx imagetools inspect "$sha_ref" \
+            --format '{{ json .Manifest }}' | jq -r '.digest')
+          if [[ "$sha_digest" != "$digest" ]]; then
+            echo "::error::$source and $sha_ref do not resolve to the same digest."
+            exit 1
+          fi
+
+          {
+            echo "digest=$digest"
+            echo "sha_short=$sha_short"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Summarize resolution
+        run: |
+          {
+            echo "### API promotion source"
+            echo "- **Requested tag:** \`${FROM_TAG}\`"
+            echo "- **SHA tag:** \`${{ env.IMAGE }}:${{ steps.source.outputs.sha_short }}\`"
+            echo "- **Digest:** \`${{ steps.source.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Deploy production
+    needs: resolve
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+      IMAGE_REF: ghcr.io/open-software-network/os-epode-api:${{ needs.resolve.outputs.sha_short }}
+      IMAGE_DIGEST_REF: ghcr.io/open-software-network/os-epode-api@${{ needs.resolve.outputs.digest }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      - name: Install Railway CLI
+        run: npm install --global "@railway/cli@${RAILWAY_CLI_VERSION}"
+
+      - name: Pin verified SHA tag
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "$IMAGE_REF" \
+            "$IMAGE_DIGEST_REF"
+
+      - name: Deploy SHA image and wait for production
+        # RAILWAY_TOKEN is step-scoped so npm install and docker steps never see it.
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$RAILWAY_TOKEN" ]]; then
+            echo "::error::The production environment secret RAILWAY_TOKEN is not configured."
+            exit 1
+          fi
+          if [[ -z "$RAILWAY_PROJECT_ID" ]]; then
+            echo "::error::The RAILWAY_PROJECT_ID variable is not configured."
+            exit 1
+          fi
+
+          previous_id=$(railway deployment list \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment production \
+            --service epode-api \
+            --limit 1 \
+            --json | jq -r '.[0].id // empty')
+          current_image=$(railway service list \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment production \
+            --json \
+            | jq -r '.[] | select(.name == "epode-api") | .source.image // empty')
+          mutation_started_at=$(node --eval 'process.stdout.write(new Date().toISOString())')
+
+          if [[ "$current_image" == "$IMAGE_REF" ]]; then
+            railway redeploy \
+              --project "$RAILWAY_PROJECT_ID" \
+              --environment production \
+              --service epode-api \
+              --from-source \
+              --yes \
+              --json
+          else
+            # Railway CLI 5.30 reads non-TTY stdin as JSON configuration.
+            # Allocate a PTY so the explicit --service-config flags are used.
+            script --quiet --return --command \
+              "railway environment edit --project \"$RAILWAY_PROJECT_ID\" --environment production --service-config epode-api source.image \"$IMAGE_REF\" --message \"Deploy $IMAGE_REF to production\" --json" \
+              /dev/null
+          fi
+
+          # Neither mutation returns a deployment ID for these modes (verified against
+          # CLI 5.30.1). Discovery requires id != previous AND image match AND
+          # createdAt after the mutation; a deployment passing all three that we
+          # did not initiate is the same image on the same service seconds apart —
+          # its outcome is the outcome this gate exists to report. Discover
+          # the matching deployment once, then freeze and poll that exact ID.
+          deployment_id=""
+          for _ in $(seq 1 60); do
+            deployments=$(railway deployment list \
+              --project "$RAILWAY_PROJECT_ID" \
+              --environment production \
+              --service epode-api \
+              --limit 100 \
+              --json)
+
+            if [[ -z "$deployment_id" ]]; then
+              deployment_id=$(jq -r \
+                --arg previous_id "$previous_id" \
+                --arg image "$IMAGE_REF" \
+                --arg started_at "$mutation_started_at" \
+                'first(.[] | select(
+                  .id != $previous_id
+                  and .meta.image == $image
+                  and .createdAt > $started_at
+                ) | .id) // empty' <<< "$deployments")
+              if [[ -z "$deployment_id" ]]; then
+                sleep 10
+                continue
+              fi
+              echo "Tracking production deployment $deployment_id."
+            fi
+
+            deployment=$(jq -c \
+              --arg deployment_id "$deployment_id" \
+              'first(.[] | select(.id == $deployment_id)) // empty' <<< "$deployments")
+            if [[ -z "$deployment" ]]; then
+              sleep 10
+              continue
+            fi
+            status=$(jq -r '.status // empty' <<< "$deployment")
+            deployment_image=$(jq -r '.meta.image // empty' <<< "$deployment")
+            if [[ "$deployment_image" != "$IMAGE_REF" ]]; then
+              echo "::error::Production deployment $deployment_id uses $deployment_image instead of $IMAGE_REF."
+              exit 1
+            fi
+
+            case "$status" in
+              SUCCESS)
+                echo "Production deployment $deployment_id succeeded."
+                exit 0
+                ;;
+              FAILED|CRASHED|REMOVED)
+                echo "::error::Production deployment $deployment_id finished with status $status."
+                exit 1
+                ;;
+              *)
+                sleep 10
+                ;;
+            esac
+          done
+
+          echo "::error::Timed out waiting for the production deployment."
+          exit 1
+
+      - name: Retag verified image as production
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "${IMAGE}:production" \
+            "$IMAGE_DIGEST_REF"
+
+      - name: Summarize production deployment
+        run: |
+          {
+            echo "### Railway production deployment"
+            echo "- **Service:** \`epode-api\`"
+            echo "- **Environment:** \`production\`"
+            echo "- **Image:** \`${IMAGE_REF}\`"
+            echo "- **Production tag:** \`${IMAGE}:production\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -2,13 +2,28 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const dashboardScript = await readFile(new URL("../backend/public/app.js", import.meta.url), "utf8");
-const dashboardHtml = await readFile(new URL("../backend/public/app.html", import.meta.url), "utf8");
+const dashboardScript = await readFile(
+  new URL("../backend/public/app.js", import.meta.url),
+  "utf8",
+);
+const dashboardHtml = await readFile(
+  new URL("../backend/public/app.html", import.meta.url),
+  "utf8",
+);
 const backendMain = await readFile(new URL("../backend/src/main.rs", import.meta.url), "utf8");
 const backendStore = await readFile(new URL("../backend/src/store.rs", import.meta.url), "utf8");
-const teamMigration = await readFile(new URL("../backend/migrations/0010_teams.sql", import.meta.url), "utf8");
-const shareableInviteMigration = await readFile(new URL("../backend/migrations/0011_shareable_team_invites.sql", import.meta.url), "utf8");
-const ephemeralInviteMigration = await readFile(new URL("../backend/migrations/0018_ephemeral_team_invite_link.sql", import.meta.url), "utf8");
+const teamMigration = await readFile(
+  new URL("../backend/migrations/0010_teams.sql", import.meta.url),
+  "utf8",
+);
+const shareableInviteMigration = await readFile(
+  new URL("../backend/migrations/0011_shareable_team_invites.sql", import.meta.url),
+  "utf8",
+);
+const ephemeralInviteMigration = await readFile(
+  new URL("../backend/migrations/0018_ephemeral_team_invite_link.sql", import.meta.url),
+  "utf8",
+);
 
 test("dashboard exposes team switching and membership management", () => {
   assert.match(dashboardHtml, /data-view="team"/);
@@ -18,7 +33,10 @@ test("dashboard exposes team switching and membership management", () => {
   assert.match(dashboardScript, />Open email draft<\/button>/);
   assert.match(dashboardScript, /Copy member invite link/);
   assert.match(dashboardScript, /data-create-invite-link/);
-  assert.match(dashboardScript, /teamInvitations\.filter\(\(invitation\) => invitation\.inviteeKind !== "link"\)/);
+  assert.match(
+    dashboardScript,
+    /teamInvitations\.filter\(\(invitation\) => invitation\.inviteeKind !== "link"\)/,
+  );
   assert.doesNotMatch(dashboardScript, /invite-link-role/);
   assert.doesNotMatch(dashboardScript, /latestInviteLink|latestInviteEmail|inviteResult/);
   assert.doesNotMatch(dashboardScript, /Anyone with this link can join/);
@@ -50,7 +68,10 @@ test("email-bound and shareable invitations survive sign-in", () => {
 });
 
 test("the member invite link is reusable for 24 hours and never becomes pending", () => {
-  const shareLinkHandler = dashboardScript.match(/if \(target\.hasAttribute\("data-create-invite-link"\)\) \{([\s\S]*?)\n    \}/)?.[1] || "";
+  const shareLinkHandler =
+    dashboardScript.match(
+      /if \(target\.hasAttribute\("data-create-invite-link"\)\) \{([\s\S]*?)\n {4}\}/,
+    )?.[1] || "";
   assert.match(ephemeralInviteMigration, /created_at \+ INTERVAL '24 hours'/);
   assert.match(ephemeralInviteMigration, /workspace_invitations_active_link_idx/);
   assert.match(backendStore, /NOW\(\) \+ INTERVAL '24 hours'/);

@@ -1,3 +1,9 @@
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "this provisioning CLI reports machine-readable results and status to the caller"
+)]
+
 use std::{env, io::Write};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -36,11 +42,11 @@ async fn main() -> anyhow::Result<()> {
     let key_label = env::var("PLAYGROUND_KEY_LABEL").unwrap_or_else(|_| "Agent playground".into());
 
     let workspace_id: Uuid = sqlx::query_scalar(
-        r#"SELECT w.id FROM workspaces w
+        r"SELECT w.id FROM workspaces w
         JOIN workspace_members m ON m.workspace_id = w.id
         WHERE LOWER(m.email) = LOWER($1)
         ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, m.joined_at
-        LIMIT 1"#,
+        LIMIT 1",
     )
     .bind(&owner_email)
     .fetch_optional(&pool)
@@ -102,15 +108,15 @@ async fn main() -> anyhow::Result<()> {
                 .fetch_one(&pool)
                 .await?;
         let reports: i64 = sqlx::query_scalar(
-            r#"SELECT COUNT(*) FROM feedback_reports r
+            r"SELECT COUNT(*) FROM feedback_reports r
             JOIN interactions_v2 i ON i.id = r.interaction_id
-            WHERE i.environment_id = $1"#,
+            WHERE i.environment_id = $1",
         )
         .bind(environment_id)
         .fetch_one(&pool)
         .await?;
         let latest: serde_json::Value = sqlx::query_scalar(
-            r#"SELECT COALESCE(json_agg(row_data ORDER BY occurred_at DESC), '[]'::json)
+            r"SELECT COALESCE(json_agg(row_data ORDER BY occurred_at DESC), '[]'::json)
             FROM (
               SELECT json_build_object(
                 'interactionId', i.id,
@@ -130,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
               WHERE i.environment_id = $1
               ORDER BY i.occurred_at DESC
               LIMIT 20
-            ) recent"#,
+            ) recent",
         )
         .bind(environment_id)
         .fetch_one(&pool)
@@ -155,13 +161,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut tx = pool.begin().await?;
-    let product_id = match existing_product_id {
-        Some(id) => id,
-        None => {
-            let id = Uuid::new_v4();
-            sqlx::query(
-                "INSERT INTO products (id, workspace_id, name, slug) VALUES ($1, $2, $3, $4)",
-            )
+    let product_id = if let Some(id) = existing_product_id {
+        id
+    } else {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO products (id, workspace_id, name, slug) VALUES ($1, $2, $3, $4)")
             .bind(id)
             .bind(workspace_id)
             .bind(&product_name)
@@ -171,33 +175,31 @@ async fn main() -> anyhow::Result<()> {
             ))
             .execute(&mut *tx)
             .await?;
-            id
-        }
+        id
     };
 
-    let environment_id = match sqlx::query_scalar::<_, Uuid>(
+    let environment_id = if let Some(id) = sqlx::query_scalar::<_, Uuid>(
         "SELECT id FROM product_environments WHERE product_id = $1 ORDER BY created_at LIMIT 1",
     )
     .bind(product_id)
     .fetch_optional(&mut *tx)
     .await?
     {
-        Some(id) => id,
-        None => {
-            let id = Uuid::new_v4();
-            sqlx::query(
-                r#"INSERT INTO product_environments
-                (id, workspace_id, product_id, name, slug, feedback_mode, retention_days)
-                VALUES ($1, $2, $3, 'Default', 'default', $4, 365)"#,
-            )
-            .bind(id)
-            .bind(workspace_id)
-            .bind(product_id)
-            .bind(&feedback_mode)
-            .execute(&mut *tx)
-            .await?;
-            id
-        }
+        id
+    } else {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            r"INSERT INTO product_environments
+            (id, workspace_id, product_id, name, slug, feedback_mode, retention_days)
+            VALUES ($1, $2, $3, 'Default', 'default', $4, 365)",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .bind(product_id)
+        .bind(&feedback_mode)
+        .execute(&mut *tx)
+        .await?;
+        id
     };
 
     sqlx::query(
@@ -220,9 +222,9 @@ async fn main() -> anyhow::Result<()> {
     let prefix: String = secret.chars().take(16).collect();
     let key_hash = Sha256::digest(secret.as_bytes()).to_vec();
     sqlx::query(
-        r#"INSERT INTO api_keys
+        r"INSERT INTO api_keys
         (id, workspace_id, environment_id, label, prefix, key_hash)
-        VALUES ($1, $2, $3, $4, $5, $6)"#,
+        VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(key_id)
     .bind(workspace_id)

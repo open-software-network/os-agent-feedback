@@ -42,10 +42,7 @@ test("feedback-aware adapter reads JSON, HTML, and header metadata", () => {
   );
   const html = `<!doctype html><script id="agent-feedback" type="application/json">${JSON.stringify(envelope)}</script>`;
   assert.deepEqual(feedbackFromResponse({ headers }, html), envelope);
-  headers.set(
-    "agent-feedback",
-    Buffer.from(JSON.stringify(envelope)).toString("base64url"),
-  );
+  headers.set("agent-feedback", Buffer.from(JSON.stringify(envelope)).toString("base64url"));
   assert.deepEqual(feedbackFromResponse({ headers }, ["ok"]), envelope);
 });
 
@@ -57,26 +54,30 @@ test("feedback-aware adapter submits a structured report to a trusted origin", a
       summary: "The product response completed the task with one workaround.",
       impact: "helped_with_friction",
       confidence: 0.9,
-      findings: [{ kind: "friction", topic: "pagination", severity: "minor", detail: "A second request was needed." }],
+      findings: [
+        {
+          kind: "friction",
+          topic: "pagination",
+          severity: "minor",
+          detail: "A second request was needed.",
+        },
+      ],
       workaround: { used: true, detail: "The agent requested the next page." },
     },
     {
       allowedSubmitOrigins: ["https://feedback.test"],
       fetch: async (url, init) => {
         requests.push({ url: String(url), init });
-        return new Response(
-          JSON.stringify({ accepted: true, interactionId: "interaction_1" }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
+        return new Response(JSON.stringify({ accepted: true, interactionId: "interaction_1" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
       },
     },
   );
   assert.equal(result.accepted, true);
   assert.equal(JSON.parse(requests[0].init.body).findings[0].topic, "pagination");
-  assert.equal(
-    requests[0].init.headers.authorization,
-    envelope.submit.authorization,
-  );
+  assert.equal(requests[0].init.headers.authorization, envelope.submit.authorization);
 });
 
 test("feedback-aware adapter rejects untrusted submission origins", async () => {
@@ -178,10 +179,7 @@ test("feedback-aware adapter rejects malformed consent contracts", () => {
     when: "after_experience_known_and_explicit_user_approval",
   };
   assert.equal(
-    feedbackFromResponse(
-      { headers: new Headers() },
-      { _agentFeedback: malformedAlways },
-    ),
+    feedbackFromResponse({ headers: new Headers() }, { _agentFeedback: malformedAlways }),
     undefined,
   );
   assert.equal(feedbackConsentAction(malformedAlways, "approved"), "skip");

@@ -12,12 +12,22 @@ const httpIntegrations = [
   {
     id: "node-express",
     page: "docs/integrations/node-express.mdx",
-    required: ["@agent-feedback/node/express", "agentFeedback({", "include:", "agent-feedback-doctor"],
+    required: [
+      "@agent-feedback/node/express",
+      "agentFeedback({",
+      "include:",
+      "agent-feedback-doctor",
+    ],
   },
   {
     id: "node-fastify",
     page: "docs/integrations/node-fastify.mdx",
-    required: ["@agent-feedback/node/fastify", "app.register(agentFeedback({", "include:", "agent-feedback-doctor"],
+    required: [
+      "@agent-feedback/node/fastify",
+      "app.register(agentFeedback({",
+      "include:",
+      "agent-feedback-doctor",
+    ],
   },
   {
     id: "python-asgi",
@@ -32,7 +42,12 @@ const httpIntegrations = [
   {
     id: "go",
     page: "docs/integrations/go-http.mdx",
-    required: ["github.com/open-software-network/os-epode/sdk/go", "agentfeedback.New", "feedback.Middleware", "feedback.Shutdown"],
+    required: [
+      "github.com/open-software-network/os-epode/sdk/go",
+      "agentfeedback.New",
+      "feedback.Middleware",
+      "feedback.Shutdown",
+    ],
   },
   {
     id: "rust",
@@ -50,12 +65,24 @@ const mcpIntegrations = [
   {
     id: "node-mcp",
     page: "docs/integrations/node-mcp.mdx",
-    required: ["createMcpInstrumentation", "createMcpHandler", "feedback.instrument(server)", "report_product_feedback", "2026-07-28"],
+    required: [
+      "createMcpInstrumentation",
+      "createMcpHandler",
+      "feedback.instrument(server)",
+      "report_product_feedback",
+      "2026-07-28",
+    ],
   },
   {
     id: "manual-mcp",
     page: "docs/integrations/manual-mcp.mdx",
-    required: ["server/discover", "MCP-Protocol-Version", "Mcp-Method", "Mcp-Name", "report_product_feedback"],
+    required: [
+      "server/discover",
+      "MCP-Protocol-Version",
+      "Mcp-Method",
+      "Mcp-Name",
+      "report_product_feedback",
+    ],
   },
 ];
 
@@ -80,17 +107,38 @@ function navigationPages(value, pages = []) {
 test("Mintlify navigation exposes the complete new-customer journey", async () => {
   const pages = new Set(navigationPages(docsConfig.navigation));
   for (const integration of [...httpIntegrations, ...mcpIntegrations]) {
-    assert.ok(pages.has(integration.page.replace(/^docs\//, "").replace(/\.mdx$/, "")), `${integration.id} is missing from navigation`);
+    assert.ok(
+      pages.has(integration.page.replace(/^docs\//, "").replace(/\.mdx$/, "")),
+      `${integration.id} is missing from navigation`,
+    );
   }
-  for (const required of ["index", "quickstart", "concepts/reliability", "concepts/feedback-modes", "guides/verify", "guides/real-world-patterns", "guides/troubleshooting", "reference/privacy-security"]) {
+  for (const required of [
+    "index",
+    "quickstart",
+    "concepts/reliability",
+    "concepts/feedback-modes",
+    "guides/verify",
+    "guides/real-world-patterns",
+    "guides/troubleshooting",
+    "reference/privacy-security",
+  ]) {
     assert.ok(pages.has(required), `${required} is missing from navigation`);
   }
-  assert.ok(![...pages].some((page) => page === "api" || page.startsWith("api/")), "Mintlify reserves the /api path");
+  assert.ok(
+    ![...pages].some((page) => page === "api" || page.startsWith("api/")),
+    "Mintlify reserves the /api path",
+  );
 });
 
 test("real-world guidance covers the initial ICP outcome boundaries", async () => {
   const content = await read("docs/guides/real-world-patterns.mdx");
-  for (const pattern of ["Search or retrieval API", "Async crawl or export", "Browser automation MCP", "Documentation MCP", "Email, payments, or issue MCP"]) {
+  for (const pattern of [
+    "Search or retrieval API",
+    "Async crawl or export",
+    "Browser automation MCP",
+    "Documentation MCP",
+    "Email, payments, or issue MCP",
+  ]) {
     assert.ok(content.includes(pattern), `real-world guidance omits ${pattern}`);
   }
   assert.match(content, /Agent-Feedback-Request: 1/);
@@ -108,11 +156,27 @@ test("Mintlify excludes internal engineering notes from publishing", () => {
 test("all fourteen HTTP and website setup permutations have copyable, current instructions", async () => {
   for (const integration of httpIntegrations) {
     const content = await read(integration.page);
-    for (const expected of integration.required) assert.ok(content.includes(expected), `${integration.id} docs omit ${expected}`);
-    assert.match(content, /AGENT_FEEDBACK_KEY|api_key=/, `${integration.id} docs omit product-key setup`);
-    assert.match(content, /server-rendered|HTML|html/i, `${integration.id} docs omit website behavior`);
-    assert.match(content, /runnable .*example/i, `${integration.id} docs do not link a runnable example`);
-    assert.ok(dashboard.includes(`\"${integration.id}\"`), `${integration.id} is not selectable in product Setup`);
+    for (const expected of integration.required)
+      assert.ok(content.includes(expected), `${integration.id} docs omit ${expected}`);
+    assert.match(
+      content,
+      /AGENT_FEEDBACK_KEY|api_key=/,
+      `${integration.id} docs omit product-key setup`,
+    );
+    assert.match(
+      content,
+      /server-rendered|HTML|html/i,
+      `${integration.id} docs omit website behavior`,
+    );
+    assert.match(
+      content,
+      /runnable .*example/i,
+      `${integration.id} docs do not link a runnable example`,
+    );
+    assert.ok(
+      dashboard.includes(`"${integration.id}"`),
+      `${integration.id} is not selectable in product Setup`,
+    );
   }
   assert.equal(httpIntegrations.length * 2, 14);
 });
@@ -120,10 +184,14 @@ test("all fourteen HTTP and website setup permutations have copyable, current in
 test("both MCP setup permutations document the stateless 2026 feedback-tool contract", async () => {
   for (const integration of mcpIntegrations) {
     const content = await read(integration.page);
-    for (const expected of integration.required) assert.ok(content.includes(expected), `${integration.id} docs omit ${expected}`);
+    for (const expected of integration.required)
+      assert.ok(content.includes(expected), `${integration.id} docs omit ${expected}`);
     assert.match(content, /stateless/i);
     assert.match(content, /runnable .*example/i);
-    assert.ok(dashboard.includes(`\"${integration.id}\"`), `${integration.id} is not selectable in product Setup`);
+    assert.ok(
+      dashboard.includes(`"${integration.id}"`),
+      `${integration.id} is not selectable in product Setup`,
+    );
   }
   assert.equal(mcpIntegrations.length, 2);
 });
@@ -134,7 +202,10 @@ test("docs explain the product/customer-agent boundary and evidence model", asyn
   const privacy = await read("docs/reference/privacy-security.mdx");
   assert.match(overview, /independent agents used by your customers/i);
   assert.match(overview, /customers do not install an Epode SDK/i);
-  assert.match(reliability, /does not label ordinary HTTP traffic as agent traffic without evidence/i);
+  assert.match(
+    reliability,
+    /does not label ordinary HTTP traffic as agent traffic without evidence/i,
+  );
   assert.match(reliability, /MCP.*confirmed/i);
   assert.match(privacy, /does not identify an agent/i);
   assert.match(privacy, /prompts or transcripts/i);
@@ -167,14 +238,28 @@ test("docs and dashboard publish the same install artifacts and feedback modes",
 test("every public docs page has a title and actionable description", async () => {
   for (const page of navigationPages(docsConfig.navigation)) {
     const content = await read(`docs/${page}.mdx`);
-    assert.match(content, /^---\n[\s\S]*?title:\s*".+"[\s\S]*?description:\s*".+"[\s\S]*?\n---\n/, `${page} has incomplete frontmatter`);
+    assert.match(
+      content,
+      /^---\n[\s\S]*?title:\s*".+"[\s\S]*?description:\s*".+"[\s\S]*?\n---\n/,
+      `${page} has incomplete frontmatter`,
+    );
   }
 });
 
 test("the downloadable protocol bundle contains only the current report contract", () => {
-  const listing = execFileSync("unzip", ["-Z1", new URL("../public/agent-feedback-protocol-v1.zip", import.meta.url).pathname], { encoding: "utf8" });
+  const listing = execFileSync(
+    "unzip",
+    ["-Z1", new URL("../backend/public/agent-feedback-protocol-v1.zip", import.meta.url).pathname],
+    { encoding: "utf8" },
+  );
   assert.doesNotMatch(listing, /outcome\.schema\.json/);
-  for (const required of ["README.md", "conformance.json", "envelope.schema.json", "feedback-report.schema.json", "telemetry-batch.schema.json"]) {
+  for (const required of [
+    "README.md",
+    "conformance.json",
+    "envelope.schema.json",
+    "feedback-report.schema.json",
+    "telemetry-batch.schema.json",
+  ]) {
     assert.match(listing, new RegExp(`protocol/v1/${required.replaceAll(".", "\\.")}$`, "m"));
   }
 });

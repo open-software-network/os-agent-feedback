@@ -1,0 +1,19 @@
+packages:
+  - "."
+  - "landing-page"
+  - "sdk/node"
+
+minimumReleaseAge: 10080
+minimumReleaseAgeIgnoreMissingTime: false
+# MCP 2.0.0 was published inside the seven-day window. These exact exemptions
+# become no-ops after 2026-08-03 and should be deleted then.
+minimumReleaseAgeExclude:
+  - "@modelcontextprotocol/core@2.0.0"
+  - "@modelcontextprotocol/server@2.0.0"
+# No dependency build scripts are approved. A true entry requires a
+# demonstrated failing command.
+allowBuilds:
+  "@scarf/scarf": false
+  keytar: false
+  puppeteer: false
+  sharp: false

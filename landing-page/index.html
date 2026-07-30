@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Epode — product feedback from customer agents</title>
+    <meta
+      name="description"
+      content="Learn whether your API, MCP server, or agent-readable website actually worked for your customer's agent."
+    >
+    <link rel="icon" href="/favicon.svg">
+    <link rel="shortcut icon" href="/favicon.svg">
+    <meta property="og:title" content="Epode — product feedback from customer agents">
+    <meta
+      property="og:description"
+      content="Learn whether your API, MCP server, or agent-readable website actually worked for your customer's agent."
+    >
+    <meta property="og:type" content="website">
+    <meta property="og:image" content="https://epode.ai/og.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Epode — product feedback from customer agents">
+    <meta
+      name="twitter:description"
+      content="Learn whether your API, MCP server, or agent-readable website actually worked for your customer's agent."
+    >
+    <meta name="twitter:image" content="https://epode.ai/og.png">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main>
+      <nav class="topbar">
+        <a class="wordmark" href="#top">EPODE</a>
+        <div>
+          <a href="https://docs.epode.ai">Docs</a>
+          <a href="https://app.epode.ai/.well-known/agent-feedback-v1.json">Protocol</a>
+          <a class="button" href="https://app.epode.ai/auth/start">Open dashboard</a>
+        </div>
+      </nav>
+
+      <section id="top" class="hero">
+        <p class="eyebrow">PRODUCT FEEDBACK FROM CUSTOMER AGENTS</p>
+        <h1>Did your product actually work for your customer's agent?</h1>
+        <p class="lede">
+          Instrument your API, MCP server, or agent-readable website once—in the
+          language you already use. MCP exposes an explicit feedback tool; HTTP
+          offers a scoped receipt that feedback-aware runtimes can submit.
+        </p>
+        <div class="actions">
+          <a class="button primary" href="https://app.epode.ai/auth/start">Set up a product</a>
+          <a class="button" href="#integration">See the integration</a>
+        </div>
+      </section>
+
+      <section class="flow" aria-label="How Agent Feedback works">
+        <article>
+          <b>1</b>
+          <h2>Your product responds</h2>
+          <p>The SDK adds a two-hour, write-only receipt locally. Your response never waits for us.</p>
+        </article>
+        <span aria-hidden="true">→</span>
+        <article>
+          <b>2</b>
+          <h2>The customer's agent uses it</h2>
+          <p>HTTP begins as an opportunity. MCP tool use is confirmed immediately.</p>
+        </article>
+        <span aria-hidden="true">→</span>
+        <article>
+          <b>3</b>
+          <h2>The agent reports the experience</h2>
+          <p>
+            A concise narrative plus the strengths, friction, gaps, defects,
+            suggestions, uncertainty, and workarounds that actually applied.
+          </p>
+        </article>
+      </section>
+
+      <section id="integration" class="integration">
+        <div>
+          <p class="eyebrow">ONE-TIME SETUP</p>
+          <h2>Use any backend. Keep every handler unchanged.</h2>
+          <p>
+            Select the routes where agent feedback is useful. Customer grouping is
+            optional and comes from authentication your product already has.
+          </p>
+          <ul>
+            <li>No agent identity or Agent Feedback account required</li>
+            <li>No blocking call on the product response path</li>
+            <li>No prompts, transcripts, credentials, or raw payloads accepted</li>
+            <li>Choose Never ask, Ask once, Ask every time, or Off</li>
+            <li>Node, Python, Go, Rust, and MCP adapters use the same contract</li>
+            <li>Every other stack can implement the small public HTTP protocol</li>
+          </ul>
+        </div>
+        <pre><code>// Pick your framework adapter once:
+Node    app.use(agentFeedback(options))
+Python  app = AgentFeedbackASGI(app, **options)
+Go      handler = feedback.Middleware(router)
+Rust    router.layer(AgentFeedbackLayer::new(options)?)
+
+// Every adapter emits the same language-neutral contract.</code></pre>
+      </section>
+
+      <section class="languages">
+        <p class="eyebrow">PROTOCOL FIRST</p>
+        <h2>One receipt contract. Every product stack.</h2>
+        <div>
+          <article>
+            <b>Node</b>
+            <p>Express and Fastify middleware plus MCP instrumentation.</p>
+          </article>
+          <article>
+            <b>Python</b>
+            <p>ASGI for FastAPI, Starlette, Quart, and Django; WSGI for Flask and Django.</p>
+          </article>
+          <article>
+            <b>Go</b>
+            <p>Standard <code>net/http</code> middleware compatible with routers built on it.</p>
+          </article>
+          <article>
+            <b>Rust</b>
+            <p>An Axum/Tower layer with bounded, non-blocking telemetry.</p>
+          </article>
+          <article>
+            <b>Anything else</b>
+            <p>Use the language-neutral protocol and shared conformance vector.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="review-shape">
+        <div>
+          <p class="eyebrow">A REAL REPORT</p>
+          <h2>Flexible enough for reality. Structured enough for product decisions.</h2>
+        </div>
+        <pre><code>{
+  "summary": "The result answered the question, but one field was stale.",
+  "impact": "helped_with_friction",
+  "findings": [
+    { "kind": "strength", "topic": "relevance", "detail": "Useful result." },
+    { "kind": "gap", "topic": "freshness", "severity": "major", "detail": "Older API." }
+  ],
+  "workaround": { "used": true, "detail": "Verified in official docs." }
+}</code></pre>
+      </section>
+
+      <section class="truth">
+        <h2>We report what is proven—not what is guessed.</h2>
+        <div>
+          <article>
+            <b>Opportunity</b>
+            <p>An eligible HTTP response carried feedback instructions.</p>
+          </article>
+          <article>
+            <b>Confirmed interaction</b>
+            <p>An MCP tool was used or an HTTP receipt returned with a review.</p>
+          </article>
+          <article>
+            <b>Optional session</b>
+            <p>
+              Continuity exists only when your product or MCP provides proof. We
+              never infer an agent identity.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <footer>
+        <span>EPODE</span>
+        <a href="https://app.epode.ai/auth/start">Sign in →</a>
+      </footer>
+    </main>
+  </body>
+</html>

@@ -61,10 +61,7 @@ test("Express preserves JSON shape and queues a non-blocking opportunity", async
   assert.equal(body._agentFeedback.requested, true);
   assert.equal(body._agentFeedback.consentPolicy, "none");
   assert.equal(body._agentFeedback.consentScope, undefined);
-  assert.equal(
-    body._agentFeedback.reliability,
-    "best_effort_without_agent_adapter",
-  );
+  assert.equal(body._agentFeedback.reliability, "best_effort_without_agent_adapter");
   assert.equal(body._agentFeedback.when, "after_experience_known_before_final_response");
   assert.equal(body._agentFeedback.submit.method, "POST");
   assert.deepEqual(body._agentFeedback.submit.reportSchema.required, ["summary"]);
@@ -163,7 +160,12 @@ test("Express does not silently destroy an explicit shared cache policy", async 
     apiKey: key,
     include: ["/search"],
     flushIntervalMs: 1,
-    logger: { debug() {}, warn(message) { warnings.push(message); } },
+    logger: {
+      debug() {},
+      warn(message) {
+        warnings.push(message);
+      },
+    },
     fetch: async (_url, init) => {
       telemetry.push(JSON.parse(init.body));
       return new Response("{}", { status: 202 });
@@ -180,7 +182,10 @@ test("Express does not silently destroy an explicit shared cache policy", async 
   const response = await fetch(`${server.url}/search`);
   const body = await response.json();
   assert.equal(body._agentFeedback, undefined);
-  assert.equal(response.headers.get("cache-control"), "public, s-maxage=600, stale-while-revalidate=60");
+  assert.equal(
+    response.headers.get("cache-control"),
+    "public, s-maxage=600, stale-while-revalidate=60",
+  );
   await middleware.shutdown();
   assert.equal(telemetry.length, 0);
   assert.equal(warnings.filter((message) => message.includes("cacheable response")).length, 1);
@@ -225,10 +230,12 @@ test("Express instruments only terminal async-job responses when configured", as
   });
   const app = express();
   app.use(middleware);
-  app.get("/crawl/:id", (request, response) => response.json({
-    id: request.params.id,
-    status: request.query.done === "1" ? "completed" : "running",
-  }));
+  app.get("/crawl/:id", (request, response) =>
+    response.json({
+      id: request.params.id,
+      status: request.query.done === "1" ? "completed" : "running",
+    }),
+  );
   const server = await serve(app);
 
   const running = await (await fetch(`${server.url}/crawl/job_1`)).json();
@@ -246,7 +253,12 @@ test("Express warns when bounded telemetry drops an old event", async () => {
     include: ["/status/*"],
     maxQueueSize: 1,
     flushIntervalMs: 60_000,
-    logger: { debug() {}, warn(message) { warnings.push(message); } },
+    logger: {
+      debug() {},
+      warn(message) {
+        warnings.push(message);
+      },
+    },
     fetch: async () => new Response("{}", { status: 202 }),
   });
   const app = express();
@@ -256,7 +268,10 @@ test("Express warns when bounded telemetry drops an old event", async () => {
 
   await fetch(`${server.url}/status/one`);
   await fetch(`${server.url}/status/two`);
-  assert.equal(warnings.filter((message) => message.includes("oldest event was dropped")).length, 1);
+  assert.equal(
+    warnings.filter((message) => message.includes("oldest event was dropped")).length,
+    1,
+  );
   await middleware.shutdown();
   await server.close();
 });
@@ -291,10 +306,18 @@ test("graceful shutdown has a hard telemetry deadline", async () => {
     flushIntervalMs: 60_000,
     telemetryTimeoutMs: 60_000,
     shutdownTimeoutMs: 25,
-    logger: { debug() {}, warn(message) { warnings.push(message); } },
-    fetch: async (_url, options) => new Promise((_resolve, reject) => {
-      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
-    }),
+    logger: {
+      debug() {},
+      warn(message) {
+        warnings.push(message);
+      },
+    },
+    fetch: async (_url, options) =>
+      new Promise((_resolve, reject) => {
+        options.signal.addEventListener("abort", () => reject(options.signal.reason), {
+          once: true,
+        });
+      }),
   });
   const app = express();
   app.use(middleware);

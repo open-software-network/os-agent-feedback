@@ -3,9 +3,9 @@
 ## Project
 
 Agent Feedback: structured product feedback from customer agents. Rust backend
-(`backend/`) serving a vanilla-JS dashboard (`backend/public/`), a Next.js
-marketing site (`app/`), SDKs (`sdk/`), and the public protocol
-(`protocol/v1/`).
+(`backend/`) serving a vanilla-JS dashboard (`backend/public/`), a hand-written
+static HTML/CSS marketing site (`landing-page/`), SDKs (`sdk/`), and the public
+protocol (`protocol/v1/`).
 
 ## Agent skills
 
@@ -26,8 +26,7 @@ and narrated.
 
 ## Verification
 
-- `npm run test` — builds, then runs `node --test tests/*.test.mjs`.
-- `npm run lint` — eslint.
+- `pnpm test` — runs `node --test tests/*.test.mjs`.
 
 The dashboard test suite asserts against the **source text** of
 `backend/public/app.js`, `app.html`, and `styles.css`, plus a DOM harness in
