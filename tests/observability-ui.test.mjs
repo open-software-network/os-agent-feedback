@@ -68,6 +68,8 @@ test("Home turns product health into an operational overview", () => {
 });
 
 test("the full app exposes live counts, setup health, and structured policy controls", () => {
+  assert.match(html, /<p>FEATURES<\/p>[\s\S]*data-view="feedback"[\s\S]*data-view="interactions"[\s\S]*data-view="sessions"/);
+  assert.doesNotMatch(html, /<p>FEEDBACK<\/p>|<p>PRODUCT USE<\/p>/);
   assert.match(html, /data-nav-count="feedback"/);
   assert.match(html, /data-nav-count="interactions"/);
   assert.match(html, /data-nav-count="sessions"/);
