@@ -177,6 +177,51 @@ test("Epode-managed ask once turns later responses into never ask", async () => 
   }
 });
 
+test("consent-only handoff records a decision before revealing the report contract", async () => {
+  const lab = await startLabServer();
+  try {
+    const run = lab.createRun({
+      mode: "ask_once",
+      consentOwner: "epode",
+      placement: "response_body",
+      copy: "consent_only",
+      customerRef: "customer_split_consent",
+    });
+    const product = await (await fetch(run.productUrl)).json();
+    assert.equal(product._agentFeedback.state, "consent_required");
+    assert.equal(product._agentFeedback.requiredAction.type, "ask_user");
+    assert.equal(product._agentFeedback.submit, undefined);
+
+    const action = product._agentFeedback.requiredAction.submitDecision;
+    const decision = await fetch(action.url, {
+      method: action.method,
+      headers: {
+        authorization: action.authorization,
+        "content-type": action.contentType,
+      },
+      body: JSON.stringify({ decision: "approved" }),
+    });
+    assert.equal(decision.status, 200);
+    const approved = await decision.json();
+    assert.equal(approved.state, "approved");
+    assert.equal(approved.feedback.mode, "never_ask");
+    assert.equal(approved.feedback.consentRequired, false);
+
+    const report = await fetch(approved.feedback.submit.url, {
+      method: approved.feedback.submit.method,
+      headers: {
+        authorization: approved.feedback.submit.authorization,
+        "content-type": approved.feedback.submit.contentType,
+      },
+      body: JSON.stringify({ summary: "The split consent flow produced a usable recommendation." }),
+    });
+    assert.equal(report.status, 201);
+    assert.equal(lab.getConsent("acme_queue", "customer_split_consent"), "approved");
+  } finally {
+    await lab.close();
+  }
+});
+
 test("compliance lab records authenticated MCP product events", async () => {
   const lab = await startLabServer();
   try {

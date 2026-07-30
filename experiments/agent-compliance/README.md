@@ -50,6 +50,24 @@ node experiments/agent-compliance/run.mjs \
 
 node experiments/agent-compliance/run.mjs \
   --runtime codex \
+  --suite consent-shape-confirmation \
+  --repetitions 5 \
+  --output .artifacts/agent-compliance/codex-consent-shapes-confirmation.json
+
+node experiments/agent-compliance/run.mjs \
+  --runtime codex \
+  --suite consent-question-decline \
+  --repetitions 5 \
+  --output .artifacts/agent-compliance/codex-consent-question-decline.json
+
+node experiments/agent-compliance/run.mjs \
+  --runtime codex \
+  --suite mcp-consent-pilot \
+  --repetitions 3 \
+  --output .artifacts/agent-compliance/codex-mcp-consent.json
+
+node experiments/agent-compliance/run.mjs \
+  --runtime codex \
   --suite mcp-pilot \
   --repetitions 3 \
   --output .artifacts/agent-compliance/codex-mcp.json

@@ -26,8 +26,8 @@ function percentage(numerator, denominator) {
   return denominator ? `${Math.round((100 * numerator) / denominator)}%` : "—";
 }
 
-console.log("| Runtime | Mode | Consent owner | Initial consent | Placement | Copy | n | Discovered | Asked | Attempted | First valid | Repaired | Accepted | Task correct | Main result |");
-console.log("|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|");
+console.log("| Runtime | Mode | Consent owner | Initial consent | Placement | Copy | n | Discovered | Asked | Decision | Attempted | First valid | Repaired | Accepted | Task correct | Main result |");
+console.log("|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|");
 for (const [key, group] of groups) {
   const [runtime, mode, consentOwner, initialConsent, placement, copy] = key.split("|");
   const count = (field) => group.filter((result) => result.observations[field]).length;
@@ -36,7 +36,7 @@ for (const [key, group] of groups) {
     all[failure] = (all[failure] || 0) + 1;
     return all;
   }, {})).sort((a, b) => b[1] - a[1]);
-  console.log(`| ${runtime} | ${mode} | ${consentOwner} | ${initialConsent} | ${placement} | ${copy} | ${group.length} | ${percentage(count("llmsFetched"), group.length)} | ${percentage(group.filter((result) => result.agent.askedPermission).length, group.length)} | ${percentage(count("submissionAttempted"), group.length)} | ${percentage(count("firstAttemptAccepted"), group.length)} | ${percentage(count("recoveredAfterRejection"), group.length)} | ${percentage(count("submissionAccepted"), group.length)} | ${percentage(count("correctTaskAnswer"), group.length)} | ${failures[0]?.[0] || "—"} |`);
+  console.log(`| ${runtime} | ${mode} | ${consentOwner} | ${initialConsent} | ${placement} | ${copy} | ${group.length} | ${percentage(count("llmsFetched"), group.length)} | ${percentage(group.filter((result) => result.agent.askedPermission).length, group.length)} | ${percentage(count("consentDecisionRecorded"), group.length)} | ${percentage(count("submissionAttempted"), group.length)} | ${percentage(count("firstAttemptAccepted"), group.length)} | ${percentage(count("recoveredAfterRejection"), group.length)} | ${percentage(count("submissionAccepted"), group.length)} | ${percentage(count("correctTaskAnswer"), group.length)} | ${failures[0]?.[0] || "—"} |`);
 }
 
 const sequences = results.filter((result) => result.scenario.sequence);

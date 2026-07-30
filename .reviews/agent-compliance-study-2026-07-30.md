@@ -124,6 +124,8 @@ Epode should remember the decision for a stable opaque customer reference. After
 
 The original consent experiment incorrectly asked the agent runtime to remember approval. A corrected lab stores approval under product plus opaque customer reference, then starts a completely fresh agent session for the next product interaction.
 
+The isolated server-consent and consent-shape follow-ups added 108 trials beyond the original 87-trial core dataset. The intentionally contaminated first debug run is excluded.
+
 | Condition | First permission/report | Later autonomous report |
 | --- | ---: | ---: |
 | Unknown consent, Codex default | 3/5 | — |
@@ -135,6 +137,33 @@ The original consent experiment incorrectly asked the agent runtime to remember 
 Across the two model pilots, first-time permission converted in 5/10 trials while previously approved customers produced autonomous reports in 9/10 fresh trials. Every customer task was answered correctly.
 
 This materially improves recurring feedback after a grant, and removes the unrealistic adapter-memory requirement. It does **not** improve the independent agent's likelihood of surfacing the first permission question enough to call Ask once reliable: the initial ask remains the dominant bottleneck. A refusal also needs a privacy-safe consent-decision action because the absence of a feedback report cannot distinguish refusal from ignored instructions.
+
+## Consent-shape experiment
+
+The follow-up split the first-time consent interaction from report composition. Unknown customers received only a question and a two-value decision endpoint. The report schema was returned only after approval.
+
+| Unknown-consent response | n | Asked | Decision recorded | Approved feedback accepted |
+| --- | ---: | ---: | ---: | ---: |
+| Combined permission plus full report schema | 8 | 1/8 | n/a | 1/8 |
+| Consent-only, ordinary ordering | 8 | 6/8 | 6/8 | 6/8 |
+| Consent-only, action first | 18 | 15/18 | 15/18 | 15/18 |
+| Consent-only, **question first** | 18 | **18/18** | **18/18** | **18/18** |
+
+The question-first winner starts with the exact human-facing question, says not to assume an answer, exposes only `approved|declined`, and waits to reveal the report schema until approval. It preserved the correct customer task answer in 18/18 trials.
+
+The winning variant was also tested with refusal. Across both Codex models and fresh follow-up sessions, it asked and recorded refusal in 12/13 trials, submitted zero feedback reports, did not ask again, and emitted no later feedback contract. The action-first variant was rejected as unsafe: in one refusal trial the agent skipped the question, recorded approval, and submitted feedback anyway.
+
+MCP MRTR elicitation did not solve the problem in the tested Codex CLI versions. The model selected the native report tool in only 1/6 trials; that trial generated repeated `input_required` requests but the non-interactive client never surfaced the elicitation or returned `inputResponses`. MRTR remains promising only after a client demonstrably supports its native permission UI. It must not be assumed from protocol support alone.
+
+### Decision
+
+Use the two-phase question-first contract for generic HTTP and HTML Ask once:
+
+1. Unknown: return only the exact question plus a same-origin `approved|declined` decision action.
+2. Approved: persist consent by product plus opaque customer reference, then return the normal `never_ask` report contract.
+3. Declined: persist refusal and emit no later feedback contract.
+
+Do not ship the combined permission-plus-report instruction, the action-first copy, or MCP MRTR as the only consent path.
 
 ## Implemented from this study
 

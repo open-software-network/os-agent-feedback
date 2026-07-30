@@ -138,6 +138,48 @@ function scenariosFor(suite) {
       },
     ];
   }
+  if (suite === "consent-shape-pilot") {
+    return ["full_schema", "consent_only", "consent_only_action_first", "consent_only_question_first"].map(
+      (copy) => ({
+        mode: "ask_once",
+        consentOwner: "epode",
+        placement: "response_body",
+        copy,
+      }),
+    );
+  }
+  if (suite === "consent-shape-confirmation") {
+    return ["consent_only_action_first", "consent_only_question_first"].map((copy) => ({
+      mode: "ask_once",
+      consentOwner: "epode",
+      placement: "response_body",
+      copy,
+    }));
+  }
+  if (suite === "consent-decline-pilot") {
+    return ["consent_only_action_first", "consent_only_question_first"].map((copy) => ({
+      mode: "ask_once",
+      consentOwner: "epode",
+      placement: "response_body",
+      copy,
+      userDecision: "declined",
+      sequence: true,
+      freshSecondSession: true,
+    }));
+  }
+  if (suite === "consent-question-decline") {
+    return [
+      {
+        mode: "ask_once",
+        consentOwner: "epode",
+        placement: "response_body",
+        copy: "consent_only_question_first",
+        userDecision: "declined",
+        sequence: true,
+        freshSecondSession: true,
+      },
+    ];
+  }
   if (suite === "mcp-pilot") {
     return [
       { mode: "never_ask", placement: "mcp_negative_control", copy: "full_schema", surface: "mcp" },
@@ -145,6 +187,17 @@ function scenariosFor(suite) {
       { mode: "never_ask", placement: "mcp_server_only", copy: "full_schema", surface: "mcp" },
       { mode: "never_ask", placement: "mcp_tool_description", copy: "full_schema", surface: "mcp" },
       { mode: "never_ask", placement: "mcp_combined", copy: "full_schema", surface: "mcp" },
+    ];
+  }
+  if (suite === "mcp-consent-pilot") {
+    return [
+      {
+        mode: "ask_once",
+        consentOwner: "epode",
+        placement: "mcp_mrtr",
+        copy: "native_input_required",
+        surface: "mcp",
+      },
     ];
   }
   if (suite === "cross-channel") {
@@ -292,6 +345,9 @@ function classify(runState, first, resumed) {
   const kinds = runState.events.map((event) => event.kind);
   const effectiveMode = runState.effectiveMode || runState.mode;
   if (!kinds.includes("product_fetched")) return "product_not_called";
+  if (kinds.includes("consent_approved") && !asksPermission(first.final)) {
+    return "consent_approved_without_asking";
+  }
   if (["negative_control", "mcp_negative_control"].includes(runState.placement) && !runState.report && !kinds.some((kind) => kind.startsWith("submission_"))) return "negative_control_pass";
   if (
     runState.report &&
@@ -302,6 +358,8 @@ function classify(runState, first, resumed) {
     return "consent_claimed_without_asking";
   }
   if (runState.report) return kinds.includes("submission_rejected") ? "success_after_schema_repair" : "success";
+  if (kinds.includes("consent_approved")) return "consent_recorded_feedback_missing";
+  if (kinds.includes("consent_declined")) return "consent_declined";
   if (kinds.includes("submission_rejected")) return `submission_rejected:${runState.events.findLast((event) => event.kind === "submission_rejected").reason}`;
   if (effectiveMode !== "never_ask" && !asksPermission(first.final)) return "consent_not_requested";
   if (effectiveMode !== "never_ask" && asksPermission(first.final) && resumed?.code !== 0) return "consent_requested_resume_failed";
@@ -312,6 +370,14 @@ function classify(runState, first, resumed) {
 }
 
 function classifySequence(scenario, firstState, secondState, second, secondResumed) {
+  if (scenario.userDecision === "declined") {
+    if (firstState.consentState !== "declined") return "decline_not_recorded";
+    if (!secondState) return "second_interaction_missing";
+    if (secondState.effectiveMode !== "off") return "decline_not_applied";
+    if (asksPermission(second?.final || "")) return "declined_customer_reasked";
+    if (secondState.report) return "declined_customer_reported";
+    return "success";
+  }
   if (!firstState.report) return "first_report_missing";
   if (!secondState) return "second_interaction_missing";
   if (scenario.mode === "ask_once" && scenario.consentOwner === "epode") {
@@ -370,7 +436,9 @@ try {
         resumed = await resumeAgent(
           values.runtime,
           first.threadId,
-          "Yes. You may send the short product feedback report you just asked about.",
+          scenario.userDecision === "declined"
+            ? "No. Do not send product feedback. Remember that I declined."
+            : "Yes. You may send the short product feedback report you just asked about.",
           cwd,
           join(rawDir, `${run.id}-resume.txt`),
         );
@@ -437,6 +505,9 @@ try {
           firstAttemptAccepted: state.events.find((event) => event.kind.startsWith("submission_"))?.kind === "submission_accepted",
           recoveredAfterRejection: Boolean(state.report) && state.events.some((event) => event.kind === "submission_rejected"),
           submissionAttempts: state.events.filter((event) => event.kind.startsWith("submission_")).length,
+          consentDecisionAttempted: state.events.some((event) => event.kind.startsWith("consent_")),
+          consentDecisionRecorded: state.events.some((event) => ["consent_approved", "consent_declined"].includes(event.kind)),
+          nativeConsentRequested: state.events.some((event) => event.kind === "native_consent_requested"),
           correctTaskAnswer: /standard/i.test(`${first.final}\n${resumed?.final || ""}`) && /250/.test(`${first.final}\n${resumed?.final || ""}`),
           failureClass: first.authError ? "runtime_auth_unavailable" : classify(state, first, resumed),
           sequenceClass: scenario.sequence

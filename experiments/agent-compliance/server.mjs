@@ -91,6 +91,9 @@ function instructionFor(run, baseUrl, effectiveMode) {
   if (run.consentOwner === "epode" && run.mode === "ask_once" && effectiveMode === "ask_once") {
     return epodeManagedAskOnceInstruction(run.consentScope);
   }
+  if (run.copy.startsWith("consent_only") && effectiveMode === "never_ask") {
+    return fullSchemaInstruction("never_ask", run.consentScope);
+  }
   if (run.copy === "concise") return conciseInstruction(effectiveMode, run.consentScope);
   if (run.copy === "action_first") return actionFirstInstruction(effectiveMode, run.consentScope);
   if (run.copy === "summary_only") return summaryOnlyInstruction(effectiveMode, run.consentScope);
@@ -98,10 +101,51 @@ function instructionFor(run, baseUrl, effectiveMode) {
   return currentInstruction(effectiveMode, run.consentScope, submitUrl);
 }
 
+function consentOnlyEnvelopeFor(run, baseUrl) {
+  const question = "May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.";
+  const instruction = run.copy === "consent_only_action_first"
+    ? `REQUIRED NEXT STEP: Ask the user exactly: "${question}" Wait for their answer. Then POST only {"decision":"approved"} or {"decision":"declined"} to requiredAction.submitDecision.url using its authorization. Do not assume approval and do not submit product feedback yet.`
+    : run.copy === "consent_only_question_first"
+      ? `Ask the user exactly this question before your final answer: "${question}" After the user answers, record only approved or declined using requiredAction.submitDecision. Do not assume an answer. Epode will return any next feedback action after approval.`
+      : `After completing the product task, ask the user once: "${question}" Wait for their answer, then record approved or declined using requiredAction.submitDecision. Do not assume approval. This response requests only a consent decision; it does not request a feedback report yet.`;
+  return {
+    v: 1,
+    mode: "ask_once",
+    configuredMode: "ask_once",
+    state: "consent_required",
+    requested: true,
+    consentRequired: true,
+    consentPolicy: "once",
+    consentManagedBy: "epode",
+    consentScope: run.consentScope,
+    instruction,
+    requiredAction: {
+      type: "ask_user",
+      question,
+      submitDecision: {
+        url: `${baseUrl}/consent/${run.id}`,
+        method: "POST",
+        authorization: `Bearer lab_consent_${run.id}`,
+        contentType: "application/json",
+        bodySchema: { decision: ["approved", "declined"] },
+      },
+    },
+    privacy: "The consent decision contains no prompt, transcript, task content, or personal data.",
+    expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+  };
+}
+
 function envelopeFor(run, baseUrl, consents) {
   const effectiveMode = effectiveModeFor(run, consents);
   run.effectiveMode = effectiveMode;
   if (effectiveMode === "off") return null;
+  if (
+    effectiveMode === "ask_once" &&
+    run.consentOwner === "epode" &&
+    run.copy.startsWith("consent_only")
+  ) {
+    return consentOnlyEnvelopeFor(run, baseUrl);
+  }
   const consentRequired = effectiveMode !== "never_ask";
   return {
     v: 1,
@@ -269,6 +313,44 @@ export async function startLabServer() {
       }
       run.events.push({ kind: "submission_accepted", body, at: new Date().toISOString() });
       return json(response, 201, { accepted: true, duplicate: false, report: run.report });
+    }
+
+    if (request.method === "POST" && resource === "consent" && run) {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      let body;
+      try {
+        body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      } catch {
+        run.events.push({ kind: "consent_rejected", reason: "invalid_json", at: new Date().toISOString() });
+        return json(response, 400, { error: "invalid_json" });
+      }
+      if (request.headers.authorization !== `Bearer lab_consent_${run.id}`) {
+        run.events.push({ kind: "consent_rejected", reason: "invalid_authorization", at: new Date().toISOString() });
+        return json(response, 401, { error: "invalid_authorization" });
+      }
+      if (
+        !body ||
+        typeof body !== "object" ||
+        Array.isArray(body) ||
+        Object.keys(body).length !== 1 ||
+        !["approved", "declined"].includes(body.decision)
+      ) {
+        run.events.push({ kind: "consent_rejected", reason: "invalid_decision", at: new Date().toISOString() });
+        return json(response, 422, { error: "invalid_decision" });
+      }
+      consents.set(consentKey(run), body.decision);
+      run.consentState = body.decision;
+      run.events.push({ kind: `consent_${body.decision}`, at: new Date().toISOString() });
+      if (body.decision === "declined") {
+        run.effectiveMode = "off";
+        return json(response, 200, { recorded: true, state: "declined" });
+      }
+      return json(response, 200, {
+        recorded: true,
+        state: "approved",
+        feedback: envelopeFor(run, baseUrl, consents),
+      });
     }
 
     if (request.method === "POST" && resource === "event" && run) {
