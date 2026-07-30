@@ -2335,8 +2335,17 @@ async fn regroup_changed_interaction_reports(
     .await?;
 
     for report in reports {
-        let findings: Vec<FeedbackFindingInput> =
-            serde_json::from_value(report.findings).map_err(ApiError::internal)?;
+        // Skip rather than fail: this runs inside telemetry ingest, so one
+        // report whose stored findings no longer deserialize must not take down
+        // an entire batch. Matches the backfill's skip-and-continue handling.
+        let Ok(findings) = serde_json::from_value::<Vec<FeedbackFindingInput>>(report.findings)
+        else {
+            tracing::warn!(
+                report_id = %report.report_id,
+                "skipping report with unreadable findings during telemetry regroup"
+            );
+            continue;
+        };
         assign_report_group(
             tx,
             &crate::grouping::FingerprintGrouper,
