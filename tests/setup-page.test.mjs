@@ -118,6 +118,8 @@ test("collection policy distinguishes remembered and per-report consent", () => 
   assert.doesNotMatch(neverAskMigration, /'ask'/);
   assert.match(consentModesMigration, /SET feedback_mode = 'ask_always'/);
   assert.match(dashboardScript, /AGENT_FEEDBACK_MODE=\$\{dashboard\.currentEnvironment\?\.feedbackMode/);
+  assert.doesNotMatch(dashboardScript, /<p class="eyebrow">RETENTION<\/p>|Data lifetime|Retention period|day retention/);
+  assert.match(dashboardScript, /retentionDays: dashboard\.currentEnvironment\.retentionDays/);
 });
 
 test("setup offers one guided install with a manual fallback", () => {
