@@ -109,6 +109,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Receives signed GitHub App events. Persistence failures answer 500 so GitHub redelivers; unhandled or non-actionable events answer 200. */
         post: operations["github_webhook_handler"];
         delete?: never;
         options?: never;
@@ -1417,6 +1418,15 @@ export interface operations {
                 };
                 content: {
                     "text/plain": string;
+                };
+            };
+            /** @description Webhook could not be persisted; GitHub should redeliver */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
                 };
             };
             /** @description GitHub App integration is not configured */

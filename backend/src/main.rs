@@ -874,8 +874,11 @@ struct GithubWebhookAccount {
         (status = 200, description = "Signed webhook accepted", body = String, content_type = "text/plain"),
         (status = 401, description = "Webhook signature is missing or invalid", body = ApiErrorEnvelope),
         (status = 413, description = "Webhook body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 500, description = "Webhook could not be persisted; GitHub should redeliver", body = ApiErrorEnvelope),
         (status = 503, description = "GitHub App integration is not configured", body = ApiErrorEnvelope)
-    )
+    ),
+    description = "Receives signed GitHub App events. Persistence failures answer \
+        500 so GitHub redelivers; unhandled or non-actionable events answer 200."
 )]
 async fn github_webhook_handler(
     State(state): State<Arc<AppState>>,
@@ -901,7 +904,7 @@ async fn github_webhook_handler(
         == Some("installation")
     {
         if let Ok(payload) = serde_json::from_slice::<GithubWebhookPayload>(&body) {
-            handle_github_installation_webhook(&state, payload).await;
+            handle_github_installation_webhook(&state, payload).await?;
         } else {
             tracing::warn!("ignored malformed signed GitHub installation webhook");
         }
@@ -909,22 +912,41 @@ async fn github_webhook_handler(
     Ok((StatusCode::OK, "ok"))
 }
 
-async fn handle_github_installation_webhook(state: &AppState, payload: GithubWebhookPayload) {
+/// Applies an `installation` event.
+///
+/// Persistence failures propagate so the webhook answers 5xx and GitHub
+/// redelivers. Everything else — an unknown installation, a missing account, a
+/// conflicting workspace, an action we do not act on — is a terminal no-op that
+/// returns `Ok`, because redelivering those would fail identically forever.
+async fn handle_github_installation_webhook(
+    state: &AppState,
+    payload: GithubWebhookPayload,
+) -> Result<(), ApiError> {
     let Some(installation) = payload.installation else {
-        return;
+        return Ok(());
     };
     match payload.action.as_deref() {
         Some("deleted" | "suspend") => {
-            best_effort_revoke_github_installation(state, installation.id).await;
+            revoke_github_installation(&state.pool, installation.id)
+                .await
+                .inspect_err(|_| {
+                    tracing::warn!(
+                        installation_id = installation.id,
+                        "failed to revoke GitHub installation from webhook"
+                    );
+                })?;
         }
         Some("created" | "unsuspend") => {
-            let Ok(Some(workspace_id)) =
-                github_installation_workspace(&state.pool, installation.id).await
-            else {
-                return;
-            };
-            let Some(account) = installation.account else {
-                return;
+            let workspace_id = github_installation_workspace(&state.pool, installation.id)
+                .await
+                .inspect_err(|_| {
+                    tracing::warn!(
+                        installation_id = installation.id,
+                        "failed to look up GitHub installation workspace from webhook"
+                    );
+                })?;
+            let (Some(workspace_id), Some(account)) = (workspace_id, installation.account) else {
+                return Ok(());
             };
             match upsert_github_installation(
                 &state.pool,
@@ -940,26 +962,18 @@ async fn handle_github_installation_webhook(state: &AppState, payload: GithubWeb
                     installation_id = installation.id,
                     "ignored conflicting GitHub installation restore from webhook"
                 ),
-                Err(_) => tracing::warn!(
-                    installation_id = installation.id,
-                    "failed to restore GitHub installation from webhook"
-                ),
+                Err(error) => {
+                    tracing::warn!(
+                        installation_id = installation.id,
+                        "failed to restore GitHub installation from webhook"
+                    );
+                    return Err(error);
+                }
             }
         }
         _ => {}
     }
-}
-
-async fn best_effort_revoke_github_installation(state: &AppState, installation_id: i64) {
-    if revoke_github_installation(&state.pool, installation_id)
-        .await
-        .is_err()
-    {
-        tracing::warn!(
-            installation_id,
-            "failed to revoke GitHub installation from webhook"
-        );
-    }
+    Ok(())
 }
 
 #[utoipa::path(
