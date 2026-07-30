@@ -22,7 +22,8 @@ client and cannot sign feedback capabilities.
 | `apiKey` / `api_key` | Product key, normally read from the environment |
 | `include` | Route patterns that receive feedback contracts |
 | `feedbackMode` / `feedback_mode` | Explicit mode override |
-| `customerRef` / `customer_ref` | Optional opaque product-auth account or tenant ID |
+| `customerRef` / `customer_ref` | Stable opaque product-auth account or tenant ID; required for durable Ask once |
+| `consentTimeoutMs` / `consent_timeout` / `AGENT_FEEDBACK_CONSENT_TIMEOUT_MS` | Bounded Ask once state lookup on a cache miss (default 750 ms) |
 | `endpoint` | Override Epode origin in tests |
 
 ## Route patterns
@@ -34,5 +35,4 @@ successful responses are intended for customer agents.
 ## Key rotation
 
 Rotate a key from Setup. The previous key remains valid for one hour so you can deploy the replacement without
-dropping product traffic. A rotated key changes the Ask once consent scope.
-
+dropping product traffic. Consent is product-scoped, so rotating a key does not expose or change the raw customer reference.

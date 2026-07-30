@@ -66,6 +66,9 @@ pub(crate) struct FeedbackConsentDiscovery {
 pub(crate) struct FeedbackSubmissionDiscovery {
     pub url: String,
     pub authentication: String,
+    pub consent_state_url: String,
+    pub consent_decision_url: String,
+    pub consent_owner: String,
     pub required_fields: FeedbackRequiredFieldsDiscovery,
     pub optional_fields: Vec<String>,
     pub finding_kinds: Vec<String>,
@@ -614,15 +617,23 @@ pub(crate) struct ProductFeedbackReportInput {
     #[serde(default)]
     pub findings: Vec<FeedbackFindingInput>,
     pub workaround: Option<FeedbackWorkaroundInput>,
-    pub consent: Option<FeedbackConsentInput>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct FeedbackConsentInput {
-    pub user_approved: bool,
-    pub approval_source: String,
-    pub consent_scope: Option<String>,
+pub(crate) struct ConsentStateInput {
+    pub subject: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct ConsentStateResponse {
+    pub state: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ConsentDecisionInput {
+    pub decision: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

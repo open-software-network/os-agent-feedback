@@ -1,20 +1,48 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agent-feedback.example/protocol/v1/envelope.schema.json",
-  "title": "Agent Feedback HTTP envelope",
+  "$id": "https://app.epode.ai/protocol/v1/envelope.schema.json",
+  "title": "Epode agent feedback response contract",
   "type": "object",
   "additionalProperties": false,
-  "required": ["v", "mode", "requested", "consentRequired", "consentPolicy", "reliability", "when", "instruction", "submit", "privacy", "expiresAt"],
+  "required": ["v", "mode", "state", "requested", "consentRequired", "consentPolicy", "reliability", "when", "instruction", "privacy", "expiresAt"],
   "properties": {
     "v": { "const": 1 },
     "mode": { "enum": ["never_ask", "ask_once", "ask_always"] },
-    "requested": { "type": "boolean" },
+    "configuredMode": { "enum": ["ask_once", "ask_always"] },
+    "state": { "enum": ["consent_required", "feedback_ready"] },
+    "requested": { "const": true },
     "consentRequired": { "type": "boolean" },
     "consentPolicy": { "enum": ["none", "once", "always"] },
-    "consentScope": { "type": "string", "pattern": "^afcs1_[0-9a-f]{32}$" },
+    "consentManagedBy": { "const": "epode" },
     "reliability": { "const": "best_effort_without_agent_adapter" },
     "when": { "enum": ["after_experience_known_before_final_response", "after_experience_known_and_consent_resolved", "after_experience_known_and_explicit_user_approval"] },
-    "instruction": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "instruction": { "type": "string", "minLength": 1, "maxLength": 2400 },
+    "requiredAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "question", "submitDecision"],
+      "properties": {
+        "type": { "const": "ask_user" },
+        "question": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "submitDecision": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url", "method", "authorization", "contentType", "bodySchema"],
+          "properties": {
+            "url": { "type": "string", "format": "uri", "pattern": "^https://" },
+            "method": { "const": "POST" },
+            "authorization": { "type": "string", "pattern": "^Bearer afr2_" },
+            "contentType": { "const": "application/json" },
+            "bodySchema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["decision"],
+              "properties": { "decision": { "const": ["approved", "declined"] } }
+            }
+          }
+        }
+      }
+    },
     "submit": {
       "type": "object",
       "additionalProperties": false,
@@ -30,7 +58,7 @@
           "required": ["required", "optional", "impacts", "findingKinds", "findingSeverities", "confidenceRange", "findingRequired", "findingOptional", "findingTopicFormat", "workaroundRequired", "workaroundOptional", "maxFindings"],
           "properties": {
             "required": { "const": ["summary"] },
-            "optional": { "const": ["impact", "confidence", "findings", "workaround", "consent"] },
+            "optional": { "const": ["impact", "confidence", "findings", "workaround"] },
             "impacts": { "const": ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"] },
             "findingKinds": { "const": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"] },
             "findingSeverities": { "const": ["minor", "major", "blocking"] },
@@ -48,42 +76,27 @@
     "privacy": { "type": "string", "minLength": 1, "maxLength": 1000 },
     "expiresAt": { "type": "string", "format": "date-time" }
   },
-  "allOf": [
+  "oneOf": [
     {
-      "if": { "properties": { "mode": { "const": "never_ask" } } },
-      "then": {
-        "properties": {
-          "requested": { "const": true },
-          "consentRequired": { "const": false },
-          "consentPolicy": { "const": "none" },
-          "when": { "const": "after_experience_known_before_final_response" }
-        },
-        "not": { "required": ["consentScope"] }
-      }
+      "properties": {
+        "state": { "const": "consent_required" },
+        "mode": { "enum": ["ask_once", "ask_always"] },
+        "consentRequired": { "const": true },
+        "consentManagedBy": { "const": "epode" }
+      },
+      "required": ["configuredMode", "consentManagedBy", "requiredAction"],
+      "not": { "required": ["submit"] }
     },
     {
-      "if": { "properties": { "mode": { "const": "ask_once" } } },
-      "then": {
-        "required": ["consentScope"],
-        "properties": {
-          "requested": { "const": true },
-          "consentRequired": { "const": true },
-          "consentPolicy": { "const": "once" },
-          "when": { "const": "after_experience_known_and_consent_resolved" }
-        }
-      }
-    },
-    {
-      "if": { "properties": { "mode": { "const": "ask_always" } } },
-      "then": {
-        "properties": {
-          "requested": { "const": true },
-          "consentRequired": { "const": true },
-          "consentPolicy": { "const": "always" },
-          "when": { "const": "after_experience_known_and_explicit_user_approval" }
-        },
-        "not": { "required": ["consentScope"] }
-      }
+      "properties": {
+        "state": { "const": "feedback_ready" },
+        "mode": { "const": "never_ask" },
+        "consentRequired": { "const": false },
+        "consentPolicy": { "const": "none" },
+        "when": { "const": "after_experience_known_before_final_response" }
+      },
+      "required": ["submit"],
+      "not": { "required": ["requiredAction"] }
     }
   ]
 }

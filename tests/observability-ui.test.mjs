@@ -78,5 +78,5 @@ test("the full app exposes live counts, setup health, and structured policy cont
   assert.match(script, /Receiving data/);
   assert.match(script, /Product key/);
   assert.match(script, /Current mode:/);
-  assert.match(script, /Independent agents cannot be forced to comply/);
+  assert.match(script, /Silence never becomes approval/);
 });

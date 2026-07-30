@@ -84,14 +84,21 @@ test("Express preserves JSON shape and queues a non-blocking opportunity", async
   await server.close();
 });
 
-test("Express Ask-once mode emits a stable product-scoped consent key", async () => {
+test("Express Ask-once emits only the question-first decision action for an unknown customer", async () => {
   const middleware = agentFeedback({
     apiKey: key,
     endpoint: "https://feedback.test",
     feedbackMode: "ask_once",
+    customerRef: () => "acct_ask_once",
     include: ["/search"],
     flushIntervalMs: 1,
-    fetch: async () => new Response("{}", { status: 202 }),
+    fetch: async (url) =>
+      String(url).endsWith("/api/v2/consent/state")
+        ? new Response('{"state":"unknown"}', {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })
+        : new Response("{}", { status: 202 }),
   });
   const app = express();
   app.use(middleware);
@@ -101,15 +108,23 @@ test("Express Ask-once mode emits a stable product-scoped consent key", async ()
   const body = await (await fetch(`${server.url}/search`)).json();
   const contract = body._agentFeedback;
   assert.equal(contract.mode, "ask_once");
+  assert.equal(contract.state, "consent_required");
   assert.equal(contract.requested, true);
   assert.equal(contract.consentRequired, true);
   assert.equal(contract.consentPolicy, "once");
-  assert.equal(contract.consentScope, "afcs1_0123456789abcdef0123456789abcdef");
+  assert.equal(contract.consentManagedBy, "epode");
+  assert.equal(contract.submit, undefined);
+  assert.equal(contract.requiredAction.type, "ask_user");
+  assert.deepEqual(contract.requiredAction.submitDecision.bodySchema, {
+    decision: ["approved", "declined"],
+  });
   assert.equal(contract.when, "after_experience_known_and_consent_resolved");
-  assert.match(contract.instruction, /ask the user once/i);
-  assert.match(contract.instruction, /stored permission/i);
-  assert.match(contract.instruction, /do not ask again/i);
-  assert.doesNotMatch(contract.instruction, /do not ask the human/i);
+  assert.match(
+    contract.instruction,
+    /^Ask the user exactly this question before your final answer:/,
+  );
+  assert.match(contract.instruction, /Do not assume an answer/);
+  assert.doesNotMatch(contract.instruction, /reportSchema|summary:string/);
   await middleware.shutdown();
   await server.close();
 });
@@ -130,10 +145,15 @@ test("Express Ask-always mode requires fresh permission for every report", async
 
   const contract = (await (await fetch(`${server.url}/search`)).json())._agentFeedback;
   assert.equal(contract.mode, "ask_always");
+  assert.equal(contract.state, "consent_required");
   assert.equal(contract.consentPolicy, "always");
-  assert.equal(contract.consentScope, undefined);
+  assert.equal(contract.submit, undefined);
   assert.equal(contract.when, "after_experience_known_and_explicit_user_approval");
-  assert.match(contract.instruction, /Ask again before every future report/i);
+  assert.match(
+    contract.instruction,
+    /^Ask the user exactly this question before your final answer:/,
+  );
+  assert.match(contract.instruction, /Do not assume an answer/);
   await middleware.shutdown();
   await server.close();
 });

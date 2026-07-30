@@ -27,6 +27,8 @@ class AgentFeedbackWSGI:
         if not self.runtime.matches(path):
             return self.app(environ, start_response)
         started = time.perf_counter()
+        context = self.runtime.context(environ)
+        consent_state = self.runtime.resolve_consent(context.get("customerRef"))
         captured: dict[str, Any] = {}
         writes: list[bytes] = []
 
@@ -46,7 +48,13 @@ class AgentFeedbackWSGI:
             and environ.get("REQUEST_METHOD") != "HEAD"
             and safe_body
         )
-        prepared = self.runtime.prepare() if eligible else None
+        prepared = (
+            self.runtime.prepare(
+                customer_ref=context.get("customerRef"), consent_state=consent_state
+            )
+            if eligible
+            else None
+        )
         chunks: list[bytes] | None = None
         if prepared:
             try:
@@ -61,6 +69,7 @@ class AgentFeedbackWSGI:
         output: bytes | None = None
         if prepared:
             raw = b"".join(chunks or [])
+            envelope = prepared["envelope"]
             content_type = next((v for k, v in headers if k.lower() == "content-type"), "")
             if "application/json" in content_type:
                 try:
@@ -68,22 +77,25 @@ class AgentFeedbackWSGI:
                 except Exception:
                     payload = None
                 if isinstance(payload, dict) and "_agentFeedback" not in payload:
-                    payload["_agentFeedback"] = prepared["envelope"]
-                    output = json.dumps(payload, separators=(",", ":")).encode()
+                    if envelope:
+                        payload["_agentFeedback"] = envelope
+                        output = json.dumps(payload, separators=(",", ":")).encode()
+                    else:
+                        output = raw
                     surface = "http_json"
                 elif payload is not None and not isinstance(payload, dict):
                     output = raw
                     surface = "http_headers"
             elif "text/html" in content_type:
                 try:
-                    output = inject_html(raw.decode(), prepared["envelope"]).encode()
+                    output = inject_html(raw.decode(), envelope).encode() if envelope else raw
                     surface = "http_html"
                 except UnicodeDecodeError:
                     pass
             if surface is None:
                 prepared = None
 
-        if prepared and output is not None and surface:
+        if prepared and prepared["envelope"] and output is not None and surface:
             headers = [
                 (key, value)
                 for key, value in headers
@@ -110,7 +122,7 @@ class AgentFeedbackWSGI:
                 operation=normalize_operation(path),
                 status_code=status_code,
                 duration_ms=round((time.perf_counter() - started) * 1000),
-                context=self.runtime.context(environ),
+                context=context,
             )
             return [output or b""]
         return chunks if chunks is not None else body

@@ -12,6 +12,7 @@ from agent_feedback import (
     feedback_consent_action,
     feedback_from_response,
     sign_capability,
+    submit_feedback_consent,
     submit_product_feedback,
 )
 
@@ -61,6 +62,28 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         middleware.shutdown()
         self.assertEqual(telemetry[0]["events"][0]["classification"], "unclassified")
         self.assertEqual(telemetry[0]["events"][0]["sequence"], 1)
+
+    async def test_asgi_without_feedback_envelope_preserves_body_and_content_length(self) -> None:
+        original = b'{ "answer": "available" }'
+
+        async def app(_scope, _receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(original)).encode())]})
+            await send({"type": "http.response.body", "body": original})
+
+        middleware = AgentFeedbackASGI(app, api_key=KEY, endpoint="https://feedback.test", include=("/status",), feedback_mode="ask_once", customer_ref=lambda _scope: "declined-customer", sender=lambda *_: None)
+        middleware.runtime.resolve_consent = lambda _customer_ref: "declined"
+        sent: list[dict] = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            sent.append(message)
+
+        await middleware({"type": "http", "method": "GET", "path": "/status"}, receive, send)
+        self.assertEqual(sent[1]["body"], original)
+        self.assertEqual(dict(sent[0]["headers"])[b"content-length"], str(len(original)).encode())
+        middleware.shutdown()
 
     def test_telemetry_retries_transient_delivery_without_changing_event(self) -> None:
         attempts = 0
@@ -142,10 +165,29 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(int(dict(captured["headers"])["Content-Length"]), len(output))
             middleware.shutdown()
 
+    def test_wsgi_without_feedback_envelope_preserves_body_and_content_length(self) -> None:
+        original = b'{ "answer": "available" }'
+
+        def app(_environ, start_response):
+            start_response("200 OK", [("Content-Type", "application/json"), ("Content-Length", str(len(original)))])
+            return [original]
+
+        middleware = AgentFeedbackWSGI(app, api_key=KEY, endpoint="https://feedback.test", include=("/status",), feedback_mode="ask_once", customer_ref=lambda _environ: "declined-customer", sender=lambda *_: None)
+        middleware.runtime.resolve_consent = lambda _customer_ref: "declined"
+        captured: dict = {}
+        output = b"".join(middleware(
+            {"PATH_INFO": "/status", "REQUEST_METHOD": "GET", "wsgi.input": BytesIO()},
+            lambda status, headers, _exc=None: captured.update(status=status, headers=headers),
+        ))
+        self.assertEqual(output, original)
+        self.assertEqual(int(dict(captured["headers"])["Content-Length"]), len(original))
+        middleware.shutdown()
+
     def test_agent_helper_allowlists_destination_and_sends_compact_body(self) -> None:
         envelope = {
             "v": 1,
             "mode": "never_ask",
+            "state": "feedback_ready",
             "requested": True,
             "consentRequired": False,
             "consentPolicy": "none",
@@ -187,40 +229,31 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(envelope["requested"])
         self.assertTrue(envelope["consentRequired"])
         self.assertEqual(envelope["consentPolicy"], "once")
-        self.assertEqual(envelope["consentScope"], "afcs1_0123456789abcdef0123456789abcdef")
+        self.assertEqual(envelope["state"], "consent_required")
+        self.assertEqual(envelope["consentManagedBy"], "epode")
+        self.assertNotIn("submit", envelope)
+        self.assertEqual(envelope["requiredAction"]["type"], "ask_user")
         self.assertEqual(envelope["when"], "after_experience_known_and_consent_resolved")
-        self.assertIn("ask the user once", envelope["instruction"])
-        self.assertIn("do not ask again", envelope["instruction"])
-        self.assertIn("topic:lowercase_slug", envelope["instruction"])
-        self.assertEqual(envelope["submit"]["reportSchema"]["findingRequired"], ["kind", "topic", "detail"])
-        self.assertEqual(envelope["submit"]["reportSchema"]["workaroundRequired"], ["used"])
+        self.assertTrue(envelope["instruction"].startswith("Ask the user exactly this question"))
+        self.assertIn("Do not assume an answer", envelope["instruction"])
         self.assertEqual(feedback_consent_action(envelope), "ask")
-        self.assertEqual(feedback_consent_action(envelope, "approved"), "submit")
-        self.assertEqual(feedback_consent_action(envelope, "refused"), "skip")
-        with self.assertRaisesRegex(ValueError, "Explicit user approval is required"):
+        with self.assertRaisesRegex(ValueError, "Invalid Agent Feedback submission contract"):
             submit_product_feedback(
                 envelope,
                 {"summary": "The product completed the task.", "impact": "helped"},
                 allowed_submit_origins=("https://feedback.test",),
                 sender=lambda *_: {"accepted": True},
             )
-        sent: list[dict] = []
-        submit_product_feedback(
+        approved_envelope = AgentFeedback(AgentFeedbackOptions(api_key=KEY)).prepare()["envelope"]
+        decision_body: list[dict] = []
+        decision = submit_feedback_consent(
             envelope,
-            {"summary": "The product completed the task.", "impact": "helped"},
+            "approved",
             allowed_submit_origins=("https://feedback.test",),
-            user_approved=True,
-            approval_source="stored_grant",
-            sender=lambda _url, _headers, body: sent.append(json.loads(body)) or {"accepted": True},
+            sender=lambda _url, _headers, body: decision_body.append(json.loads(body)) or {"state": "approved", "feedback": approved_envelope},
         )
-        self.assertEqual(
-            sent[0]["consent"],
-            {
-                "userApproved": True,
-                "approvalSource": "stored_grant",
-                "consentScope": envelope["consentScope"],
-            },
-        )
+        self.assertEqual(decision_body[0], {"decision": "approved"})
+        self.assertEqual(feedback_consent_action(decision["feedback"]), "submit")
         runtime.shutdown()
 
         always = AgentFeedback(AgentFeedbackOptions(
@@ -230,22 +263,8 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         ))
         always_envelope = always.prepare()["envelope"]
         self.assertEqual(always_envelope["consentPolicy"], "always")
-        self.assertNotIn("consentScope", always_envelope)
-        self.assertIn("every future report", always_envelope["instruction"])
-        self.assertEqual(feedback_consent_action(always_envelope, "approved"), "ask")
-        always_sent: list[dict] = []
-        submit_product_feedback(
-            always_envelope,
-            {"summary": "The product completed the task.", "impact": "helped"},
-            allowed_submit_origins=("https://feedback.test",),
-            user_approved=True,
-            approval_source="granted_now",
-            sender=lambda _url, _headers, body: always_sent.append(json.loads(body)) or {"accepted": True},
-        )
-        self.assertEqual(
-            always_sent[0]["consent"],
-            {"userApproved": True, "approvalSource": "granted_now"},
-        )
+        self.assertNotIn("submit", always_envelope)
+        self.assertEqual(feedback_consent_action(always_envelope), "ask")
         always.shutdown()
 
     def test_agent_helper_rejects_malformed_consent_contracts(self) -> None:
@@ -255,15 +274,11 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(
             feedback_from_response({}, {"_agentFeedback": malformed})
         )
-        self.assertEqual(feedback_consent_action(malformed, "approved"), "skip")
+        self.assertEqual(feedback_consent_action(malformed), "skip")
 
-        missing_scope = runtime.prepare()["envelope"]
-        missing_scope.update(
-            mode="ask_once",
-            consentPolicy="once",
-            when="after_experience_known_and_consent_resolved",
-        )
-        self.assertEqual(feedback_consent_action(missing_scope), "skip")
+        missing_action = runtime.prepare()["envelope"]
+        missing_action.pop("requiredAction")
+        self.assertEqual(feedback_consent_action(missing_action), "skip")
         runtime.shutdown()
 
 

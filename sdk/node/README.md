@@ -1,13 +1,13 @@
 # `@agent-feedback/node`
 
-Collect one structured feedback report from the independent customer agents using your product. The SDK never identifies an agent, never sends prompts or product payloads, and never waits for Agent Feedback on your response path.
+Collect one structured feedback report from the independent customer agents using your product. The SDK never identifies an agent or sends prompts or product payloads. Telemetry never blocks the response; Ask once uses a bounded consent-state lookup and fails closed by omitting feedback instructions.
 
 There are two reliability levels:
 
 - **MCP is protocol-backed.** The SDK registers an explicit `report_product_feedback` tool, which compatible agents can call autonomously.
-- **Ask once remembers product consent.** Set `feedbackMode: "ask_once"`; the agent runtime stores approval or refusal under the returned `consentScope`. Approved future reports use `approvalSource: "stored_grant"` without asking again.
-- **Ask every time requires fresh consent.** Set `feedbackMode: "ask_always"`; every report requires `userApproved: true` and `approvalSource: "granted_now"`.
-- **Consent is enforced end to end.** Agent helpers add a nested `consent` attestation to every ask-mode submission; never-ask reports omit it.
+- **Ask once is Epode-managed.** Unknown customers receive only the exact question and an `approved|declined` action. Epode remembers the answer by product plus an opaque subject derived from `customerRef`; agents store nothing.
+- **Ask every time is also two phase.** Approval reveals a report action for that interaction only. Silence or refusal never reveals it.
+- **Consent is enforced end to end.** Ask-mode report schemas are withheld until approval, and report bodies never contain consent attestations.
 - **HTTP and HTML are best-effort by default.** Generic agents may treat response metadata as untrusted and ignore its side-effect instruction. A feedback-aware agent adapter can make submission deterministic.
 
 ## Express
@@ -24,7 +24,7 @@ import { agentFeedback } from "@agent-feedback/node/express";
 app.use(agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY!,
   include: ["/search", "/docs/*"],
-  customerRef: req => req.user?.accountId, // optional opaque ID
+  customerRef: req => req.user?.accountId, // stable opaque ID; required for durable Ask once
 }));
 ```
 
@@ -57,6 +57,7 @@ const feedback = createMcpInstrumentation({
   apiKey: process.env.AGENT_FEEDBACK_KEY!,
   includeTools: ["browser_*"],
   feedbackTools: ["browser_close"],
+  customerRef: (_args, context) => context.http?.authInfo?.extra?.accountId,
   sessionRef: (args, _context, result) =>
     args.sessionId || result?.structuredContent?.sessionId,
 });
@@ -90,6 +91,7 @@ Agent runtimes that want deterministic HTTP/HTML feedback can explicitly consume
 import {
   feedbackConsentAction,
   feedbackFromResponse,
+  submitFeedbackConsent,
   submitProductFeedback,
 } from "@agent-feedback/node/agent";
 
@@ -98,33 +100,29 @@ const body = await response.json();
 const feedback = feedbackFromResponse(response, body);
 
 if (feedback) {
-  const stored = feedback.consentScope
-    ? await agentPreferences.get(feedback.consentScope)
-    : undefined;
-  const action = feedbackConsentAction(feedback, stored);
-  if (action === "skip") return;
-  const approvalSource = action === "ask"
-    ? (await askUserForPermission() ? "granted_now" : undefined)
-    : "stored_grant";
-  if (!approvalSource && feedback.consentRequired) return;
+  let reportContract = feedback;
+  const action = feedbackConsentAction(feedback);
+  if (action === "ask") {
+    const approved = await askUser(feedback.requiredAction.question);
+    const decision = await submitFeedbackConsent(feedback, approved ? "approved" : "declined");
+    if (!decision.feedback) return;
+    reportContract = decision.feedback;
+  }
+  if (feedbackConsentAction(reportContract) !== "submit") return;
   await submitProductFeedback(
-    feedback,
+    reportContract,
     {
       summary: "The product completed the task, but required a retry.",
       impact: "helped_with_friction",
       findings: [{ kind: "friction", topic: "reliability", severity: "minor", detail: "The first request timed out." }],
       workaround: { used: true, detail: "The agent retried once." },
     },
-    {
-      allowedSubmitOrigins: ["https://app.epode.ai"],
-      userApproved: feedback.consentRequired ? true : undefined,
-      approvalSource,
-    },
+    { allowedSubmitOrigins: ["https://app.epode.ai"] },
   );
 }
 ```
 
-The adapter requires an allow-listed HTTPS destination and submits only the structured report fields. In Ask once mode, the agent runtime—not Epode—stores approval or refusal under `consentScope`.
+The adapter requires an allow-listed HTTPS destination and submits only the structured report fields. In Ask once mode, Epode stores only the decision and the SDK-derived opaque subject; the agent runtime has no consent preference store.
 
 ## Verify the whole loop
 

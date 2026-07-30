@@ -1,6 +1,7 @@
 import {
   feedbackConsentAction,
   feedbackFromResponse,
+  submitFeedbackConsent,
   submitProductFeedback,
 } from "@agent-feedback/node/agent";
 
@@ -27,29 +28,30 @@ const body = contentType.includes("application/json")
 const feedback = feedbackFromResponse(response, body);
 if (!feedback) throw new Error("Product response did not include feedback metadata");
 
-const storedDecision = process.env.AGENT_FEEDBACK_STORED_CONSENT;
 const currentDecision = process.env.AGENT_FEEDBACK_USER_DECISION;
-const consentAction = feedbackConsentAction(feedback, storedDecision);
-let approvalSource;
-if (consentAction === "skip") {
-  console.log(JSON.stringify({ feedback: { submitted: false, reason: "stored_refusal" } }, null, 2));
-  process.exit(0);
-}
+const consentAction = feedbackConsentAction(feedback);
+let reportContract = feedback;
 if (consentAction === "ask") {
-  if (currentDecision !== "approved") {
+  if (!currentDecision) {
     console.log(JSON.stringify({
       feedback: {
         submitted: false,
-        reason: currentDecision === "refused" ? "user_refused" : "permission_required",
-        askUser: currentDecision ? undefined : "May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.",
-        ...(feedback.mode === "ask_once" ? { storeForConsentScope: feedback.consentScope, decision: currentDecision || "pending" } : {}),
+        reason: "permission_required",
+        askUser: feedback.requiredAction.question,
       },
     }, null, 2));
     process.exit(0);
   }
-  approvalSource = "granted_now";
-} else if (feedback.mode === "ask_once") {
-  approvalSource = "stored_grant";
+  const decision = await submitFeedbackConsent(
+    feedback,
+    currentDecision === "approved" ? "approved" : "declined",
+    { allowedSubmitOrigins: [new URL(process.env.TRUSTED_FEEDBACK_ORIGIN || "https://app.epode.ai").origin] },
+  );
+  if (!decision.feedback) {
+    console.log(JSON.stringify({ feedback: { submitted: false, reason: "user_declined" } }, null, 2));
+    process.exit(0);
+  }
+  reportContract = decision.feedback;
 }
 
 const trustedFeedbackOrigin = new URL(
@@ -57,7 +59,7 @@ const trustedFeedbackOrigin = new URL(
     "https://app.epode.ai",
 ).origin;
 const result = await submitProductFeedback(
-  feedback,
+  reportContract,
   {
     summary: "The feedback-aware HTTP agent completed its product task and verified the result.",
     impact: "helped",
@@ -65,12 +67,7 @@ const result = await submitProductFeedback(
     findings: [{ kind: "strength", topic: "reliability", detail: "The product returned a usable result on the first attempt." }],
     workaround: { used: false },
   },
-  {
-    allowedSubmitOrigins: [trustedFeedbackOrigin],
-    ...(feedback.consentRequired
-      ? { userApproved: true, approvalSource }
-      : {}),
-  },
+  { allowedSubmitOrigins: [trustedFeedbackOrigin] },
 );
 
 const safeProductBody =

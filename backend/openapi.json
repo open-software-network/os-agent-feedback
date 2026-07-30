@@ -2806,6 +2806,149 @@
         ]
       }
     },
+    "/api/v2/consent/state": {
+      "post": {
+        "tags": [
+          "ingest"
+        ],
+        "operationId": "consent_state_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConsentStateInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Epode-managed Ask once state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentStateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid opaque subject",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid product API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Consent state lookup failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          },
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v2/consent/decisions": {
+      "post": {
+        "tags": [
+          "ingest"
+        ],
+        "operationId": "consent_decision_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConsentDecisionInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Consent decision recorded idempotently",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentDecisionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid decision",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or expired interaction capability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Consent is not applicable to this product mode",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Consent decision could not be stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/api/v2/reports": {
       "post": {
         "tags": [
@@ -3257,6 +3400,54 @@
           }
         }
       },
+      "ConsentDecisionInput": {
+        "type": "object",
+        "required": [
+          "decision"
+        ],
+        "properties": {
+          "decision": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConsentDecisionResponse": {
+        "type": "object",
+        "required": [
+          "state",
+          "feedback"
+        ],
+        "properties": {
+          "feedback": {},
+          "state": {
+            "type": "string"
+          }
+        }
+      },
+      "ConsentStateInput": {
+        "type": "object",
+        "required": [
+          "subject"
+        ],
+        "properties": {
+          "subject": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConsentStateResponse": {
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "type": "string"
+          }
+        }
+      },
       "CreateApiKeyInput": {
         "type": "object",
         "required": [
@@ -3586,28 +3777,6 @@
           }
         }
       },
-      "FeedbackConsentInput": {
-        "type": "object",
-        "required": [
-          "userApproved",
-          "approvalSource"
-        ],
-        "properties": {
-          "approvalSource": {
-            "type": "string"
-          },
-          "consentScope": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "userApproved": {
-            "type": "boolean"
-          }
-        },
-        "additionalProperties": false
-      },
       "FeedbackDiscoveryResponse": {
         "type": "object",
         "required": [
@@ -3785,6 +3954,9 @@
         "required": [
           "url",
           "authentication",
+          "consentStateUrl",
+          "consentDecisionUrl",
+          "consentOwner",
           "requiredFields",
           "optionalFields",
           "findingKinds",
@@ -3808,6 +3980,15 @@
           },
           "consent": {
             "$ref": "#/components/schemas/FeedbackConsentDiscovery"
+          },
+          "consentDecisionUrl": {
+            "type": "string"
+          },
+          "consentOwner": {
+            "type": "string"
+          },
+          "consentStateUrl": {
+            "type": "string"
           },
           "findingKinds": {
             "type": "array",
@@ -4514,16 +4695,6 @@
               "null"
             ],
             "format": "double"
-          },
-          "consent": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/FeedbackConsentInput"
-              }
-            ]
           },
           "findings": {
             "type": "array",

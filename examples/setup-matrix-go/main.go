@@ -15,6 +15,7 @@ func main() {
 	feedback, err := agentfeedback.New(agentfeedback.Options{
 		APIKey: os.Getenv("AGENT_FEEDBACK_KEY"), Endpoint: os.Getenv("AGENT_FEEDBACK_URL"),
 		Include: []string{"/search", "/docs/*"},
+		CustomerRef: func(request *http.Request) string { return request.Header.Get("x-customer-ref") },
 	})
 	if err != nil { log.Fatal(err) }
 	mux := http.NewServeMux()

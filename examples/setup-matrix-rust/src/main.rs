@@ -5,7 +5,9 @@ use serde_json::{Value, json};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut options = Options::new(env::var("AGENT_FEEDBACK_KEY")?).include(["/search", "/docs/*"]);
+    let mut options = Options::new(env::var("AGENT_FEEDBACK_KEY")?)
+        .include(["/search", "/docs/*"])
+        .customer_ref(|request| request.headers().get("x-customer-ref")?.to_str().ok().map(str::to_owned));
     if let Ok(endpoint) = env::var("AGENT_FEEDBACK_URL") { options = options.endpoint(endpoint); }
     let feedback = AgentFeedbackLayer::new(options)?;
     let app = Router::new()

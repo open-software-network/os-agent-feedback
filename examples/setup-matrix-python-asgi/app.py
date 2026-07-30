@@ -23,4 +23,8 @@ app = AgentFeedbackASGI(
     api_key=os.environ["AGENT_FEEDBACK_KEY"],
     endpoint=os.environ.get("AGENT_FEEDBACK_URL", "https://app.epode.ai"),
     include=("/search", "/docs/*"),
+    customer_ref=lambda scope: next(
+        (value.decode() for name, value in scope.get("headers", []) if name.lower() == b"x-customer-ref"),
+        None,
+    ),
 )

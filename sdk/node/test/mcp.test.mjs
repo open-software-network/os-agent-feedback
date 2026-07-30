@@ -200,7 +200,7 @@ test("MCP can group a session-creation call by an identifier returned in its res
   assert.equal(calls[0].body.events[0].sessionRef, "browser_session_42");
 });
 
-test("MCP Ask-always mode requires fresh approval for every report", async () => {
+test("MCP Ask-always uses a question-only tool before revealing report submission", async () => {
   const tools = new Map();
   const reports = [];
   const server = {
@@ -215,6 +215,19 @@ test("MCP Ask-always mode requires fresh approval for every report", async () =>
     feedbackMode: "ask_always",
     flushIntervalMs: 60_000,
     fetch: async (url, init) => {
+      if (String(url).endsWith("/api/v2/consent/decisions")) {
+        const handle = init.headers.authorization;
+        return new Response(
+          JSON.stringify({
+            state: "approved",
+            feedback: {
+              state: "feedback_ready",
+              submit: { authorization: handle },
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
       if (String(url).endsWith("/api/v2/reports")) {
         reports.push(JSON.parse(init.body));
         return new Response('{"accepted":true}', {
@@ -234,50 +247,42 @@ test("MCP Ask-always mode requires fresh approval for every report", async () =>
   const result = await tools.get("search").handler({}, {});
   const contract = result.structuredContent._agentFeedback;
   assert.equal(contract.required, false);
+  assert.equal(contract.state, "consent_required");
   assert.equal(contract.consentRequired, true);
   assert.equal(contract.consentPolicy, "always");
-  assert.equal(contract.consentScope, undefined);
+  assert.equal(contract.reportTool, undefined);
+  assert.equal(contract.consentTool, "record_product_feedback_consent");
   assert.equal(contract.when, "after_experience_known_and_explicit_user_approval");
-  assert.match(contract.instruction, /Ask again before every future report/i);
-  assert.doesNotMatch(contract.instruction, /autonomously/i);
-  assert.match(result.content.at(-1).text, /Ask permission for this report/i);
   assert.match(
-    tools.get("report_product_feedback").configuration.description,
-    /individual report/i,
+    contract.instruction,
+    /^Ask the user exactly this question before your final answer:/,
   );
-  assert.doesNotMatch(
-    tools.get("report_product_feedback").configuration.description,
-    /autonomously/i,
-  );
+  assert.match(contract.instruction, /Do not assume an answer/);
+  assert.match(result.content.at(-1).text, /record_product_feedback_consent/);
 
-  const feedbackHandle = contract.feedbackHandle;
-  const withoutApproval = await tools.get("report_product_feedback").handler({
-    feedbackHandle,
-    summary: "The search result completed the task with useful context.",
+  const decision = await tools.get("record_product_feedback_consent").handler({
+    feedbackHandle: contract.feedbackHandle,
+    decision: "approved",
   });
-  assert.equal(withoutApproval.isError, true);
-  assert.equal(withoutApproval.structuredContent.consentRequired, true);
+  assert.equal(decision.structuredContent.state, "approved");
   assert.deepEqual(reports, []);
 
   const approved = await tools.get("report_product_feedback").handler({
-    feedbackHandle,
+    feedbackHandle: decision.structuredContent.feedbackHandle,
     summary: "The search result completed the task with useful context.",
     impact: "helped",
-    userApproved: true,
-    approvalSource: "granted_now",
   });
   assert.equal(approved.structuredContent.accepted, true);
   assert.deepEqual(reports, [
     {
       summary: "The search result completed the task with useful context.",
       impact: "helped",
-      consent: { userApproved: true, approvalSource: "granted_now" },
     },
   ]);
   await feedback.shutdown();
 });
 
-test("MCP Ask-once mode accepts current or stored product-scoped approval", async () => {
+test("MCP Ask-once lets Epode own approval and never exposes report fields early", async () => {
   const tools = new Map();
   const reports = [];
   const server = {
@@ -292,6 +297,18 @@ test("MCP Ask-once mode accepts current or stored product-scoped approval", asyn
     feedbackMode: "ask_once",
     flushIntervalMs: 60_000,
     fetch: async (url, init) => {
+      if (String(url).endsWith("/api/v2/consent/decisions")) {
+        return new Response(
+          JSON.stringify({
+            state: "approved",
+            feedback: {
+              state: "feedback_ready",
+              submit: { authorization: init.headers.authorization },
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
       if (String(url).endsWith("/api/v2/reports")) {
         reports.push(JSON.parse(init.body));
         return new Response('{"accepted":true}', {
@@ -311,29 +328,30 @@ test("MCP Ask-once mode accepts current or stored product-scoped approval", asyn
   const result = await tools.get("search").handler({}, {});
   const contract = result.structuredContent._agentFeedback;
   assert.equal(contract.mode, "ask_once");
+  assert.equal(contract.state, "consent_required");
   assert.equal(contract.consentPolicy, "once");
-  assert.match(contract.consentScope, /^afcs1_[0-9a-f]{32}$/);
   assert.equal(contract.when, "after_experience_known_and_consent_resolved");
-  assert.match(contract.instruction, /stored_grant/);
-  assert.match(contract.instruction, /do not ask again/i);
+  assert.equal(contract.reportSchema, undefined);
+  assert.equal(contract.reportTool, undefined);
+  assert.match(
+    contract.instruction,
+    /^Ask the user exactly this question before your final answer:/,
+  );
 
-  const approved = await tools.get("report_product_feedback").handler({
+  const decision = await tools.get("record_product_feedback_consent").handler({
     feedbackHandle: contract.feedbackHandle,
+    decision: "approved",
+  });
+  const approved = await tools.get("report_product_feedback").handler({
+    feedbackHandle: decision.structuredContent.feedbackHandle,
     summary: "The stored consent allowed this structured report.",
     impact: "helped",
-    userApproved: true,
-    approvalSource: "stored_grant",
   });
   assert.equal(approved.structuredContent.accepted, true);
   assert.deepEqual(reports, [
     {
       summary: "The stored consent allowed this structured report.",
       impact: "helped",
-      consent: {
-        userApproved: true,
-        approvalSource: "stored_grant",
-        consentScope: contract.consentScope,
-      },
     },
   ]);
   await feedback.shutdown();

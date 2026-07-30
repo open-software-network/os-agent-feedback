@@ -34,6 +34,6 @@ delivery failures with bounded exponential backoff. Configure `telemetry_timeout
 `max_telemetry_attempts` only when a private Epode deployment requires different bounds. Call `shutdown()`
 during graceful server shutdown so the last queued batch gets a final delivery attempt.
 
-HTTP feedback is best-effort for generic agents. `feedback_from_response` and `submit_product_feedback` provide the deterministic, allow-listed agent-runtime path.
+HTTP feedback is best-effort for generic agents. `feedback_from_response`, `submit_feedback_consent`, and `submit_product_feedback` provide the deterministic, allow-listed agent-runtime path.
 
-Pass `feedback_mode="ask_once"` to store approval or refusal under the returned product-scoped `consentScope`; approved future reports use `approval_source="stored_grant"`. Use `ask_always` to require `approval_source="granted_now"` for every report. `feedback_consent_action` resolves the agent-local preference without sending it to Epode. The submit helper adds the required nested `consent` attestation to ask-mode reports and omits it in `never_ask` mode.
+Pass `feedback_mode="ask_once"` with a stable opaque `customer_ref`. Unknown customers receive only the question-first `approved|declined` action; Epode remembers the decision and reveals a report contract only after approval. `ask_always` uses the same two-step flow per report. Agents store no preference, and report bodies contain no consent fields.

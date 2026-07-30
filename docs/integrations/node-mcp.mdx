@@ -78,7 +78,7 @@ const feedback = createMcpInstrumentation({
   sessionRef: (args, _context, result) =>
     args.sessionId || result?.structuredContent?.sessionId,
   customerRef: (_args, context) =>
-    context.authInfo?.extra?.accountId,
+    context.http?.authInfo?.extra?.accountId,
 });
 ```
 

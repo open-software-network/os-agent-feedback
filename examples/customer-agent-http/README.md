@@ -16,8 +16,8 @@ npm start -- https://company.example/api/status
 For a consent contract, the runtime must resolve consent before submission:
 
 - `AGENT_FEEDBACK_USER_DECISION=approved` represents permission granted just now.
-- `AGENT_FEEDBACK_USER_DECISION=refused` skips the report. In Ask once mode, store that refusal under the returned `consentScope`.
-- `AGENT_FEEDBACK_STORED_CONSENT=approved|refused` represents the Ask once decision stored by this agent runtime. Ask every time ignores it.
+- `AGENT_FEEDBACK_USER_DECISION=refused` records refusal with Epode and skips the report.
+- Ask once needs the product integration's stable opaque `customerRef`; Epode, not this runtime, remembers the decision.
 
 With no decision, the example prints the exact permission question and does not submit. Epode never receives or stores the consent preference.
 

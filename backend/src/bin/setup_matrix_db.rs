@@ -164,6 +164,22 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             println!("deleted");
         }
+        "set-mode" => {
+            let environment_id = uuid("SETUP_MATRIX_ENVIRONMENT_ID")?;
+            let mode = required("SETUP_MATRIX_FEEDBACK_MODE")?;
+            if !matches!(
+                mode.as_str(),
+                "never_ask" | "ask_once" | "ask_always" | "off"
+            ) {
+                anyhow::bail!("invalid feedback mode");
+            }
+            sqlx::query("UPDATE product_environments SET feedback_mode = $1 WHERE id = $2")
+                .bind(&mode)
+                .bind(environment_id)
+                .execute(&pool)
+                .await?;
+            println!("{mode}");
+        }
         _ => anyhow::bail!("unknown action"),
     }
     Ok(())

@@ -27,7 +27,7 @@ or identify their agent.
 <Steps>
   <Step title="Your product responds">
     Epode's server-side SDK adds a short-lived, write-only feedback contract to selected successful responses.
-    The product response never waits for Epode.
+    Telemetry never delays the response. Ask once uses a bounded consent-state lookup on a cache miss and omits feedback instructions if that lookup fails.
   </Step>
   <Step title="Your customer's agent uses the result">
     The agent performs the customer's real task using your API, page, or MCP tool.
@@ -41,6 +41,7 @@ or identify their agent.
 <Note>
 Epode does not identify agents. Optional customer and session references come from identifiers your
 product already knows, and should be opaque—not names, emails, prompts, or task content.
+`customerRef` is required only when Ask once must remember a decision across interactions.
 </Note>
 
 ## Pick the right starting point
@@ -55,4 +56,3 @@ product already knows, and should be opaque—not names, emails, prompts, or tas
 | Rust Axum or Tower | [Rust](/integrations/rust-axum) | Opportunity until feedback returns |
 | Node MCP server | [Node MCP](/integrations/node-mcp) | Confirmed on product-tool use |
 | Any other backend | [Language-neutral HTTP](/integrations/manual-http) or [MCP](/integrations/manual-mcp) | Depends on surface |
-

@@ -356,6 +356,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/consent/state": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["consent_state_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/consent/decisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["consent_decision_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/reports": {
         parameters: {
             query?: never;
@@ -432,6 +464,19 @@ export interface components {
             http: string;
             mcp: string;
         };
+        ConsentDecisionInput: {
+            decision: string;
+        };
+        ConsentDecisionResponse: {
+            feedback: unknown;
+            state: string;
+        };
+        ConsentStateInput: {
+            subject: string;
+        };
+        ConsentStateResponse: {
+            state: string;
+        };
         CreateApiKeyInput: {
             /** Format: uuid */
             environmentId: string;
@@ -505,11 +550,6 @@ export interface components {
             onRefusalOrNoResponse: string;
             prompt: string;
         };
-        FeedbackConsentInput: {
-            approvalSource: string;
-            consentScope?: string | null;
-            userApproved: boolean;
-        };
         FeedbackDiscoveryResponse: {
             classification: components["schemas"]["ClassificationDiscovery"];
             feedbackModes: components["schemas"]["FeedbackModesDiscovery"];
@@ -559,6 +599,9 @@ export interface components {
             authentication: string;
             confidenceRange: number[];
             consent: components["schemas"]["FeedbackConsentDiscovery"];
+            consentDecisionUrl: string;
+            consentOwner: string;
+            consentStateUrl: string;
             findingKinds: string[];
             findingSeverities: string[];
             findingShape: components["schemas"]["FeedbackFindingShapeDiscovery"];
@@ -755,7 +798,6 @@ export interface components {
         ProductFeedbackReportInput: {
             /** Format: double */
             confidence?: number | null;
-            consent?: null | components["schemas"]["FeedbackConsentInput"];
             findings?: components["schemas"]["FeedbackFindingInput"][];
             impact?: string | null;
             summary: string;
@@ -2976,6 +3018,117 @@ export interface operations {
                 };
             };
             /** @description Telemetry ingestion failed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    consent_state_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConsentStateInput"];
+            };
+        };
+        responses: {
+            /** @description Epode-managed Ask once state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsentStateResponse"];
+                };
+            };
+            /** @description Invalid opaque subject */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Invalid product API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Consent state lookup failed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    consent_decision_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConsentDecisionInput"];
+            };
+        };
+        responses: {
+            /** @description Consent decision recorded idempotently */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsentDecisionResponse"];
+                };
+            };
+            /** @description Invalid decision */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Invalid or expired interaction capability */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Consent is not applicable to this product mode */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Consent decision could not be stored */
             500: {
                 headers: {
                     [name: string]: unknown;

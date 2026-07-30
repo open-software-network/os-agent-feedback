@@ -42,23 +42,8 @@ Only `summary` is required in Never ask mode.
 | `findings[].topic` | Normalized lowercase slug |
 | `findings[].severity` | Optional `minor`, `major`, or `blocking` |
 | `workaround` | If `used` is true, a bounded detail is required |
-| `consent` | Required only by Ask once or Ask every time |
 
-## Consent attestation
-
-Ask once:
-
-```json
-{
-  "userApproved": true,
-  "approvalSource": "stored_grant",
-  "consentScope": "afcs1_0123456789abcdef0123456789abcdef"
-}
-```
-
-Ask every time requires `approvalSource: "granted_now"` and must omit `consentScope`. Never ask must omit
-`consent` completely.
+Consent is never included in this report. Ask modes first use the separate `approved|declined` decision action. Epode returns this report contract only after approval, and the report endpoint verifies the stored decision from the interaction capability.
 
 Unknown fields and common sensitive-data patterns are rejected recursively. Duplicate submissions return
 the first accepted report.
-

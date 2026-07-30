@@ -27,42 +27,25 @@ type FeedbackWorkaround struct {
 }
 
 type FeedbackReport struct {
-	Summary        string              `json:"summary"`
-	Impact         string              `json:"impact,omitempty"`
-	Confidence     *float64            `json:"confidence,omitempty"`
-	Findings       []FeedbackFinding   `json:"findings,omitempty"`
-	Workaround     *FeedbackWorkaround `json:"workaround,omitempty"`
-	UserApproved   bool                `json:"-"`
-	ApprovalSource string              `json:"-"`
+	Summary    string              `json:"summary"`
+	Impact     string              `json:"impact,omitempty"`
+	Confidence *float64            `json:"confidence,omitempty"`
+	Findings   []FeedbackFinding   `json:"findings,omitempty"`
+	Workaround *FeedbackWorkaround `json:"workaround,omitempty"`
 }
 
-type ConsentAttestation struct {
-	UserApproved   bool   `json:"userApproved"`
-	ApprovalSource string `json:"approvalSource"`
-	ConsentScope   string `json:"consentScope,omitempty"`
-}
-
-// FeedbackConsentAction resolves a preference stored by the agent runtime.
-// Epode never receives the preference store or uses this consent as an identity.
-func FeedbackConsentAction(envelope *Envelope, storedDecision string) string {
+// FeedbackConsentAction resolves Epode's server-managed response state.
+func FeedbackConsentAction(envelope *Envelope) string {
 	if !validEnvelope(envelope) {
 		return "skip"
 	}
-	if !envelope.ConsentRequired {
+	if envelope.State == "feedback_ready" {
 		return "submit"
 	}
-	if envelope.Mode == FeedbackAskAlways {
+	if envelope.State == "consent_required" {
 		return "ask"
 	}
-	if envelope.Mode == FeedbackAskOnce {
-		if storedDecision == "approved" {
-			return "submit"
-		}
-		if storedDecision == "refused" {
-			return "skip"
-		}
-	}
-	return "ask"
+	return "skip"
 }
 
 func FeedbackFromResponse(response *http.Response, body []byte) (*Envelope, error) {
@@ -95,26 +78,70 @@ func FeedbackFromResponse(response *http.Response, body []byte) (*Envelope, erro
 }
 
 func validEnvelope(envelope *Envelope) bool {
-	if envelope == nil || envelope.V != 1 || !envelope.Requested ||
-		envelope.Submit.Method != http.MethodPost ||
-		envelope.Submit.ContentType != "application/json" ||
-		!strings.HasPrefix(envelope.Submit.Authorization, "Bearer afr2_") {
+	if envelope == nil || envelope.V != 1 || !envelope.Requested {
 		return false
 	}
-	switch envelope.Mode {
-	case FeedbackNeverAsk:
-		return !envelope.ConsentRequired && envelope.ConsentPolicy == "none" &&
-			envelope.ConsentScope == "" && envelope.When == "after_experience_known_before_final_response"
-	case FeedbackAskOnce:
-		matched, _ := regexp.MatchString(`^afcs1_[0-9a-f]{32}$`, envelope.ConsentScope)
-		return envelope.ConsentRequired && envelope.ConsentPolicy == "once" && matched &&
-			envelope.When == "after_experience_known_and_consent_resolved"
-	case FeedbackAskAlways:
-		return envelope.ConsentRequired && envelope.ConsentPolicy == "always" &&
-			envelope.ConsentScope == "" && envelope.When == "after_experience_known_and_explicit_user_approval"
-	default:
-		return false
+	if envelope.State == "feedback_ready" {
+		return envelope.Mode == FeedbackNeverAsk && !envelope.ConsentRequired &&
+			envelope.ConsentPolicy == "none" && envelope.Submit != nil &&
+			envelope.Submit.Method == http.MethodPost &&
+			envelope.Submit.ContentType == "application/json" &&
+			strings.HasPrefix(envelope.Submit.Authorization, "Bearer afr2_")
 	}
+	return envelope.State == "consent_required" && envelope.ConsentRequired &&
+		envelope.ConsentManagedBy == "epode" && envelope.RequiredAction != nil && envelope.Submit == nil
+}
+
+// SubmitFeedbackConsent records only an explicit approved or declined answer.
+// Epode returns a separate feedback_ready contract after approval.
+func SubmitFeedbackConsent(ctx context.Context, envelope *Envelope, decision string, allowedOrigins []string, client *http.Client) (map[string]any, error) {
+	if !validEnvelope(envelope) || envelope.State != "consent_required" || envelope.RequiredAction == nil {
+		return nil, errors.New("invalid Agent Feedback consent contract")
+	}
+	if decision != "approved" && decision != "declined" {
+		return nil, errors.New("decision must be approved or declined")
+	}
+	action := envelope.RequiredAction.SubmitDecision
+	decisionURL, err := url.Parse(action.URL)
+	if err != nil || decisionURL.Scheme != "https" {
+		return nil, errors.New("Agent Feedback decisions require HTTPS")
+	}
+	if len(allowedOrigins) == 0 {
+		allowedOrigins = []string{DefaultEndpoint}
+	}
+	trusted := false
+	for _, value := range allowedOrigins {
+		origin, parseErr := url.Parse(value)
+		if parseErr == nil && origin.Scheme == decisionURL.Scheme && origin.Host == decisionURL.Host {
+			trusted = true
+			break
+		}
+	}
+	if !trusted {
+		return nil, fmt.Errorf("refusing to submit a consent decision to untrusted origin %s://%s", decisionURL.Scheme, decisionURL.Host)
+	}
+	body, _ := json.Marshal(map[string]string{"decision": decision})
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, action.URL, bytes.NewReader(body))
+	request.Header.Set("Authorization", action.Authorization)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", "agent-feedback-go-agent/0.1.0")
+	if client == nil {
+		client = http.DefaultClient
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	responseBody, _ := io.ReadAll(response.Body)
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("consent decision failed with HTTP %d", response.StatusCode)
+	}
+	result := map[string]any{}
+	if err := json.Unmarshal(responseBody, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func feedbackSubmissionBody(envelope *Envelope, report FeedbackReport) []byte {
@@ -131,32 +158,13 @@ func feedbackSubmissionBody(envelope *Envelope, report FeedbackReport) []byte {
 	if report.Workaround != nil {
 		bodyValue["workaround"] = report.Workaround
 	}
-	if envelope.Mode == FeedbackAskOnce {
-		bodyValue["consent"] = ConsentAttestation{
-			UserApproved: true, ApprovalSource: report.ApprovalSource,
-			ConsentScope: envelope.ConsentScope,
-		}
-	} else if envelope.Mode == FeedbackAskAlways {
-		bodyValue["consent"] = ConsentAttestation{
-			UserApproved: true, ApprovalSource: "granted_now",
-		}
-	}
 	body, _ := json.Marshal(bodyValue)
 	return body
 }
 
 func SubmitProductFeedback(ctx context.Context, envelope *Envelope, report FeedbackReport, allowedOrigins []string, client *http.Client) (map[string]any, error) {
-	if !validEnvelope(envelope) {
+	if !validEnvelope(envelope) || envelope.State != "feedback_ready" || envelope.Submit == nil {
 		return nil, errors.New("invalid Agent Feedback submission contract")
-	}
-	if envelope.ConsentRequired && !report.UserApproved {
-		return nil, errors.New("explicit user approval is required before submitting this report")
-	}
-	if envelope.Mode == FeedbackAskOnce && report.ApprovalSource != "granted_now" && report.ApprovalSource != "stored_grant" {
-		return nil, errors.New("ask-once submission requires granted_now or stored_grant approval")
-	}
-	if envelope.Mode == FeedbackAskAlways && report.ApprovalSource != "granted_now" {
-		return nil, errors.New("ask-every-time submission requires fresh approval")
 	}
 	report.Summary = strings.TrimSpace(report.Summary)
 	if len(report.Summary) < 8 || len(report.Summary) > 700 {

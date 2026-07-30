@@ -15,37 +15,28 @@ def _valid(value: Any) -> bool:
         isinstance(value, dict)
         and value.get("v") == 1
         and value.get("requested") is True
-        and isinstance(value.get("submit"), dict)
-        and value["submit"].get("method") == "POST"
-        and value["submit"].get("contentType") == "application/json"
-        and str(value["submit"].get("authorization", "")).startswith("Bearer afr2_")
     ):
         return False
-    mode = value.get("mode")
-    scope = value.get("consentScope")
-    if mode == "never_ask":
+    if value.get("state") == "feedback_ready":
+        submit = value.get("submit")
         return (
+            value.get("mode") == "never_ask"
+            and
             value.get("consentRequired") is False
             and value.get("consentPolicy") == "none"
-            and value.get("when") == "after_experience_known_before_final_response"
-            and scope is None
+            and isinstance(submit, dict)
+            and submit.get("method") == "POST"
+            and submit.get("contentType") == "application/json"
+            and str(submit.get("authorization", "")).startswith("Bearer afr2_")
         )
-    if mode == "ask_once":
-        return (
-            value.get("consentRequired") is True
-            and value.get("consentPolicy") == "once"
-            and isinstance(scope, str)
-            and re.fullmatch(r"afcs1_[0-9a-f]{32}", scope) is not None
-            and value.get("when") == "after_experience_known_and_consent_resolved"
-        )
-    if mode == "ask_always":
-        return (
-            value.get("consentRequired") is True
-            and value.get("consentPolicy") == "always"
-            and scope is None
-            and value.get("when") == "after_experience_known_and_explicit_user_approval"
-        )
-    return False
+    return (
+        value.get("state") == "consent_required"
+        and value.get("mode") in {"ask_once", "ask_always"}
+        and value.get("consentRequired") is True
+        and value.get("consentManagedBy") == "epode"
+        and isinstance(value.get("requiredAction"), dict)
+        and value.get("submit") is None
+    )
 
 
 def feedback_from_response(headers: Mapping[str, str], body: Any) -> dict[str, Any] | None:
@@ -76,22 +67,45 @@ def feedback_from_response(headers: Mapping[str, str], body: Any) -> dict[str, A
     return None
 
 
-def feedback_consent_action(
-    feedback: Mapping[str, Any], stored_decision: str | None = None
-) -> str:
-    """Resolve agent-local consent without exposing the preference store to Epode."""
+def feedback_consent_action(feedback: Mapping[str, Any]) -> str:
+    """Resolve Epode's server-managed response state."""
     if not _valid(feedback):
         return "skip"
-    if feedback.get("consentRequired") is not True:
+    if feedback.get("state") == "feedback_ready":
         return "submit"
-    if feedback.get("mode") == "ask_always":
+    if feedback.get("state") == "consent_required":
         return "ask"
-    if feedback.get("mode") == "ask_once":
-        if stored_decision == "approved":
-            return "submit"
-        if stored_decision == "refused":
-            return "skip"
-    return "ask"
+    return "skip"
+
+
+def submit_feedback_consent(
+    feedback: Mapping[str, Any],
+    decision: str,
+    *,
+    allowed_submit_origins: tuple[str, ...] = (DEFAULT_ENDPOINT,),
+    sender: Any = None,
+) -> dict[str, Any]:
+    if not _valid(feedback) or feedback.get("state") != "consent_required":
+        raise ValueError("Invalid Agent Feedback consent contract")
+    if decision not in {"approved", "declined"}:
+        raise ValueError("decision must be approved or declined")
+    action = feedback["requiredAction"]["submitDecision"]
+    url = str(action["url"])
+    parsed = urlparse(url)
+    allowed = {(urlparse(value).scheme, urlparse(value).netloc) for value in allowed_submit_origins}
+    if parsed.scheme != "https" or (parsed.scheme, parsed.netloc) not in allowed:
+        raise ValueError(f"Refusing to submit a consent decision to untrusted origin {parsed.scheme}://{parsed.netloc}")
+    headers = {
+        "authorization": str(action["authorization"]),
+        "content-type": "application/json",
+        "user-agent": "agent-feedback-python-agent/0.1.0",
+    }
+    data = json.dumps({"decision": decision}, separators=(",", ":")).encode()
+    if sender:
+        return sender(url, headers, data)
+    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return json.loads(response.read())
 
 
 def submit_product_feedback(
@@ -99,18 +113,10 @@ def submit_product_feedback(
     report: Mapping[str, Any],
     *,
     allowed_submit_origins: tuple[str, ...] = (DEFAULT_ENDPOINT,),
-    user_approved: bool = False,
-    approval_source: str | None = None,
     sender: Any = None,
 ) -> dict[str, Any]:
-    if not _valid(feedback):
+    if not _valid(feedback) or feedback.get("state") != "feedback_ready":
         raise ValueError("Invalid Agent Feedback submission contract")
-    if feedback.get("consentRequired") is True and not user_approved:
-        raise ValueError("Explicit user approval is required before submitting this report")
-    if feedback.get("mode") == "ask_once" and approval_source not in {"granted_now", "stored_grant"}:
-        raise ValueError("Ask-once submission requires granted_now or stored_grant approval")
-    if feedback.get("mode") == "ask_always" and approval_source != "granted_now":
-        raise ValueError("Ask-every-time submission requires fresh approval")
     summary = str(report.get("summary", "")).strip()
     if not 8 <= len(summary) <= 700:
         raise ValueError("summary must contain 8 to 700 characters")
@@ -154,17 +160,6 @@ def submit_product_feedback(
         **({"findings": findings} if findings else {}),
         **({"workaround": workaround} if workaround is not None else {}),
     }
-    if feedback.get("mode") == "ask_once":
-        body["consent"] = {
-            "userApproved": True,
-            "approvalSource": approval_source,
-            "consentScope": feedback["consentScope"],
-        }
-    elif feedback.get("mode") == "ask_always":
-        body["consent"] = {
-            "userApproved": True,
-            "approvalSource": "granted_now",
-        }
     data = json.dumps(body, separators=(",", ":")).encode()
     if sender:
         return sender(url, headers, data)

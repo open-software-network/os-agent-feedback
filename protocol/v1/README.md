@@ -77,17 +77,14 @@ Eligible 2xx JSON objects append `_agentFeedback` without wrapping or changing e
 `requested` means the product provider asks the agent to follow the mode's instruction:
 
 - `never_ask` submits the agent's structured assessment autonomously without interrupting the user.
-- `ask_once` asks the first time this product is encountered in an agent runtime. The response
-  includes an opaque `consentScope`. The runtime stores approval or refusal under that scope;
-  approval permits later reports without another question, while refusal prevents future asks.
-- `ask_always` asks before every individual feedback report and submits only after approval for
-  that report.
+- `ask_once` uses a question-only decision contract. Epode stores `approved` or `declined` by
+  product plus an opaque HMAC-derived subject from the company's `customerRef`. The agent stores
+  nothing. Approval returns a separate report contract; refusal suppresses later requests.
+- `ask_always` uses the same question-only decision contract for every individual report.
 
-Ask-once consent is scoped to one product key and agent runtime. It is not a human identity.
-Epode receives the per-report attestation but never receives the runtime's preference store.
-Rotating the product key creates a new scope and may cause the agent to ask again. Generic HTTP
-agents that do not retain preferences may not implement ask-once consistently; feedback-aware
-runtimes and MCP clients can.
+The initial ask-mode response must not contain `submit` or the report schema. It starts with the
+exact human-facing question, allows only `approved|declined`, says not to assume an answer, and
+states that Epode will return the next action after approval. Silence creates no decision.
 
 Ask-mode consent copy is deliberately concrete:
 
@@ -101,7 +98,9 @@ Your prompt and task content will not be included.
 - Never overwrite an existing `_agentFeedback` field.
 - Exclude errors, redirects, health/metrics endpoints, assets, streams, binary bodies, and the Agent Feedback endpoints themselves.
 - Add `Cache-Control: private, no-store` to instrumented responses because every capability is unique.
-- Product responses must never wait for telemetry delivery.
+- Product responses must never wait for telemetry delivery. Ask once may perform a bounded consent
+  state lookup on a cache miss; a lookup failure omits feedback instructions and never fails the
+  product response.
 
 ## Telemetry
 
@@ -139,24 +138,21 @@ Content-Type: application/json
 }
 ```
 
-Only `summary` is required in `never_ask` mode. `impact`, `confidence`, up to eight typed findings, and `workaround` are optional. A report can express several simultaneous observations instead of forcing success/partial/failure. Unknown fields, prompts, transcripts, credentials, personal data, and raw tool or product data are rejected. Duplicate submissions return the first accepted report.
+Only `summary` is required. `impact`, `confidence`, up to eight typed findings, and `workaround` are optional. A report can express several simultaneous observations instead of forcing success/partial/failure. Unknown fields—including legacy consent attestations—prompts, transcripts, credentials, personal data, and raw tool or product data are rejected. Duplicate submissions return the first accepted report.
 
-Consent modes add a machine-verifiable `consent` attestation to the report body. This is an assertion by the submitting agent runtime, not proof of a human identity:
+Ask modes first submit exactly one decision:
 
-```json
-{
-  "summary": "The product completed the task.",
-  "consent": {
-    "userApproved": true,
-    "approvalSource": "stored_grant",
-    "consentScope": "afcs1_0123456789abcdef0123456789abcdef"
-  }
-}
+```http
+POST /api/v2/consent/decisions
+Authorization: Bearer <afr2 capability>
+Content-Type: application/json
+
+{"decision":"approved"}
 ```
 
-- `ask_once` requires `userApproved: true`, `approvalSource: granted_now|stored_grant`, and the exact `consentScope` from the response envelope.
-- `ask_always` requires `userApproved: true` and `approvalSource: granted_now`; it must not include `consentScope`.
-- `never_ask` must omit `consent`.
+The endpoint stores the decision idempotently. Approval returns a `feedback_ready` contract using
+the same short-lived interaction capability. Decline returns no report action. The report itself
+never contains consent fields.
 
 ## MCP 2026-07-28 binding
 
@@ -169,9 +165,9 @@ MCP servers implement the Epode feedback contract on top of the current stateles
 - Require `io.modelcontextprotocol/protocolVersion` and `io.modelcontextprotocol/clientCapabilities` in each request's `params._meta`.
 - Return `resultType: "complete"` on completed results and server identity in `_meta.io.modelcontextprotocol/serverInfo`.
 - Return deterministic `tools/list` results with `ttlMs` and `cacheScope`.
-- Register `report_product_feedback`, decorate product-tool results with `_agentFeedback`, and emit confirmed MCP telemetry for the product tool call.
-- In `ask_once` mode, require `userApproved: true` and `approvalSource: granted_now|stored_grant` on `report_product_feedback`, and forward the same values with `consentScope` in the report's nested `consent` attestation. Store the consent decision only in the agent runtime under `consentScope`.
-- In `ask_always` mode, require `userApproved: true` and `approvalSource: granted_now` for every report, and forward them in the report's nested `consent` attestation. Never submit after refusal or silence.
+- Register `record_product_feedback_consent` and `report_product_feedback`, decorate product-tool results with `_agentFeedback`, and emit confirmed MCP telemetry for the product tool call.
+- In either ask mode, expose only the consent tool and question first. On approval, that tool returns the report action. On refusal or silence, never call the report tool.
+- Do not rely on MCP MRTR `input_required` as the only consent path until the deployed client demonstrably surfaces and resumes elicitation.
 - Use an explicit product-supplied handle when application-level continuity is required. Never use a transport session as agent identity or product-session proof.
 
 Dual-era servers may continue accepting the 2025 `initialize` handshake as a compatibility fallback, but modern requests must stay stateless and must not depend on that fallback.

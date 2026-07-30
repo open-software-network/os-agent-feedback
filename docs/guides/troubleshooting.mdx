@@ -14,9 +14,13 @@ description: "Diagnose missing telemetry, missing feedback, consent errors, and 
     Verify the contract with the doctor or a feedback-aware runtime. MCP is the reliable explicit-tool path.
   </Accordion>
   <Accordion title="The report is rejected for consent">
-    Ensure Collection policy and deployed `AGENT_FEEDBACK_MODE` match. Ask once requires the exact returned
-    `consentScope` and `granted_now` or `stored_grant`. Ask every time requires fresh `granted_now` and no scope.
-    Never ask must omit consent.
+    Ensure Collection policy and deployed `AGENT_FEEDBACK_MODE` match. An ask-mode response must first contain
+    only `requiredAction.submitDecision`. Submit exactly `approved` or `declined`, then use the separate
+    `feedback_ready` contract returned after approval. Never add consent fields to the report body.
+  </Accordion>
+  <Accordion title="Ask once keeps asking">
+    Configure `customerRef` from a stable opaque account or tenant ID supplied by your product authentication.
+    Do not use a name or email. Without `customerRef`, Ask once safely becomes per-interaction permission and the SDK logs a warning.
   </Accordion>
   <Accordion title="My response was not modified">
     Errors, redirects, streams, binaries, assets, health routes, excluded routes, and unsafe bodies are intentionally
@@ -32,7 +36,7 @@ description: "Diagnose missing telemetry, missing feedback, consent errors, and 
   </Accordion>
   <Accordion title="The MCP feedback tool is temporarily unavailable">
     When the tool returns `retryable: true`, retry exactly once with the same `feedbackHandle` and identical
-    report. Do not retry non-retryable validation or consent failures. Epode's idempotency returns the first
+    report. Do not retry non-retryable validation or permission failures. Epode's idempotency returns the first
     accepted report if the original success response was lost.
   </Accordion>
 </AccordionGroup>

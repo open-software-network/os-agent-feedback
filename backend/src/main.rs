@@ -17,6 +17,7 @@ use axum::{
     routing::get,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -36,15 +37,17 @@ use uuid::Uuid;
 use crate::{
     api_types::{
         ApiKeyCreatedResponse, ApiKeyRotatedResponse, AuthenticationStateResponse,
-        DashboardInteractionResponse, DashboardReportResponse, EnvironmentResponse,
-        McpInfoResponse, OpaqueJsonObject, ProductCreatedResponse, ProductDeletedResponse,
-        ProductResponse, RemovedResponse, RevokedResponse, TeamInvitationCreatedResponse,
-        TeamMemberResponse, TransferredResponse, UpdatedResponse, WorkspaceResponse,
+        ConsentDecisionResponse, DashboardInteractionResponse, DashboardReportResponse,
+        EnvironmentResponse, McpInfoResponse, OpaqueJsonObject, ProductCreatedResponse,
+        ProductDeletedResponse, ProductResponse, RemovedResponse, RevokedResponse,
+        TeamInvitationCreatedResponse, TeamMemberResponse, TransferredResponse, UpdatedResponse,
+        WorkspaceResponse,
     },
     error::{ApiError, ApiErrorEnvelope},
     models::{
-        ClassificationDiscovery, CreateApiKeyInput, CreateProductInput, CreateTeamInvitationInput,
-        CurrentUser, DashboardContext, DashboardData, DashboardSessionDetail, DeleteProductInput,
+        ClassificationDiscovery, ConsentDecisionInput, ConsentStateInput, ConsentStateResponse,
+        CreateApiKeyInput, CreateProductInput, CreateTeamInvitationInput, CurrentUser,
+        DashboardContext, DashboardData, DashboardSessionDetail, DeleteProductInput,
         FeedbackConsentDiscovery, FeedbackDiscoveryResponse, FeedbackFindingShapeDiscovery,
         FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackModesDiscovery,
         FeedbackRequiredFieldsDiscovery, FeedbackSubmissionDiscovery,
@@ -61,11 +64,12 @@ use crate::{
         accept_team_invitation, agent_product_auth, create_api_key,
         create_product_with_default_key, create_team_invitation, dashboard_interaction_by_id,
         dashboard_report_by_id, dashboard_session_by_id, dashboard_with_limits, delete_product,
-        feedback_list_interactions, feedback_list_reports, get_or_create_workspace,
-        ingest_telemetry_batch, purge_expired_product_data, read_product_auth, remove_team_member,
-        rename_product, rename_workspace, resolve_workspace_access, revoke_api_key,
-        revoke_team_invitation, rotate_api_key, submit_product_feedback, transfer_team_ownership,
-        update_feedback_workflow, update_policy, update_team_member_role,
+        feedback_consent_state, feedback_list_interactions, feedback_list_reports,
+        get_or_create_workspace, ingest_telemetry_batch, purge_expired_product_data,
+        read_product_auth, record_feedback_consent_decision, remove_team_member, rename_product,
+        rename_workspace, resolve_workspace_access, revoke_api_key, revoke_team_invitation,
+        rotate_api_key, submit_product_feedback, transfer_team_ownership, update_feedback_workflow,
+        update_policy, update_team_member_role,
     },
 };
 
@@ -174,6 +178,8 @@ fn build_app_router() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(rotate_api_key_handler))
         .routes(routes!(update_policy_handler))
         .routes(routes!(telemetry_batch_handler))
+        .routes(routes!(consent_state_handler))
+        .routes(routes!(consent_decision_handler))
         .routes(routes!(product_feedback_handler))
         .routes(routes!(mcp_info, mcp_handler))
         .layer(DefaultBodyLimit::max(64 * 1024))
@@ -442,7 +448,7 @@ fn feedback_discovery(public_base_url: &str) -> FeedbackDiscoveryResponse {
             never_ask:
                 "The agent submits its own assessment autonomously without interrupting the user."
                     .to_owned(),
-            ask_once: "The agent asks once per product and agent runtime, then remembers approval or refusal."
+            ask_once: "Epode remembers approval or refusal per product and opaque customer reference. Unknown customers receive a question-only decision action before any report schema."
                 .to_owned(),
             ask_always: "The agent asks before every individual feedback report.".to_owned(),
             off: "No feedback contract is emitted.".to_owned(),
@@ -455,6 +461,9 @@ fn feedback_discovery(public_base_url: &str) -> FeedbackDiscoveryResponse {
         feedback_submission: FeedbackSubmissionDiscovery {
             url: format!("{public_base_url}/api/v2/reports"),
             authentication: "Bearer afr2_... short-lived interaction capability".to_owned(),
+            consent_state_url: format!("{public_base_url}/api/v2/consent/state"),
+            consent_decision_url: format!("{public_base_url}/api/v2/consent/decisions"),
+            consent_owner: "Epode; agents never store Ask once decisions".to_owned(),
             required_fields: FeedbackRequiredFieldsDiscovery {
                 summary:
                     "concise description of how the product contributed, 8 to 700 characters"
@@ -490,7 +499,7 @@ fn feedback_discovery(public_base_url: &str) -> FeedbackDiscoveryResponse {
             consent: FeedbackConsentDiscovery {
                 prompt: "May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.".to_owned(),
                 ask_once_scope:
-                    "per product and agent runtime; no user or agent identity is stored by Epode"
+                    "per product and opaque customerRef-derived subject; Epode stores only approved or declined"
                         .to_owned(),
                 ask_always_scope: "per feedback report".to_owned(),
                 on_refusal_or_no_response: "do not submit".to_owned(),
@@ -1665,6 +1674,125 @@ fn safe_input<T: DeserializeOwned>(value: Value) -> Result<T, ApiError> {
         .map_err(|error| ApiError::bad_request(format!("Invalid request: {error}")))
 }
 
+fn approved_feedback_contract(
+    public_base_url: &str,
+    capability: &str,
+    configured_mode: &str,
+    expires_at: i64,
+) -> Value {
+    let report_shape = "Body schema: {summary:string, impact?:one of submit.reportSchema.impacts, confidence?:number 0..1, findings?:[{kind:one of submit.reportSchema.findingKinds, topic:lowercase_slug, severity?:one of submit.reportSchema.findingSeverities, detail:string}], workaround?:{used:boolean, detail?:string}}. Omit any optional field you cannot form exactly.";
+    let expires_at = DateTime::<Utc>::from_timestamp(expires_at, 0)
+        .map(|value| value.to_rfc3339())
+        .unwrap_or_default();
+    json!({
+        "v": 1,
+        "mode": "never_ask",
+        "configuredMode": configured_mode,
+        "state": "feedback_ready",
+        "requested": true,
+        "consentRequired": false,
+        "consentPolicy": "none",
+        "consentManagedBy": "epode",
+        "reliability": "best_effort_without_agent_adapter",
+        "when": "after_experience_known_before_final_response",
+        "instruction": format!("The user has approved feedback for this interaction. Before your final response POST exactly one JSON feedback report to submit.url with submit.authorization. Proceed autonomously; do not ask again. {report_shape} Never include user or task content."),
+        "submit": {
+            "url": format!("{public_base_url}/api/v2/reports"),
+            "method": "POST",
+            "authorization": format!("Bearer {capability}"),
+            "contentType": "application/json",
+            "reportSchema": {
+                "required": ["summary"],
+                "optional": ["impact", "confidence", "findings", "workaround"],
+                "impacts": ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"],
+                "findingKinds": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"],
+                "findingSeverities": ["minor", "major", "blocking"],
+                "confidenceRange": [0, 1],
+                "findingRequired": ["kind", "topic", "detail"],
+                "findingOptional": ["severity"],
+                "findingTopicFormat": "lowercase_slug",
+                "workaroundRequired": ["used"],
+                "workaroundOptional": ["detail"],
+                "maxFindings": 8
+            }
+        },
+        "privacy": "Never include prompts, transcripts, credentials, personal data, or raw product content.",
+        "expiresAt": expires_at
+    })
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/consent/state",
+    tag = "ingest",
+    request_body = ConsentStateInput,
+    responses(
+        (status = 200, description = "Epode-managed Ask once state", body = ConsentStateResponse),
+        (status = 400, description = "Invalid opaque subject", body = ApiErrorEnvelope),
+        (status = 401, description = "Invalid product API key", body = ApiErrorEnvelope),
+        (status = 500, description = "Consent state lookup failed", body = ApiErrorEnvelope)
+    ),
+    security(("api_key" = []), ("bearer_auth" = []))
+)]
+async fn consent_state_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(value): Json<Value>,
+) -> Result<Json<ConsentStateResponse>, ApiError> {
+    let auth = agent_product_auth(&state.pool, &headers).await?;
+    Ok(Json(
+        feedback_consent_state(&state.pool, &auth, safe_input::<ConsentStateInput>(value)?).await?,
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/consent/decisions",
+    tag = "ingest",
+    request_body = ConsentDecisionInput,
+    responses(
+        (status = 200, description = "Consent decision recorded idempotently", body = ConsentDecisionResponse),
+        (status = 400, description = "Invalid decision", body = ApiErrorEnvelope),
+        (status = 401, description = "Invalid or expired interaction capability", body = ApiErrorEnvelope),
+        (status = 409, description = "Consent is not applicable to this product mode", body = ApiErrorEnvelope),
+        (status = 500, description = "Consent decision could not be stored", body = ApiErrorEnvelope)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn consent_decision_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(value): Json<Value>,
+) -> Result<Response, ApiError> {
+    let capability = bearer_token(&headers)
+        .filter(|token| token.starts_with("afr2_"))
+        .ok_or_else(ApiError::unauthorized)?;
+    let (decision, configured_mode, expires_at) = record_feedback_consent_decision(
+        &state.pool,
+        &capability,
+        safe_input::<ConsentDecisionInput>(value)?,
+    )
+    .await?;
+    let feedback = (decision == "approved").then(|| {
+        approved_feedback_contract(
+            &state.public_base_url,
+            &capability,
+            &configured_mode,
+            expires_at,
+        )
+    });
+    let mut response = Json(ConsentDecisionResponse {
+        state: decision,
+        feedback,
+    })
+    .into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
+}
+
 #[utoipa::path(
     post,
     path = "/api/v2/telemetry/batches",
@@ -2272,7 +2400,7 @@ mod page_tests {
             "purpose": "Collect one structured product feedback report from a customer's independent agent.",
             "feedbackModes": {
                 "never_ask": "The agent submits its own assessment autonomously without interrupting the user.",
-                "ask_once": "The agent asks once per product and agent runtime, then remembers approval or refusal.",
+                "ask_once": "Epode remembers approval or refusal per product and opaque customer reference. Unknown customers receive a question-only decision action before any report schema.",
                 "ask_always": "The agent asks before every individual feedback report.",
                 "off": "No feedback contract is emitted."
             },
@@ -2284,6 +2412,9 @@ mod page_tests {
             "feedbackSubmission": {
                 "url": "https://epode.test/api/v2/reports",
                 "authentication": "Bearer afr2_... short-lived interaction capability",
+                "consentStateUrl": "https://epode.test/api/v2/consent/state",
+                "consentDecisionUrl": "https://epode.test/api/v2/consent/decisions",
+                "consentOwner": "Epode; agents never store Ask once decisions",
                 "requiredFields": {
                     "summary": "concise description of how the product contributed, 8 to 700 characters"
                 },
@@ -2310,7 +2441,7 @@ mod page_tests {
                 },
                 "consent": {
                     "prompt": "May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.",
-                    "askOnceScope": "per product and agent runtime; no user or agent identity is stored by Epode",
+                    "askOnceScope": "per product and opaque customerRef-derived subject; Epode stores only approved or declined",
                     "askAlwaysScope": "per feedback report",
                     "onRefusalOrNoResponse": "do not submit"
                 }

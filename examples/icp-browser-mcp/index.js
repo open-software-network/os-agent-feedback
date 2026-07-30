@@ -13,7 +13,7 @@ const feedback = createMcpInstrumentation({
   feedbackTools: ["browser_close"],
   sessionRef: (arguments_, _context, result) =>
     arguments_?.sessionId || result?.structuredContent?.sessionId,
-  customerRef: (_arguments, context) => context.authInfo?.extra?.accountId || "acct_browser_demo",
+  customerRef: (_arguments, context) => context.http?.authInfo?.extra?.accountId || "acct_browser_demo",
   runtimeHint: (_arguments, context) => context.clientInfo?.name,
 });
 
