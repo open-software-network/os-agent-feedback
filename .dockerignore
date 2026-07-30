@@ -1,0 +1,21 @@
+# The web image builds from the repository root because pnpm needs the root
+# workspace manifests and lockfile. Send only that dependency metadata and web.
+*
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!web/
+!web/**
+
+# Never let local dependency/build state back into the root build context.
+.git
+**/node_modules
+**/.next
+backend/target
+**/target
+
+# `!web/**` above would otherwise re-include a developer's local env files and
+# bake them into the build context and BuildKit cache. CI checkouts are clean,
+# but a local `docker build` would not be.
+**/.env
+**/.env.*
