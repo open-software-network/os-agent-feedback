@@ -2167,7 +2167,7 @@ fn contains_sensitive_report_text(value: &str) -> bool {
 }
 
 fn normalize_session_label(value: Option<&str>) -> Result<Option<String>, ApiError> {
-    let label = value.map(|label| label.split_whitespace().collect::<Vec<_>>().join(" "));
+    let label = value.map(|label| label.trim().to_owned());
     if label
         .as_ref()
         .is_some_and(|label| !(2..=80).contains(&label.chars().count()))
@@ -2505,13 +2505,18 @@ mod product_tests {
     #[test]
     fn session_labels_use_unicode_code_point_limits() -> anyhow::Result<()> {
         anyhow::ensure!(normalize_session_label(None).map_err(test_error)?.is_none());
-        for invalid in ["   ".to_string(), "😀".to_string(), "😀".repeat(81)] {
+        for invalid in [
+            "   ".to_string(),
+            "😀".to_string(),
+            "😀".repeat(81),
+            format!("a{}b", " ".repeat(79)),
+        ] {
             anyhow::ensure!(
                 normalize_session_label(Some(&invalid)).unwrap_err().status
                     == StatusCode::BAD_REQUEST
             );
         }
-        for valid in ["😀😀".to_string(), "😀".repeat(80)] {
+        for valid in ["😀😀".to_string(), "😀".repeat(80), "a  b".to_string()] {
             anyhow::ensure!(
                 normalize_session_label(Some(&valid)).map_err(test_error)? == Some(valid)
             );

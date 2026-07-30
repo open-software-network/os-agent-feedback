@@ -146,6 +146,39 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["accepted"])
         self.assertEqual(sent[0]["findings"][0]["topic"], "pagination")
 
+    def test_session_label_requires_a_string_and_preserves_internal_whitespace(self) -> None:
+        envelope = {
+            "v": 1,
+            "mode": "never_ask",
+            "requested": True,
+            "consentRequired": False,
+            "consentPolicy": "none",
+            "when": "after_experience_known_before_final_response",
+            "submit": {
+                "url": "https://feedback.test/api/v2/reports",
+                "method": "POST",
+                "authorization": "Bearer afr2_test.payload.signature",
+                "contentType": "application/json",
+            },
+        }
+        for session_label in (True, 123, ["investigation"]):
+            with self.assertRaisesRegex(ValueError, "sessionLabel must be a string"):
+                submit_product_feedback(
+                    envelope,
+                    {"summary": "The product completed the task.", "sessionLabel": session_label},
+                    allowed_submit_origins=("https://feedback.test",),
+                    sender=lambda *_: {"accepted": True},
+                )
+
+        sent: list[dict] = []
+        submit_product_feedback(
+            envelope,
+            {"summary": "The product completed the task.", "sessionLabel": "  Search  investigation  "},
+            allowed_submit_origins=("https://feedback.test",),
+            sender=lambda _url, _headers, body: sent.append(json.loads(body)) or {"accepted": True},
+        )
+        self.assertEqual(sent[0]["sessionLabel"], "Search  investigation")
+
     def test_ask_modes_have_distinct_consent_policies(self) -> None:
         runtime = AgentFeedback(AgentFeedbackOptions(
             api_key=KEY,

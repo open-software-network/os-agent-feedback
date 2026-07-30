@@ -116,7 +116,9 @@ def submit_product_feedback(
         raise ValueError("summary must contain 8 to 700 characters")
     session_label = report.get("sessionLabel")
     if session_label is not None:
-        session_label = str(session_label).strip()
+        if not isinstance(session_label, str):
+            raise ValueError("sessionLabel must be a string")
+        session_label = session_label.strip()
         if not 2 <= len(session_label) <= 80:
             raise ValueError("sessionLabel must contain 2 to 80 characters")
     impact = report.get("impact")
