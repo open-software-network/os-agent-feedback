@@ -124,6 +124,34 @@ describe("dashboard data flow", () => {
     act(() => dismiss?.());
     expect(message).not.toBeInTheDocument();
   });
+
+  it("clears a success notice when navigating to another view", async () => {
+    const data = dashboardFixture();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "PATCH")
+          return Promise.resolve(json({ product: data.currentProduct }));
+        return Promise.resolve(json(data));
+      }),
+    );
+
+    render(
+      <Providers>
+        <Home />
+      </Providers>,
+    );
+
+    expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Rename" }));
+    fireEvent.change(screen.getByLabelText("New name"), { target: { value: "Search API 2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Product renamed.")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "Feedback (1)" }));
+
+    expect(screen.queryByText("Product renamed.")).not.toBeInTheDocument();
+  });
 });
 
 function json(body: unknown): Response {

@@ -1,7 +1,7 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import type { ShownSecrets } from "@/components/dashboard/types";
@@ -61,6 +61,7 @@ export function SetupView({
   const [stack, setStack] = useState<SetupStack>("node-mcp");
   const [readClient, setReadClient] = useState<ReadClient>("claude-code");
   const [error, setError] = useState("");
+  const [creatingWriteKey, setCreatingWriteKey] = useState(false);
   const environment = data.currentEnvironment;
   const writeKeys = data.apiKeys.filter((key) => key.kind !== "read");
   const readKeys = data.apiKeys.filter((key) => key.kind === "read");
@@ -80,6 +81,45 @@ export function SetupView({
     defaultValues: { label: "Repo read key", expiresInSeconds: "7776000" },
   });
 
+  const createWriteKey = useCallback(
+    async (allowCompletedEnsure: boolean) => {
+      const environmentId = environment?.id;
+      if (!environmentId || !claimWriteKeyEnsure(environmentId, allowCompletedEnsure)) return;
+      setCreatingWriteKey(true);
+      setError("");
+      const input: CreateApiKeyInput = {
+        environmentId,
+        kind: "write",
+        label: "Default product key",
+      };
+      let created: ApiKeyCreatedResponse;
+      try {
+        created = await apiRequest<ApiKeyCreatedResponse>("/api/settings/api-keys", {
+          method: "POST",
+          workspaceId: data.workspace.id,
+          body: JSON.stringify(input),
+        });
+      } catch (caught) {
+        releaseWriteKeyEnsure(environmentId);
+        setError(caught instanceof Error ? caught.message : "Could not create product key");
+        setCreatingWriteKey(false);
+        return;
+      }
+
+      finishWriteKeyEnsure(environmentId);
+      rememberSecret("write", created.secret);
+      setNotice("Product key created. Save it now — it is shown once.");
+      try {
+        await refresh();
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : "Could not refresh product keys");
+      } finally {
+        setCreatingWriteKey(false);
+      }
+    },
+    [data.workspace.id, environment?.id, refresh, rememberSecret, setNotice],
+  );
+
   useEffect(() => {
     const environmentId = environment?.id;
     if (!environmentId || !editor) return;
@@ -87,37 +127,8 @@ export function SetupView({
       finishWriteKeyEnsure(environmentId);
       return;
     }
-    if (!claimWriteKeyEnsure(environmentId)) return;
-
-    const input: CreateApiKeyInput = {
-      environmentId,
-      kind: "write",
-      label: "Default product key",
-    };
-    apiRequest<ApiKeyCreatedResponse>("/api/settings/api-keys", {
-      method: "POST",
-      workspaceId: data.workspace.id,
-      body: JSON.stringify(input),
-    })
-      .then(async (created) => {
-        finishWriteKeyEnsure(environmentId);
-        rememberSecret("write", created.secret);
-        setNotice("Product key created. Save it now — it is shown once.");
-        await refresh();
-      })
-      .catch((caught: unknown) => {
-        releaseWriteKeyEnsure(environmentId);
-        setError(caught instanceof Error ? caught.message : "Could not create product key");
-      });
-  }, [
-    data.workspace.id,
-    editor,
-    environment?.id,
-    refresh,
-    rememberSecret,
-    setNotice,
-    writeKeys.length,
-  ]);
+    void createWriteKey(false);
+  }, [createWriteKey, editor, environment?.id, writeKeys.length]);
 
   const stacks = SETUP_SURFACES[surface].stacks as readonly SetupStack[];
   useEffect(() => {
@@ -209,7 +220,10 @@ export function SetupView({
       />
       <Metrics
         items={[
-          { label: "Product key", value: writeKey ? "Ready" : "Preparing" },
+          {
+            label: "Product key",
+            value: writeKey ? "Ready" : creatingWriteKey ? "Preparing" : "Missing",
+          },
           { label: "Telemetry", value: keyInteractions.length ? "Connected" : "Waiting" },
           { label: "Agent feedback", value: keyReports.length ? "Received" : "Waiting" },
         ]}
@@ -252,12 +266,24 @@ export function SetupView({
       <Panel title={`2. Install ${stackName(stack)}`}>
         {secrets?.write ? (
           <SecretCallout label="Save this server-side key now" secret={secrets.write} copy={copy} />
-        ) : (
+        ) : writeKey ? (
           <p className="text-sm text-muted-foreground">
-            {writeKey
-              ? `${writeKey.prefix}… is ready. Rotate it if the full value was not saved.`
-              : "Preparing a product key…"}
+            {writeKey.prefix}… is ready. Rotate it if the full value was not saved.
           </p>
+        ) : (
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="text-sm text-muted-foreground">
+              {creatingWriteKey ? "Preparing a product key…" : "No product key is active."}
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={creatingWriteKey}
+              onClick={() => void createWriteKey(true)}
+            >
+              {creatingWriteKey ? "Creating product key…" : "Create product key"}
+            </Button>
+          </div>
         )}
         <CodeBlock label="Server environment" value={environmentSnippet} copy={copy} />
         <CodeBlock label="Coding-agent setup prompt" value={agentPrompt} copy={copy} />
@@ -391,14 +417,16 @@ function writeKeyEnsureStorageKey(environmentId: string) {
   return `${WRITE_KEY_ENSURE_PREFIX}${environmentId}`;
 }
 
-function claimWriteKeyEnsure(environmentId: string): boolean {
+function claimWriteKeyEnsure(environmentId: string, allowCompletedEnsure = false): boolean {
   const key = writeKeyEnsureStorageKey(environmentId);
   try {
-    if (window.sessionStorage.getItem(key)) return false;
+    const state = window.sessionStorage.getItem(key);
+    if (state === "pending" || (state === "done" && !allowCompletedEnsure)) return false;
     window.sessionStorage.setItem(key, "pending");
     return true;
   } catch {
-    if (fallbackWriteKeyEnsureState.has(key)) return false;
+    const state = fallbackWriteKeyEnsureState.get(key);
+    if (state === "pending" || (state === "done" && !allowCompletedEnsure)) return false;
     fallbackWriteKeyEnsureState.set(key, "pending");
     return true;
   }

@@ -188,6 +188,8 @@ describe("dashboard view behavior", () => {
     renderWithQuery(<SetupView {...props} />);
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Create product key" }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("offers safe rotation without destructive key revocation", () => {
@@ -205,7 +207,8 @@ describe("dashboard view behavior", () => {
     expect(screen.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
   });
 
-  it("does not recreate a write key that disappears after Setup observed it", () => {
+  it("does not auto-recreate a removed write key and offers manual recovery", async () => {
+    const data = dashboardFixture();
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     const props = {
@@ -214,7 +217,7 @@ describe("dashboard view behavior", () => {
       refresh: vi.fn().mockResolvedValue(undefined),
       setNotice: vi.fn(),
     };
-    const rendered = renderWithQuery(<SetupView {...props} data={dashboardFixture()} />);
+    const rendered = renderWithQuery(<SetupView {...props} data={data} />);
 
     rendered.rerender(
       <QueryClientProvider client={rendered.client}>
@@ -223,6 +226,28 @@ describe("dashboard view behavior", () => {
     );
 
     expect(fetchMock).not.toHaveBeenCalled();
+    fetchMock.mockResolvedValue(
+      json({
+        apiKey: data.apiKeys[0],
+        secret: "af_live_manual_secret",
+        shownOnce: true,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Create product key" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/settings/api-keys",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          environmentId: data.currentEnvironment?.id,
+          kind: "write",
+          label: "Default product key",
+        }),
+      }),
+    );
+    expect(props.rememberSecret).toHaveBeenCalledWith("write", "af_live_manual_secret");
   });
 
   it("rotates an existing key and surfaces the replacement secret", async () => {

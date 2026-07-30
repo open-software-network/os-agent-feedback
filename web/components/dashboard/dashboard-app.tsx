@@ -64,6 +64,7 @@ export function DashboardApp() {
   const readLocation = useCallback(() => {
     const url = new URL(window.location.href);
     historyMode.current = "replace";
+    setNotice(null);
     if (url.searchParams.get("invite") === "invalid") {
       url.searchParams.delete("invite");
       window.history.replaceState({}, "", url);
@@ -169,6 +170,7 @@ export function DashboardApp() {
   );
 
   const changeWorkspace = (nextWorkspaceId: string) => {
+    setNotice(null);
     setWorkspaceId(nextWorkspaceId);
     setProductId("");
     clearSelection();
@@ -177,6 +179,7 @@ export function DashboardApp() {
   };
 
   const changeProduct = (nextProductId: string) => {
+    setNotice(null);
     setProductId(nextProductId);
     clearSelection();
     setSecrets(null);
@@ -190,6 +193,7 @@ export function DashboardApp() {
   }
 
   function navigate(nextView: DashboardView) {
+    setNotice(null);
     historyMode.current = "push";
     setView(nextView);
     if (nextView !== "feedback") setSelectedReportId(null);
@@ -198,6 +202,7 @@ export function DashboardApp() {
   }
 
   function openFeedback(reportId: string) {
+    setNotice(null);
     historyMode.current = "push";
     setSelectedSessionId(null);
     setSelectedInteractionId(null);
@@ -206,6 +211,7 @@ export function DashboardApp() {
   }
 
   function openSession(sessionId: string) {
+    setNotice(null);
     historyMode.current = "push";
     setSelectedReportId(null);
     setSelectedInteractionId(null);
@@ -214,6 +220,7 @@ export function DashboardApp() {
   }
 
   function openInteraction(interactionId: string) {
+    setNotice(null);
     historyMode.current = "push";
     setSelectedReportId(null);
     setSelectedSessionId(null);
@@ -360,6 +367,7 @@ export function DashboardApp() {
             data={currentData}
             selectedReportId={selectedReportId}
             selectReport={(reportId) => {
+              setNotice(null);
               historyMode.current = "push";
               setSelectedReportId(reportId);
             }}
@@ -381,6 +389,7 @@ export function DashboardApp() {
             data={currentData}
             selectedSessionId={selectedSessionId}
             selectSession={(sessionId) => {
+              setNotice(null);
               historyMode.current = "push";
               setSelectedSessionId(sessionId);
             }}
