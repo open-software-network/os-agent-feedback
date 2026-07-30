@@ -4,7 +4,7 @@ const notice = document.querySelector("#notice");
 const account = document.querySelector("#account");
 const productScope = document.querySelector("#product-scope");
 let dashboard;
-let currentView = initialUrl.searchParams.get("view") || "feedback";
+let currentView = initialUrl.searchParams.get("view") || "home";
 let selectedWorkspaceId = initialUrl.searchParams.get("team") || "";
 let selectedProductId = initialUrl.searchParams.get("product") || "";
 let selectedReport = initialUrl.searchParams.get("report");
@@ -26,9 +26,9 @@ let setupMonitor = null;
 let noticeTimer = null;
 let explorerTimer = null;
 
-const validViews = new Set(["feedback", "insights", "interactions", "sessions", "setup", "policy", "team", "new-product"]);
+const validViews = new Set(["home", "feedback", "interactions", "sessions", "setup", "policy", "team", "new-product"]);
 const validRanges = new Set(["24h", "7d", "30d", "all"]);
-if (!validViews.has(currentView)) currentView = "feedback";
+if (!validViews.has(currentView)) currentView = "home";
 if (!validRanges.has(explorerRange)) explorerRange = "30d";
 
 function setupSecretKey(environmentId, kind = "write") {
@@ -113,7 +113,7 @@ const matchesQuery = (...values) => !explorerQuery || values.some((value) => Str
 function syncUrl(mode = "replace") {
   const url = new URL(location.href);
   const values = {
-    view: currentView,
+    view: currentView === "home" ? "" : currentView,
     team: selectedWorkspaceId,
     product: selectedProductId,
     report: selectedReport,
@@ -140,14 +140,14 @@ function resetExplorer() {
 }
 
 function normalizeDashboardState() {
-  if (!validViews.has(currentView)) currentView = "feedback";
+  if (!validViews.has(currentView)) currentView = "home";
   if (!validRanges.has(explorerRange)) explorerRange = "30d";
   const primaryByView = {
     feedback: ["all", "helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown", "unspecified"],
-    insights: ["all", "confirmed", "unclassified"],
     interactions: ["all", "confirmed", "unclassified", "reviewed", "unreviewed"],
     sessions: ["all", "reviewed", "unreviewed"],
   };
+  if (!primaryByView[currentView]) explorerPrimary = "all";
   if (primaryByView[currentView] && !primaryByView[currentView].includes(explorerPrimary)) explorerPrimary = "all";
   const secondaryValues = currentView === "sessions"
     ? new Set(dashboard.sessions.map((entry) => entry.source))
@@ -206,7 +206,7 @@ async function refresh() {
   selectedWorkspaceId = dashboard.workspace.id;
   selectedProductId = dashboard.currentProduct?.id || "";
   if (dashboard.currentRole === "member" && ["setup", "policy", "new-product"].includes(currentView)) {
-    currentView = "feedback";
+    currentView = "home";
   }
   normalizeDashboardState();
   if (currentView === "setup" && dashboard.currentRole !== "member" && dashboard.currentEnvironment && !dashboard.apiKeys.length) {
@@ -352,10 +352,15 @@ function feedbackView() {
   return `${header("FEEDBACK", "Agent feedback", `${filtered.length} of ${ranged.length} reports`, `<button class="button" data-refresh-data>Refresh</button>`)}${metricStrip([[filtered.length, "Reports"], [findings, "Findings"], [blockers, "With blockers", blockers ? "negative" : ""], [workarounds, "With workarounds"]])}${toolbar}${table}`;
 }
 
-function insightsView() {
-  if (!dashboard.interactions.length) return `${header("INSIGHTS", "Product health", "No data", `<button class="button" data-refresh-data>Refresh</button>`)}${empty("No product activity yet", "Finish setup and send one real product request or MCP tool call.")}`;
-  const surfaces = [...new Set(dashboard.interactions.map((entry) => entry.surface))].sort().map((value) => [value, title(value)]);
-  const interactions = dashboard.interactions.filter((entry) => inTimeRange(entry.occurredAt) && (explorerPrimary === "all" || entry.classification === explorerPrimary) && (explorerSecondary === "all" || entry.surface === explorerSecondary) && matchesQuery(entry.operation, entry.surface, entry.customerRef, entry.runtimeHint));
+function homeView() {
+  const canConfigure = dashboard.currentRole !== "member";
+  const actions = `<button class="button" data-refresh-data>Refresh</button>`;
+  const context = `<p class="page-context">A current view of what customer agents are using, what they reported, and where your team should look next.</p>`;
+  if (!dashboard.interactions.length) {
+    return `${header("HOME", dashboard.currentProduct.name, "Product overview", actions)}${context}${metricStrip([[0, "Opportunities"], [0, "Confirmed"], ["—", "Report rate"], [0, "Reports with blockers"]])}${empty("No product activity yet", "Finish setup and send one real product request or MCP tool call.", canConfigure ? "setup" : "team")}`;
+  }
+  const homeCutoff = Date.now() - rangeMs["30d"];
+  const interactions = dashboard.interactions.filter((entry) => new Date(entry.occurredAt).getTime() >= homeCutoff);
   const ids = new Set(interactions.map((entry) => entry.id));
   const reports = dashboard.reports.filter((entry) => ids.has(entry.interactionId));
   const confirmed = interactions.filter((entry) => entry.classification === "confirmed").length;
@@ -377,9 +382,11 @@ function insightsView() {
   const gap = Math.max(confirmed - reports.length, 0);
   const blockers = reports.filter((report) => reportSeverity(report) === "blocking").length;
   const workarounds = reports.filter((report) => report.workaround?.used).length;
-  const toolbar = explorerToolbar({ placeholder: "Filter by operation, customer, or runtime", primaryLabel: "Classification", primaryOptions: [["all", "All interactions"], ["confirmed", "Confirmed"], ["unclassified", "Unclassified"]], secondaryOptions: surfaces });
   const investigations = `<section class="investigations"><div><p class="eyebrow">INVESTIGATE</p><h2>Where to look next</h2></div><div class="investigation-grid">${blockerRows[0] ? `<button data-investigate-view="feedback" data-investigate-query="${esc(blockerRows[0].name)}"><span>Most common blocker</span><strong>${esc(title(blockerRows[0].name))}</strong><small>${blockerRows[0].count} blocking finding${blockerRows[0].count === 1 ? "" : "s"} →</small></button>` : `<article><span>Blockers</span><strong>None reported</strong><small>No blocking findings in this view.</small></article>`}${gap ? `<button data-investigate-view="interactions" data-investigate-filter="unreviewed"><span>Feedback gap</span><strong>${gap} confirmed</strong><small>Interactions without feedback →</small></button>` : `<article><span>Feedback gap</span><strong>Fully covered</strong><small>Every confirmed interaction has feedback.</small></article>`}${slowest ? `<button data-investigate-view="interactions" data-investigate-query="${esc(slowest.name)}"><span>Slowest operation</span><strong>${esc(slowest.name)}</strong><small>${duration(slowest.average)} average →</small></button>` : `<article><span>Latency</span><strong>No timing data</strong><small>Duration appears when integrations provide it.</small></article>`}</div></section>`;
-  return `${header("INSIGHTS", "Product learning", `${interactions.length} interactions in view`, `<button class="button" data-refresh-data>Refresh</button>`)}${toolbar}${metricStrip([[interactions.length, "Opportunities"], [confirmed, "Confirmed"], [confirmed ? `${Math.round(reports.length / confirmed * 100)}%` : "—", "Report rate"], [blockers, "Reports with blockers", blockers ? "negative" : ""], [workarounds, "Workarounds used"]])}<section class="funnel"><div><p class="eyebrow">CONVERSION</p><h2>From product response to feedback</h2></div><div class="funnel-steps"><button data-investigate-view="interactions"><strong>${interactions.length}</strong><span>Opportunities</span></button><i>→</i><button data-investigate-view="interactions" data-investigate-filter="confirmed"><strong>${confirmed}</strong><span>Confirmed</span></button><i>→</i><button data-investigate-view="feedback"><strong>${reports.length}</strong><span>Reported</span></button></div></section><div class="three-col breakdown-grid"><article><h2>Impacts</h2>${breakdown(impactRows, reports.length, "No impact data yet.")}</article><article><h2>Finding types</h2>${breakdown(findingRows, findingRows.reduce((sum, row) => sum + row.count, 0), "No findings yet.")}</article><article><h2>Topics</h2>${breakdown(topicRows, topicRows.reduce((sum, row) => sum + row.count, 0), "No topics yet.")}</article></div>${investigations}<section class="explanation compact"><h2>Evidence model</h2><p>HTTP responses begin as opportunities—not assumed agent traffic. A submitted report confirms the interaction. MCP tool calls are confirmed immediately because the protocol proves a tool-capable client used them.</p></section>`;
+  const recentReports = [...reports].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 5);
+  const recentFeedback = recentReports.length ? recentReports.map((report) => `<button class="home-feedback-row" data-open-feedback="${esc(report.id)}"><span>${badge(reportImpact(report))}<strong>${esc(report.summary)}</strong></span><small>${esc(report.operation)} · ${esc(relativeDate(report.createdAt))}</small></button>`).join("") : `<div class="inline-empty"><p>No feedback in the last 30 days.</p><small>Confirmed interactions can exist without a submitted report.</small></div>`;
+  const activity = `<div class="home-grid"><section class="home-panel"><div class="section-heading"><div><p class="eyebrow">RECENT FEEDBACK</p><h2>What agents reported</h2></div><button class="link-button" data-view="feedback">View all</button></div><div class="home-feedback-list">${recentFeedback}</div></section><section class="home-panel"><div class="section-heading"><div><p class="eyebrow">USAGE</p><h2>Top operations</h2></div><button class="link-button" data-view="interactions">View all</button></div>${breakdown(operationRows, interactions.length, "No operations in the last 30 days.")}</section></div>`;
+  return `${header("HOME", dashboard.currentProduct.name, "Last 30 days", actions)}${context}${metricStrip([[interactions.length, "Opportunities"], [confirmed, "Confirmed"], [confirmed ? `${Math.round(reports.length / confirmed * 100)}%` : "—", "Report rate"], [blockers, "Reports with blockers", blockers ? "negative" : ""], [workarounds, "Workarounds used"]])}${investigations}${activity}<section class="funnel"><div><p class="eyebrow">CONVERSION</p><h2>From product response to feedback</h2></div><div class="funnel-steps"><button data-investigate-view="interactions"><strong>${interactions.length}</strong><span>Opportunities</span></button><i>→</i><button data-investigate-view="interactions" data-investigate-filter="confirmed"><strong>${confirmed}</strong><span>Confirmed</span></button><i>→</i><button data-investigate-view="feedback"><strong>${reports.length}</strong><span>Reported</span></button></div></section><div class="three-col breakdown-grid"><article><h2>Impacts</h2>${breakdown(impactRows, reports.length, "No impact data yet.")}</article><article><h2>Finding types</h2>${breakdown(findingRows, findingRows.reduce((sum, row) => sum + row.count, 0), "No findings yet.")}</article><article><h2>Topics</h2>${breakdown(topicRows, topicRows.reduce((sum, row) => sum + row.count, 0), "No topics yet.")}</article></div><section class="explanation compact"><h2>How Epode counts activity</h2><p>HTTP responses begin as opportunities—not assumed agent traffic. A submitted report confirms the interaction. MCP tool calls are confirmed immediately because the protocol proves a tool-capable client used them.</p></section>`;
 }
 
 function interactionsView() {
@@ -608,8 +615,8 @@ function readKeyClientSnippets() {
 
 function productCreateView(firstProduct = false) {
   const heading = firstProduct ? "Create your first product" : "Create a product";
-  const copy = firstProduct ? "Products keep feedback and interactions separate. Start with the product your customers' agents use." : "The new product gets its own integration, interactions, feedback, and insights.";
-  return `${header(firstProduct ? "WELCOME" : "NEW PRODUCT", heading)}<section class="create-product"><p>${esc(copy)}</p><form id="product-form"><label><span>Product name</span><input name="name" placeholder="Search" maxlength="80" required autofocus></label><button class="button primary">Create product</button></form>${firstProduct ? "" : `<button class="back" data-view="feedback">← Cancel</button>`}</section>`;
+  const copy = firstProduct ? "Products keep feedback and interactions separate. Start with the product your customers' agents use." : "The new product gets its own Home overview, integration, interactions, feedback, and sessions.";
+  return `${header(firstProduct ? "WELCOME" : "NEW PRODUCT", heading)}<section class="create-product"><p>${esc(copy)}</p><form id="product-form"><label><span>Product name</span><input name="name" placeholder="Search" maxlength="80" required autofocus></label><button class="button primary">Create product</button></form>${firstProduct ? "" : `<button class="back" data-view="home">← Cancel</button>`}</section>`;
 }
 
 function setupView() {
@@ -685,7 +692,7 @@ function render() {
   if (!dashboard.products.length && !["team", "new-product"].includes(currentView)) {
     page.innerHTML = dashboard.currentRole === "member" ? empty("No product yet", "An owner or admin needs to create the first product.", "team") : productCreateView(true);
   } else {
-    page.innerHTML = ({ feedback: feedbackView, insights: insightsView, interactions: interactionsView, sessions: sessionsView, setup: setupView, policy: policyView, team: teamView, "new-product": productCreateView }[currentView] || feedbackView)();
+    page.innerHTML = ({ home: homeView, feedback: feedbackView, interactions: interactionsView, sessions: sessionsView, setup: setupView, policy: policyView, team: teamView, "new-product": productCreateView }[currentView] || homeView)();
   }
   if (currentView !== "setup" || !setupConnectionId || setupConnectionStatus(setupConnectionId).reports.length) {
     clearInterval(setupMonitor);
@@ -756,7 +763,7 @@ document.addEventListener("click", async (event) => {
       selectedSession = null;
       apiSecret = "";
       setupConnectionId = null;
-      currentView = "feedback";
+      currentView = "home";
       await refresh();
       setNotice(`${product.name} and its data were deleted.`);
     }
@@ -994,7 +1001,7 @@ document.querySelector("#signout").addEventListener("click", async () => {
 window.addEventListener("popstate", () => {
   clearTimeout(explorerTimer);
   const url = new URL(location.href);
-  currentView = url.searchParams.get("view") || "feedback";
+  currentView = url.searchParams.get("view") || "home";
   selectedWorkspaceId = url.searchParams.get("team") || "";
   selectedProductId = url.searchParams.get("product") || "";
   selectedReport = url.searchParams.get("report");

@@ -120,7 +120,7 @@ test("facets and investigation shortcuts change the loaded explorer", async () =
   assert.doesNotMatch(page.innerHTML, /The result answered the question/);
   assert.match(page.innerHTML, /The document could not be opened/);
 
-  await handlers.click({ target: { closest: () => button({ view: "insights" }) } });
+  await handlers.click({ target: { closest: () => button({ view: "home" }) } });
   assert.match(page.innerHTML, /Where to look next/);
   await handlers.click({ target: { closest: () => button({ investigateView: "interactions", investigateFilter: "unreviewed" }) } });
   assert.match(page.innerHTML, /Confirmed without feedback/);
@@ -128,7 +128,7 @@ test("facets and investigation shortcuts change the loaded explorer", async () =
 
 test("malformed deep links and delayed searches cannot corrupt navigation state", async () => {
   const { context, handlers } = await loadDashboard({ href: "https://app.epode.ai/?view=unknown&report=missing&filter=garbage&surface=bogus&range=forever" });
-  assert.equal(vm.runInContext("currentView", context), "feedback");
+  assert.equal(vm.runInContext("currentView", context), "home");
   assert.equal(vm.runInContext("selectedReport", context), null);
   assert.equal(vm.runInContext("explorerPrimary", context), "all");
   assert.equal(vm.runInContext("explorerSecondary", context), "all");
@@ -334,6 +334,17 @@ test("deleting the last product returns owners to first-product onboarding", asy
   });
 
   await handlers.click({ target: { closest: () => button({}, ["data-delete-product"]) } });
-  assert.equal(vm.runInContext("currentView", context), "feedback");
+  assert.equal(vm.runInContext("currentView", context), "home");
   assert.match(page.innerHTML, /Create your first product/);
+});
+
+test("the product root opens a Home overview with recent feedback and usage", async () => {
+  const { context, page } = await loadDashboard({ href: "https://app.epode.ai/" });
+  assert.equal(vm.runInContext("currentView", context), "home");
+  assert.match(page.innerHTML, /Search API/);
+  assert.match(page.innerHTML, /Last 30 days/);
+  assert.match(page.innerHTML, /What agents reported/);
+  assert.match(page.innerHTML, /Top operations/);
+  assert.match(page.innerHTML, /Where to look next/);
+  assert.match(page.innerHTML, /The document could not be opened/);
 });

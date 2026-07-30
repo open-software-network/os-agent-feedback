@@ -19,7 +19,7 @@ A company instruments selected API, website, or MCP surfaces once. Every SDK cre
 
 Agent Feedback does not identify agents. HTTP responses are unclassified opportunities until a receipt is used; generic HTTP agents may ignore response-side instructions, while a feedback-aware runtime can submit deterministically. MCP `2026-07-28` tool calls are confirmed agent interactions and expose feedback as an explicit protocol tool. The MCP transport is stateless; sessions exist only when the company supplies an explicit application-level continuity handle.
 
-Dashboard data is organized as workspace → product → integration. Users choose a product once; its keys, interactions, reviews, sessions, insights, and collection policy stay scoped to that product.
+Dashboard data is organized as workspace → product → integration. Users choose a product once; its Home overview, keys, interactions, feedback, sessions, and collection policy stay scoped to that product.
 
 Workspaces support OS Account teams. Owners can invite admins or members, change roles, and remove teammates. Admins can manage products and member invitations. Members have read-only access to feedback and observability data. Invitations are bound to the recipient's OS Account email or handle and can be accepted through a seven-day share link.
 

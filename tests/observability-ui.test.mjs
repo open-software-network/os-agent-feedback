@@ -49,7 +49,14 @@ test("sessions expose proof-based grouping, aggregate health, and a linked timel
   assert.match(store, /started_at = LEAST\(sessions_v2\.started_at, EXCLUDED\.started_at\)/);
 });
 
-test("insights turn aggregate metrics into investigations", () => {
+test("Home turns product health into an operational overview", () => {
+  assert.match(html, /data-view="home">Home/);
+  assert.doesNotMatch(html, /data-view="insights"/);
+  assert.match(script, /function homeView/);
+  assert.match(script, /view: currentView === "home" \? "" : currentView/);
+  assert.match(script, /header\("HOME", dashboard\.currentProduct\.name, "Last 30 days"/);
+  assert.match(script, /What agents reported/);
+  assert.match(script, /Top operations/);
   assert.match(script, /From product response to feedback/);
   assert.match(script, /Where to look next/);
   assert.match(script, /Most common blocker/);
@@ -57,6 +64,7 @@ test("insights turn aggregate metrics into investigations", () => {
   assert.match(script, /Slowest operation/);
   assert.match(script, /data-investigate-view/);
   assert.match(styles, /\.investigation-grid/);
+  assert.match(styles, /\.home-grid/);
 });
 
 test("the full app exposes live counts, setup health, and structured policy controls", () => {
