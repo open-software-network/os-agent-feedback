@@ -187,7 +187,11 @@ jobs:
               /dev/null
           fi
 
-          # Neither mutation returns a deployment ID for these modes. Discover
+          # Neither mutation returns a deployment ID for these modes (verified against
+          # CLI 5.30.1). Discovery requires id != previous AND image match AND
+          # createdAt after the mutation; a deployment passing all three that we
+          # did not initiate is the same image on the same service seconds apart —
+          # its outcome is the outcome this gate exists to report. Discover
           # the matching deployment once, then freeze and poll that exact ID.
           deployment_id=""
           for _ in $(seq 1 60); do
