@@ -230,9 +230,9 @@ test("owners and admins can rename teams and products without replacing their ID
   );
   assert.match(backendMain, /async fn rename_team_handler[\s\S]*require_workspace_editor/);
   assert.match(backendMain, /async fn rename_product_handler[\s\S]*require_workspace_editor/);
-  assert.match(backendStore, /pub async fn rename_workspace/);
+  assert.match(backendStore, /pub(?:\(crate\))? async fn rename_workspace/);
   assert.match(backendStore, /UPDATE workspaces SET name = \$1, slug = \$2/);
-  assert.match(backendStore, /pub async fn rename_product/);
+  assert.match(backendStore, /pub(?:\(crate\))? async fn rename_product/);
   assert.match(backendStore, /UPDATE products SET name = \$1, slug = \$2/);
   assert.match(dashboardScript, /data-rename-team/);
   assert.match(dashboardScript, /data-rename-product/);
@@ -241,7 +241,7 @@ test("owners and admins can rename teams and products without replacing their ID
 test("owners and admins can permanently delete a product with exact-name confirmation", () => {
   assert.match(backendMain, /patch\(rename_product_handler\)\.delete\(delete_product_handler\)/);
   assert.match(backendMain, /async fn delete_product_handler[\s\S]*require_workspace_editor/);
-  assert.match(backendStore, /pub async fn delete_product/);
+  assert.match(backendStore, /pub(?:\(crate\))? async fn delete_product/);
   assert.match(backendStore, /input\.confirmation\.trim\(\) != product\.name/);
   assert.match(
     backendStore,
