@@ -238,7 +238,7 @@ async function refresh() {
   }
   account.innerHTML = `<strong>${esc(dashboard.user.displayName)}</strong>${dashboard.user.email ? `<small>${esc(dashboard.user.email)}</small>` : ""}<small>${esc(title(dashboard.currentRole))} · ${esc(dashboard.workspace.name)}</small>`;
   renderProductScope();
-  const navigationCounts = { feedback: dashboard.reports.length, interactions: dashboard.interactions.length, sessions: dashboard.sessions.length };
+  const navigationCounts = { feedback: dashboard.reports.length, sessions: dashboard.sessions.length };
   for (const [view, count] of Object.entries(navigationCounts)) {
     const element = document.querySelector(`[data-nav-count="${view}"]`);
     if (element) element.textContent = String(count);
