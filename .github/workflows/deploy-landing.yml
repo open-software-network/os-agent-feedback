@@ -23,7 +23,6 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     env:
-      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -36,6 +35,9 @@ jobs:
         run: npm install --global "@railway/cli@${RAILWAY_CLI_VERSION}"
 
       - name: Upload landing page
+        # RAILWAY_TOKEN is step-scoped so the npm install above never sees it.
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           set -euo pipefail
           if [[ -z "$RAILWAY_TOKEN" ]]; then

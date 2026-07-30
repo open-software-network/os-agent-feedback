@@ -115,7 +115,6 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     env:
-      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
       IMAGE_REF: ghcr.io/open-software-network/os-epode-api:${{ needs.resolve.outputs.sha_short }}
       IMAGE_DIGEST_REF: ghcr.io/open-software-network/os-epode-api@${{ needs.resolve.outputs.digest }}
@@ -145,6 +144,9 @@ jobs:
             "$IMAGE_DIGEST_REF"
 
       - name: Deploy SHA image and wait for production
+        # RAILWAY_TOKEN is step-scoped so npm install and docker steps never see it.
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           set -euo pipefail
           if [[ -z "$RAILWAY_TOKEN" ]]; then
@@ -193,8 +195,15 @@ jobs:
               --json)
             deployment_id=$(jq -r '.[0].id // empty' <<< "$deployment")
             status=$(jq -r '.[0].status // empty' <<< "$deployment")
+            deployment_image=$(jq -r '.[0].meta.image // empty' <<< "$deployment")
 
             if [[ -z "$deployment_id" || "$deployment_id" == "$previous_id" ]]; then
+              sleep 10
+              continue
+            fi
+            # A concurrent deploy from another source would surface here with a
+            # different image; skip it rather than reporting its status as ours.
+            if [[ -n "$deployment_image" && "$deployment_image" != "$IMAGE_REF" ]]; then
               sleep 10
               continue
             fi
