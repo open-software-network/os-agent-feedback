@@ -14,6 +14,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 const GITHUB_BODY_LIMIT: usize = 65_536;
+/// Shared by the renderer and the redaction pre-pass so the two cannot drift:
+/// anything the pre-pass skips must also be absent from the body.
+const MAX_IMPACT_VALUES: usize = 20;
 const MAX_FINDING_GROUPS: usize = 25;
 const MAX_DETAILS_PER_FINDING: usize = 3;
 const MAX_WORKAROUNDS: usize = 20;
@@ -80,7 +83,7 @@ pub(crate) fn render_issue_body(data: &IssueTemplateData) -> String {
     if data.impacts.is_empty() {
         body.push_str("- No impact reported.\n");
     } else {
-        for impact in data.impacts.iter().take(20) {
+        for impact in data.impacts.iter().take(MAX_IMPACT_VALUES) {
             let _ = writeln!(
                 body,
                 "- {}: {}",
@@ -88,7 +91,12 @@ pub(crate) fn render_issue_body(data: &IssueTemplateData) -> String {
                 impact.count
             );
         }
-        append_more_line(&mut body, data.impacts.len(), 20, "impact values");
+        append_more_line(
+            &mut body,
+            data.impacts.len(),
+            MAX_IMPACT_VALUES,
+            "impact values",
+        );
     }
 
     body.push_str("\n## Findings\n");
@@ -302,25 +310,56 @@ impl PublicationRedactions {
             data.primary_operation.as_str(),
             data.explanation.as_str(),
         ];
-        fields.extend(data.impacts.iter().map(|impact| impact.value.as_str()));
-        for finding in &data.findings {
+        // Scan exactly what the body will render, using the same caps as the
+        // renderer. Two reasons, both load-bearing:
+        //  * only rendered text can leak, and `data.findings` is unbounded and
+        //    customer-controlled (it aggregates across every report in the
+        //    group), so scanning all of it puts unbounded work on the
+        //    file-issue request path.
+        //  * adjacency is a property of the OUTPUT. Windowing over fields that
+        //    never appear, or never appear next to each other, invents splits
+        //    that cannot occur and redacts text unnecessarily.
+        fields.extend(
+            data.impacts
+                .iter()
+                .take(MAX_IMPACT_VALUES)
+                .map(|impact| impact.value.as_str()),
+        );
+        for finding in data.findings.iter().take(MAX_FINDING_GROUPS) {
             fields.push(finding.kind.as_str());
             fields.push(finding.topic.as_str());
+            // NOT capped at MAX_DETAILS_PER_FINDING: that cap bounds how many
+            // details the renderer EMITS, not how many it examines. It walks
+            // every detail and stops once three have printed, so a later detail
+            // is published whenever earlier ones are redacted. Scanning fewer
+            // than the renderer can reach would publish an unscanned field.
             fields.extend(finding.details.iter().map(String::as_str));
         }
         fields.extend(
             data.workarounds
                 .iter()
+                .take(MAX_WORKAROUNDS)
                 .filter_map(|workaround| workaround.get("detail").and_then(Value::as_str)),
         );
-        fields.extend(data.operations.iter().map(String::as_str));
-        fields.extend(data.surfaces.iter().map(String::as_str));
+        fields.extend(
+            data.operations
+                .iter()
+                .take(MAX_WHERE_VALUES)
+                .map(String::as_str),
+        );
+        fields.extend(
+            data.surfaces
+                .iter()
+                .take(MAX_WHERE_VALUES)
+                .map(String::as_str),
+        );
 
         let mut adjacent_split_values = HashSet::new();
         mark_sensitive_adjacent_windows(&mut adjacent_split_values, &fields);
         let finding_details = data
             .findings
             .iter()
+            .take(MAX_FINDING_GROUPS)
             .flat_map(|finding| finding.details.iter().map(String::as_str))
             .collect::<Vec<_>>();
         mark_sensitive_adjacent_windows(&mut adjacent_split_values, &finding_details);
