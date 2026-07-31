@@ -70,6 +70,12 @@ function createProductServer() {
 const mcp = createMcpHandler(createProductServer, {
   legacy: "stateless",
   responseMode: "json",
+  // The tool list and discovery document are deterministic for this server,
+  // so advertise a real cache lifetime instead of the uncacheable default.
+  cacheHints: {
+    "tools/list": { ttlMs: 60_000, cacheScope: "public" },
+    "server/discover": { ttlMs: 60_000, cacheScope: "public" },
+  },
 });
 const handleMcp = toNodeHandler(mcp);
 

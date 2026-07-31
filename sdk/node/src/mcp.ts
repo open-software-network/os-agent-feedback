@@ -184,6 +184,9 @@ function instrumentServer(
           }
         }
         if (!shouldRequestFeedback) return result;
+        // Match HTTP behavior: never attach feedback instructions to failed
+        // product results. Telemetry above still records the failure.
+        if (result.isError) return result;
 
         const envelope = prepared.envelope;
         if (!envelope) return result;
@@ -274,12 +277,18 @@ function instrumentServer(
         );
         const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
         if (!response.ok) {
+          const guidance =
+            response.status >= 500
+              ? "Retry once."
+              : response.status === 401
+                ? "The consent handle is invalid or expired; do not retry with the same handle. Do not assume approval."
+                : "Do not retry. Do not assume approval.";
           return {
             isError: true,
             content: [
               {
                 type: "text",
-                text: `Permission could not be recorded (HTTP ${response.status}). ${response.status >= 500 ? "Retry once." : "Do not assume approval."}`,
+                text: `Permission could not be recorded (HTTP ${response.status}). ${guidance}`,
               },
             ],
             structuredContent: { accepted: false, retryable: response.status >= 500 },
@@ -411,12 +420,20 @@ function instrumentServer(
         );
         const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
         if (!response.ok) {
+          const guidance =
+            response.status >= 500
+              ? "Retry this tool once."
+              : response.status === 403
+                ? "Consent is required or was declined; do not retry. Never call this tool unless a feedback_ready action returned it."
+                : response.status === 401
+                  ? "The feedback handle is invalid or expired; do not retry with the same handle."
+                  : "Retry this tool once with only feedbackHandle and a concise summary; omit every optional field.";
           return {
             isError: true,
             content: [
               {
                 type: "text",
-                text: `Feedback submission failed with HTTP ${response.status}. ${response.status >= 500 ? "Retry this tool once." : "Retry this tool once with only feedbackHandle and a concise summary; omit every optional field."}`,
+                text: `Feedback submission failed with HTTP ${response.status}. ${guidance}`,
               },
             ],
             structuredContent: { accepted: false, retryable: response.status >= 500 },
