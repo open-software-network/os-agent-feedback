@@ -2047,28 +2047,23 @@ pub(crate) async fn dashboard_session_by_id(
     })
 }
 
-fn opaque_ref(value: Option<String>, field: &str) -> Result<Option<String>, ApiError> {
+fn opaque_ref(value: Option<String>) -> Option<String> {
     let value = value.filter(|value| !value.trim().is_empty());
-    if value.as_ref().is_some_and(|value| {
-        value.chars().count() > 160
-            || value.contains('@')
-            || value.chars().any(char::is_whitespace)
-            || !value
+    value.filter(|value| {
+        value.chars().count() <= 160
+            && !value.contains('@')
+            && !value.chars().any(char::is_whitespace)
+            && value
                 .chars()
                 .all(|character| character.is_ascii_alphanumeric() || "-_.:".contains(character))
-    }) {
-        return Err(ApiError::bad_request(format!(
-            "{field} must be an opaque identifier, not a name or email"
-        )));
-    }
-    Ok(value)
+    })
 }
 
 fn session_evidence(
     session_ref: Option<String>,
     session_source: Option<String>,
 ) -> Result<Option<(String, String)>, ApiError> {
-    let Some(session_ref) = opaque_ref(session_ref, "sessionRef")? else {
+    let Some(session_ref) = opaque_ref(session_ref) else {
         return Ok(None);
     };
     let source = session_source.unwrap_or_else(|| "customer".into());
@@ -2220,7 +2215,7 @@ async fn ingest_telemetry_event(
             "occurredAt is outside the accepted window",
         ));
     }
-    let customer_ref = opaque_ref(event.customer_ref, "customerRef")?;
+    let customer_ref = opaque_ref(event.customer_ref);
     let session_evidence = session_evidence(event.session_ref, event.session_source)?;
     let classification = if event.surface == "mcp" {
         "confirmed".to_string()
@@ -4129,7 +4124,12 @@ mod product_tests {
             "workflow/42".into(),
             "x".repeat(161),
         ] {
-            assert!(session_evidence(Some(invalid_ref), Some("mcp".into())).is_err());
+            assert_eq!(
+                session_evidence(Some(invalid_ref.clone()), Some("mcp".into()))
+                    .expect("invalid optional session refs are omitted"),
+                None
+            );
+            assert_eq!(opaque_ref(Some(invalid_ref)), None);
         }
         assert!(session_evidence(Some("workflow_42".into()), Some("transport".into())).is_err());
     }
@@ -4293,30 +4293,54 @@ mod product_tests {
                     .map_err(test_error)?;
             anyhow::ensure!(!serde_json::to_string(&detail)?.contains(canonical_ref));
 
-            let malformed_id = Uuid::new_v4();
+            let malformed_session_id = Uuid::new_v4();
+            let malformed_customer_id = Uuid::new_v4();
+            let mut malformed_customer = mcp_telemetry_event(
+                malformed_customer_id,
+                Some(10),
+                "malformed_customer",
+                None,
+                None,
+                occurred_at,
+            );
+            malformed_customer.customer_ref = Some("customer@example.com".into());
             let malformed = ingest_telemetry_batch(
                 &pool,
                 &primary_auth,
                 TelemetryBatchInput {
-                    events: vec![mcp_telemetry_event(
-                        malformed_id,
-                        Some(9),
-                        "malformed_workflow",
-                        Some("customer@example.com"),
-                        Some("mcp"),
-                        occurred_at,
-                    )],
+                    events: vec![
+                        mcp_telemetry_event(
+                            malformed_session_id,
+                            Some(9),
+                            "malformed_workflow",
+                            Some("customer@example.com"),
+                            Some("mcp"),
+                            occurred_at,
+                        ),
+                        malformed_customer,
+                    ],
                 },
             )
             .await
             .map_err(test_error)?;
-            anyhow::ensure!(malformed.accepted == 0 && malformed.dropped == 1);
+            anyhow::ensure!(malformed.accepted == 2 && malformed.dropped == 0);
+            let malformed_rows: Vec<(Uuid, Option<Uuid>, Option<String>)> = sqlx::query_as(
+                r"SELECT id, session_id, customer_ref FROM interactions_v2
+                WHERE id = ANY($1) ORDER BY id",
+            )
+            .bind(vec![malformed_session_id, malformed_customer_id])
+            .fetch_all(&pool)
+            .await?;
+            anyhow::ensure!(malformed_rows.len() == 2);
+            anyhow::ensure!(malformed_rows.iter().all(|(_, session_id, customer_ref)| {
+                session_id.is_none() && customer_ref.is_none()
+            }));
             let malformed_count: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM interactions_v2 WHERE id = $1")
-                    .bind(malformed_id)
+                sqlx::query_scalar("SELECT COUNT(*) FROM interactions_v2 WHERE id = ANY($1)")
+                    .bind(vec![malformed_session_id, malformed_customer_id])
                     .fetch_one(&pool)
                     .await?;
-            anyhow::ensure!(malformed_count == 0);
+            anyhow::ensure!(malformed_count == 2);
             let session_count: i64 =
                 sqlx::query_scalar("SELECT COUNT(*) FROM sessions_v2 WHERE workspace_id = $1")
                     .bind(workspace.id)
