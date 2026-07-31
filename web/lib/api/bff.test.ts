@@ -7,7 +7,11 @@ import { NextRequest } from "next/server";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { GET as proxyDiscoveryGet } from "@/app/.well-known/agent-feedback-v1.json/route";
-import { OPTIONS as proxyApiOptions, POST as proxyApiPost } from "@/app/api/[...path]/route";
+import {
+  GET as proxyApiGet,
+  OPTIONS as proxyApiOptions,
+  POST as proxyApiPost,
+} from "@/app/api/[...path]/route";
 import { GET as proxyAuthGet, POST as proxyAuthPost } from "@/app/auth/[...path]/route";
 import { GET as proxyJoinGet } from "@/app/join/[invitation_id]/route";
 import { OPTIONS as proxyMcpOptions, POST as proxyMcpPost } from "@/app/mcp/route";
@@ -317,6 +321,18 @@ describe("BFF response and route behavior", () => {
     expect(lastRequest().url).toBe("/mcp");
     expect(mcpResponse.status).toBe(204);
     expect(mcpResponse.headers.get("access-control-allow-origin")).toBe("https://trusted.example");
+  });
+
+  it("passes the selected team to the GitHub installation flow", async () => {
+    await proxyApiGet(
+      new NextRequest("https://app.epode.ai/api/github/install?workspaceId=workspace-selected", {
+        headers: { "x-workspace-id": "workspace-spoofed" },
+      }),
+      { params: Promise.resolve({ path: ["github", "install"] }) },
+    );
+
+    expect(lastRequest().url).toBe("/api/github/install?workspaceId=workspace-selected");
+    expect(lastRequest().headers["x-workspace-id"]).toBe("workspace-selected");
   });
 });
 

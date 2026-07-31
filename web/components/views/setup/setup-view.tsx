@@ -50,12 +50,14 @@ export function SetupView({
   rememberSecret,
   refresh,
   setNotice,
+  embedded = false,
 }: {
   data: DashboardData;
   secrets: ShownSecrets | null;
   rememberSecret: (kind: "write" | "read", secret: string) => void;
   refresh: () => Promise<unknown>;
   setNotice: (message: string) => void;
+  embedded?: boolean;
 }) {
   const [surface, setSurface] = useState<SetupSurface>("mcp");
   const [stack, setStack] = useState<SetupStack>("node-mcp");
@@ -108,7 +110,7 @@ export function SetupView({
 
       finishWriteKeyEnsure(environmentId);
       rememberSecret("write", created.secret);
-      setNotice("Product key created. Save it now — it is shown once.");
+      setNotice("Product key created. Save it now; it is shown once.");
       try {
         await refresh();
       } catch (caught) {
@@ -193,7 +195,7 @@ export function SetupView({
         body: JSON.stringify(input),
       });
       rememberSecret("read", created.secret);
-      setNotice("Read key created. Save it now — it is shown once.");
+      setNotice("Read key created. Save it now; it is shown once.");
       await refresh();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not create read key");
@@ -212,12 +214,14 @@ export function SetupView({
   const legacyKey = writeKey && !/^af_(live|read)_[0-9a-f]{8}$/.test(writeKey.prefix);
 
   return (
-    <div className="space-y-6">
-      <PageHeader
-        eyebrow="Setup"
-        title={`Connect ${data.currentProduct.name}`}
-        description={keyInteractions.length ? "Receiving data" : "Not connected"}
-      />
+    <div className="flex flex-col gap-6">
+      {embedded ? null : (
+        <PageHeader
+          eyebrow="Setup"
+          title={`Connect ${data.currentProduct.name}`}
+          description={keyInteractions.length ? "Receiving data" : "Not connected"}
+        />
+      )}
       <Metrics
         items={[
           {
@@ -323,7 +327,7 @@ export function SetupView({
       </Panel>
 
       <Panel title={`Product keys (${data.apiKeys.length})`}>
-        <div className="space-y-3">
+        <div className="flex flex-col gap-3">
           {connectionRows.map(({ key, state }) => (
             <div
               className="flex flex-wrap items-center justify-between gap-3 border-b pb-3 last:border-0"
@@ -358,11 +362,11 @@ export function SetupView({
           className="grid max-w-xl gap-3 sm:grid-cols-3"
           onSubmit={readForm.handleSubmit(createReadKey)}
         >
-          <div className="space-y-1">
+          <div className="flex flex-col gap-1">
             <Label htmlFor="read-key-label">Label</Label>
             <Input id="read-key-label" {...readForm.register("label")} />
           </div>
-          <label className="space-y-1 text-sm" htmlFor="read-key-expiration">
+          <label className="flex flex-col gap-1 text-sm" htmlFor="read-key-expiration">
             <span>Expires</span>
             <NativeSelect id="read-key-expiration" {...readForm.register("expiresInSeconds")}>
               <option value="2592000">30 days</option>
@@ -483,7 +487,7 @@ function CodeBlock({
   copy: (value: string) => Promise<void>;
 }) {
   return (
-    <div className="space-y-2">
+    <div className="flex flex-col gap-2">
       <h3 className="text-sm font-medium">{label}</h3>
       <pre className="overflow-x-auto rounded-lg bg-muted p-3 text-xs">
         <code>{value}</code>

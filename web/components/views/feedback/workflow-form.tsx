@@ -17,6 +17,7 @@ import type {
   UpdatedResponse,
   UpdateFeedbackWorkflowInput,
 } from "@/lib/api/dashboard";
+import { cn } from "@/lib/utils";
 
 const workflowSchema = z.object({
   status: z.enum(["new", "investigating", "planned", "resolved", "wont_act"]),
@@ -30,11 +31,13 @@ export function WorkflowForm({
   report,
   refresh,
   setNotice,
+  compact = false,
 }: {
   data: DashboardData;
   report: ProductFeedbackReport;
   refresh: () => Promise<unknown>;
   setNotice: (message: string) => void;
+  compact?: boolean;
 }) {
   const [error, setError] = useState("");
   const form = useForm<z.infer<typeof workflowSchema>>({
@@ -73,10 +76,13 @@ export function WorkflowForm({
   }
 
   return (
-    <form className="grid gap-3 sm:grid-cols-2" onSubmit={form.handleSubmit(submit)}>
-      <label className="space-y-1 text-sm" htmlFor="feedback-status">
-        <span>Status</span>
-        <NativeSelect id="feedback-status" {...form.register("status")}>
+    <form
+      className={cn("grid gap-3", !compact && "sm:grid-cols-2")}
+      onSubmit={form.handleSubmit(submit)}
+    >
+      <label className="flex flex-col gap-1 text-sm" htmlFor="feedback-status">
+        <span>Workflow status</span>
+        <NativeSelect aria-label="Status" id="feedback-status" {...form.register("status")}>
           <option value="new">New</option>
           <option value="investigating">Investigating</option>
           <option value="planned">Planned</option>
@@ -84,7 +90,7 @@ export function WorkflowForm({
           <option value="wont_act">Won&apos;t act</option>
         </NativeSelect>
       </label>
-      <label className="space-y-1 text-sm" htmlFor="feedback-assignee">
+      <label className="flex flex-col gap-1 text-sm" htmlFor="feedback-assignee">
         <span>Assignee</span>
         <NativeSelect id="feedback-assignee" {...form.register("assigneeOsUserId")}>
           <option value="">Unassigned</option>
@@ -95,21 +101,21 @@ export function WorkflowForm({
           ))}
         </NativeSelect>
       </label>
-      <div className="space-y-1 sm:col-span-2">
+      <div className={cn("flex flex-col gap-1", !compact && "sm:col-span-2")}>
         <Label htmlFor="feedback-tags">Tags</Label>
         <Input id="feedback-tags" placeholder="docs, latency" {...form.register("tags")} />
       </div>
-      <div className="space-y-1 sm:col-span-2">
+      <div className={cn("flex flex-col gap-1", !compact && "sm:col-span-2")}>
         <Label htmlFor="feedback-note">Internal note</Label>
         <Textarea id="feedback-note" rows={4} {...form.register("internalNote")} />
       </div>
-      <div className="sm:col-span-2">
+      <div className={cn(!compact && "sm:col-span-2")}>
         <Button type="submit" disabled={form.formState.isSubmitting}>
           Save triage
         </Button>
       </div>
       {error ? (
-        <div className="sm:col-span-2">
+        <div className={cn(!compact && "sm:col-span-2")}>
           <StatusMessage tone="error">{error}</StatusMessage>
         </div>
       ) : null}

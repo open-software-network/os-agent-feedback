@@ -23,7 +23,7 @@ describe("dashboard data flow", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Connectors" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Configuration" })).toBeVisible();
     expect(screen.getByText("Search results omitted the newest document")).toBeVisible();
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining("interactionLimit=250"),
@@ -38,10 +38,10 @@ describe("dashboard data flow", () => {
       expect.any(Object),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Feedback (1)" }));
+    fireEvent.click(screen.getByRole("button", { name: "Feedback" }));
     expect(await screen.findByRole("heading", { name: "Feedback" })).toBeVisible();
     expect(
-      screen.getByRole("button", { name: "Search results omitted the newest document" }),
+      screen.getByRole("row", { name: /Search results omitted the newest document/ }),
     ).toBeVisible();
   });
 
@@ -67,13 +67,20 @@ describe("dashboard data flow", () => {
     expect(
       fetchMock.mock.calls.some(([input]) => String(input) === "/api/github/installations"),
     ).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Configuration" }));
+    expect(await screen.findByRole("heading", { name: "Product" })).toBeVisible();
+    expect(screen.getByRole("tab", { name: "Team" })).toBeVisible();
+    expect(screen.queryByRole("tab", { name: "Setup" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Collection" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Connectors" })).not.toBeInTheDocument();
   });
 
   it.each([
-    ["connected", "GitHub connected successfully.", "status"],
-    ["conflict", "That GitHub installation is already connected to another workspace.", "alert"],
-    ["error", "Could not connect GitHub. Try again.", "alert"],
-    ["unexpected", "Could not connect GitHub. Try again.", "alert"],
+    ["connected", "GitHub connected. Choose a repository for this product.", "status"],
+    ["conflict", "That GitHub installation already belongs to another Epode team.", "alert"],
+    ["error", "GitHub could not be connected. Try the installation flow again.", "alert"],
+    ["unexpected", "GitHub could not be connected. Try the installation flow again.", "alert"],
   ])("consumes the GitHub %s callback result", async (result, message, role) => {
     window.history.replaceState({}, "", `/?view=connectors&github=${result}`);
     vi.stubGlobal(
@@ -97,6 +104,35 @@ describe("dashboard data flow", () => {
     expect(window.location.search).not.toContain("github=");
   });
 
+  it("clears the GitHub callback result after leaving Connectors", async () => {
+    const message = "GitHub connected. Choose a repository for this product.";
+    window.history.replaceState({}, "", "/?view=connectors&github=connected");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        if (String(input) === "/api/github/installations") {
+          return Promise.resolve(json({ configured: true, installations: [] }));
+        }
+        return Promise.resolve(json(dashboardFixture()));
+      }),
+    );
+
+    render(
+      <Providers>
+        <Home />
+      </Providers>,
+    );
+
+    expect(await screen.findByText(message)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Home" }));
+    expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Configuration" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Connectors" }));
+
+    expect(await screen.findByRole("heading", { name: "Connectors" })).toBeVisible();
+    expect(screen.queryByText(message)).not.toBeInTheDocument();
+  });
+
   it("restores dashboard state when the browser goes Back", async () => {
     vi.stubGlobal("fetch", vi.fn().mockImplementation(dashboardFetch(dashboardFixture())));
 
@@ -107,23 +143,29 @@ describe("dashboard data flow", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Feedback (1)" }));
+    fireEvent.click(screen.getByRole("button", { name: "Feedback" }));
     fireEvent.click(
-      await screen.findByRole("button", {
-        name: "Search results omitted the newest document",
+      await screen.findByRole("row", {
+        name: /Search results omitted the newest document/,
       }),
     );
-    expect(await screen.findByText("What the agent reported")).toBeVisible();
+    expect(
+      await screen.findByRole("heading", { name: "Search results omitted the newest document" }),
+    ).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Open interaction" }));
     expect(await screen.findByRole("heading", { name: "search" })).toBeVisible();
 
     window.history.back();
 
-    expect(await screen.findByText("What the agent reported")).toBeVisible();
+    expect(
+      await screen.findByRole("heading", { name: "Search results omitted the newest document" }),
+    ).toBeVisible();
     window.history.back();
 
     await waitFor(() =>
-      expect(screen.queryByText("What the agent reported")).not.toBeInTheDocument(),
+      expect(
+        screen.queryByRole("heading", { name: "Search results omitted the newest document" }),
+      ).not.toBeInTheDocument(),
     );
     expect(screen.getByRole("heading", { name: "Feedback" })).toBeVisible();
   });
@@ -153,6 +195,34 @@ describe("dashboard data flow", () => {
     expect(message).not.toBeInTheDocument();
   });
 
+  it("keeps legacy settings deep links inside the unified Configuration surface", async () => {
+    window.history.replaceState({}, "", "/?view=policy");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() => Promise.resolve(json(dashboardFixture()))),
+    );
+
+    render(
+      <Providers>
+        <Home />
+      </Providers>,
+    );
+
+    expect(await screen.findByRole("heading", { name: "Collection" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Configuration" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(screen.getByRole("tab", { name: "Collection" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "Setup" }));
+    expect(await screen.findByRole("heading", { name: "Setup" })).toBeVisible();
+    expect(new URL(window.location.href).searchParams.get("view")).toBe("setup");
+  });
+
   it("clears a success notice when navigating to another view", async () => {
     const data = dashboardFixture();
     vi.stubGlobal(
@@ -173,12 +243,14 @@ describe("dashboard data flow", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Configuration" }));
+    expect(await screen.findByRole("heading", { name: "Product" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Rename" }));
     fireEvent.change(screen.getByLabelText("New name"), { target: { value: "Search API 2" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(await screen.findByText("Product renamed.")).toBeVisible();
 
-    fireEvent.click(screen.getByRole("button", { name: "Feedback (1)" }));
+    fireEvent.click(screen.getByRole("button", { name: "Feedback" }));
 
     expect(screen.queryByText("Product renamed.")).not.toBeInTheDocument();
   });

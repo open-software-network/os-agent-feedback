@@ -32,3 +32,9 @@ The dashboard test suite asserts against the **source text** of
 `tests/dashboard-runtime.test.mjs`. Asset URLs in `app.html` are cache-busted
 (`?v=YYYYMMDD-<name>`) and the version string is asserted by the tests — bump
 both the file and the assertion together.
+
+## Web UI
+
+- Use shadcn/Base UI components as the primitive layer; shadcn does not define Epode's product workflows or API model.
+- Use the Central Icon System outlined Radius 3 / Stroke 2 package through the `central-icons` alias. Import individual icons from `central-icons/IconName`; do not add new Lucide imports.
+- Keep `CENTRAL_LICENSE_KEY` in the developer or deployment environment only. Never commit the key.

@@ -1,6 +1,14 @@
 import type { ComponentProps, ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyTitle,
+} from "@/components/ui/empty";
+import { NativeSelect as ShadcnNativeSelect } from "@/components/ui/native-select";
 import { cn } from "@/lib/utils";
 
 export function PageHeader({
@@ -16,9 +24,9 @@ export function PageHeader({
 }) {
   return (
     <header className="flex flex-wrap items-start justify-between gap-4">
-      <div className="space-y-1">
-        <p className="text-xs font-medium text-muted-foreground uppercase">{eyebrow}</p>
-        <h1 className="text-2xl font-semibold">{title}</h1>
+      <div className="flex flex-col gap-1">
+        <p className="text-xs text-muted-foreground">{eyebrow}</p>
+        <h1 className="text-2xl font-medium">{title}</h1>
         {description ? (
           <p className="max-w-3xl text-sm text-muted-foreground">{description}</p>
         ) : null}
@@ -38,7 +46,7 @@ export function Panel({
   className?: string;
 }) {
   return (
-    <section className={cn("space-y-3 rounded-xl border bg-card p-4", className)}>
+    <section className={cn("flex flex-col gap-3 border bg-background p-4", className)}>
       {title ? <h2 className="text-base font-medium">{title}</h2> : null}
       {children}
     </section>
@@ -46,12 +54,22 @@ export function Panel({
 }
 
 export function Metrics({ items }: { items: Array<{ label: string; value: ReactNode }> }) {
+  const columnCount = Math.min(items.length, 4);
+
   return (
-    <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+    <dl
+      className={cn(
+        "grid gap-px border bg-border",
+        columnCount === 1 && "sm:grid-cols-1 lg:grid-cols-1",
+        columnCount === 2 && "sm:grid-cols-2 lg:grid-cols-2",
+        columnCount === 3 && "sm:grid-cols-2 lg:grid-cols-3",
+        columnCount === 4 && "sm:grid-cols-2 lg:grid-cols-4",
+      )}
+    >
       {items.map((item) => (
-        <div className="rounded-xl border bg-card p-4" key={item.label}>
+        <div className="min-w-0 bg-background p-4" key={item.label}>
           <dt className="text-xs text-muted-foreground">{item.label}</dt>
-          <dd className="mt-1 text-xl font-semibold">{item.value}</dd>
+          <dd className="mt-1 text-xl font-medium">{item.value}</dd>
         </div>
       ))}
     </dl>
@@ -68,11 +86,13 @@ export function EmptyState({
   action?: ReactNode;
 }) {
   return (
-    <Panel>
-      <h2 className="font-medium">{title}</h2>
-      <p className="text-sm text-muted-foreground">{description}</p>
-      {action}
-    </Panel>
+    <Empty className="min-h-64 border bg-background">
+      <EmptyHeader>
+        <EmptyTitle>{title}</EmptyTitle>
+        <EmptyDescription>{description}</EmptyDescription>
+      </EmptyHeader>
+      {action ? <EmptyContent>{action}</EmptyContent> : null}
+    </Empty>
   );
 }
 
@@ -108,14 +128,6 @@ export function StatusMessage({
   );
 }
 
-export function NativeSelect({ className, ...props }: ComponentProps<"select">) {
-  return (
-    <select
-      className={cn(
-        "h-8 rounded-lg border border-input bg-background px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50",
-        className,
-      )}
-      {...props}
-    />
-  );
+export function NativeSelect({ className, ...props }: ComponentProps<typeof ShadcnNativeSelect>) {
+  return <ShadcnNativeSelect className={cn("w-full", className)} {...props} />;
 }

@@ -1,17 +1,17 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
+import { IconCrossSmall } from "central-icons/IconCrossSmall";
+import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { useMemo, useState } from "react";
 
-import {
-  EmptyState,
-  ErrorState,
-  NativeSelect,
-  PageHeader,
-  Panel,
-} from "@/components/dashboard/view-primitives";
+import { DetailRail, DetailWorkspace } from "@/components/dashboard/detail-rail";
+import { MetricStrip } from "@/components/dashboard/metric-strip";
+import { EmptyState, ErrorState } from "@/components/dashboard/view-primitives";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Separator } from "@/components/ui/separator";
 import {
   Table,
   TableBody,
@@ -20,9 +20,70 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { apiRequest } from "@/lib/api/client";
-import type { DashboardData, DashboardSessionDetail, ProductSession } from "@/lib/api/dashboard";
-import { formatDate, formatDuration, relativeDate, titleCase } from "@/lib/dashboard/format";
+import type {
+  DashboardData,
+  DashboardSessionDetail,
+  ProductFeedbackReport,
+  ProductInteraction,
+  ProductSession,
+} from "@/lib/api/dashboard";
+import {
+  formatDate,
+  formatDuration,
+  interfaceLabel,
+  relativeDate,
+  titleCase,
+} from "@/lib/dashboard/format";
+import { cn } from "@/lib/utils";
+
+type SessionFilter = "all" | "multi" | "feedback" | "no_feedback";
+
+const impactRank: Record<string, number> = {
+  blocked: 5,
+  hindered: 4,
+  helped_with_friction: 3,
+  neutral: 2,
+  unknown: 1,
+  helped: 0,
+};
+
+const impactLabels: Record<string, string> = {
+  blocked: "Blocked",
+  hindered: "Hindered",
+  helped_with_friction: "Friction",
+  helped: "Helped",
+  neutral: "Neutral",
+  unknown: "Unknown",
+};
+
+function sessionJourney(interactions: ProductInteraction[]) {
+  if (!interactions.length) return "No loaded interactions";
+  if (interactions.length === 1) return interactions[0]?.operation ?? "Single event";
+  if (interactions.length > 3) return `${interactions.length}-step journey`;
+  return `${interactions[0]?.operation} → ${interactions.at(-1)?.operation}`;
+}
+
+function elapsedLabel(startedAt: string, occurredAt: string) {
+  const elapsedSeconds = Math.max(
+    0,
+    Math.round((new Date(occurredAt).getTime() - new Date(startedAt).getTime()) / 1000),
+  );
+  const hours = Math.floor(elapsedSeconds / 3600);
+  const minutes = Math.floor((elapsedSeconds % 3600) / 60);
+  const seconds = elapsedSeconds % 60;
+  const parts = hours > 0 ? [hours, minutes, seconds] : [minutes, seconds];
+  return `+${parts.map((part) => String(part).padStart(2, "0")).join(":")}`;
+}
+
+function sessionDuration(startedAt: string, lastSeenAt: string) {
+  const durationMs = Math.max(0, new Date(lastSeenAt).getTime() - new Date(startedAt).getTime());
+  if (durationMs === 0) return "Single observation";
+  if (durationMs < 60_000) return "Less than a minute";
+  const minutes = Math.round(durationMs / 60_000);
+  return minutes < 60 ? `${minutes}m` : `${(minutes / 60).toFixed(1)}h`;
+}
 
 export function SessionsView({
   data,
@@ -42,9 +103,7 @@ export function SessionsView({
   refresh: () => Promise<unknown>;
 }) {
   const [query, setQuery] = useState("");
-  const [reviewState, setReviewState] = useState("all");
-  const [source, setSource] = useState("all");
-  const [range, setRange] = useState("30d");
+  const [filter, setFilter] = useState<SessionFilter>("all");
   const productId = data.currentProduct?.id;
   const detail = useQuery({
     queryKey: ["session", data.workspace.id, productId, selectedSessionId],
@@ -56,17 +115,36 @@ export function SessionsView({
     enabled: Boolean(selectedSessionId && productId),
   });
 
+  const interactionsBySession = useMemo(() => {
+    const result = new Map<string, ProductInteraction[]>();
+    for (const interaction of data.interactions) {
+      if (!interaction.sessionId) continue;
+      const interactions = result.get(interaction.sessionId) ?? [];
+      interactions.push(interaction);
+      result.set(interaction.sessionId, interactions);
+    }
+    for (const interactions of result.values()) {
+      interactions.sort((left, right) => left.occurredAt.localeCompare(right.occurredAt));
+    }
+    return result;
+  }, [data.interactions]);
+
+  const reportsBySession = useMemo(() => {
+    const result = new Map<string, ProductFeedbackReport[]>();
+    for (const report of data.reports) {
+      if (!report.sessionId) continue;
+      const reports = result.get(report.sessionId) ?? [];
+      reports.push(report);
+      result.set(report.sessionId, reports);
+    }
+    return result;
+  }, [data.reports]);
+
   const sessionRows = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    const minimum =
-      range === "7d"
-        ? Date.now() - 7 * 86_400_000
-        : range === "30d"
-          ? Date.now() - 30 * 86_400_000
-          : 0;
     return data.sessions.filter((session) => {
-      const interactions = data.interactions.filter((item) => item.sessionId === session.id);
-      const reports = data.reports.filter((item) => item.sessionId === session.id);
+      const interactions = interactionsBySession.get(session.id) ?? [];
+      const reports = reportsBySession.get(session.id) ?? [];
       const haystack = [
         session.refHint,
         session.source,
@@ -78,90 +156,96 @@ export function SessionsView({
         .toLowerCase();
       return (
         (!needle || haystack.includes(needle)) &&
-        (reviewState === "all" ||
-          (reviewState === "reviewed" ? reports.length > 0 : reports.length === 0)) &&
-        (source === "all" || session.source === source) &&
-        new Date(session.lastSeenAt).getTime() >= minimum
+        (filter === "all" ||
+          (filter === "multi" && interactions.length > 1) ||
+          (filter === "feedback" && reports.length > 0) ||
+          (filter === "no_feedback" && reports.length === 0))
       );
     });
-  }, [data.interactions, data.reports, data.sessions, query, range, reviewState, source]);
+  }, [data.sessions, filter, interactionsBySession, query, reportsBySession]);
 
-  if (selectedSessionId) {
-    if (detail.isError) return <ErrorState error={detail.error} onRetry={() => detail.refetch()} />;
-    if (!detail.data) return <p className="text-sm text-muted-foreground">Loading session…</p>;
-    return (
-      <SessionDetail
-        detail={detail.data}
-        back={() => selectSession(null)}
-        openFeedback={openFeedback}
-        openInteraction={openInteraction}
-      />
-    );
-  }
+  const loadedInteractions = Array.from(interactionsBySession.values()).reduce(
+    (total, interactions) => total + interactions.length,
+    0,
+  );
+  const multiStep = Array.from(interactionsBySession.values()).filter(
+    (interactions) => interactions.length > 1,
+  ).length;
+  const average = data.sessions.length
+    ? (loadedInteractions / data.sessions.length).toFixed(1)
+    : "0";
 
-  const sources = Array.from(new Set(data.sessions.map((session) => session.source))).sort();
   return (
-    <div className="space-y-6">
-      <PageHeader
-        eyebrow={data.currentProduct?.name ?? "No product selected"}
-        title="Sessions"
-        description="Review grouped agent activity and the feedback it produced."
-        actions={
-          <Button variant="outline" onClick={() => void refresh()}>
-            Refresh
-          </Button>
-        }
+    <DetailWorkspace
+      open={Boolean(selectedSessionId)}
+      className="bg-background"
+      inspector={
+        selectedSessionId ? (
+          <SessionInspector
+            requestedId={selectedSessionId}
+            detail={detail.data}
+            error={detail.isError ? detail.error : null}
+            close={() => selectSession(null)}
+            retry={() => detail.refetch()}
+            openFeedback={openFeedback}
+            openInteraction={openInteraction}
+          />
+        ) : null
+      }
+    >
+      <MetricStrip
+        items={[
+          { label: "Proven sessions", value: data.listState.sessionsTotal.toLocaleString() },
+          { label: "Loaded interactions", value: loadedInteractions },
+          { label: "Multi-step", value: multiStep },
+          { label: "Average interactions", value: average },
+        ]}
       />
-      <Panel>
-        <div className="grid gap-2 md:grid-cols-4">
-          <Input
+      <p className="border-b bg-muted/25 px-4 py-2 text-xs text-muted-foreground">
+        Sessions exist only when the product supplies a stable reference.
+      </p>
+      <div className="flex shrink-0 flex-col gap-2 border-b px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+        <InputGroup className="max-w-xl bg-background">
+          <InputGroupAddon>
+            <IconMagnifyingGlass />
+          </InputGroupAddon>
+          <InputGroupInput
             aria-label="Search sessions"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search sessions"
+            placeholder="Search session, customer, or operation"
           />
-          <NativeSelect
-            aria-label="Feedback state"
-            value={reviewState}
-            onChange={(event) => setReviewState(event.target.value)}
+        </InputGroup>
+        <div className="flex min-w-0 items-center gap-2 overflow-x-auto">
+          <ToggleGroup
+            value={[filter]}
+            spacing={1}
+            aria-label="Filter sessions"
+            onValueChange={(value) => {
+              const next = value[0] as SessionFilter | undefined;
+              if (next) setFilter(next);
+            }}
           >
-            <option value="all">All sessions</option>
-            <option value="reviewed">With feedback</option>
-            <option value="unreviewed">Without feedback</option>
-          </NativeSelect>
-          <NativeSelect
-            aria-label="Session source"
-            value={source}
-            onChange={(event) => setSource(event.target.value)}
-          >
-            <option value="all">All sources</option>
-            {sources.map((item) => (
-              <option value={item} key={item}>
-                {titleCase(item)}
-              </option>
-            ))}
-          </NativeSelect>
-          <NativeSelect
-            aria-label="Time range"
-            value={range}
-            onChange={(event) => setRange(event.target.value)}
-          >
-            <option value="all">All time</option>
-            <option value="7d">Last 7 days</option>
-            <option value="30d">Last 30 days</option>
-          </NativeSelect>
+            <ToggleGroupItem value="all">All</ToggleGroupItem>
+            <ToggleGroupItem value="multi">Multi-step</ToggleGroupItem>
+            <ToggleGroupItem value="feedback">Has feedback</ToggleGroupItem>
+            <ToggleGroupItem value="no_feedback">No feedback</ToggleGroupItem>
+          </ToggleGroup>
+          <Button variant="ghost" size="sm" onClick={() => void refresh()}>
+            Refresh
+          </Button>
         </div>
-      </Panel>
-      {sessionRows.length ? (
-        <Panel>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Session</TableHead>
-                <TableHead>Source</TableHead>
-                <TableHead>Interactions</TableHead>
-                <TableHead>Feedback</TableHead>
-                <TableHead>Last seen</TableHead>
+      </div>
+      <section className="min-h-0 flex-1 overflow-auto bg-background" aria-label="Sessions">
+        {sessionRows.length ? (
+          <Table className="min-w-[760px] table-fixed">
+            <TableHeader className="sticky top-0 z-[1] bg-background">
+              <TableRow className="hover:bg-background">
+                <TableHead className="h-9 w-[24%] pl-5 text-xs">Session</TableHead>
+                <TableHead className="h-9 w-[31%] text-xs">Journey</TableHead>
+                <TableHead className="h-9 w-[12%] text-xs">Interactions</TableHead>
+                <TableHead className="h-9 w-[13%] text-xs">Feedback</TableHead>
+                <TableHead className="h-9 w-[20%] pr-5 text-right text-xs">Last seen</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -169,126 +253,312 @@ export function SessionsView({
                 <SessionRow
                   key={session.id}
                   session={session}
-                  interactionCount={
-                    data.interactions.filter((item) => item.sessionId === session.id).length
-                  }
-                  reportCount={data.reports.filter((item) => item.sessionId === session.id).length}
+                  interactions={interactionsBySession.get(session.id) ?? []}
+                  reports={reportsBySession.get(session.id) ?? []}
+                  selected={selectedSessionId === session.id}
                   onOpen={() => selectSession(session.id)}
                 />
               ))}
             </TableBody>
           </Table>
-        </Panel>
-      ) : (
-        <EmptyState
-          title="No matching sessions"
-          description="Try a wider filter or wait for session telemetry."
-        />
-      )}
+        ) : (
+          <div className="h-full bg-canvas p-4">
+            <EmptyState
+              title="No matching sessions"
+              description="Clear the search or choose a different session view."
+              action={
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setQuery("");
+                    setFilter("all");
+                  }}
+                >
+                  Clear filters
+                </Button>
+              }
+            />
+          </div>
+        )}
+      </section>
       {data.listState.sessionsLoaded < data.listState.sessionsTotal ? (
-        <Button variant="outline" onClick={loadMore}>
-          Load 100 more
-        </Button>
+        <div className="shrink-0 border-t bg-background px-4 py-2">
+          <Button variant="outline" size="sm" onClick={loadMore}>
+            Load 100 more
+          </Button>
+        </div>
       ) : null}
-    </div>
+    </DetailWorkspace>
   );
 }
 
 function SessionRow({
   session,
-  interactionCount,
-  reportCount,
+  interactions,
+  reports,
+  selected,
   onOpen,
 }: {
   session: ProductSession;
-  interactionCount: number;
-  reportCount: number;
+  interactions: ProductInteraction[];
+  reports: ProductFeedbackReport[];
+  selected: boolean;
   onOpen: () => void;
 }) {
+  const strongest = [...reports].sort(
+    (left, right) =>
+      (impactRank[right.impact ?? "unknown"] ?? 0) - (impactRank[left.impact ?? "unknown"] ?? 0),
+  )[0];
+
   return (
-    <TableRow>
-      <TableCell>
-        <Button variant="link" className="h-auto p-0" onClick={onOpen}>
-          {session.refHint}
-        </Button>
+    <TableRow
+      data-state={selected ? "selected" : undefined}
+      aria-selected={selected}
+      tabIndex={0}
+      className="cursor-pointer bg-background hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring data-[state=selected]:bg-selected data-[state=selected]:shadow-[inset_2px_0_0_var(--attention)]"
+      onClick={onOpen}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpen();
+        }
+      }}
+    >
+      <TableCell className="h-[66px] overflow-hidden pl-5">
+        <p className="truncate font-mono text-xs font-medium">{session.refHint}</p>
+        <p className="mt-1 truncate text-xs text-muted-foreground">
+          {interfaceLabel(session.source)}
+        </p>
       </TableCell>
-      <TableCell>{titleCase(session.source)}</TableCell>
-      <TableCell>{interactionCount}</TableCell>
-      <TableCell>{reportCount}</TableCell>
-      <TableCell title={formatDate(session.lastSeenAt)}>
+      <TableCell className="overflow-hidden">
+        <p className="truncate font-mono text-xs">{sessionJourney(interactions)}</p>
+        <p className="mt-1 truncate text-xs text-muted-foreground">
+          {interactions[0]?.customerRef ?? "Unknown customer"}
+        </p>
+      </TableCell>
+      <TableCell className="text-xs">{interactions.length}</TableCell>
+      <TableCell className="text-xs">
+        {reports.length
+          ? `${reports.length} · ${impactLabels[strongest?.impact ?? "unknown"]}`
+          : "None"}
+      </TableCell>
+      <TableCell
+        className="pr-5 text-right text-xs text-muted-foreground"
+        title={formatDate(session.lastSeenAt)}
+      >
         {relativeDate(session.lastSeenAt)}
       </TableCell>
     </TableRow>
   );
 }
 
-function SessionDetail({
+function SessionInspector({
+  requestedId,
   detail,
-  back,
+  error,
+  close,
+  retry,
+  openFeedback,
+  openInteraction,
+}: {
+  requestedId: string;
+  detail?: DashboardSessionDetail;
+  error: Error | null;
+  close: () => void;
+  retry: () => Promise<unknown>;
+  openFeedback: (reportId: string) => void;
+  openInteraction: (interactionId: string) => void;
+}) {
+  return (
+    <DetailRail open onClose={close} label="Session detail">
+      <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-4">
+        <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
+          {detail?.session.refHint ?? requestedId}
+        </span>
+        <Button variant="ghost" size="icon-sm" aria-label="Close session detail" onClick={close}>
+          <IconCrossSmall />
+        </Button>
+      </div>
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="p-5">
+          {error ? (
+            <ErrorState error={error} onRetry={() => void retry()} />
+          ) : detail ? (
+            <SessionJourney
+              detail={detail}
+              openFeedback={openFeedback}
+              openInteraction={openInteraction}
+            />
+          ) : (
+            <p className="text-sm text-muted-foreground" role="status">
+              Loading session…
+            </p>
+          )}
+        </div>
+      </ScrollArea>
+    </DetailRail>
+  );
+}
+
+function SessionJourney({
+  detail,
   openFeedback,
   openInteraction,
 }: {
   detail: DashboardSessionDetail;
-  back: () => void;
   openFeedback: (reportId: string) => void;
   openInteraction: (interactionId: string) => void;
 }) {
   const reportsByInteraction = new Map(
     detail.reports.map((report) => [report.interactionId, report]),
   );
+  const interactions = [...detail.interactions].sort((left, right) =>
+    left.occurredAt.localeCompare(right.occurredAt),
+  );
+
   return (
-    <div className="space-y-6">
-      <PageHeader
-        eyebrow="Session"
-        title={detail.session.refHint}
-        description={`${titleCase(detail.session.source)} · ${formatDate(detail.session.startedAt)} to ${formatDate(detail.session.lastSeenAt)}`}
-        actions={
-          <Button variant="outline" onClick={back}>
-            Back to sessions
-          </Button>
-        }
-      />
-      <Panel title="Timeline">
-        {detail.interactions.length ? (
-          <ol className="space-y-3">
-            {[...detail.interactions]
-              .sort((left, right) => left.occurredAt.localeCompare(right.occurredAt))
-              .map((interaction) => {
-                const report = reportsByInteraction.get(interaction.id);
-                return (
-                  <li
-                    className="grid gap-2 border-b pb-3 last:border-0 sm:grid-cols-[10rem_1fr_auto]"
-                    key={interaction.id}
-                  >
-                    <time className="text-sm text-muted-foreground">
-                      {formatDate(interaction.occurredAt)}
-                    </time>
-                    <div>
-                      <Button
-                        variant="link"
-                        className="h-auto justify-start p-0 font-medium"
-                        onClick={() => openInteraction(interaction.id)}
-                      >
-                        {interaction.operation}
-                      </Button>
-                      <p className="text-sm text-muted-foreground">
-                        {titleCase(interaction.surface)} · {formatDuration(interaction.durationMs)}{" "}
-                        · HTTP {interaction.statusCode ?? "—"}
-                      </p>
+    <>
+      <p className="text-xs text-muted-foreground">Proven session</p>
+      <div className="mt-2 flex items-start justify-between gap-3">
+        <h2 className="min-w-0 break-words font-mono text-base font-medium">
+          {detail.session.refHint}
+        </h2>
+        <span className="shrink-0 text-xs text-muted-foreground">
+          {interfaceLabel(detail.session.source)}
+        </span>
+      </div>
+
+      <dl className="mt-5 grid grid-cols-[100px_1fr] gap-x-3 gap-y-3 text-xs">
+        <dt className="text-muted-foreground">Started</dt>
+        <dd>{formatDate(detail.session.startedAt)}</dd>
+        <dt className="text-muted-foreground">Observed for</dt>
+        <dd>{sessionDuration(detail.session.startedAt, detail.session.lastSeenAt)}</dd>
+        <dt className="text-muted-foreground">Interactions</dt>
+        <dd>{interactions.length}</dd>
+        <dt className="text-muted-foreground">Feedback reports</dt>
+        <dd>{detail.reports.length}</dd>
+      </dl>
+      <p className="mt-4 text-xs leading-5 text-muted-foreground">
+        Epode groups this journey only because the product supplied a stable session reference.
+      </p>
+
+      <Separator className="my-5" />
+
+      <section aria-labelledby="observed-journey-heading">
+        <h3 id="observed-journey-heading" className="text-xs font-medium">
+          Observed journey
+        </h3>
+        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+          Structured interaction metadata in chronological order.
+        </p>
+        <ol className="relative mt-4 before:absolute before:top-2 before:bottom-2 before:left-[5px] before:border-l before:border-dotted before:border-foreground/25 before:content-['']">
+          <JourneyCap label="Session started" timestamp={detail.session.startedAt} />
+          {interactions.length ? (
+            interactions.map((interaction, index) => {
+              const report = reportsByInteraction.get(interaction.id);
+              const isError = interaction.statusCode !== null && interaction.statusCode >= 400;
+              return (
+                <li
+                  key={interaction.id}
+                  className="relative grid grid-cols-[12px_minmax(0,1fr)] gap-3 pb-5"
+                >
+                  <span
+                    className={cn(
+                      "relative z-[1] mt-1 size-3 border bg-background",
+                      isError && "border-destructive bg-destructive",
+                      !isError && report && "border-attention bg-attention",
+                      !isError && !report && "border-foreground/40",
+                    )}
+                    aria-hidden="true"
+                  />
+                  <div className="min-w-0">
+                    <div className="mb-1 flex items-center justify-between gap-3 text-[10px] text-muted-foreground">
+                      <span>{elapsedLabel(detail.session.startedAt, interaction.occurredAt)}</span>
+                      <span>Step {index + 1}</span>
                     </div>
-                    {report ? (
-                      <Button variant="outline" size="sm" onClick={() => openFeedback(report.id)}>
-                        Open feedback
-                      </Button>
+                    <Button
+                      variant="link"
+                      className="h-auto max-w-full justify-start p-0 font-mono text-xs font-medium"
+                      onClick={() => openInteraction(interaction.id)}
+                    >
+                      <span className="truncate">{interaction.operation}</span>
+                    </Button>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {interfaceLabel(interaction.surface)} ·{" "}
+                      {formatDuration(interaction.durationMs)} ·{" "}
+                      {interaction.statusCode === null
+                        ? "No status"
+                        : `HTTP ${interaction.statusCode}`}
+                    </p>
+                    {isError || report ? (
+                      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px]">
+                        {isError ? <span className="text-destructive">Error response</span> : null}
+                        {report ? (
+                          <span className="text-muted-foreground">Feedback attached</span>
+                        ) : null}
+                      </div>
                     ) : null}
-                  </li>
-                );
-              })}
-          </ol>
-        ) : (
-          <p className="text-sm text-muted-foreground">No interactions in this session.</p>
-        )}
-      </Panel>
-    </div>
+                    {report ? (
+                      <div className="mt-3 border bg-muted/30 p-3 shadow-[inset_2px_0_0_var(--attention)]">
+                        <p className="text-xs leading-5">{report.summary}</p>
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          {titleCase(report.impact ?? "Unknown impact")} ·{" "}
+                          {titleCase(report.workflowStatus)}
+                        </p>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="mt-3"
+                          onClick={() => openFeedback(report.id)}
+                        >
+                          Open feedback
+                        </Button>
+                      </div>
+                    ) : null}
+                  </div>
+                </li>
+              );
+            })
+          ) : (
+            <li className="relative grid grid-cols-[12px_minmax(0,1fr)] gap-3 pb-5">
+              <span
+                className="relative z-[1] mt-1 size-3 border border-foreground/25 bg-background"
+                aria-hidden="true"
+              />
+              <p className="text-xs text-muted-foreground">
+                No interactions were observed in this session.
+              </p>
+            </li>
+          )}
+          <JourneyCap label="Last observed" timestamp={detail.session.lastSeenAt} last />
+        </ol>
+      </section>
+    </>
+  );
+}
+
+function JourneyCap({
+  label,
+  timestamp,
+  last = false,
+}: {
+  label: string;
+  timestamp: string;
+  last?: boolean;
+}) {
+  return (
+    <li className={cn("relative grid grid-cols-[12px_minmax(0,1fr)] gap-3", !last && "pb-5")}>
+      <span
+        className="relative z-[1] mt-1 size-3 border border-foreground/40 bg-background"
+        aria-hidden="true"
+      />
+      <div>
+        <p className="text-xs font-medium">{label}</p>
+        <time dateTime={timestamp} className="mt-0.5 block text-[11px] text-muted-foreground">
+          {formatDate(timestamp)}
+        </time>
+      </div>
+    </li>
   );
 }

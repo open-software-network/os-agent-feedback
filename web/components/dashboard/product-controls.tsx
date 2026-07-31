@@ -115,7 +115,7 @@ export function ProductControls({
   }
 
   return (
-    <div className="space-y-3">
+    <div className="flex flex-col gap-3">
       <div className="flex flex-wrap gap-2">
         <Button size="sm" variant="outline" onClick={() => setMode("create")}>
           New product
@@ -137,7 +137,7 @@ export function ProductControls({
           className="flex max-w-md items-end gap-2"
           onSubmit={createForm.handleSubmit(submitCreate)}
         >
-          <div className="flex-1 space-y-1">
+          <div className="flex flex-1 flex-col gap-1">
             <Label htmlFor="create-product-name">Product name</Label>
             <Input id="create-product-name" {...createForm.register("name")} />
             <FormError message={createForm.formState.errors.name?.message} />
@@ -156,7 +156,7 @@ export function ProductControls({
           className="flex max-w-md items-end gap-2"
           onSubmit={renameForm.handleSubmit(submitRename)}
         >
-          <div className="flex-1 space-y-1">
+          <div className="flex flex-1 flex-col gap-1">
             <Label htmlFor="rename-product-name">New name</Label>
             <Input id="rename-product-name" {...renameForm.register("name")} />
             <FormError message={renameForm.formState.errors.name?.message} />
@@ -171,7 +171,10 @@ export function ProductControls({
       ) : null}
 
       {mode === "delete" && data.currentProduct ? (
-        <form className="max-w-md space-y-2" onSubmit={deleteForm.handleSubmit(submitDelete)}>
+        <form
+          className="flex max-w-md flex-col gap-2"
+          onSubmit={deleteForm.handleSubmit(submitDelete)}
+        >
           <Label htmlFor="delete-product-confirmation">
             Type <strong>{data.currentProduct.name}</strong> to confirm deletion
           </Label>

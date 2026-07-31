@@ -40,10 +40,12 @@ export function TeamView({
   data,
   refresh,
   setNotice,
+  embedded = false,
 }: {
   data: DashboardData;
   refresh: () => Promise<unknown>;
   setNotice: (message: string) => void;
+  embedded?: boolean;
 }) {
   const [error, setError] = useState("");
   const [renaming, setRenaming] = useState(false);
@@ -176,19 +178,21 @@ export function TeamView({
   );
 
   return (
-    <div className="space-y-6">
-      <PageHeader
-        eyebrow="Team"
-        title={data.workspace.name}
-        description={`${data.teamMembers.length} member${data.teamMembers.length === 1 ? "" : "s"}`}
-        actions={
-          canInvite ? (
-            <Button variant="outline" onClick={() => setRenaming(true)}>
-              Rename team
-            </Button>
-          ) : null
-        }
-      />
+    <div className="flex flex-col gap-6">
+      {embedded ? null : (
+        <PageHeader
+          eyebrow="Team"
+          title={data.workspace.name}
+          description={`${data.teamMembers.length} member${data.teamMembers.length === 1 ? "" : "s"}`}
+          actions={
+            canInvite ? (
+              <Button variant="outline" onClick={() => setRenaming(true)}>
+                Rename team
+              </Button>
+            ) : null
+          }
+        />
+      )}
       {error ? <StatusMessage tone="error">{error}</StatusMessage> : null}
       {renaming ? (
         <Panel title="Rename team">
@@ -196,7 +200,7 @@ export function TeamView({
             className="flex max-w-md items-end gap-2"
             onSubmit={renameForm.handleSubmit(renameTeam)}
           >
-            <div className="flex-1 space-y-1">
+            <div className="flex flex-1 flex-col gap-1">
               <Label htmlFor="team-name">Team name</Label>
               <Input id="team-name" {...renameForm.register("name")} />
             </div>
@@ -216,7 +220,7 @@ export function TeamView({
             className="grid max-w-2xl gap-3 sm:grid-cols-[1fr_10rem_auto]"
             onSubmit={inviteForm.handleSubmit(inviteByEmail)}
           >
-            <div className="space-y-1">
+            <div className="flex flex-col gap-1">
               <Label htmlFor="invite-email">Email address</Label>
               <Input
                 id="invite-email"
@@ -230,7 +234,7 @@ export function TeamView({
                 </p>
               ) : null}
             </div>
-            <label className="space-y-1 text-sm" htmlFor="invite-role">
+            <label className="flex flex-col gap-1 text-sm" htmlFor="invite-role">
               <span>Role</span>
               <NativeSelect id="invite-role" {...inviteForm.register("role")}>
                 <option value="member">Member</option>
@@ -250,7 +254,7 @@ export function TeamView({
       )}
 
       <Panel title="Members">
-        <div className="space-y-3">
+        <div className="flex flex-col gap-3">
           {data.teamMembers.map((member) => {
             const self = member.osUserId === data.user.id;
             const canRemove =
@@ -313,7 +317,7 @@ export function TeamView({
       {canInvite ? (
         <Panel title="Pending invitations">
           {pendingInvitations.length ? (
-            <div className="space-y-3">
+            <div className="flex flex-col gap-3">
               {pendingInvitations.map((invitation) => {
                 const canRevoke = isOwner || (isAdmin && invitation.role === "member");
                 const joinUrl = new URL(

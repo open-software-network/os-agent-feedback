@@ -25,10 +25,12 @@ export function PolicyView({
   data,
   refresh,
   setNotice,
+  embedded = false,
 }: {
   data: DashboardData;
   refresh: () => Promise<unknown>;
   setNotice: (message: string) => void;
+  embedded?: boolean;
 }) {
   const [error, setError] = useState("");
   const environment = data.currentEnvironment;
@@ -71,13 +73,15 @@ export function PolicyView({
   }
 
   return (
-    <div className="space-y-6">
-      <PageHeader
-        eyebrow="Collection policy"
-        title="Data controls"
-        description="These controls are enforced when a report reaches Epode. Product traffic stays available even if Epode is unavailable."
-      />
-      <form className="space-y-4" onSubmit={form.handleSubmit(submit)}>
+    <div className="flex flex-col gap-6">
+      {embedded ? null : (
+        <PageHeader
+          eyebrow="Collection policy"
+          title="Data controls"
+          description="These controls are enforced when a report reaches Epode. Product traffic stays available even if Epode is unavailable."
+        />
+      )}
+      <form className="flex flex-col gap-4" onSubmit={form.handleSubmit(submit)}>
         <Panel title="Feedback collection">
           <Label htmlFor="feedback-mode">Feedback mode</Label>
           <NativeSelect
@@ -85,10 +89,10 @@ export function PolicyView({
             className="w-full max-w-xl"
             {...form.register("feedbackMode")}
           >
-            <option value="never_ask">Never ask — submit autonomously</option>
-            <option value="ask_once">Ask once — remember this product&apos;s permission</option>
-            <option value="ask_always">Ask every time — request permission for each report</option>
-            <option value="off">Off — do not request feedback</option>
+            <option value="never_ask">Never ask: submit autonomously</option>
+            <option value="ask_once">Ask once: remember this product&apos;s permission</option>
+            <option value="ask_always">Ask every time: request permission for each report</option>
+            <option value="off">Off: do not request feedback</option>
           </NativeSelect>
           <p className="max-w-3xl text-sm text-muted-foreground">
             Ask modes require a matching consent attestation. Permission is scoped to this product

@@ -1,18 +1,18 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
+import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { DashboardShell } from "@/components/dashboard/dashboard-shell";
 import { ProductControls } from "@/components/dashboard/product-controls";
 import type { DashboardView, ShownSecrets } from "@/components/dashboard/types";
-import { DASHBOARD_NAV_VIEWS, DASHBOARD_VIEWS } from "@/components/dashboard/types";
+import { DASHBOARD_VIEWS } from "@/components/dashboard/types";
+import { EmptyState, ErrorState, StatusMessage } from "@/components/dashboard/view-primitives";
 import {
-  EmptyState,
-  ErrorState,
-  NativeSelect,
-  StatusMessage,
-} from "@/components/dashboard/view-primitives";
-import { DashboardHeader } from "@/components/dashboard-header";
-import { Button } from "@/components/ui/button";
+  ConfigurationView,
+  isConfigurationSection,
+  ProductConfigurationView,
+} from "@/components/views/configuration/configuration-view";
 import { ConnectorsView } from "@/components/views/connectors/connectors-view";
 import { FeedbackView } from "@/components/views/feedback/feedback-view";
 import { HomeView } from "@/components/views/home/home-view";
@@ -28,7 +28,7 @@ import {
   fetchDashboard,
   type ProductCreatedResponse,
 } from "@/lib/api/dashboard";
-import { isEditor, titleCase } from "@/lib/dashboard/format";
+import { isEditor } from "@/lib/dashboard/format";
 
 type Limits = {
   interactionLimit: number;
@@ -66,22 +66,24 @@ export function DashboardApp() {
     const url = new URL(window.location.href);
     historyMode.current = "replace";
     setNotice(null);
-    const githubResult = url.searchParams.get("github");
-    if (githubResult) {
+    const callbackResult = url.searchParams.get("github");
+    if (callbackResult) {
       url.searchParams.delete("github");
       window.history.replaceState({}, "", url);
-      if (githubResult === "connected") {
-        showNotice("GitHub connected successfully.");
-      } else if (githubResult === "conflict") {
+      if (callbackResult === "connected") {
+        showNotice("GitHub connected. Choose a repository for this product.");
+      } else if (callbackResult === "conflict") {
         showNotice(
-          "That GitHub installation is already connected to another workspace.",
+          "That GitHub installation already belongs to another Epode team.",
           6_000,
           "error",
         );
-      } else if (githubResult === "error") {
-        showNotice("Could not connect GitHub. Try again.", 6_000, "error");
       } else {
-        showNotice("Could not connect GitHub. Try again.", 6_000, "error");
+        showNotice(
+          "GitHub could not be connected. Try the installation flow again.",
+          6_000,
+          "error",
+        );
       }
     }
     if (url.searchParams.get("invite") === "invalid") {
@@ -262,8 +264,6 @@ export function DashboardApp() {
   }
   if (!data) return null;
 
-  const editor = isEditor(data.currentRole);
-
   async function productCreated(created: ProductCreatedResponse) {
     persistSecret(created.environment.id, "write", created.secret);
     setSecrets({ environmentId: created.environment.id, write: created.secret });
@@ -288,98 +288,83 @@ export function DashboardApp() {
     }
   }
 
-  const page = data.products.length ? (
-    renderView(data)
-  ) : data.currentRole === "member" ? (
-    <EmptyState
-      title="No product yet"
-      description="An owner or admin needs to create the first product."
-    />
-  ) : (
-    <EmptyState
-      title="Create your first product"
-      description="Products keep feedback, interactions, and sessions separate."
-    />
-  );
+  const page = data.products.length ? renderView(data) : renderEmptyProductState(data);
+  const configurationActive =
+    isConfigurationSection(view) || (data.products.length === 0 && data.currentRole !== "member");
+  const fullBleed = configurationActive || view === "feedback" || view === "sessions";
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <DashboardHeader
-        breadcrumb={
-          <div className="flex flex-wrap items-center gap-2">
-            <strong>Epode</strong>
-            <NativeSelect
-              aria-label="Team"
-              value={data.workspace.id}
-              onChange={(event) => changeWorkspace(event.target.value)}
-            >
-              {data.workspaceMemberships.map((membership) => (
-                <option value={membership.workspaceId} key={membership.workspaceId}>
-                  {membership.workspaceName}
-                </option>
-              ))}
-            </NativeSelect>
-            <NativeSelect
-              aria-label="Product"
-              value={data.currentProduct?.id ?? ""}
-              onChange={(event) => changeProduct(event.target.value)}
-            >
-              {data.products.length ? null : <option value="">No products</option>}
-              {data.products.map((product) => (
-                <option value={product.id} key={product.id}>
-                  {product.name}
-                </option>
-              ))}
-            </NativeSelect>
-            <span className="ml-auto text-xs text-muted-foreground">
-              {data.user.displayName} · {titleCase(data.currentRole)}
-            </span>
-            <Button size="sm" variant="ghost" onClick={() => void logout()}>
-              Sign out
-            </Button>
-          </div>
-        }
-      />
-      <div className="grid md:grid-cols-[13rem_minmax(0,1fr)]">
-        <aside className="border-b p-4 md:min-h-[calc(100vh-3.5rem)] md:border-r md:border-b-0">
-          <nav aria-label="Dashboard" className="flex flex-wrap gap-1 md:flex-col">
-            {DASHBOARD_NAV_VIEWS.filter(
-              (item) => editor || (item !== "connectors" && item !== "setup" && item !== "policy"),
-            ).map((item) => (
-              <Button
-                key={item}
-                variant={view === item ? "secondary" : "ghost"}
-                className="justify-start"
-                aria-current={view === item ? "page" : undefined}
-                onClick={() => navigate(item)}
-              >
-                {titleCase(item)}
-                {item === "feedback" ? ` (${data.listState.reportsTotal})` : ""}
-                {item === "sessions" ? ` (${data.listState.sessionsTotal})` : ""}
-              </Button>
-            ))}
-          </nav>
-          <div className="mt-5">
-            <ProductControls
-              data={data}
-              onProductCreated={productCreated}
-              onProductDeleted={productDeleted}
-              refresh={refresh}
-              setNotice={showNotice}
-            />
-          </div>
-        </aside>
-        <main className="min-w-0 p-4 md:p-8">
-          {notice ? (
-            <div className="mb-4">
+    <DashboardShell
+      data={data}
+      view={view}
+      onNavigate={navigate}
+      onWorkspaceChange={changeWorkspace}
+      onProductChange={changeProduct}
+      onLogout={() => void logout()}
+    >
+      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+        {notice ? (
+          <div className="pointer-events-none absolute inset-x-4 top-4 z-50 flex justify-center">
+            <div className="pointer-events-auto w-full max-w-xl bg-background">
               <StatusMessage tone={notice.tone}>{notice.message}</StatusMessage>
             </div>
-          ) : null}
+          </div>
+        ) : null}
+        <div
+          className={
+            fullBleed ? "min-h-0 flex-1" : "min-h-0 flex-1 overflow-auto bg-canvas p-4 md:p-6"
+          }
+        >
           {page}
-        </main>
+        </div>
       </div>
-    </div>
+    </DashboardShell>
   );
+
+  function configurationPage(
+    currentData: DashboardData,
+    section: "configuration" | "setup" | "policy" | "connectors" | "team",
+    content: ReactNode,
+  ) {
+    return (
+      <ConfigurationView
+        data={currentData}
+        section={section}
+        onSectionChange={(nextSection) => navigate(nextSection)}
+      >
+        {content}
+      </ConfigurationView>
+    );
+  }
+
+  function productControls(currentData: DashboardData) {
+    return (
+      <ProductControls
+        data={currentData}
+        onProductCreated={productCreated}
+        onProductDeleted={productDeleted}
+        refresh={refresh}
+        setNotice={showNotice}
+      />
+    );
+  }
+
+  function renderEmptyProductState(currentData: DashboardData) {
+    if (currentData.currentRole === "member") {
+      return (
+        <EmptyState
+          title="No product yet"
+          description="An owner or admin needs to create the first product."
+        />
+      );
+    }
+
+    return configurationPage(
+      currentData,
+      "configuration",
+      <ProductConfigurationView data={currentData} controls={productControls(currentData)} />,
+    );
+  }
 
   function renderView(currentData: DashboardData) {
     switch (view) {
@@ -426,26 +411,47 @@ export function DashboardApp() {
             }
           />
         );
-      case "connectors":
-        return isEditor(currentData.currentRole) ? (
-          <ConnectorsView data={currentData} />
-        ) : (
-          <HomeView data={currentData} openFeedback={openFeedback} refresh={refresh} />
-        );
       case "setup":
-        return (
+        return configurationPage(
+          currentData,
+          "setup",
           <SetupView
             data={currentData}
             secrets={secrets}
             rememberSecret={rememberSecret}
             refresh={refresh}
             setNotice={showNotice}
-          />
+            embedded
+          />,
         );
       case "policy":
-        return <PolicyView data={currentData} refresh={refresh} setNotice={showNotice} />;
+        return configurationPage(
+          currentData,
+          "policy",
+          <PolicyView data={currentData} refresh={refresh} setNotice={showNotice} embedded />,
+        );
+      case "connectors":
+        return isEditor(currentData.currentRole) ? (
+          configurationPage(
+            currentData,
+            "connectors",
+            <ConnectorsView data={currentData} embedded />,
+          )
+        ) : (
+          <HomeView data={currentData} openFeedback={openFeedback} refresh={refresh} />
+        );
       case "team":
-        return <TeamView data={currentData} refresh={refresh} setNotice={showNotice} />;
+        return configurationPage(
+          currentData,
+          "team",
+          <TeamView data={currentData} refresh={refresh} setNotice={showNotice} embedded />,
+        );
+      case "configuration":
+        return configurationPage(
+          currentData,
+          "configuration",
+          <ProductConfigurationView data={currentData} controls={productControls(currentData)} />,
+        );
       case "interactions":
         return selectedInteractionId ? (
           <InteractionDetail

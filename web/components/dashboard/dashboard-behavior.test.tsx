@@ -66,7 +66,7 @@ describe("dashboard view behavior", () => {
     expect(screen.getByText("Organization")).toBeVisible();
     expect(screen.getByRole("link", { name: "Add organization" })).toHaveAttribute(
       "href",
-      "/api/github/install",
+      `/api/github/install?workspaceId=${encodeURIComponent(data.workspace.id)}`,
     );
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(new Headers(fetchMock.mock.calls[0][1].headers).get("x-workspace-id")).toBe(
@@ -596,7 +596,7 @@ describe("dashboard view behavior", () => {
         refresh={vi.fn().mockResolvedValue(undefined)}
       />,
     );
-    expect(screen.getByRole("button", { name: "session-42" })).toBeVisible();
+    expect(screen.getByRole("row", { name: /session-42/ })).toBeVisible();
     list.unmount();
 
     const selectSession = vi.fn();
@@ -613,7 +613,7 @@ describe("dashboard view behavior", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "session-42" })).toBeVisible();
-    expect(screen.getByText("search")).toBeVisible();
+    expect(screen.getAllByText("search")[0]).toBeVisible();
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining(`/api/dashboard/sessions/${data.sessions[0].id}?productId=`),
       expect.any(Object),
@@ -859,7 +859,7 @@ describe("dashboard view behavior", () => {
     );
   });
 
-  it("renders editor feedback groups alongside the existing report list", async () => {
+  it("renders editor feedback groups in Signals alongside the report workspace", async () => {
     const data = dashboardFixture();
     const group = reportGroup();
     const fetchMock = feedbackGroupFetch(data, [group]);
@@ -878,10 +878,11 @@ describe("dashboard view behavior", () => {
       />,
     );
 
+    fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
     expect(await screen.findByText(group.groupKey)).toBeVisible();
-    expect(screen.getByRole("heading", { name: "Feedback groups" })).toBeVisible();
+    fireEvent.click(screen.getByRole("tab", { name: "Reports" }));
     expect(
-      screen.getByRole("button", { name: "Search results omitted the newest document" }),
+      screen.getByRole("row", { name: /Search results omitted the newest document/ }),
     ).toBeVisible();
     expect(screen.getByLabelText("Search feedback")).toBeVisible();
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -911,13 +912,16 @@ describe("dashboard view behavior", () => {
     );
 
     expect(
-      screen.getByRole("button", { name: "Legacy report with malformed findings" }),
+      screen.getByRole("row", { name: /Legacy report with malformed findings/ }),
     ).toBeVisible();
     expect(
-      screen.getByRole("button", { name: "Search results omitted the newest document" }),
+      screen.getByRole("row", { name: /Search results omitted the newest document/ }),
     ).toBeVisible();
+    fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
+    expect(await screen.findByText("No signals yet")).toBeVisible();
+    fireEvent.click(screen.getByRole("tab", { name: "Reports" }));
     expect(
-      await screen.findByText("No feedback groups are available for this product."),
+      screen.getByRole("row", { name: /Legacy report with malformed findings/ }),
     ).toBeVisible();
   });
 
@@ -943,12 +947,14 @@ describe("dashboard view behavior", () => {
       />,
     );
 
+    fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
+    expect(await screen.findByText("No signals yet")).toBeVisible();
+    fireEvent.click(screen.getByRole("tab", { name: "Reports" }));
+    fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Received" }));
+    fireEvent.click(screen.getByRole("button", { name: "Last 7 days" }));
     expect(
-      await screen.findByText("No feedback groups are available for this product."),
-    ).toBeVisible();
-    fireEvent.change(screen.getByLabelText("Time range"), { target: { value: "7d" } });
-    expect(
-      screen.getByRole("button", { name: "Search results omitted the newest document" }),
+      screen.getByRole("row", { name: /Search results omitted the newest document/ }),
     ).toBeVisible();
   });
 
