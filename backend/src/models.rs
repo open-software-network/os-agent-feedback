@@ -290,6 +290,19 @@ pub(crate) struct ProductGroupsResponse {
     pub has_more: bool,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct MergeReportGroupsInput {
+    pub into_group_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MergeReportGroupsResponse {
+    pub reports_moved: i64,
+    pub target_group_key: String,
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProductEnvironment {
