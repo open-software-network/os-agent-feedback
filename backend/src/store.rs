@@ -9,12 +9,16 @@ use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{Acquire, PgPool, Postgres, Transaction};
+use sqlx::{Acquire, Executor, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
     error::ApiError,
+    github::validate_repo_full_name,
     grouping::{GroupInput, ReportGrouper},
+    issue_template::{
+        IssueCount, IssueFindingRollup, IssueTemplateData, contains_sensitive_report_text,
+    },
     models::{
         ApiKeyPublic, ConsentDecisionInput, ConsentStateInput, ConsentStateResponse,
         CreateProductInput, CreateTeamInvitationInput, DashboardContext, DashboardData,
@@ -22,11 +26,13 @@ use crate::{
         FeedbackInteractionItem, FeedbackInteractionsPage, FeedbackListInteractionsInput,
         FeedbackListReportsInput, FeedbackOperationSummary, FeedbackReportItem,
         FeedbackReportsPage, FeedbackReportsResponse, FeedbackSummary, FeedbackSurfaceSummary,
-        FeedbackWindow, InsightCount, Insights, InteractionTelemetryInput, PolicyInput, Product,
-        ProductAuth, ProductEnvironment, ProductFeedbackReport, ProductFeedbackReportInput,
-        ProductFeedbackReportWithInteraction, ProductInteraction, ProductSession, TeamInvitation,
-        TeamMember, TelemetryBatchInput, TelemetryBatchResult, UpdateFeedbackWorkflowInput,
-        UpdateNameInput, UpdateTeamMemberInput, Workspace, WorkspaceMembership,
+        FeedbackWindow, GithubIssueLink, InsightCount, Insights, InteractionTelemetryInput,
+        PolicyInput, Product, ProductAuth, ProductEnvironment, ProductFeedbackReport,
+        ProductFeedbackReportInput, ProductFeedbackReportWithInteraction, ProductGithubRepo,
+        ProductGithubRepoInput, ProductInteraction, ProductReportGroup, ProductSession,
+        TeamInvitation, TeamMember, TelemetryBatchInput, TelemetryBatchResult,
+        UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput, Workspace,
+        WorkspaceMembership,
     },
     os_accounts::OsUser,
     security::{
@@ -42,6 +48,68 @@ pub(crate) struct GithubInstallationRow {
     pub(crate) account_login: String,
     pub(crate) account_type: String,
     pub(crate) created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct GroupGithubIssueRow {
+    pub(crate) repo_full_name: String,
+    pub(crate) issue_number: i64,
+    pub(crate) url: String,
+    pub(crate) state: String,
+}
+
+impl GroupGithubIssueRow {
+    pub(crate) fn link(&self) -> GithubIssueLink {
+        GithubIssueLink {
+            repo_full_name: self.repo_full_name.clone(),
+            issue_number: self.issue_number,
+            url: self.url.clone(),
+            state: self.state.clone(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct GroupIssueContext {
+    pub(crate) installation_id: Option<i64>,
+    pub(crate) repo_full_name: Option<String>,
+    pub(crate) installation_active: bool,
+    pub(crate) template: IssueTemplateData,
+}
+
+#[derive(Debug)]
+pub(crate) struct ListedProductGroup {
+    pub(crate) group: ProductReportGroup,
+    pub(crate) last_commented_report_count: Option<i64>,
+    pub(crate) state_refreshed_at: Option<DateTime<Utc>>,
+    pub(crate) needs_reconciliation: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct ProductGroupPage {
+    pub(crate) groups: Vec<ListedProductGroup>,
+    pub(crate) has_more: bool,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub(crate) struct GroupIssueSyncContext {
+    pub(crate) installation_id: i64,
+    pub(crate) repo_full_name: String,
+    pub(crate) issue_number: i64,
+    pub(crate) observed_report_count: i64,
+    pub(crate) current_report_count: i64,
+    pub(crate) earliest_new_occurred_at: Option<DateTime<Utc>>,
+    pub(crate) latest_new_occurred_at: Option<DateTime<Utc>>,
+    pub(crate) state_refreshed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub(crate) struct GroupIssueReconciliationContext {
+    pub(crate) installation_id: i64,
+    pub(crate) repo_full_name: String,
+    pub(crate) needs_reconciliation_since: DateTime<Utc>,
+    pub(crate) reconciliation_claimed_at: DateTime<Utc>,
+    pub(crate) claim_report_count: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +245,906 @@ pub(crate) async fn github_installation_workspace(
     .bind(installation_id)
     .fetch_optional(pool)
     .await?)
+}
+
+pub(crate) async fn ensure_product_in_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+) -> Result<(), ApiError> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM products WHERE id = $1 AND workspace_id = $2)",
+    )
+    .bind(product_id)
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
+    if exists {
+        Ok(())
+    } else {
+        Err(ApiError::not_found("Product not found for this team"))
+    }
+}
+
+pub(crate) async fn set_product_github_repo(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    input: &ProductGithubRepoInput,
+) -> Result<ProductGithubRepo, ApiError> {
+    validate_repo_full_name(&input.repo_full_name)
+        .map_err(|_| ApiError::bad_request("Repository name must use the owner/name form"))?;
+    ensure_product_in_workspace(pool, workspace_id, product_id).await?;
+    let installation_exists: bool = sqlx::query_scalar(
+        r"SELECT EXISTS(
+          SELECT 1 FROM github_installations
+          WHERE installation_id = $1 AND workspace_id = $2 AND revoked_at IS NULL
+        )",
+    )
+    .bind(input.installation_id)
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
+    if !installation_exists {
+        return Err(ApiError::not_found(
+            "Active GitHub installation not found for this team",
+        ));
+    }
+    let default_branch = input.default_branch.trim();
+    if default_branch.is_empty()
+        || default_branch.len() > 255
+        || default_branch.chars().any(char::is_control)
+    {
+        return Err(ApiError::bad_request("Default branch is invalid"));
+    }
+    let path_prefix = input
+        .path_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if path_prefix.is_some_and(|value| value.len() > 500 || value.chars().any(char::is_control)) {
+        return Err(ApiError::bad_request("Path prefix is invalid"));
+    }
+
+    sqlx::query_as::<_, ProductGithubRepo>(
+        r"INSERT INTO product_github_repos
+        (product_id, workspace_id, installation_id, repo_full_name, default_branch, path_prefix)
+        SELECT p.id, p.workspace_id, $3, $4, $5, $6
+        FROM products p
+        JOIN github_installations installation
+          ON installation.installation_id = $3
+         AND installation.workspace_id = p.workspace_id
+         AND installation.revoked_at IS NULL
+        WHERE p.id = $2 AND p.workspace_id = $1
+        ON CONFLICT (product_id) DO UPDATE SET
+          workspace_id = EXCLUDED.workspace_id,
+          installation_id = EXCLUDED.installation_id,
+          repo_full_name = EXCLUDED.repo_full_name,
+          default_branch = EXCLUDED.default_branch,
+          path_prefix = EXCLUDED.path_prefix,
+          updated_at = NOW()
+        RETURNING product_id, installation_id, repo_full_name, default_branch, path_prefix,
+          created_at, updated_at",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(input.installation_id)
+    .bind(&input.repo_full_name)
+    .bind(default_branch)
+    .bind(path_prefix)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| {
+        ApiError::not_found("Product or active GitHub installation not found for this team")
+    })
+}
+
+pub(crate) async fn get_product_github_repo(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+) -> Result<Option<ProductGithubRepo>, ApiError> {
+    ensure_product_in_workspace(pool, workspace_id, product_id).await?;
+    Ok(sqlx::query_as::<_, ProductGithubRepo>(
+        r"SELECT product_id, installation_id, repo_full_name, default_branch, path_prefix,
+          created_at, updated_at
+        FROM product_github_repos
+        WHERE product_id = $1 AND workspace_id = $2",
+    )
+    .bind(product_id)
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+pub(crate) async fn clear_product_github_repo(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+) -> Result<bool, ApiError> {
+    ensure_product_in_workspace(pool, workspace_id, product_id).await?;
+    let result =
+        sqlx::query("DELETE FROM product_github_repos WHERE product_id = $1 AND workspace_id = $2")
+            .bind(product_id)
+            .bind(workspace_id)
+            .execute(pool)
+            .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct GroupIssueContextRow {
+    group_key: String,
+    explanation: String,
+    installation_id: Option<i64>,
+    repo_full_name: Option<String>,
+    installation_active: bool,
+    report_count: i64,
+    earliest_occurred_at: Option<DateTime<Utc>>,
+    latest_occurred_at: Option<DateTime<Utc>>,
+    primary_kind: Option<String>,
+    primary_topic: Option<String>,
+    primary_operation: Option<String>,
+    impacts: serde_json::Value,
+    findings: serde_json::Value,
+    workarounds: serde_json::Value,
+    operations: Vec<String>,
+    surfaces: Vec<String>,
+    status_codes: Vec<i32>,
+}
+
+pub(crate) async fn group_issue_context(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    backlink: String,
+) -> Result<Option<GroupIssueContext>, ApiError> {
+    group_issue_context_with_executor(pool, workspace_id, group_key, backlink).await
+}
+
+async fn group_issue_context_with_executor<'executor>(
+    executor: impl Executor<'executor, Database = Postgres>,
+    workspace_id: Uuid,
+    group_key: &str,
+    backlink: String,
+) -> Result<Option<GroupIssueContext>, ApiError> {
+    let row = sqlx::query_as::<_, GroupIssueContextRow>(
+        r"WITH scoped_group AS (
+          SELECT g.id, g.workspace_id, g.product_id, g.group_key, g.explanation,
+            mapping.installation_id, mapping.repo_full_name,
+            (installation.installation_id IS NOT NULL) AS installation_active
+          FROM report_groups g
+          JOIN products p
+            ON p.id = g.product_id AND p.workspace_id = g.workspace_id
+          LEFT JOIN product_github_repos mapping
+            ON mapping.product_id = g.product_id
+           AND mapping.workspace_id = g.workspace_id
+          LEFT JOIN github_installations installation
+            ON installation.installation_id = mapping.installation_id
+           AND installation.workspace_id = g.workspace_id
+           AND installation.revoked_at IS NULL
+          WHERE g.workspace_id = $1 AND g.group_key = $2
+        ),
+        scoped_reports AS (
+          SELECT r.id AS report_id, r.impact, r.findings, r.workaround, r.created_at,
+            i.operation, i.surface, i.status_code, i.occurred_at
+          FROM scoped_group g
+          JOIN feedback_reports r
+            ON r.group_id = g.id AND r.workspace_id = g.workspace_id
+          JOIN interactions_v2 i
+            ON i.id = r.interaction_id AND i.workspace_id = g.workspace_id
+          JOIN product_environments environment
+            ON environment.id = i.environment_id
+           AND environment.workspace_id = g.workspace_id
+           AND environment.product_id = g.product_id
+        ),
+        expanded_findings AS (
+          SELECT reports.report_id, reports.operation, reports.occurred_at,
+            finding.ordinality,
+            finding.value ->> 'kind' AS kind,
+            finding.value ->> 'topic' AS topic,
+            finding.value ->> 'severity' AS severity,
+            finding.value ->> 'detail' AS detail
+          FROM scoped_reports reports
+          CROSS JOIN LATERAL
+            jsonb_array_elements(reports.findings) WITH ORDINALITY AS finding(value, ordinality)
+          WHERE COALESCE(finding.value ->> 'kind', '') <> ''
+            AND COALESCE(finding.value ->> 'topic', '') <> ''
+        ),
+        finding_rollups AS (
+          SELECT kind, topic, COUNT(*)::BIGINT AS count,
+            COUNT(*) FILTER (WHERE COALESCE(detail, '') <> '')::BIGINT AS detail_count,
+            COALESCE(
+              (ARRAY_AGG(detail ORDER BY occurred_at, report_id, ordinality)
+                FILTER (WHERE COALESCE(detail, '') <> ''))[1:10],
+              ARRAY[]::TEXT[]
+            ) AS details
+          FROM expanded_findings
+          GROUP BY kind, topic
+        ),
+        primary_finding AS (
+          SELECT kind, topic, operation
+          FROM expanded_findings
+          ORDER BY
+            CASE severity
+              WHEN 'blocking' THEN 3 WHEN 'major' THEN 2 WHEN 'minor' THEN 1 ELSE 0
+            END DESC,
+            CASE kind
+              WHEN 'defect' THEN 7 WHEN 'friction' THEN 6 WHEN 'gap' THEN 5
+              WHEN 'uncertainty' THEN 4 WHEN 'suggestion' THEN 3 WHEN 'other' THEN 2
+              WHEN 'strength' THEN 1 ELSE 0
+            END DESC,
+            occurred_at, report_id, ordinality
+          LIMIT 1
+        )
+        SELECT g.group_key, g.explanation, g.installation_id, g.repo_full_name,
+          g.installation_active,
+          (SELECT COUNT(*)::BIGINT FROM scoped_reports) AS report_count,
+          (SELECT MIN(occurred_at) FROM scoped_reports) AS earliest_occurred_at,
+          (SELECT MAX(occurred_at) FROM scoped_reports) AS latest_occurred_at,
+          (SELECT kind FROM primary_finding) AS primary_kind,
+          (SELECT topic FROM primary_finding) AS primary_topic,
+          COALESCE(
+            (SELECT operation FROM primary_finding),
+            (SELECT MIN(operation) FROM scoped_reports),
+            'unknown'
+          ) AS primary_operation,
+          COALESCE((
+            SELECT JSONB_AGG(
+              JSONB_BUILD_OBJECT('value', impact, 'count', count)
+              ORDER BY impact
+            )
+            FROM (
+              SELECT impact, COUNT(*)::BIGINT AS count
+              FROM scoped_reports
+              WHERE impact IS NOT NULL
+              GROUP BY impact
+            ) impact_counts
+          ), '[]'::JSONB) AS impacts,
+          COALESCE((
+            SELECT JSONB_AGG(
+              JSONB_BUILD_OBJECT(
+                'kind', kind,
+                'topic', topic,
+                'count', count,
+                'detailCount', detail_count,
+                'details', details
+              )
+              ORDER BY count DESC, kind, topic
+            )
+            FROM finding_rollups
+          ), '[]'::JSONB) AS findings,
+          COALESCE((
+            SELECT JSONB_AGG(workaround ORDER BY workaround::TEXT)
+            FROM (
+              SELECT DISTINCT workaround
+              FROM scoped_reports
+              WHERE workaround IS NOT NULL
+            ) distinct_workarounds
+          ), '[]'::JSONB) AS workarounds,
+          ARRAY(
+            SELECT DISTINCT operation FROM scoped_reports ORDER BY operation
+          ) AS operations,
+          ARRAY(
+            SELECT DISTINCT surface FROM scoped_reports ORDER BY surface
+          ) AS surfaces,
+          ARRAY(
+            SELECT DISTINCT status_code
+            FROM scoped_reports
+            WHERE status_code IS NOT NULL
+            ORDER BY status_code
+          ) AS status_codes
+        FROM scoped_group g",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .fetch_optional(executor)
+    .await?;
+
+    row.map(|row| {
+        let impacts =
+            serde_json::from_value::<Vec<IssueCount>>(row.impacts).map_err(ApiError::internal)?;
+        let findings = serde_json::from_value::<Vec<IssueFindingRollup>>(row.findings)
+            .map_err(ApiError::internal)?;
+        let workarounds = serde_json::from_value::<Vec<serde_json::Value>>(row.workarounds)
+            .map_err(ApiError::internal)?;
+        Ok(GroupIssueContext {
+            installation_id: row.installation_id,
+            repo_full_name: row.repo_full_name,
+            installation_active: row.installation_active,
+            template: IssueTemplateData {
+                group_key: row.group_key,
+                explanation: row.explanation,
+                primary_kind: row.primary_kind.unwrap_or_else(|| "none".to_owned()),
+                primary_topic: row.primary_topic.unwrap_or_else(|| "none".to_owned()),
+                primary_operation: row
+                    .primary_operation
+                    .unwrap_or_else(|| "unknown".to_owned()),
+                impacts,
+                findings,
+                workarounds,
+                operations: row.operations,
+                surfaces: row.surfaces,
+                status_codes: row.status_codes,
+                earliest_occurred_at: row.earliest_occurred_at,
+                latest_occurred_at: row.latest_occurred_at,
+                report_count: row.report_count,
+                backlink,
+            },
+        })
+    })
+    .transpose()
+}
+
+pub(crate) async fn get_group_github_issue(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+) -> Result<Option<GroupGithubIssueRow>, ApiError> {
+    Ok(sqlx::query_as::<_, GroupGithubIssueRow>(
+        r"SELECT issue.repo_full_name, issue.issue_number, issue.url, issue.state
+        FROM group_github_issues issue
+        JOIN report_groups report_group
+          ON report_group.group_key = issue.group_key
+         AND report_group.workspace_id = issue.workspace_id
+        WHERE issue.workspace_id = $1 AND issue.group_key = $2
+          AND issue.filing_state = 'filed'",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Outcome of trying to claim a group for issue filing.
+#[derive(Debug)]
+pub(crate) enum GroupIssueFilingClaim {
+    /// The caller owns the claim and should now call GitHub.
+    Claimed,
+    /// An issue already exists; return it and call nothing.
+    AlreadyFiled(Box<GroupGithubIssueRow>),
+    /// Another filer holds a fresh claim.
+    InProgress,
+    /// GitHub may already have created the issue; reconcile before filing.
+    NeedsReconciliation,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GroupIssueFilingRequest<'a> {
+    pub(crate) workspace_id: Uuid,
+    pub(crate) group_key: &'a str,
+    pub(crate) installation_id: i64,
+    pub(crate) repo_full_name: &'a str,
+    pub(crate) created_by: &'a str,
+    /// Exact report count represented by the body rendered before this claim.
+    pub(crate) claim_report_count: i64,
+}
+
+/// Claims a group for filing before any GitHub call is made.
+///
+/// The primary key on `group_key` is what de-duplicates concurrent filers, so
+/// no database connection has to be held across the network request. A filer
+/// that dies mid-call leaves a `pending` row. Once it is older than
+/// `stale_cutoff`, the outcome is ambiguous, so it is quarantined for
+/// reconciliation instead of being handed to another blind filer.
+/// `claim_report_count` becomes the evidence baseline on either direct filing
+/// or later adoption; a live recount at adoption would silently swallow reports
+/// that arrived after the rendered body.
+pub(crate) async fn claim_group_issue_filing(
+    pool: &PgPool,
+    request: GroupIssueFilingRequest<'_>,
+    stale_cutoff: DateTime<Utc>,
+) -> Result<GroupIssueFilingClaim, ApiError> {
+    let claimed = sqlx::query_scalar::<_, i32>(
+        r"INSERT INTO group_github_issues
+        (group_key, workspace_id, installation_id, repo_full_name, created_by,
+         filing_state, claimed_at, last_commented_report_count)
+        SELECT report_group.group_key, report_group.workspace_id, $3, $4, $5,
+          'pending', NOW(), $6
+        FROM report_groups report_group
+        JOIN products product
+          ON product.id = report_group.product_id
+         AND product.workspace_id = report_group.workspace_id
+        WHERE report_group.workspace_id = $1 AND report_group.group_key = $2
+        ON CONFLICT (group_key) DO NOTHING
+        RETURNING 1",
+    )
+    .bind(request.workspace_id)
+    .bind(request.group_key)
+    .bind(request.installation_id)
+    .bind(request.repo_full_name)
+    .bind(request.created_by)
+    .bind(request.claim_report_count)
+    .fetch_optional(pool)
+    .await?;
+    if claimed.is_some() {
+        return Ok(GroupIssueFilingClaim::Claimed);
+    }
+
+    if let Some(existing) =
+        get_group_github_issue(pool, request.workspace_id, request.group_key).await?
+    {
+        return Ok(GroupIssueFilingClaim::AlreadyFiled(Box::new(existing)));
+    }
+
+    let needs_reconciliation = sqlx::query_scalar::<_, bool>(
+        r"SELECT EXISTS (
+          SELECT 1 FROM group_github_issues
+          WHERE workspace_id = $1 AND group_key = $2
+            AND filing_state = 'needs_reconciliation'
+        )",
+    )
+    .bind(request.workspace_id)
+    .bind(request.group_key)
+    .fetch_one(pool)
+    .await?;
+    if needs_reconciliation {
+        return Ok(GroupIssueFilingClaim::NeedsReconciliation);
+    }
+
+    // A stale pending owner may have died after GitHub accepted the request.
+    // Quarantine it for a consistent marker listing rather than filing a
+    // possible duplicate.
+    let quarantined = sqlx::query_scalar::<_, i32>(
+        r"UPDATE group_github_issues
+        SET filing_state = 'needs_reconciliation', state_refreshed_at = NULL,
+            updated_at = NOW()
+        WHERE workspace_id = $1 AND group_key = $2
+          AND filing_state = 'pending' AND claimed_at <= $3
+        RETURNING 1",
+    )
+    .bind(request.workspace_id)
+    .bind(request.group_key)
+    .bind(stale_cutoff)
+    .fetch_optional(pool)
+    .await?;
+    if quarantined.is_some() {
+        return Ok(GroupIssueFilingClaim::NeedsReconciliation);
+    }
+    Ok(GroupIssueFilingClaim::InProgress)
+}
+
+/// Records the issue GitHub returned against a claim this caller owns.
+pub(crate) async fn complete_group_issue_filing(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    link: &GithubIssueLink,
+    report_count: i64,
+) -> Result<GroupGithubIssueRow, ApiError> {
+    sqlx::query_as::<_, GroupGithubIssueRow>(
+        r"UPDATE group_github_issues
+        SET issue_number = $3, url = $4, state = $5, filing_state = 'filed',
+            last_commented_report_count = $6, state_refreshed_at = NOW(), updated_at = NOW()
+        WHERE workspace_id = $1 AND group_key = $2 AND filing_state = 'pending'
+        RETURNING repo_full_name, issue_number, url, state",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(link.issue_number)
+    .bind(&link.url)
+    .bind(&link.state)
+    .bind(report_count)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| ApiError::internal("GitHub issue filing claim disappeared before it completed"))
+}
+
+/// Drops a claim whose GitHub call failed, so a retry can file cleanly.
+pub(crate) async fn release_group_issue_filing_claim(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        r"DELETE FROM group_github_issues
+        WHERE workspace_id = $1 AND group_key = $2 AND filing_state = 'pending'",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Retains an ambiguous filing outcome until GitHub search can settle it.
+pub(crate) async fn mark_group_issue_filing_for_reconciliation(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE group_github_issues
+        SET filing_state = 'needs_reconciliation', state_refreshed_at = NULL,
+            updated_at = NOW()
+        WHERE workspace_id = $1 AND group_key = $2 AND filing_state = 'pending'",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Claims one throttled reconciliation attempt and returns its pinned repo.
+pub(crate) async fn claim_group_issue_reconciliation(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    refresh_cutoff: DateTime<Utc>,
+) -> Result<Option<GroupIssueReconciliationContext>, ApiError> {
+    Ok(sqlx::query_as::<_, GroupIssueReconciliationContext>(
+        r"WITH candidate AS (
+          SELECT issue.group_key
+          FROM group_github_issues issue
+          JOIN report_groups report_group
+            ON report_group.group_key = issue.group_key
+           AND report_group.workspace_id = issue.workspace_id
+          JOIN products product
+            ON product.id = report_group.product_id
+           AND product.workspace_id = report_group.workspace_id
+          JOIN github_installations installation
+            ON installation.installation_id = issue.installation_id
+           AND installation.workspace_id = issue.workspace_id
+           AND installation.revoked_at IS NULL
+          WHERE issue.workspace_id = $1 AND issue.group_key = $2
+            AND issue.filing_state = 'needs_reconciliation'
+        ), claimed AS (
+          UPDATE group_github_issues issue
+          SET state_refreshed_at = NOW(), updated_at = NOW()
+          FROM candidate
+          WHERE issue.group_key = candidate.group_key
+            AND issue.workspace_id = $1
+            AND issue.filing_state = 'needs_reconciliation'
+            AND (
+              issue.state_refreshed_at IS NULL
+              OR issue.state_refreshed_at <= $3
+            )
+          RETURNING issue.group_key, issue.installation_id, issue.repo_full_name,
+            issue.claimed_at AS needs_reconciliation_since,
+            issue.state_refreshed_at AS reconciliation_claimed_at,
+            issue.last_commented_report_count AS claim_report_count
+        )
+        SELECT claimed.installation_id, claimed.repo_full_name,
+          claimed.needs_reconciliation_since, claimed.reconciliation_claimed_at,
+          claimed.claim_report_count
+        FROM claimed
+        JOIN candidate ON candidate.group_key = claimed.group_key",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(refresh_cutoff)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Adopts the exactly marked issue if this task still owns the attempt.
+pub(crate) async fn complete_group_issue_reconciliation(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    reconciliation_claimed_at: DateTime<Utc>,
+    link: &GithubIssueLink,
+    claim_report_count: i64,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE group_github_issues
+        SET issue_number = $4, url = $5, state = $6, filing_state = 'filed',
+            last_commented_report_count = $7, state_refreshed_at = NOW(), updated_at = NOW()
+        WHERE workspace_id = $1 AND group_key = $2
+          AND filing_state = 'needs_reconciliation'
+          AND state_refreshed_at = $3",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(reconciliation_claimed_at)
+    .bind(link.issue_number)
+    .bind(&link.url)
+    .bind(&link.state)
+    .bind(claim_report_count)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Releases a definitively absent issue if this task still owns the attempt.
+pub(crate) async fn release_group_issue_reconciliation_claim(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    reconciliation_claimed_at: DateTime<Utc>,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"DELETE FROM group_github_issues
+        WHERE workspace_id = $1 AND group_key = $2
+          AND filing_state = 'needs_reconciliation'
+          AND state_refreshed_at = $3",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(reconciliation_claimed_at)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ProductGroupListRow {
+    group_key: String,
+    explanation: String,
+    report_count: i64,
+    latest_occurred_at: Option<DateTime<Utc>>,
+    issue_repo_full_name: Option<String>,
+    issue_number: Option<i64>,
+    issue_url: Option<String>,
+    issue_state: Option<String>,
+    last_commented_report_count: Option<i64>,
+    state_refreshed_at: Option<DateTime<Utc>>,
+    filing_state: Option<String>,
+}
+
+pub(crate) async fn list_product_groups(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<ProductGroupPage, ApiError> {
+    ensure_product_in_workspace(pool, workspace_id, product_id).await?;
+    let limit = limit.clamp(1, 100);
+    let offset = offset.max(0);
+    let rows = sqlx::query_as::<_, ProductGroupListRow>(
+        r"SELECT report_group.group_key, report_group.explanation,
+          COUNT(environment.id)::BIGINT AS report_count,
+          MAX(interaction.occurred_at) FILTER (
+            WHERE environment.id IS NOT NULL
+          ) AS latest_occurred_at,
+          issue.repo_full_name AS issue_repo_full_name,
+          issue.issue_number,
+          issue.url AS issue_url,
+          issue.state AS issue_state,
+          issue.last_commented_report_count,
+          issue.state_refreshed_at,
+          issue.filing_state
+        FROM report_groups report_group
+        JOIN products product
+          ON product.id = report_group.product_id
+         AND product.workspace_id = report_group.workspace_id
+        LEFT JOIN feedback_reports report
+          ON report.group_id = report_group.id
+         AND report.workspace_id = report_group.workspace_id
+        LEFT JOIN interactions_v2 interaction
+          ON interaction.id = report.interaction_id
+         AND interaction.workspace_id = report_group.workspace_id
+        LEFT JOIN product_environments environment
+          ON environment.id = interaction.environment_id
+         AND environment.workspace_id = report_group.workspace_id
+         AND environment.product_id = report_group.product_id
+        LEFT JOIN group_github_issues issue
+          ON issue.group_key = report_group.group_key
+         AND issue.workspace_id = report_group.workspace_id
+        WHERE report_group.workspace_id = $1 AND report_group.product_id = $2
+        GROUP BY report_group.id, report_group.group_key, report_group.explanation,
+          issue.repo_full_name, issue.issue_number, issue.url, issue.state,
+          issue.last_commented_report_count, issue.state_refreshed_at,
+          issue.filing_state
+        ORDER BY MAX(interaction.occurred_at) DESC NULLS LAST,
+          report_group.updated_at DESC, report_group.group_key
+        LIMIT $3 OFFSET $4",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(limit + 1)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+    let has_more = i64::try_from(rows.len()).is_ok_and(|count| count > limit);
+    let groups = rows
+        .into_iter()
+        .take(usize::try_from(limit).map_err(ApiError::internal)?)
+        .map(|row| {
+            let github_issue = match (
+                row.issue_repo_full_name,
+                row.issue_number,
+                row.issue_url,
+                row.issue_state,
+            ) {
+                (Some(repo_full_name), Some(issue_number), Some(url), Some(state)) => {
+                    Some(GithubIssueLink {
+                        repo_full_name,
+                        issue_number,
+                        url,
+                        state,
+                    })
+                }
+                _ => None,
+            };
+            ListedProductGroup {
+                group: ProductReportGroup {
+                    group_key: row.group_key,
+                    explanation: row.explanation,
+                    report_count: row.report_count,
+                    latest_occurred_at: row.latest_occurred_at,
+                    github_issue,
+                },
+                last_commented_report_count: row.last_commented_report_count,
+                state_refreshed_at: row.state_refreshed_at,
+                needs_reconciliation: row.filing_state.as_deref() == Some("needs_reconciliation"),
+            }
+        })
+        .collect();
+    Ok(ProductGroupPage { groups, has_more })
+}
+
+pub(crate) async fn group_issue_sync_context(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    group_key: &str,
+) -> Result<Option<GroupIssueSyncContext>, ApiError> {
+    Ok(sqlx::query_as::<_, GroupIssueSyncContext>(
+        r"WITH scoped_issue AS (
+          -- The installation comes from the ISSUE, not the product's current
+          -- repo mapping. Remapping a product to another repo must not route
+          -- comments for an existing issue through an installation that does
+          -- not own that issue's repository: the issue keeps being updated
+          -- where it actually lives.
+          SELECT issue.group_key, issue.repo_full_name, issue.issue_number,
+            issue.last_commented_report_count, issue.state_refreshed_at,
+            report_group.id AS group_id,
+            report_group.product_id, issue.installation_id
+          FROM group_github_issues issue
+          JOIN report_groups report_group
+            ON report_group.group_key = issue.group_key
+           AND report_group.workspace_id = issue.workspace_id
+          JOIN products product
+            ON product.id = report_group.product_id
+           AND product.workspace_id = report_group.workspace_id
+          JOIN github_installations installation
+            ON installation.installation_id = issue.installation_id
+           AND installation.workspace_id = issue.workspace_id
+           AND installation.revoked_at IS NULL
+          WHERE issue.workspace_id = $1 AND issue.group_key = $2
+            AND issue.filing_state = 'filed'
+        ),
+        ordered_reports AS (
+          SELECT interaction.occurred_at,
+            ROW_NUMBER() OVER (ORDER BY report.created_at, report.id) AS report_number
+          FROM scoped_issue issue
+          JOIN feedback_reports report
+            ON report.group_id = issue.group_id AND report.workspace_id = $1
+          JOIN interactions_v2 interaction
+            ON interaction.id = report.interaction_id AND interaction.workspace_id = $1
+          JOIN product_environments environment
+            ON environment.id = interaction.environment_id
+           AND environment.workspace_id = $1
+           AND environment.product_id = issue.product_id
+        )
+        SELECT issue.installation_id, issue.repo_full_name, issue.issue_number,
+          issue.last_commented_report_count AS observed_report_count,
+          COUNT(report.report_number)::BIGINT AS current_report_count,
+          MIN(report.occurred_at) FILTER (
+            WHERE report.report_number > issue.last_commented_report_count
+          ) AS earliest_new_occurred_at,
+          MAX(report.occurred_at) FILTER (
+            WHERE report.report_number > issue.last_commented_report_count
+          ) AS latest_new_occurred_at,
+          issue.state_refreshed_at
+        FROM scoped_issue issue
+        LEFT JOIN ordered_reports report ON TRUE
+        GROUP BY issue.installation_id, issue.repo_full_name, issue.issue_number,
+          issue.last_commented_report_count, issue.state_refreshed_at",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+pub(crate) async fn bump_last_commented_report_count(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    group_key: &str,
+    observed_report_count: i64,
+    current_report_count: i64,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE group_github_issues issue
+        SET last_commented_report_count = $4, updated_at = NOW()
+        FROM report_groups report_group
+        WHERE issue.group_key = report_group.group_key
+          AND issue.workspace_id = report_group.workspace_id
+          AND issue.workspace_id = $1
+          AND issue.group_key = $2
+          AND issue.filing_state = 'filed'
+          AND issue.last_commented_report_count = $3
+          AND $4 > $3",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(observed_report_count)
+    .bind(current_report_count)
+    .execute(&mut **tx)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+pub(crate) async fn revert_last_commented_report_count(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    observed_report_count: i64,
+    claimed_report_count: i64,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE group_github_issues issue
+        SET last_commented_report_count = $3, updated_at = NOW()
+        FROM report_groups report_group
+        WHERE issue.group_key = report_group.group_key
+          AND issue.workspace_id = report_group.workspace_id
+          AND issue.workspace_id = $1
+          AND issue.group_key = $2
+          AND issue.filing_state = 'filed'
+          AND issue.last_commented_report_count = $4",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(observed_report_count)
+    .bind(claimed_report_count)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+pub(crate) async fn claim_group_issue_state_refresh(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    refresh_cutoff: DateTime<Utc>,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE group_github_issues issue
+        SET state_refreshed_at = NOW(), updated_at = NOW()
+        FROM report_groups report_group
+        WHERE issue.group_key = report_group.group_key
+          AND issue.workspace_id = report_group.workspace_id
+          AND issue.workspace_id = $1
+          AND issue.group_key = $2
+          AND issue.filing_state = 'filed'
+          AND (
+            issue.state_refreshed_at IS NULL
+            OR issue.state_refreshed_at <= $3
+          )",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(refresh_cutoff)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+pub(crate) async fn update_group_issue_state(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    state: &str,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE group_github_issues issue
+        SET state = $3, state_refreshed_at = NOW(), updated_at = NOW()
+        FROM report_groups report_group
+        WHERE issue.group_key = report_group.group_key
+          AND issue.workspace_id = report_group.workspace_id
+          AND issue.workspace_id = $1
+          AND issue.group_key = $2
+          AND issue.filing_state = 'filed'",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(state)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
 }
 
 pub(crate) async fn get_or_create_workspace(
@@ -934,6 +1902,19 @@ pub(crate) async fn delete_product(
             "Type the exact product name to confirm deletion",
         ));
     }
+    let removed_issue_links = sqlx::query_as::<_, (String, i64)>(
+        r"SELECT issue.repo_full_name, issue.issue_number
+        FROM group_github_issues issue
+        JOIN report_groups report_group
+          ON report_group.group_key = issue.group_key
+         AND report_group.workspace_id = issue.workspace_id
+        WHERE report_group.workspace_id = $1 AND report_group.product_id = $2
+        ORDER BY issue.repo_full_name, issue.issue_number",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .fetch_all(&mut *tx)
+    .await?;
     let deleted = sqlx::query_as::<_, Product>(
         "DELETE FROM products WHERE id = $1 AND workspace_id = $2 RETURNING *",
     )
@@ -942,6 +1923,15 @@ pub(crate) async fn delete_product(
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
+    for (repo_full_name, issue_number) in removed_issue_links {
+        tracing::info!(
+            %workspace_id,
+            %product_id,
+            %repo_full_name,
+            issue_number,
+            "product deletion removed Epode's GitHub issue link; customer issue remains"
+        );
+    }
     Ok(deleted)
 }
 
@@ -2494,49 +3484,6 @@ async fn regroup_changed_interaction_reports(
     Ok(())
 }
 
-fn contains_sensitive_report_text(value: &str) -> bool {
-    let value = value.to_ascii_lowercase();
-    let forbidden_pattern = [
-        "af_live_",
-        "af_read_",
-        "github_pat_",
-        "-----begin ",
-        "xoxb-",
-        "xoxp-",
-        "sk-proj-",
-        "api key",
-        "password",
-        "transcript:",
-        "prompt:",
-        "raw input:",
-        "raw output:",
-    ]
-    .iter()
-    .any(|pattern| value.contains(pattern));
-    let email_like = value.split_whitespace().any(|word| {
-        let trimmed = word.trim_matches(|character: char| {
-            !character.is_ascii_alphanumeric() && !"@._+-".contains(character)
-        });
-        trimmed
-            .split_once('@')
-            .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.'))
-    });
-    let bearer_credential = value.match_indices("bearer ").any(|(index, _)| {
-        let candidate = value[index + "bearer ".len()..]
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .trim_matches(|character: char| {
-                !character.is_ascii_alphanumeric() && !"-._~+/=".contains(character)
-            });
-        candidate.len() >= 20
-            && candidate
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || "-._~+/=".contains(character))
-    });
-    forbidden_pattern || bearer_credential || email_like
-}
-
 pub(crate) async fn feedback_consent_state(
     pool: &PgPool,
     auth: &ProductAuth,
@@ -3449,6 +4396,576 @@ mod product_tests {
         Ok(workspace_id)
     }
 
+    #[derive(Debug)]
+    struct GithubIssueGroupFixture {
+        workspace_id: Uuid,
+        product_id: Uuid,
+        environment_id: Uuid,
+        group_id: Uuid,
+        group_key: String,
+        installation_id: i64,
+    }
+
+    async fn github_issue_group_fixture(
+        pool: &PgPool,
+        label: &str,
+        report_count: usize,
+    ) -> anyhow::Result<GithubIssueGroupFixture> {
+        let workspace_id = github_test_workspace(pool, label).await?;
+        let (product, environment) = create_product(
+            pool,
+            workspace_id,
+            CreateProductInput {
+                name: label.to_owned(),
+            },
+        )
+        .await
+        .map_err(test_error)?;
+        let installation_id = i64::from(Uuid::new_v4().as_fields().0);
+        upsert_github_installation(
+            pool,
+            workspace_id,
+            installation_id,
+            "epode-test",
+            "Organization",
+        )
+        .await
+        .map_err(test_error)?;
+        set_product_github_repo(
+            pool,
+            workspace_id,
+            product.id,
+            &ProductGithubRepoInput {
+                installation_id,
+                repo_full_name: "open-software/epode-test".to_owned(),
+                default_branch: "main".to_owned(),
+                path_prefix: None,
+            },
+        )
+        .await
+        .map_err(test_error)?;
+        let group_id = Uuid::new_v4();
+        let group_key = Uuid::new_v4().simple().to_string();
+        sqlx::query(
+            r"INSERT INTO report_groups
+            (id, workspace_id, product_id, group_key, grouper_name, grouper_version, explanation)
+            VALUES ($1, $2, $3, $4, 'fingerprint', 1, 'test issue filing group')",
+        )
+        .bind(group_id)
+        .bind(workspace_id)
+        .bind(product.id)
+        .bind(&group_key)
+        .execute(pool)
+        .await?;
+        for index in 0..report_count {
+            let interaction_id = Uuid::new_v4();
+            let occurred_at = Utc::now() + Duration::seconds(i64::try_from(index)?);
+            sqlx::query(
+                r"INSERT INTO interactions_v2
+                (id, workspace_id, environment_id, surface, operation, status_code,
+                 classification, confirmation_method, occurred_at)
+                VALUES ($1, $2, $3, 'mcp', 'search_reports', 503, 'confirmed', 'mcp', $4)",
+            )
+            .bind(interaction_id)
+            .bind(workspace_id)
+            .bind(environment.id)
+            .bind(occurred_at)
+            .execute(pool)
+            .await?;
+            sqlx::query(
+                r"INSERT INTO feedback_reports
+                (id, workspace_id, interaction_id, summary, impact, findings, workaround, group_id)
+                VALUES ($1, $2, $3, $4, 'blocked', $5, $6, $7)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(workspace_id)
+            .bind(interaction_id)
+            .bind(format!("GitHub issue fixture report number {index}."))
+            .bind(serde_json::json!([{
+                "kind": "defect",
+                "topic": "search_failure",
+                "severity": "major",
+                "detail": "Search failed for a valid request."
+            }]))
+            .bind(serde_json::json!({
+                "used": true,
+                "detail": "Retried the request once."
+            }))
+            .bind(group_id)
+            .execute(pool)
+            .await?;
+        }
+        Ok(GithubIssueGroupFixture {
+            workspace_id,
+            product_id: product.id,
+            environment_id: environment.id,
+            group_id,
+            group_key,
+            installation_id,
+        })
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn recording_one_group_issue_twice_returns_the_existing_link() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let fixture = github_issue_group_fixture(&pool, "Issue idempotency test", 2).await?;
+
+        let result = async {
+            let link = GithubIssueLink {
+                repo_full_name: "open-software/epode-test".to_owned(),
+                issue_number: 42,
+                url: "https://github.com/open-software/epode-test/issues/42".to_owned(),
+                state: "open".to_owned(),
+            };
+            let stale_cutoff = Utc::now() - Duration::minutes(5);
+            let first_claim = claim_group_issue_filing(
+                &pool,
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: 4_433_427,
+                    repo_full_name: &link.repo_full_name,
+                    created_by: "usr_test",
+                    claim_report_count: 2,
+                },
+                stale_cutoff,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(matches!(first_claim, GroupIssueFilingClaim::Claimed));
+
+            // A concurrent filer must be turned away while the claim is fresh,
+            // so only one GitHub issue is ever created.
+            let contended = claim_group_issue_filing(
+                &pool,
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: 4_433_427,
+                    repo_full_name: &link.repo_full_name,
+                    created_by: "usr_other",
+                    claim_report_count: 2,
+                },
+                stale_cutoff,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(matches!(contended, GroupIssueFilingClaim::InProgress));
+
+            let first = complete_group_issue_filing(
+                &pool,
+                fixture.workspace_id,
+                &fixture.group_key,
+                &link,
+                2,
+            )
+            .await
+            .map_err(test_error)?;
+
+            // Once filed, a later attempt returns the existing issue instead of
+            // claiming again.
+            let second = claim_group_issue_filing(
+                &pool,
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: 4_433_427,
+                    repo_full_name: &link.repo_full_name,
+                    created_by: "usr_other",
+                    claim_report_count: 2,
+                },
+                stale_cutoff,
+            )
+            .await
+            .map_err(test_error)?;
+            let GroupIssueFilingClaim::AlreadyFiled(second) = second else {
+                anyhow::bail!("expected the second claim to see an already filed issue");
+            };
+
+            anyhow::ensure!(first.link() == link);
+            anyhow::ensure!(second.link() == link);
+            let count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM group_github_issues WHERE group_key = $1")
+                    .bind(&fixture.group_key)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(count == 1);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn ambiguous_filing_refuses_a_subsequent_claim() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let fixture = github_issue_group_fixture(&pool, "Ambiguous filing test", 2).await?;
+
+        let result = async {
+            let claim = claim_group_issue_filing(
+                &pool,
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: fixture.installation_id,
+                    repo_full_name: "open-software/epode-test",
+                    created_by: "usr_test",
+                    claim_report_count: 2,
+                },
+                Utc::now() - Duration::minutes(5),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(matches!(claim, GroupIssueFilingClaim::Claimed));
+            let claim_time: DateTime<Utc> = sqlx::query_scalar(
+                "SELECT claimed_at FROM group_github_issues WHERE group_key = $1",
+            )
+            .bind(&fixture.group_key)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                mark_group_issue_filing_for_reconciliation(
+                    &pool,
+                    fixture.workspace_id,
+                    &fixture.group_key,
+                )
+                .await
+                .map_err(test_error)?
+            );
+
+            let filing_state: String = sqlx::query_scalar(
+                "SELECT filing_state FROM group_github_issues WHERE group_key = $1",
+            )
+            .bind(&fixture.group_key)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(filing_state == "needs_reconciliation");
+            let retained_claim_time: DateTime<Utc> = sqlx::query_scalar(
+                "SELECT claimed_at FROM group_github_issues WHERE group_key = $1",
+            )
+            .bind(&fixture.group_key)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(retained_claim_time == claim_time);
+
+            let retry = claim_group_issue_filing(
+                &pool,
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: fixture.installation_id,
+                    repo_full_name: "open-software/epode-test",
+                    created_by: "usr_retry",
+                    claim_report_count: 2,
+                },
+                Utc::now() - Duration::minutes(5),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(matches!(retry, GroupIssueFilingClaim::NeedsReconciliation));
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn reconciliation_adopts_the_found_issue_and_claim_report_count() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let fixture = github_issue_group_fixture(&pool, "Issue adoption test", 2).await?;
+
+        let result = async {
+            let claim = claim_group_issue_filing(
+                &pool,
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: fixture.installation_id,
+                    repo_full_name: "open-software/epode-test",
+                    created_by: "usr_test",
+                    claim_report_count: 2,
+                },
+                Utc::now() - Duration::minutes(5),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(matches!(claim, GroupIssueFilingClaim::Claimed));
+            let claim_time: DateTime<Utc> = sqlx::query_scalar(
+                "SELECT claimed_at FROM group_github_issues WHERE group_key = $1",
+            )
+            .bind(&fixture.group_key)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                mark_group_issue_filing_for_reconciliation(
+                    &pool,
+                    fixture.workspace_id,
+                    &fixture.group_key,
+                )
+                .await
+                .map_err(test_error)?
+            );
+            let retained_claim_time: DateTime<Utc> = sqlx::query_scalar(
+                "SELECT claimed_at FROM group_github_issues WHERE group_key = $1",
+            )
+            .bind(&fixture.group_key)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(retained_claim_time == claim_time);
+            let interim_interaction_id = Uuid::new_v4();
+            sqlx::query(
+                r"INSERT INTO interactions_v2
+                (id, workspace_id, environment_id, surface, operation, status_code,
+                 classification, confirmation_method, occurred_at)
+                VALUES ($1, $2, $3, 'mcp', 'search_reports', 503, 'confirmed', 'mcp', NOW())",
+            )
+            .bind(interim_interaction_id)
+            .bind(fixture.workspace_id)
+            .bind(fixture.environment_id)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                r"INSERT INTO feedback_reports
+                (id, workspace_id, interaction_id, summary, impact, findings, workaround, group_id)
+                VALUES ($1, $2, $3, 'Interim report after the filing claim.', 'blocked',
+                  '[]'::JSONB, NULL, $4)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(fixture.workspace_id)
+            .bind(interim_interaction_id)
+            .bind(fixture.group_id)
+            .execute(&pool)
+            .await?;
+            let reconciliation = claim_group_issue_reconciliation(
+                &pool,
+                fixture.workspace_id,
+                &fixture.group_key,
+                Utc::now(),
+            )
+            .await
+            .map_err(test_error)?
+            .ok_or_else(|| anyhow::anyhow!("reconciliation should be claimable"))?;
+            anyhow::ensure!(reconciliation.claim_report_count == 2);
+            let live_report_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM feedback_reports WHERE workspace_id = $1 AND group_id = $2",
+            )
+            .bind(fixture.workspace_id)
+            .bind(fixture.group_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(live_report_count == 3);
+
+            let link = GithubIssueLink {
+                repo_full_name: "open-software/epode-test".to_owned(),
+                issue_number: 142,
+                url: "https://github.com/open-software/epode-test/issues/142".to_owned(),
+                state: "open".to_owned(),
+            };
+            anyhow::ensure!(
+                complete_group_issue_reconciliation(
+                    &pool,
+                    fixture.workspace_id,
+                    &fixture.group_key,
+                    reconciliation.reconciliation_claimed_at,
+                    &link,
+                    reconciliation.claim_report_count,
+                )
+                .await
+                .map_err(test_error)?
+            );
+
+            let adopted = get_group_github_issue(&pool, fixture.workspace_id, &fixture.group_key)
+                .await
+                .map_err(test_error)?
+                .ok_or_else(|| anyhow::anyhow!("adopted issue should be filed"))?;
+            anyhow::ensure!(adopted.link() == link);
+            let report_count: i64 = sqlx::query_scalar(
+                "SELECT last_commented_report_count FROM group_github_issues WHERE group_key = $1",
+            )
+            .bind(&fixture.group_key)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(report_count == 2);
+            let mut tx = pool.begin().await?;
+            let sync = group_issue_sync_context(&mut tx, fixture.workspace_id, &fixture.group_key)
+                .await
+                .map_err(test_error)?
+                .ok_or_else(|| anyhow::anyhow!("adopted issue should be syncable"))?;
+            anyhow::ensure!(sync.observed_report_count == 2);
+            anyhow::ensure!(sync.current_report_count == 3);
+            tx.rollback().await?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn product_mapping_rejects_another_workspaces_installation() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let original_workspace = github_test_workspace(&pool, "Mapping owner").await?;
+        let other_workspace = github_test_workspace(&pool, "Mapping attacker").await?;
+        let (other_product, _) = create_product(
+            &pool,
+            other_workspace,
+            CreateProductInput {
+                name: "Other workspace product".to_owned(),
+            },
+        )
+        .await
+        .map_err(test_error)?;
+        let installation_id = i64::from(Uuid::new_v4().as_fields().0);
+        upsert_github_installation(
+            &pool,
+            original_workspace,
+            installation_id,
+            "mapping-owner",
+            "Organization",
+        )
+        .await
+        .map_err(test_error)?;
+
+        let error = set_product_github_repo(
+            &pool,
+            other_workspace,
+            other_product.id,
+            &ProductGithubRepoInput {
+                installation_id,
+                repo_full_name: "open-software/private".to_owned(),
+                default_branch: "main".to_owned(),
+                path_prefix: None,
+            },
+        )
+        .await
+        .expect_err("a foreign installation must not be accepted");
+        anyhow::ensure!(error.status == StatusCode::NOT_FOUND);
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM product_github_repos WHERE product_id = $1")
+                .bind(other_product.id)
+                .fetch_one(&pool)
+                .await?;
+        anyhow::ensure!(count == 0);
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1 OR id = $2")
+            .bind(original_workspace)
+            .bind(other_workspace)
+            .execute(&pool)
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn product_group_listing_includes_counts_and_linked_issue() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let fixture = github_issue_group_fixture(&pool, "Group listing test", 2).await?;
+
+        let result = async {
+            let context = group_issue_context(
+                &pool,
+                fixture.workspace_id,
+                &fixture.group_key,
+                "https://app.epode.test/?view=feedback&group=test".to_owned(),
+            )
+            .await
+            .map_err(test_error)?
+            .ok_or_else(|| anyhow::anyhow!("fixture group should be found"))?;
+            anyhow::ensure!(context.installation_id == Some(fixture.installation_id));
+            anyhow::ensure!(context.installation_active);
+            anyhow::ensure!(context.template.report_count == 2);
+            anyhow::ensure!(context.template.findings[0].count == 2);
+
+            let link = GithubIssueLink {
+                repo_full_name: "open-software/epode-test".to_owned(),
+                issue_number: 84,
+                url: "https://github.com/open-software/epode-test/issues/84".to_owned(),
+                state: "open".to_owned(),
+            };
+            let claim = claim_group_issue_filing(
+                &pool,
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: 4_433_427,
+                    repo_full_name: &link.repo_full_name,
+                    created_by: "usr_test",
+                    claim_report_count: 2,
+                },
+                Utc::now() - Duration::minutes(5),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(matches!(claim, GroupIssueFilingClaim::Claimed));
+            complete_group_issue_filing(&pool, fixture.workspace_id, &fixture.group_key, &link, 2)
+                .await
+                .map_err(test_error)?;
+
+            let page = list_product_groups(&pool, fixture.workspace_id, fixture.product_id, 50, 0)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(!page.has_more);
+            anyhow::ensure!(page.groups.len() == 1);
+            let listed_group = &page.groups[0];
+            anyhow::ensure!(listed_group.last_commented_report_count == Some(2));
+            let group = &listed_group.group;
+            anyhow::ensure!(group.report_count == 2);
+            anyhow::ensure!(group.latest_occurred_at.is_some());
+            anyhow::ensure!(group.github_issue.as_ref() == Some(&link));
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
     #[tokio::test]
     #[ignore = "requires DATABASE_URL"]
     async fn matching_report_fingerprints_share_group_row() -> anyhow::Result<()> {
@@ -4156,6 +5673,9 @@ mod product_tests {
         ));
         assert!(contains_sensitive_report_text(
             "The response exposed customer@example.com"
+        ));
+        assert!(!contains_sensitive_report_text(
+            "Request 123e4567-e89b-12d3-a456-426614174000 failed after retry"
         ));
     }
 
@@ -5109,6 +6629,13 @@ mod product_tests {
             )
             .await
             .map_err(test_error)?;
+            let uuid_capability = test_capability(&write_secret, write_key.id, Uuid::new_v4());
+            let uuid_summary = "Request 123e4567-e89b-12d3-a456-426614174000 failed after retry";
+            let (_, uuid_report) =
+                submit_product_feedback(&pool, &uuid_capability, feedback_input(uuid_summary))
+                    .await
+                    .map_err(test_error)?;
+            anyhow::ensure!(uuid_report.summary == uuid_summary);
 
             update_policy(
                 &pool,

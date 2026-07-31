@@ -238,6 +238,58 @@ pub(crate) struct Product {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ProductGithubRepoInput {
+    pub installation_id: i64,
+    pub repo_full_name: String,
+    pub default_branch: String,
+    pub path_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProductGithubRepo {
+    pub product_id: Uuid,
+    pub installation_id: i64,
+    pub repo_full_name: String,
+    pub default_branch: String,
+    #[schema(required = true, nullable)]
+    pub path_prefix: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GithubIssueLink {
+    pub repo_full_name: String,
+    pub issue_number: i64,
+    pub url: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProductReportGroup {
+    pub group_key: String,
+    pub explanation: String,
+    pub report_count: i64,
+    #[schema(required = true, nullable)]
+    pub latest_occurred_at: Option<DateTime<Utc>>,
+    #[schema(required = true, nullable)]
+    pub github_issue: Option<GithubIssueLink>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProductGroupsResponse {
+    pub groups: Vec<ProductReportGroup>,
+    pub limit: i64,
+    pub offset: i64,
+    pub has_more: bool,
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProductEnvironment {
