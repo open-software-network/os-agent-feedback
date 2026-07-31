@@ -3,6 +3,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
 COPY migrations ./migrations
+COPY seed ./seed
 COPY public ./public
 RUN cargo build --release
 
