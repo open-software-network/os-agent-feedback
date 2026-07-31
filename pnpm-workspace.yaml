@@ -13,6 +13,7 @@ minimumReleaseAgeExclude:
 # No dependency build scripts are approved. A true entry requires a
 # demonstrated failing command.
 allowBuilds:
+  "@central-icons-react/round-outlined-radius-3-stroke-2": false
   "@scarf/scarf": false
   keytar: false
   puppeteer: false

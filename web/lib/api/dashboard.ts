@@ -27,6 +27,13 @@ export type RevokedResponse = components["schemas"]["RevokedResponse"];
 export type RemovedResponse = components["schemas"]["RemovedResponse"];
 export type TransferredResponse = components["schemas"]["TransferredResponse"];
 export type DashboardReportResponse = components["schemas"]["DashboardReportResponse"];
+export type GithubInstallationsResponse = components["schemas"]["GithubInstallationsResponse"];
+export type GithubRepositoriesResponse = components["schemas"]["GithubRepositoriesResponse"];
+export type GithubIssueLink = components["schemas"]["GithubIssueLink"];
+export type ProductGithubRepo = components["schemas"]["ProductGithubRepo"];
+export type ProductGithubRepoInput = components["schemas"]["ProductGithubRepoInput"];
+export type ProductGroupsResponse = components["schemas"]["ProductGroupsResponse"];
+export type ProductReportGroup = components["schemas"]["ProductReportGroup"];
 
 export type CreateProductInput = components["schemas"]["CreateProductInput"];
 export type UpdateNameInput = components["schemas"]["UpdateNameInput"];

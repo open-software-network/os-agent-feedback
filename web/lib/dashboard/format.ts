@@ -4,6 +4,20 @@ export function titleCase(value: string | null | undefined): string {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+export function interfaceLabel(value: string | null | undefined): string {
+  const normalized = String(value || "unknown").toLowerCase();
+  const labels: Record<string, string> = {
+    api: "API",
+    http: "HTTP",
+    http_headers: "HTTP headers",
+    http_html: "HTML",
+    http_json: "HTTP JSON",
+    mcp: "MCP",
+    sdk: "SDK",
+  };
+  return labels[normalized] ?? titleCase(value);
+}
+
 export function formatDate(value: string | null | undefined): string {
   return value ? new Date(value).toLocaleString() : "—";
 }

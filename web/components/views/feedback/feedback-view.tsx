@@ -1,17 +1,29 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { IconArrowUpRight } from "central-icons/IconArrowUpRight";
+import { IconCalendarCheck } from "central-icons/IconCalendarCheck";
+import { IconCheckCircle2 } from "central-icons/IconCheckCircle2";
+import { IconCircle } from "central-icons/IconCircle";
+import { IconCircleMinus } from "central-icons/IconCircleMinus";
+import { IconCirclePlaceholderOn } from "central-icons/IconCirclePlaceholderOn";
+import { IconCircleQuestionmark } from "central-icons/IconCircleQuestionmark";
+import { IconCrossSmall } from "central-icons/IconCrossSmall";
+import { IconExclamationCircle } from "central-icons/IconExclamationCircle";
+import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
+import { IconMathEqualsCircle } from "central-icons/IconMathEqualsCircle";
+import { IconStopCircle } from "central-icons/IconStopCircle";
+import { IconThumbUpCurved } from "central-icons/IconThumbUpCurved";
+import { IconWarningSign } from "central-icons/IconWarningSign";
+import type { ComponentType } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-import {
-  EmptyState,
-  ErrorState,
-  NativeSelect,
-  PageHeader,
-  Panel,
-} from "@/components/dashboard/view-primitives";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { DetailRail, DetailWorkspace } from "@/components/dashboard/detail-rail";
+import { EmptyState, Panel, StatusMessage } from "@/components/dashboard/view-primitives";
+import { Badge } from "@/components/ui/badge";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Separator } from "@/components/ui/separator";
 import {
   Table,
   TableBody,
@@ -20,22 +32,91 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { apiRequest } from "@/lib/api/client";
+import { Tabs, TabsList, TabsPanel, TabsTab } from "@/components/ui/tabs";
+import { ApiError, apiRequest } from "@/lib/api/client";
+import { fetchProductGithubRepo } from "@/lib/api/connectors";
 import type {
   DashboardData,
   DashboardReportResponse,
   ProductFeedbackReport,
 } from "@/lib/api/dashboard";
 import {
+  fetchProductGroupsWindow,
+  fileGroupGithubIssue,
+  type ProductGroupsResponse,
+  type ProductReportGroup,
+} from "@/lib/api/groups";
+import {
   formatDate,
   formatDuration,
+  interfaceLabel,
   isEditor,
   relativeDate,
   titleCase,
 } from "@/lib/dashboard/format";
 import { reportFindings } from "@/lib/dashboard/reports";
-import { FeedbackGroups } from "./feedback-groups";
+import { cn } from "@/lib/utils";
+
+import {
+  createEmptyFilters,
+  type FeedbackFacet,
+  FeedbackFilters,
+  type FeedbackFiltersState,
+  type FilterOption,
+  facetOrder,
+  impactLabels,
+  impactValues,
+  type WorkflowStatus,
+  workflowLabels,
+  workflowStatuses,
+} from "./feedback-filters";
 import { WorkflowForm } from "./workflow-form";
+
+const defaultRange = "30d";
+const groupsPageSize = 50;
+
+type FeedbackMode = "reports" | "signals";
+
+const statusBadge = {
+  new: "workflow-new",
+  investigating: "workflow-investigating",
+  planned: "workflow-planned",
+  resolved: "workflow-resolved",
+  wont_act: "workflow-wont-act",
+} as const;
+
+type SemanticIcon = ComponentType<{
+  className?: string;
+  size?: number;
+  "aria-hidden"?: boolean;
+  "data-icon"?: string;
+}>;
+
+const workflowIcons: Record<WorkflowStatus, SemanticIcon> = {
+  new: IconCircle,
+  investigating: IconMagnifyingGlass,
+  planned: IconCalendarCheck,
+  resolved: IconCheckCircle2,
+  wont_act: IconCircleMinus,
+};
+
+const impactIcons: Record<string, SemanticIcon> = {
+  blocked: IconStopCircle,
+  hindered: IconWarningSign,
+  helped_with_friction: IconExclamationCircle,
+  helped: IconThumbUpCurved,
+  neutral: IconMathEqualsCircle,
+  unknown: IconCircleQuestionmark,
+};
+
+const impactTone: Record<string, string> = {
+  blocked: "text-impact-negative",
+  hindered: "text-impact-warning",
+  helped_with_friction: "text-impact-caution",
+  helped: "text-impact-positive",
+  neutral: "text-muted-foreground",
+  unknown: "text-muted-foreground",
+};
 
 export function FeedbackView({
   data,
@@ -56,10 +137,12 @@ export function FeedbackView({
   refresh: () => Promise<unknown>;
   setNotice: (message: string) => void;
 }) {
-  const [query, setQuery] = useState("");
-  const [status, setStatus] = useState("all");
-  const [impact, setImpact] = useState("all");
-  const [range, setRange] = useState("30d");
+  const initialLocation = useMemo(readFilterLocation, []);
+  const [query, setQuery] = useState(initialLocation.query);
+  const [filters, setFilters] = useState<FeedbackFiltersState>(initialLocation.filters);
+  const [range, setRange] = useState(initialLocation.range);
+  const [mode, setMode] = useState<FeedbackMode>("reports");
+  const [groupLimit, setGroupLimit] = useState(groupsPageSize);
   const productId = data.currentProduct?.id;
   const loadedReport = data.reports.find((report) => report.id === selectedReportId);
   const detail = useQuery({
@@ -72,178 +155,632 @@ export function FeedbackView({
     enabled: Boolean(selectedReportId && productId && !loadedReport),
   });
   const selectedReport = loadedReport ?? detail.data?.report ?? null;
-  const impacts = Array.from(
-    new Set(data.reports.map((report) => report.impact ?? "unspecified")),
-  ).sort();
+  const groups = useQuery({
+    queryKey: ["product-groups", data.workspace.id, productId, groupLimit],
+    queryFn: () => fetchProductGroupsWindow(data.workspace.id, productId ?? "", groupLimit),
+    enabled: mode === "signals" && Boolean(productId) && isEditor(data.currentRole),
+    gcTime: 0,
+  });
+  const mapping = useQuery({
+    queryKey: ["product-github-repo", data.workspace.id, productId],
+    queryFn: () => fetchProductGithubRepo(data.workspace.id, productId ?? ""),
+    enabled: mode === "signals" && Boolean(productId) && isEditor(data.currentRole),
+  });
+  const filing = useMutation({
+    mutationFn: (groupKey: string) => fileGroupGithubIssue(data.workspace.id, groupKey),
+    onSuccess: () => groups.refetch(),
+  });
 
-  const filtered = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    const minimum =
-      range === "7d"
-        ? Date.now() - 7 * 86_400_000
-        : range === "30d"
-          ? Date.now() - 30 * 86_400_000
-          : 0;
-    return data.reports.filter((report) => {
-      const findings = reportFindings(report);
-      const haystack = [
-        report.summary,
-        report.operation,
-        report.surface,
-        report.customerRef,
-        report.runtimeHint,
-        report.workflowStatus,
-        ...report.tags,
-        ...findings.flatMap((finding) => [finding.topic, finding.kind, finding.detail]),
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      return (
-        (!needle || haystack.includes(needle)) &&
-        (status === "all" || report.workflowStatus === status) &&
-        (impact === "all" || (report.impact ?? "unspecified") === impact) &&
-        new Date(report.createdAt).getTime() >= minimum
-      );
-    });
-  }, [data.reports, impact, query, range, status]);
+  useEffect(() => {
+    writeFilterLocation(query, filters, range);
+  }, [filters, query, range]);
 
-  if (selectedReportId) {
-    if (detail.isError) {
-      return <ErrorState error={detail.error} onRetry={() => detail.refetch()} />;
+  useEffect(() => {
+    const restoreFilters = () => {
+      const location = readFilterLocation();
+      setQuery(location.query);
+      setFilters(location.filters);
+      setRange(location.range);
+    };
+    window.addEventListener("popstate", restoreFilters);
+    return () => window.removeEventListener("popstate", restoreFilters);
+  }, []);
+
+  const filterOptions = useMemo<Record<FeedbackFacet, FilterOption[]>>(() => {
+    const findings = data.reports.flatMap(reportFindings);
+    const memberNames = new Map(
+      data.teamMembers.map((member) => [member.osUserId, member.displayName]),
+    );
+    const assignedIds = unique(data.reports.map((report) => report.assigneeOsUserId));
+    const assigneeIds = unique([
+      ...data.teamMembers.map((member) => member.osUserId),
+      ...assignedIds,
+    ]);
+
+    return {
+      status: workflowStatuses.map((value) => ({ value, label: workflowLabels[value] })),
+      impact: impactValues.map((value) => ({ value, label: impactLabels[value] })),
+      surface: unique(data.reports.map((report) => report.surface)).map((value) => ({
+        value,
+        label: interfaceLabel(value),
+      })),
+      topic: unique(findings.map((finding) => finding.topic)).map((value) => ({
+        value,
+        label: titleCase(value),
+      })),
+      kind: unique(findings.map((finding) => finding.kind)).map((value) => ({
+        value,
+        label: titleCase(value),
+      })),
+      severity: unique(findings.map((finding) => finding.severity)).map((value) => ({
+        value,
+        label: titleCase(value),
+      })),
+      tag: unique(data.reports.flatMap((report) => report.tags)).map((value) => ({
+        value,
+        label: value,
+      })),
+      assignee: [
+        { value: "unassigned", label: "Unassigned" },
+        ...assigneeIds.map((value) => ({ value, label: memberNames.get(value) ?? value })),
+      ],
+      workaround: [
+        { value: "used", label: "Observed" },
+        { value: "suggested", label: "Suggested" },
+        { value: "none", label: "None recorded" },
+      ],
+    };
+  }, [data.reports, data.teamMembers]);
+
+  const filteredReports = useMemo(
+    () => filterFeedbackReports(data.reports, { filters, query, range }),
+    [data.reports, filters, query, range],
+  );
+
+  function commitFilters(nextFilters: FeedbackFiltersState) {
+    setFilters(nextFilters);
+  }
+
+  function toggleFilter(facet: FeedbackFacet, value: string) {
+    const selected = filters[facet];
+    const nextValues = selected.includes(value)
+      ? selected.filter((item) => item !== value)
+      : [...selected, value];
+    commitFilters({ ...filters, [facet]: nextValues });
+  }
+
+  async function refreshSelectedReport() {
+    await refresh();
+    if (!loadedReport) await detail.refetch();
+  }
+
+  async function refreshView() {
+    await refresh();
+    if (mode === "signals" && productId && isEditor(data.currentRole)) {
+      await groups.refetch();
     }
-    if (!selectedReport) {
-      return <p className="text-sm text-muted-foreground">Loading feedback…</p>;
-    }
+  }
+
+  function selectMode(nextMode: FeedbackMode) {
+    setMode(nextMode);
+    if (nextMode === "signals") selectReport(null);
+  }
+
+  const incomplete = data.listState.reportsLoaded < data.listState.reportsTotal;
+
+  return (
+    <DetailWorkspace
+      open={mode === "reports" && Boolean(selectedReportId)}
+      className="bg-background"
+      inspector={
+        <FeedbackInspector
+          open={mode === "reports" && Boolean(selectedReportId)}
+          reportId={selectedReportId}
+          report={selectedReport}
+          loading={detail.isPending && !selectedReport}
+          error={detail.isError ? detail.error : null}
+          onRetry={() => detail.refetch()}
+          onClose={() => selectReport(null)}
+          data={data}
+          openInteraction={openInteraction}
+          openSession={openSession}
+          refresh={refreshSelectedReport}
+          setNotice={setNotice}
+        />
+      }
+    >
+      <Tabs
+        value={mode}
+        onValueChange={(value) => selectMode(value as FeedbackMode)}
+        className="min-h-0 flex-1 gap-0"
+      >
+        <div className="flex h-11 shrink-0 items-center justify-between gap-3 border-b px-4">
+          <TabsList variant="line" aria-label="Feedback view">
+            <TabsTab value="reports">Reports</TabsTab>
+            <TabsTab value="signals">Signals</TabsTab>
+          </TabsList>
+          <Button variant="ghost" size="sm" onClick={() => void refreshView()}>
+            Refresh
+          </Button>
+        </div>
+
+        <TabsPanel value="reports" className="flex min-h-0 flex-1 flex-col">
+          <FeedbackFilters
+            query={query}
+            onQueryChange={setQuery}
+            filters={filters}
+            options={filterOptions}
+            range={range}
+            onRangeChange={setRange}
+            onToggle={toggleFilter}
+            onClearFacet={(facet) => commitFilters({ ...filters, [facet]: [] })}
+            onClearAll={() => {
+              setQuery("");
+              setRange(defaultRange);
+              commitFilters(createEmptyFilters());
+            }}
+          />
+
+          {incomplete ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/25 px-4 py-2 text-xs text-muted-foreground">
+              <p>
+                Showing the newest {data.listState.reportsLoaded.toLocaleString()} of{" "}
+                {data.listState.reportsTotal.toLocaleString()} reports. Filters apply to loaded
+                reports.
+              </p>
+              <Button variant="outline" size="sm" onClick={loadMore}>
+                Load 250 more
+              </Button>
+            </div>
+          ) : null}
+
+          {filteredReports.length ? (
+            <section
+              className="min-h-0 flex-1 overflow-auto bg-background"
+              aria-label="Feedback reports"
+            >
+              <FeedbackTable
+                reports={filteredReports}
+                selectedId={selectedReportId}
+                onSelect={selectReport}
+              />
+            </section>
+          ) : (
+            <div className="min-h-0 flex-1 bg-canvas p-4">
+              <EmptyState
+                title="No matching feedback"
+                description="Try a wider filter or wait for agents to submit feedback."
+                action={
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setQuery("");
+                      setRange(defaultRange);
+                      commitFilters(createEmptyFilters());
+                    }}
+                  >
+                    Clear filters
+                  </Button>
+                }
+              />
+            </div>
+          )}
+        </TabsPanel>
+
+        <TabsPanel value="signals" className="min-h-0 overflow-auto bg-canvas p-4">
+          <SignalsView
+            canView={isEditor(data.currentRole)}
+            hasProduct={Boolean(productId)}
+            groups={groups.data}
+            loading={groups.isPending || mapping.isPending}
+            error={groups.isError ? groups.error : mapping.isError ? mapping.error : null}
+            mappingAvailable={Boolean(mapping.data)}
+            connectorsHref={connectorsPath(data.workspace.id, productId ?? "")}
+            mutationGroupKey={filing.variables}
+            filingPending={filing.isPending}
+            filingError={filing.error}
+            onFileIssue={(groupKey) => filing.mutate(groupKey)}
+            onCheckAgain={async () => {
+              await groups.refetch();
+              filing.reset();
+            }}
+            onLoadMore={() => {
+              filing.reset();
+              setGroupLimit((current) => current + groupsPageSize);
+            }}
+            onRetry={() => Promise.all([groups.refetch(), mapping.refetch()])}
+          />
+        </TabsPanel>
+      </Tabs>
+    </DetailWorkspace>
+  );
+}
+
+function SignalsView({
+  canView,
+  hasProduct,
+  groups,
+  loading,
+  error,
+  mappingAvailable,
+  connectorsHref,
+  mutationGroupKey,
+  filingPending,
+  filingError,
+  onFileIssue,
+  onCheckAgain,
+  onLoadMore,
+  onRetry,
+}: {
+  canView: boolean;
+  hasProduct: boolean;
+  groups: ProductGroupsResponse | undefined;
+  loading: boolean;
+  error: Error | null;
+  mappingAvailable: boolean;
+  connectorsHref: string;
+  mutationGroupKey: string | undefined;
+  filingPending: boolean;
+  filingError: Error | null;
+  onFileIssue: (groupKey: string) => void;
+  onCheckAgain: () => Promise<void>;
+  onLoadMore: () => void;
+  onRetry: () => unknown;
+}) {
+  if (!hasProduct) {
     return (
-      <FeedbackDetail
-        data={data}
-        report={selectedReport}
-        back={() => selectReport(null)}
-        openInteraction={openInteraction}
-        openSession={openSession}
-        refresh={async () => {
-          await refresh();
-          await detail.refetch();
-        }}
-        setNotice={setNotice}
+      <EmptyState
+        title="No product selected"
+        description="Choose a product to review its grouped feedback signals."
+      />
+    );
+  }
+  if (!canView) {
+    return (
+      <EmptyState
+        title="Signals require editor access"
+        description="An owner or admin can review grouped feedback signals."
+      />
+    );
+  }
+  if (error) {
+    return (
+      <EmptyState
+        title="Signals could not be loaded"
+        description={error.message}
+        action={
+          <Button variant="outline" size="sm" onClick={onRetry}>
+            Try again
+          </Button>
+        }
+      />
+    );
+  }
+  if (loading || !groups) {
+    return <p className="p-4 text-sm text-muted-foreground">Loading signals…</p>;
+  }
+  if (!groups.groups.length) {
+    return (
+      <EmptyState
+        title="No signals yet"
+        description="Related reports will appear here once recurring feedback is detected."
       />
     );
   }
 
+  const pendingMessage =
+    filingError instanceof ApiError && filingError.status === 409 ? filingError.message : null;
+  const failureMessage = filingError && !pendingMessage ? filingError.message : null;
+
   return (
-    <div className="space-y-6">
-      <PageHeader
-        eyebrow={data.currentProduct?.name ?? "No product selected"}
-        title="Feedback"
-        description="Search submitted agent feedback and manage the team workflow."
-        actions={
-          <Button variant="outline" onClick={() => void refresh()}>
-            Refresh
+    <div className="grid gap-3">
+      {!mappingAvailable && groups.groups.some((group) => !group.githubIssue) ? (
+        <StatusMessage>
+          Map this product to a GitHub repository before filing an issue.{" "}
+          <a className={buttonVariants({ variant: "link", size: "sm" })} href={connectorsHref}>
+            Open Connectors
+          </a>
+        </StatusMessage>
+      ) : null}
+      {pendingMessage ? (
+        <StatusMessage>
+          {pendingMessage}{" "}
+          <Button type="button" variant="outline" size="sm" onClick={() => void onCheckAgain()}>
+            Check again
           </Button>
-        }
-      />
-      <FeedbackGroups
-        key={`${data.workspace.id}:${data.currentProduct?.id ?? "none"}`}
-        data={data}
-      />
-      <Panel>
-        <div className="grid gap-2 md:grid-cols-4">
-          <Input
-            aria-label="Search feedback"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search feedback"
-          />
-          <NativeSelect
-            aria-label="Workflow status"
-            value={status}
-            onChange={(event) => setStatus(event.target.value)}
-          >
-            <option value="all">All statuses</option>
-            <option value="new">New</option>
-            <option value="investigating">Investigating</option>
-            <option value="planned">Planned</option>
-            <option value="resolved">Resolved</option>
-            <option value="wont_act">Won&apos;t act</option>
-          </NativeSelect>
-          <NativeSelect
-            aria-label="Impact"
-            value={impact}
-            onChange={(event) => setImpact(event.target.value)}
-          >
-            <option value="all">All impacts</option>
-            {impacts.map((value) => (
-              <option value={value} key={value}>
-                {titleCase(value)}
-              </option>
-            ))}
-          </NativeSelect>
-          <NativeSelect
-            aria-label="Time range"
-            value={range}
-            onChange={(event) => setRange(event.target.value)}
-          >
-            <option value="all">All time</option>
-            <option value="7d">Last 7 days</option>
-            <option value="30d">Last 30 days</option>
-          </NativeSelect>
-        </div>
-      </Panel>
-      {filtered.length ? (
-        <Panel>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Status</TableHead>
-                <TableHead>Summary</TableHead>
-                <TableHead>Operation</TableHead>
-                <TableHead>Customer</TableHead>
-                <TableHead>Received</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {filtered.map((report) => (
-                <TableRow key={report.id}>
-                  <TableCell>{titleCase(report.workflowStatus)}</TableCell>
-                  <TableCell>
-                    <Button
-                      variant="link"
-                      className="h-auto justify-start p-0 text-left"
-                      onClick={() => selectReport(report.id)}
-                    >
-                      {report.summary}
-                    </Button>
-                  </TableCell>
-                  <TableCell>{report.operation}</TableCell>
-                  <TableCell>{report.customerRef ?? "Not linked"}</TableCell>
-                  <TableCell title={formatDate(report.createdAt)}>
-                    {relativeDate(report.createdAt)}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </Panel>
-      ) : (
-        <EmptyState
-          title="No matching feedback"
-          description="Try a wider filter or wait for agents to submit feedback."
+        </StatusMessage>
+      ) : null}
+      {failureMessage ? <StatusMessage tone="error">{failureMessage}</StatusMessage> : null}
+      <Panel className="min-h-0 gap-0 overflow-hidden p-0">
+        <SignalsTable
+          groups={groups.groups}
+          mappingAvailable={mappingAvailable}
+          mutationGroupKey={mutationGroupKey}
+          filingPending={filingPending}
+          onFileIssue={onFileIssue}
         />
-      )}
-      {data.listState.reportsLoaded < data.listState.reportsTotal ? (
-        <Button variant="outline" onClick={loadMore}>
-          Load 250 more
+      </Panel>
+      {groups.hasMore ? (
+        <Button className="w-fit" type="button" variant="outline" onClick={onLoadMore}>
+          Load more
         </Button>
       ) : null}
     </div>
   );
 }
 
-function FeedbackDetail({
+function SignalsTable({
+  groups,
+  mappingAvailable,
+  mutationGroupKey,
+  filingPending,
+  onFileIssue,
+}: {
+  groups: ProductReportGroup[];
+  mappingAvailable: boolean;
+  mutationGroupKey: string | undefined;
+  filingPending: boolean;
+  onFileIssue: (groupKey: string) => void;
+}) {
+  return (
+    <Table className="min-w-[680px] table-fixed">
+      <TableHeader className="bg-background">
+        <TableRow className="hover:bg-background">
+          <TableHead className="w-[52%] pl-4 text-xs text-muted-foreground">Signal</TableHead>
+          <TableHead className="w-[12%] text-xs text-muted-foreground">Reports</TableHead>
+          <TableHead className="w-[18%] text-xs text-muted-foreground">Latest observed</TableHead>
+          <TableHead className="w-[18%] pr-4 text-xs text-muted-foreground">GitHub issue</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {groups.map((group) => {
+          const signal = describeSignal(group.explanation);
+          return (
+            <TableRow key={group.groupKey} className="bg-background hover:bg-muted/40">
+              <TableCell className="h-[66px] overflow-hidden pl-4">
+                {signal.operation ? (
+                  <p className="truncate text-[13px] font-medium leading-5">
+                    <span className="font-mono">{signal.operation}</span>
+                    {signal.surface ? (
+                      <span className="font-sans font-normal text-muted-foreground">
+                        {" "}
+                        on {signal.surface}
+                      </span>
+                    ) : null}
+                  </p>
+                ) : (
+                  <p className="line-clamp-2 text-[13px] font-medium leading-5">
+                    {signal.fallback}
+                  </p>
+                )}
+                <p className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+                  {signal.detail ? <span className="truncate">{signal.detail}</span> : null}
+                  <span className="truncate font-mono">{group.groupKey}</span>
+                </p>
+              </TableCell>
+              <TableCell className="text-xs text-muted-foreground">
+                {group.reportCount.toLocaleString()}
+              </TableCell>
+              <TableCell
+                className="text-xs text-muted-foreground"
+                title={group.latestOccurredAt ? formatDate(group.latestOccurredAt) : undefined}
+              >
+                {group.latestOccurredAt ? relativeDate(group.latestOccurredAt) : "Not recorded"}
+              </TableCell>
+              <TableCell className="pr-4 text-xs">
+                {group.githubIssue ? (
+                  <a
+                    href={group.githubIssue.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex max-w-full items-center gap-1 text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+                  >
+                    <span className="truncate">
+                      {group.githubIssue.repoFullName}#{group.githubIssue.issueNumber}
+                    </span>
+                    <IconArrowUpRight className="shrink-0" size={13} />
+                  </a>
+                ) : mappingAvailable ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={filingPending}
+                    aria-busy={filingPending && mutationGroupKey === group.groupKey}
+                    onClick={() => onFileIssue(group.groupKey)}
+                  >
+                    {filingPending && mutationGroupKey === group.groupKey
+                      ? "Filing…"
+                      : "File GitHub issue"}
+                  </Button>
+                ) : (
+                  <span className="text-muted-foreground">Not linked</span>
+                )}
+              </TableCell>
+            </TableRow>
+          );
+        })}
+      </TableBody>
+    </Table>
+  );
+}
+
+function describeSignal(explanation: string) {
+  const parts = explanation
+    .split("·")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const operation = parts.find((part) => part.startsWith("operation "))?.slice(10);
+  if (!operation) {
+    return {
+      operation: null,
+      surface: null,
+      detail: null,
+      fallback: explanation || "Related feedback reports",
+    };
+  }
+
+  const surface = parts.find((part) => part.startsWith("surface "))?.slice(8);
+  const finding = parts.find(
+    (part) => part.includes("/") && !part.startsWith("product ") && !part.startsWith("operation "),
+  );
+  const statusClass = parts.find((part) => /^\dxx$/i.test(part));
+  const findingLabel =
+    finding && finding !== "none/none"
+      ? finding
+          .split("/")
+          .map((part) => titleCase(part))
+          .join(" / ")
+      : null;
+
+  return {
+    operation,
+    surface: surface ? interfaceLabel(surface) : null,
+    detail: [findingLabel, statusClass ? `HTTP ${statusClass.toLowerCase()}` : null]
+      .filter(Boolean)
+      .join(" · "),
+    fallback: explanation,
+  };
+}
+
+function FeedbackTable({
+  reports,
+  selectedId,
+  onSelect,
+}: {
+  reports: ProductFeedbackReport[];
+  selectedId: string | null;
+  onSelect: (reportId: string) => void;
+}) {
+  return (
+    <Table className="min-w-[760px] table-fixed">
+      <TableHeader className="bg-background">
+        <TableRow className="hover:bg-background">
+          <TableHead className="w-[44%] pl-4 text-xs text-muted-foreground">Feedback</TableHead>
+          <TableHead className="w-[17%] text-xs text-muted-foreground">Impact</TableHead>
+          <TableHead className="w-[17%] text-xs text-muted-foreground">Workflow</TableHead>
+          <TableHead className="w-[12%] text-xs text-muted-foreground">Customer</TableHead>
+          <TableHead className="w-[10%] pr-4 text-right text-xs text-muted-foreground">
+            Received
+          </TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {reports.map((report) => (
+          <TableRow
+            key={report.id}
+            data-state={selectedId === report.id ? "selected" : undefined}
+            aria-selected={selectedId === report.id}
+            tabIndex={0}
+            className="cursor-pointer bg-background hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring data-[state=selected]:bg-selected data-[state=selected]:shadow-[inset_2px_0_0_var(--attention)]"
+            onClick={() => onSelect(report.id)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onSelect(report.id);
+              }
+            }}
+          >
+            <TableCell className="h-[66px] overflow-hidden pl-4">
+              <div className="min-w-0">
+                <p className="truncate text-[13px] font-medium leading-5">{report.summary}</p>
+                <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+                  {report.operation} · {interfaceLabel(report.surface)}
+                </p>
+              </div>
+            </TableCell>
+            <TableCell>
+              <ImpactLabel impact={report.impact} />
+            </TableCell>
+            <TableCell>
+              <WorkflowBadge status={report.workflowStatus} />
+            </TableCell>
+            <TableCell className="truncate text-xs text-muted-foreground">
+              {report.customerRef ?? "Not linked"}
+            </TableCell>
+            <TableCell
+              className="pr-4 text-right text-xs text-muted-foreground"
+              title={formatDate(report.createdAt)}
+            >
+              {relativeDate(report.createdAt)}
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
+function FeedbackInspector({
+  open,
+  reportId,
+  report,
+  loading,
+  error,
+  onRetry,
+  onClose,
+  data,
+  openInteraction,
+  openSession,
+  refresh,
+  setNotice,
+}: {
+  open: boolean;
+  reportId: string | null;
+  report: ProductFeedbackReport | null;
+  loading: boolean;
+  error: Error | null;
+  onRetry: () => unknown;
+  onClose: () => void;
+  data: DashboardData;
+  openInteraction: (interactionId: string) => void;
+  openSession: (sessionId: string) => void;
+  refresh: () => Promise<unknown>;
+  setNotice: (message: string) => void;
+}) {
+  return (
+    <DetailRail open={open} onClose={onClose} label="Feedback detail">
+      <div className="flex h-12 shrink-0 items-center justify-between border-b px-4">
+        <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+          <IconCirclePlaceholderOn size={14} />
+          <span className="truncate font-mono">{report?.id ?? reportId}</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <Button variant="ghost" size="icon-sm" aria-label="Close detail" onClick={onClose}>
+            <IconCrossSmall />
+          </Button>
+        </div>
+      </div>
+
+      {error ? (
+        <div className="grid gap-3 p-5">
+          <p role="alert" className="text-sm text-destructive">
+            {error.message}
+          </p>
+          <Button className="w-fit" onClick={onRetry}>
+            Try again
+          </Button>
+        </div>
+      ) : loading || !report ? (
+        <p className="p-5 text-sm text-muted-foreground">Loading feedback…</p>
+      ) : (
+        <FeedbackDetailContent
+          data={data}
+          report={report}
+          openInteraction={openInteraction}
+          openSession={openSession}
+          refresh={refresh}
+          setNotice={setNotice}
+        />
+      )}
+    </DetailRail>
+  );
+}
+
+function FeedbackDetailContent({
   data,
   report,
-  back,
   openInteraction,
   openSession,
   refresh,
@@ -251,7 +788,6 @@ function FeedbackDetail({
 }: {
   data: DashboardData;
   report: ProductFeedbackReport;
-  back: () => void;
   openInteraction: (interactionId: string) => void;
   openSession: (sessionId: string) => void;
   refresh: () => Promise<unknown>;
@@ -260,87 +796,285 @@ function FeedbackDetail({
   const findings = reportFindings(report);
 
   return (
-    <div className="space-y-6">
-      <PageHeader
-        eyebrow="Feedback"
-        title={titleCase(report.impact ?? "Unknown impact")}
-        description={formatDate(report.createdAt)}
-        actions={
-          <Button variant="outline" onClick={back}>
-            Back to feedback
-          </Button>
-        }
-      />
-      <Panel title="What the agent reported">
-        <p className="text-lg">{report.summary}</p>
-      </Panel>
-      <Panel title={`Findings (${findings.length})`}>
-        {findings.length ? (
-          <ul className="space-y-3">
-            {findings.map((finding) => (
-              <li
-                className="border-b pb-3 last:border-0"
-                key={[finding.topic, finding.kind, finding.detail, finding.severity].join(":")}
-              >
-                <strong>{titleCase(finding.topic ?? finding.kind ?? "Finding")}</strong>
-                <p className="text-sm text-muted-foreground">
-                  {finding.detail ?? "No detail provided."}
-                </p>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="text-sm text-muted-foreground">No structured findings.</p>
-        )}
-      </Panel>
-      {report.workaround ? (
-        <Panel title="Workaround">
-          <p>{report.workaround.detail ?? "No detail provided."}</p>
-          <p className="text-sm text-muted-foreground">
-            {report.workaround.used ? "The workaround was used." : "The workaround was not used."}
+    <ScrollArea className="min-h-0 flex-1">
+      <div className="p-5">
+        <section>
+          <p className="text-xs text-muted-foreground">
+            {report.customerRef ?? "Customer not linked"} · {formatDate(report.createdAt)}
           </p>
-        </Panel>
-      ) : null}
-      <Panel title="Product context">
-        <dl className="grid gap-3 text-sm sm:grid-cols-4">
-          <Property label="Operation" value={report.operation} />
-          <Property label="Surface" value={titleCase(report.surface)} />
-          <Property label="Duration" value={formatDuration(report.durationMs)} />
-          <Property label="Status code" value={report.statusCode ?? "—"} />
-        </dl>
-        <div className="flex flex-wrap gap-2">
-          <Button variant="outline" size="sm" onClick={() => openInteraction(report.interactionId)}>
-            Open interaction
-          </Button>
-          {report.sessionId ? (
+          <h2 className="mt-2 text-balance text-lg font-medium leading-6">{report.summary}</h2>
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <ImpactLabel impact={report.impact} />
+            <WorkflowBadge status={report.workflowStatus} />
+            {report.tags.map((tag) => (
+              <Badge key={tag} variant="secondary">
+                {tag}
+              </Badge>
+            ))}
+          </div>
+        </section>
+
+        <Separator className="my-5" />
+
+        <section>
+          <h3 className="text-xs font-medium">Findings ({findings.length})</h3>
+          {findings.length ? (
+            <div className="mt-3 grid gap-3">
+              {findings.map((finding, index) => (
+                <div
+                  key={`${finding.topic ?? "finding"}-${finding.kind ?? "general"}-${finding.detail ?? index}`}
+                  className="border-l-2 border-foreground/15 pl-3"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium">
+                      {titleCase(finding.topic ?? finding.kind ?? "Finding")}
+                    </span>
+                    {finding.severity ? (
+                      <span className="text-[11px] text-muted-foreground">
+                        {titleCase(finding.severity)}
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className="mt-1 text-[13px] leading-5 text-muted-foreground">
+                    {finding.detail ?? "No detail provided."}
+                  </p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-2 text-sm text-muted-foreground">No structured findings.</p>
+          )}
+        </section>
+
+        {report.workaround ? (
+          <>
+            <Separator className="my-5" />
+            <section>
+              <h3 className="text-xs font-medium">
+                {report.workaround.used ? "Workaround observed" : "Suggested workaround"}
+              </h3>
+              <p className="mt-2 text-[13px] leading-5 text-muted-foreground">
+                {report.workaround.detail ?? "No detail provided."}
+              </p>
+            </section>
+          </>
+        ) : null}
+
+        <Separator className="my-5" />
+
+        <section>
+          <h3 className="text-xs font-medium">Source interaction</h3>
+          <dl className="mt-3 grid grid-cols-[92px_1fr] gap-x-3 gap-y-3 text-xs">
+            <Property label="Interface" value={interfaceLabel(report.surface)} />
+            <Property label="Operation" value={report.operation} mono />
+            <Property label="Duration" value={formatDuration(report.durationMs)} />
+            <Property label="HTTP status" value={report.statusCode ?? "Not recorded"} />
+            <Property label="Customer" value={report.customerRef ?? "Not linked"} />
+            <Property
+              label="Confirmed by"
+              value={interfaceLabel(report.confirmationMethod ?? "unknown")}
+            />
+          </dl>
+          <div className="mt-4 flex flex-wrap gap-2">
             <Button
               variant="outline"
               size="sm"
-              onClick={() => report.sessionId && openSession(report.sessionId)}
+              onClick={() => openInteraction(report.interactionId)}
             >
-              Open linked session
+              Open interaction
+              <IconArrowUpRight data-icon="inline-end" />
             </Button>
-          ) : null}
-        </div>
-      </Panel>
-      <Panel title="Team workflow">
-        {isEditor(data.currentRole) ? (
-          <WorkflowForm data={data} report={report} refresh={refresh} setNotice={setNotice} />
-        ) : (
-          <p className="text-sm text-muted-foreground">
-            An owner or admin manages status, assignment, tags, and internal notes.
-          </p>
-        )}
-      </Panel>
-    </div>
+            {report.sessionId ? (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => report.sessionId && openSession(report.sessionId)}
+              >
+                Open linked session
+              </Button>
+            ) : null}
+          </div>
+        </section>
+
+        <Separator className="my-5" />
+
+        <section>
+          <h3 className="text-xs font-medium">Team workflow</h3>
+          <div className="mt-3">
+            {isEditor(data.currentRole) ? (
+              <WorkflowForm
+                compact
+                data={data}
+                report={report}
+                refresh={refresh}
+                setNotice={setNotice}
+              />
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                An owner or admin manages status, assignment, tags, and internal notes.
+              </p>
+            )}
+          </div>
+        </section>
+      </div>
+    </ScrollArea>
   );
 }
 
-function Property({ label, value }: { label: string; value: string | number }) {
+function WorkflowBadge({ status }: { status: string }) {
+  if (!isWorkflowStatus(status)) {
+    return <Badge variant="outline">{titleCase(status)}</Badge>;
+  }
+  const StatusIcon = workflowIcons[status];
   return (
-    <div>
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="font-medium">{value}</dd>
-    </div>
+    <Badge variant={statusBadge[status]}>
+      <StatusIcon data-icon="inline-start" />
+      {workflowLabels[status]}
+    </Badge>
   );
+}
+
+function ImpactLabel({ impact }: { impact: string | null }) {
+  const value = impact ?? "unknown";
+  const ImpactIcon = impactIcons[value] ?? IconCircleQuestionmark;
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs">
+      <ImpactIcon size={14} className={impactTone[value] ?? "text-muted-foreground"} />
+      <span>{impactLabels[value] ?? titleCase(value)}</span>
+    </span>
+  );
+}
+
+function Property({
+  label,
+  value,
+  mono = false,
+}: {
+  label: string;
+  value: string | number;
+  mono?: boolean;
+}) {
+  return (
+    <>
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className={cn("min-w-0 truncate", mono && "font-mono")} title={String(value)}>
+        {value}
+      </dd>
+    </>
+  );
+}
+
+export function filterFeedbackReports(
+  reports: ProductFeedbackReport[],
+  {
+    filters,
+    query,
+    range,
+    now = Date.now(),
+  }: {
+    filters: FeedbackFiltersState;
+    query: string;
+    range: string;
+    now?: number;
+  },
+) {
+  const needle = query.trim().toLowerCase();
+  const minimum =
+    range === "7d" ? now - 7 * 86_400_000 : range === "30d" ? now - 30 * 86_400_000 : 0;
+
+  return reports.filter((report) => {
+    const findings = reportFindings(report);
+    const workaround = report.workaround ? (report.workaround.used ? "used" : "suggested") : "none";
+    const matches =
+      (filters.status.length === 0 || filters.status.includes(report.workflowStatus)) &&
+      (filters.impact.length === 0 || filters.impact.includes(report.impact ?? "unknown")) &&
+      (filters.surface.length === 0 || filters.surface.includes(report.surface)) &&
+      (filters.tag.length === 0 || filters.tag.some((tag) => report.tags.includes(tag))) &&
+      (filters.assignee.length === 0 ||
+        filters.assignee.includes(report.assigneeOsUserId ?? "unassigned")) &&
+      (filters.workaround.length === 0 || filters.workaround.includes(workaround)) &&
+      (filters.topic.length === 0 ||
+        findings.some((finding) =>
+          finding.topic ? filters.topic.includes(finding.topic) : false,
+        )) &&
+      (filters.kind.length === 0 ||
+        findings.some((finding) => (finding.kind ? filters.kind.includes(finding.kind) : false))) &&
+      (filters.severity.length === 0 ||
+        findings.some((finding) =>
+          finding.severity ? filters.severity.includes(finding.severity) : false,
+        ));
+    const searchable = [
+      report.summary,
+      report.operation,
+      report.customerRef,
+      report.surface,
+      report.runtimeHint,
+      report.workflowStatus,
+      report.internalNote,
+      report.workaround?.detail,
+      ...report.tags,
+      ...findings.flatMap((finding) => [
+        finding.topic,
+        finding.kind,
+        finding.severity,
+        finding.detail,
+      ]),
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    return (
+      matches &&
+      (!needle || searchable.includes(needle)) &&
+      new Date(report.createdAt).getTime() >= minimum
+    );
+  });
+}
+
+function isWorkflowStatus(value: string): value is WorkflowStatus {
+  return workflowStatuses.includes(value as WorkflowStatus);
+}
+
+function unique(values: Array<string | null | undefined>) {
+  return [...new Set(values.filter((value): value is string => Boolean(value)))].sort(
+    (left, right) => left.localeCompare(right),
+  );
+}
+
+function connectorsPath(workspaceId: string, productId: string): string {
+  const params = new URLSearchParams({ view: "connectors", team: workspaceId, product: productId });
+  return `/?${params}`;
+}
+
+function readFilterLocation(): {
+  query: string;
+  filters: FeedbackFiltersState;
+  range: string;
+} {
+  if (typeof window === "undefined") {
+    return { query: "", filters: createEmptyFilters(), range: defaultRange };
+  }
+  const params = new URL(window.location.href).searchParams;
+  const filters = createEmptyFilters();
+  for (const facet of facetOrder) filters[facet] = params.getAll(facet).filter(Boolean);
+  return {
+    query: params.get("q") ?? "",
+    filters,
+    range: params.get("range") ?? defaultRange,
+  };
+}
+
+function writeFilterLocation(query: string, filters: FeedbackFiltersState, range: string) {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (query.trim()) url.searchParams.set("q", query.trim());
+  else url.searchParams.delete("q");
+  for (const facet of facetOrder) {
+    url.searchParams.delete(facet);
+    for (const value of filters[facet]) url.searchParams.append(facet, value);
+  }
+  if (range === defaultRange) url.searchParams.delete("range");
+  else url.searchParams.set("range", range);
+  window.history.replaceState(window.history.state, "", url);
 }

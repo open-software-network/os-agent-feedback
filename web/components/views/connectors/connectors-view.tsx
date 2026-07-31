@@ -33,7 +33,10 @@ import { formatDate, isEditor } from "@/lib/dashboard/format";
 
 const PLANNED_CONNECTORS = ["Slack", "Linear", "OS Platform"] as const;
 
-export function ConnectorsView({ data }: Pick<ViewBaseProps, "data">) {
+export function ConnectorsView({
+  data,
+  embedded = false,
+}: Pick<ViewBaseProps, "data"> & { embedded?: boolean }) {
   const [githubExpanded, setGithubExpanded] = useState(true);
   const [mappingExpanded, setMappingExpanded] = useState(false);
   const installationsQuery = useQuery({
@@ -45,11 +48,13 @@ export function ConnectorsView({ data }: Pick<ViewBaseProps, "data">) {
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        eyebrow="Workspace"
-        title="Connectors"
-        description="Connect Epode to the tools your team uses to act on product feedback."
-      />
+      {!embedded ? (
+        <PageHeader
+          eyebrow="Workspace"
+          title="Connectors"
+          description="Connect Epode to the tools your team uses to act on product feedback."
+        />
+      ) : null}
 
       <div className="space-y-3">
         <Panel>
@@ -502,8 +507,11 @@ function GithubConnector({
             Organizations and personal accounts connected to this workspace.
           </p>
         </div>
-        {/* GitHub install requires a top-level navigation; this link cannot carry x-workspace-id. */}
-        <a className={buttonVariants({ variant: "outline" })} href="/api/github/install">
+        {/* GitHub install requires a top-level navigation; carry workspace context in the URL. */}
+        <a
+          className={buttonVariants({ variant: "outline" })}
+          href={`/api/github/install?workspaceId=${encodeURIComponent(workspaceId)}`}
+        >
           Add organization
         </a>
       </div>

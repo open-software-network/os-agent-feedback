@@ -1,0 +1,852 @@
+{
+  "version": "relay-support-v1",
+  "product": {
+    "name": "Relay Support",
+    "slug": "epode-demo-relay-support",
+    "environmentName": "Production",
+    "environmentSlug": "production"
+  },
+  "members": [
+    {
+      "alias": "mina",
+      "osUserId": "usr_seed_mina",
+      "handle": "mina-seed",
+      "displayName": "Mina Park",
+      "role": "admin"
+    },
+    {
+      "alias": "jakub",
+      "osUserId": "usr_seed_jakub",
+      "handle": "jakub-seed",
+      "displayName": "Jakub Nowak",
+      "role": "member"
+    }
+  ],
+  "reports": [
+    {
+      "key": "refund-timeout-state",
+      "sessionKey": "refund-acct-70c1",
+      "sessionSource": "mcp",
+      "hoursAgo": 5,
+      "surface": "mcp",
+      "operation": "refund_create",
+      "statusCode": 500,
+      "durationMs": 14820,
+      "customerRef": "acct_70c1",
+      "runtimeHint": "claude-code/2.1",
+      "runtimeHintSource": "client_info",
+      "summary": "Refund creation timed out without revealing whether the charge was reversed",
+      "impact": "blocked",
+      "confidence": 0.98,
+      "findings": [
+        {
+          "kind": "defect",
+          "topic": "idempotency",
+          "severity": "blocking",
+          "detail": "The tool exposed no stable retry key after the upstream request exceeded its timeout."
+        },
+        {
+          "kind": "uncertainty",
+          "topic": "operation_state",
+          "severity": "major",
+          "detail": "A rejected refund and a completed refund with a lost acknowledgement were indistinguishable."
+        }
+      ],
+      "workaround": {
+        "used": true,
+        "detail": "Query refund status with the original external reference before attempting another write."
+      },
+      "workflow": {
+        "status": "new",
+        "assignee": null,
+        "tags": ["refunds", "idempotency", "regression"],
+        "internalNote": null
+      }
+    },
+    {
+      "key": "knowledge-current-policy",
+      "sessionKey": "knowledge-acct-5aa4",
+      "sessionSource": "mcp",
+      "hoursAgo": 12,
+      "surface": "mcp",
+      "operation": "knowledge_search",
+      "statusCode": 200,
+      "durationMs": 620,
+      "customerRef": "acct_5aa4",
+      "runtimeHint": "openai-agents-js/0.8",
+      "runtimeHintSource": "client_info",
+      "summary": "Knowledge search returned the current policy with a direct source citation",
+      "impact": "helped",
+      "confidence": 0.96,
+      "findings": [
+        {
+          "kind": "strength",
+          "topic": "citations",
+          "severity": null,
+          "detail": "The answer linked directly to the governing policy section instead of paraphrasing without evidence."
+        },
+        {
+          "kind": "strength",
+          "topic": "relevance",
+          "severity": null,
+          "detail": "The current policy ranked above superseded versions for the same question."
+        }
+      ],
+      "workaround": null,
+      "workflow": {
+        "status": "resolved",
+        "assignee": "mina",
+        "tags": ["knowledge", "citations", "quality-bar"],
+        "internalNote": "Quality bar for cited answers after ranking v2.8."
+      }
+    },
+    {
+      "key": "knowledge-missing-guidance",
+      "sessionKey": "knowledge-acct-2d91",
+      "sessionSource": "customer",
+      "hoursAgo": 19,
+      "surface": "http_json",
+      "operation": "/v1/knowledge/search",
+      "statusCode": 200,
+      "durationMs": 780,
+      "customerRef": "acct_2d91",
+      "runtimeHint": "openai-python/1.92",
+      "runtimeHintSource": "user_agent",
+      "summary": "Recently published return guidance was missing from knowledge search",
+      "impact": "hindered",
+      "confidence": 0.91,
+      "findings": [
+        {
+          "kind": "gap",
+          "topic": "knowledge_freshness",
+          "severity": "major",
+          "detail": "The guidance remained absent eighteen hours after publication even though direct article lookup succeeded."
+        }
+      ],
+      "workaround": {
+        "used": true,
+        "detail": "Fetch the known article slug directly and verify its effective date before using the guidance."
+      },
+      "workflow": {
+        "status": "new",
+        "assignee": null,
+        "tags": ["knowledge", "freshness", "regression"],
+        "internalNote": "Third freshness report in ten days; compare index watermarks."
+      }
+    },
+    {
+      "key": "subscription-preview",
+      "sessionKey": "subscription-acct-c21e",
+      "sessionSource": "mcp",
+      "hoursAgo": 29,
+      "surface": "mcp",
+      "operation": "subscription_cancel",
+      "statusCode": 200,
+      "durationMs": 430,
+      "customerRef": "acct_c21e",
+      "runtimeHint": "codex-cli/0.25",
+      "runtimeHintSource": "client_info",
+      "summary": "Subscription cancellation exposed no safe preview of the effective change",
+      "impact": "neutral",
+      "confidence": 0.74,
+      "findings": [
+        {
+          "kind": "uncertainty",
+          "topic": "side_effects",
+          "severity": "major",
+          "detail": "The agent could not tell whether cancellation was immediate or scheduled for the billing boundary."
+        },
+        {
+          "kind": "suggestion",
+          "topic": "preview",
+          "severity": "minor",
+          "detail": "Return an explicit dry-run summary before the destructive confirmation step."
+        }
+      ],
+      "workaround": null,
+      "workflow": {
+        "status": "investigating",
+        "assignee": "jakub",
+        "tags": ["subscriptions", "safety", "tool-contract"],
+        "internalNote": null
+      }
+    },
+    {
+      "key": "refund-second-attempt",
+      "sessionKey": "refund-acct-91af",
+      "sessionSource": "mcp",
+      "hoursAgo": 43,
+      "surface": "mcp",
+      "operation": "refund_create",
+      "statusCode": 500,
+      "durationMs": 15040,
+      "customerRef": "acct_91af",
+      "runtimeHint": "claude-code/2.1",
+      "runtimeHintSource": "client_info",
+      "summary": "A second refund attempt remained unsafe after the first tool call timed out",
+      "impact": "blocked",
+      "confidence": 0.97,
+      "findings": [
+        {
+          "kind": "defect",
+          "topic": "idempotency",
+          "severity": "blocking",
+          "detail": "Repeating the same logical request could create another refund because no idempotency contract was exposed."
+        },
+        {
+          "kind": "gap",
+          "topic": "recovery",
+          "severity": "major",
+          "detail": "The tool response did not provide a lookup handle for resolving an ambiguous write."
+        }
+      ],
+      "workaround": {
+        "used": true,
+        "detail": "Inspect the refund list for the original external reference before retrying."
+      },
+      "workflow": {
+        "status": "investigating",
+        "assignee": "owner",
+        "tags": ["refunds", "idempotency", "reliability"],
+        "internalNote": "Reproduced with injected upstream latency."
+      }
+    },
+    {
+      "key": "timeline-duplicate-page",
+      "sessionKey": "case-acct-11b8",
+      "sessionSource": "mcp",
+      "hoursAgo": 53,
+      "surface": "mcp",
+      "operation": "customer_timeline",
+      "statusCode": 200,
+      "durationMs": 1280,
+      "customerRef": "acct_11b8",
+      "runtimeHint": "cursor-agent/1.3",
+      "runtimeHintSource": "client_info",
+      "summary": "Customer timeline completed after pagination repeated one event",
+      "impact": "helped_with_friction",
+      "confidence": 0.88,
+      "findings": [
+        {
+          "kind": "friction",
+          "topic": "pagination",
+          "severity": "minor",
+          "detail": "The boundary event appeared at the end of one page and the beginning of the next page."
+        }
+      ],
+      "workaround": {
+        "used": true,
+        "detail": "Deduplicate events by their opaque event identifier while traversing cursors."
+      },
+      "workflow": {
+        "status": "planned",
+        "assignee": "jakub",
+        "tags": ["timeline", "pagination"],
+        "internalNote": null
+      }
+    },
+    {
+      "key": "draft-grounded-policy",
+      "sessionKey": "case-acct-11b8",
+      "sessionSource": "mcp",
+      "hoursAgo": 58,
+      "surface": "mcp",
+      "operation": "draft_reply",
+      "statusCode": 200,
+      "durationMs": 1940,
+      "customerRef": "acct_11b8",
+      "runtimeHint": "cursor-agent/1.3",
+      "runtimeHintSource": "client_info",
+      "summary": "Draft reply used the correct order state and cited the applicable policy",
+      "impact": "helped",
+      "confidence": 0.94,
+      "findings": [
+        {
+          "kind": "strength",
+          "topic": "grounding",
+          "severity": null,
+          "detail": "The draft reflected the live order state instead of relying on the older case summary."
+        },
+        {
+          "kind": "strength",
+          "topic": "citations",
+          "severity": null,
+          "detail": "The response attached the exact policy used to justify the recommendation."
+        }
+      ],
+      "workaround": null,
+      "workflow": {
+        "status": "resolved",
+        "assignee": "jakub",
+        "tags": ["drafting", "grounding", "quality-bar"],
+        "internalNote": null
+      }
+    },
+    {
+      "key": "handoff-delivery-unknown",
+      "sessionKey": "handoff-acct-88d0",
+      "sessionSource": "mcp",
+      "hoursAgo": 72,
+      "surface": "mcp",
+      "operation": "handoff_create",
+      "statusCode": 200,
+      "durationMs": 860,
+      "customerRef": "acct_88d0",
+      "runtimeHint": "langgraph/0.6",
+      "runtimeHintSource": "client_info",
+      "summary": "The handoff was accepted, but queue delivery could not be verified",
+      "impact": "unknown",
+      "confidence": 0.61,
+      "findings": [
+        {
+          "kind": "uncertainty",
+          "topic": "delivery_state",
+          "severity": "major",
+          "detail": "Acceptance confirmed storage but did not prove the case reached the assigned queue."
+        },
+        {
+          "kind": "other",
+          "topic": "queue_visibility",
+          "severity": "minor",
+          "detail": "No durable delivery receipt or query handle was available after the handoff."
+        }
+      ],
+      "workaround": null,
+      "workflow": {
+        "status": "new",
+        "assignee": null,
+        "tags": ["handoff", "observability"],
+        "internalNote": null
+      }
+    },
+    {
+      "key": "cancellation-effective-date",
+      "sessionKey": "subscription-acct-f310",
+      "sessionSource": "customer",
+      "hoursAgo": 91,
+      "surface": "http_json",
+      "operation": "/v1/subscriptions/:id/cancel",
+      "statusCode": 200,
+      "durationMs": 940,
+      "customerRef": "acct_f310",
+      "runtimeHint": "openai-node/5.10",
+      "runtimeHintSource": "user_agent",
+      "summary": "Cancellation succeeded but the response did not state when access would end",
+      "impact": "hindered",
+      "confidence": 0.9,
+      "findings": [
+        {
+          "kind": "gap",
+          "topic": "response_semantics",
+          "severity": "major",
+          "detail": "The successful response omitted both the effective cancellation time and the remaining access window."
+        }
+      ],
+      "workaround": {
+        "used": true,
+        "detail": "Perform a follow-up subscription lookup and read the period-end timestamp."
+      },
+      "workflow": {
+        "status": "planned",
+        "assignee": "jakub",
+        "tags": ["subscriptions", "response-contract"],
+        "internalNote": null
+      }
+    },
+    {
+      "key": "knowledge-stale-version",
+      "sessionKey": "knowledge-acct-6a2d",
+      "sessionSource": "mcp",
+      "hoursAgo": 110,
+      "surface": "mcp",
+      "operation": "knowledge_search",
+      "statusCode": 200,
+      "durationMs": 720,
+      "customerRef": "acct_6a2d",
+      "runtimeHint": "claude-code/2.1",
+      "runtimeHintSource": "client_info",
+      "summary": "Knowledge search returned the pre-release article after the new version shipped",
+      "impact": "helped_with_friction",
+      "confidence": 0.87,
+      "findings": [
+        {
+          "kind": "gap",
+          "topic": "knowledge_freshness",
+          "severity": "major",
+          "detail": "The superseded article ranked first even though its replacement had a later effective date."
+        }
+      ],
+      "workaround": {
+        "used": true,
+        "detail": "Filter results by effective date and fetch the replacement article directly."
+      },
+      "workflow": {
+        "status": "investigating",
+        "assignee": "mina",
+        "tags": ["knowledge", "freshness"],
+        "internalNote": null
+      }
+    },
+    {
+      "key": "handoff-durable-receipt",
+      "sessionKey": "handoff-acct-76b2",
+      "sessionSource": "mcp",
+      "hoursAgo": 127,
+      "surface": "mcp",
+      "operation": "handoff_create",
+      "statusCode": 200,
+      "durationMs": 810,
+      "customerRef": "acct_76b2",
+      "runtimeHint": "codex-cli/0.25",
+      "runtimeHintSource": "client_info",
+      "summary": "Human handoff returned a durable case identifier and expected response window",
+      "impact": "helped",
+      "confidence": 0.95,
+      "findings": [
+        {
+          "kind": "strength",
+          "topic": "observability",
+          "severity": null,
+          "detail": "The case identifier supported later status checks and the response window set a clear expectation."
+        }
+      ],
+      "workaround": null,
+      "workflow": {
+        "status": "wont_act",
+        "assignee": "jakub",
+        "tags": ["handoff", "positive", "quality-bar"],
+        "internalNote": "No change planned; preserve this response contract."
+      }
+    },
+    {
+      "key": "case-export-resume",
+      "sessionKey": "export-acct-b55c",
+      "sessionSource": "customer",
+      "hoursAgo": 154,
+      "surface": "http_json",
+      "operation": "/v1/cases/export/:id",
+      "statusCode": 504,
+      "durationMs": 12480,
+      "customerRef": "acct_b55c",
+      "runtimeHint": "openai-python/1.92",
+      "runtimeHintSource": "user_agent",
+      "summary": "Case export failed near completion after processing twelve days of history, discarded the completed pages, and offered neither a resume checkpoint nor a list of records already written",
+      "impact": "blocked",
+      "confidence": 0.93,
+      "findings": [
+        {
+          "kind": "defect",
+          "topic": "resumability",
+          "severity": "blocking",
+          "detail": "A terminal timeout discarded the server-side progress made before the final page."
+        },
+        {
+          "kind": "gap",
+          "topic": "partial_results",
+          "severity": "major",
+          "detail": "The response did not identify completed pages or provide a checkpoint for resuming."
+        }
+      ],
+      "workaround": {
+        "used": true,
+        "detail": "Export one-day windows separately and combine the resulting files."
+      },
+      "workflow": {
+        "status": "new",
+        "assignee": "owner",
+        "tags": ["exports", "resumability", "reliability"],
+        "internalNote": null
+      }
+    },
+    {
+      "key": "order-complete-context",
+      "sessionKey": "order-acct-05d7",
+      "sessionSource": "customer",
+      "hoursAgo": 173,
+      "surface": "http_json",
+      "operation": "/v1/orders/:id",
+      "statusCode": 200,
+      "durationMs": 310,
+      "customerRef": "acct_05d7",
+      "runtimeHint": "openai-node/5.10",
+      "runtimeHintSource": "user_agent",
+      "summary": "Order lookup combined payment, fulfillment, and return eligibility in one response",
+      "impact": "helped",
+      "confidence": 0.97,
+      "findings": [
+        {
+          "kind": "strength",
+          "topic": "completeness",
+          "severity": null,
+          "detail": "The agent could answer the case without making separate payment and fulfillment requests."
+        }
+      ],
+      "workaround": null,
+      "workflow": {
+        "status": "resolved",
+        "assignee": "jakub",
+        "tags": ["orders", "positive", "quality-bar"],
+        "internalNote": null
+      }
+    },
+    {
+      "key": "search-rate-limit-guidance",
+      "sessionKey": "knowledge-acct-603a",
+      "sessionSource": "customer",
+      "hoursAgo": 194,
+      "surface": "http_json",
+      "operation": "/v1/knowledge/search",
+      "statusCode": 200,
+      "durationMs": 2340,
+      "customerRef": "acct_603a",
+      "runtimeHint": "openai-python/1.92",
+      "runtimeHintSource": "user_agent",
+      "summary": "Search succeeded after rate limiting, but retry guidance required guesswork",
+      "impact": "helped_with_friction",
+      "confidence": 0.86,
+      "findings": [
+        {
+          "kind": "friction",
+          "topic": "rate_limits",
+          "severity": "minor",
+          "detail": "The client received a delay value but no guidance on jitter or retry limits."
+        },
+        {
+          "kind": "suggestion",
+          "topic": "retry_guidance",
+          "severity": "minor",
+          "detail": "Document the recommended retry count and whether the search operation is idempotent."
+        }
+      ],
+      "workaround": {
+        "used": true,
+        "detail": "Honor the supplied delay and retry once with jitter."
+      },
+      "workflow": {
+        "status": "planned",
+        "assignee": "jakub",
+        "tags": ["rate-limits", "retry-guidance"],
+        "internalNote": null
+      }
+    },
+    {
+      "key": "draft-locale-unclear",
+      "sessionKey": "draft-acct-4ee0",
+      "sessionSource": "mcp",
+      "hoursAgo": 211,
+      "surface": "mcp",
+      "operation": "draft_reply",
+      "statusCode": 200,
+      "durationMs": 1640,
+      "customerRef": "acct_4ee0",
+      "runtimeHint": "langgraph/0.6",
+      "runtimeHintSource": "client_info",
+      "summary": "Draft reply was grounded correctly but the response language was inferred",
+      "impact": "neutral",
+      "confidence": 0.72,
+      "findings": [
+        {
+          "kind": "uncertainty",
+          "topic": "locale",
+          "severity": "major",
+          "detail": "The selected language depended on weak signals in the case history rather than an explicit preference."
+        },
+        {
+          "kind": "suggestion",
+          "topic": "locale_control",
+          "severity": "minor",
+          "detail": "Expose the selected locale as an input and include it in the response metadata."
+        }
+      ],
+      "workaround": null,
+      "workflow": {
+        "status": "new",
+        "assignee": null,
+        "tags": ["drafting", "localization"],
+        "internalNote": null
+      }
+    },
+    {
+      "key": "knowledge-correction-lag",
+      "sessionKey": "knowledge-acct-9c40",
+      "sessionSource": "customer",
+      "hoursAgo": 240,
+      "surface": "http_json",
+      "operation": "/v1/knowledge/search",
+      "statusCode": 200,
+      "durationMs": 690,
+      "customerRef": "acct_9c40",
+      "runtimeHint": "openai-node/5.10",
+      "runtimeHintSource": "user_agent",
+      "summary": "Knowledge results lagged behind an article correction for several hours",
+      "impact": "hindered",
+      "confidence": 0.89,
+      "findings": [
+        {
+          "kind": "gap",
+          "topic": "knowledge_freshness",
+          "severity": "major",
+          "detail": "Search continued returning the pre-correction excerpt while direct article reads showed the updated text."
+        }
+      ],
+      "workaround": {
+        "used": true,
+        "detail": "Use the article endpoint after comparing update metadata on the search result."
+      },
+      "workflow": {
+        "status": "resolved",
+        "assignee": "mina",
+        "tags": ["knowledge", "freshness"],
+        "internalNote": "Initially resolved by worker restart; retain as recurrence baseline."
+      }
+    },
+    {
+      "key": "refund-status-recovery",
+      "sessionKey": "refund-acct-144f",
+      "sessionSource": "mcp",
+      "hoursAgo": 274,
+      "surface": "mcp",
+      "operation": "refund_status",
+      "statusCode": 200,
+      "durationMs": 510,
+      "customerRef": "acct_144f",
+      "runtimeHint": "claude-code/2.1",
+      "runtimeHintSource": "client_info",
+      "summary": "Refund status resolved an ambiguous timeout without creating a duplicate",
+      "impact": "helped_with_friction",
+      "confidence": 0.92,
+      "findings": [
+        {
+          "kind": "strength",
+          "topic": "recovery",
+          "severity": null,
+          "detail": "The original request reference resolved the write outcome without another mutation."
+        },
+        {
+          "kind": "friction",
+          "topic": "latency",
+          "severity": "minor",
+          "detail": "The recovery lookup was only discoverable after the write had already timed out."
+        }
+      ],
+      "workaround": {
+        "used": true,
+        "detail": "Check the original request reference instead of resubmitting the refund."
+      },
+      "workflow": {
+        "status": "resolved",
+        "assignee": "owner",
+        "tags": ["refunds", "recovery", "quality-bar"],
+        "internalNote": null
+      }
+    },
+    {
+      "key": "timeline-low-evidence",
+      "sessionKey": "timeline-acct-aa72",
+      "sessionSource": "mcp",
+      "hoursAgo": 305,
+      "surface": "mcp",
+      "operation": "customer_timeline",
+      "statusCode": 200,
+      "durationMs": 440,
+      "customerRef": "acct_aa72",
+      "runtimeHint": "codex-cli/0.25",
+      "runtimeHintSource": "client_info",
+      "summary": "Timeline completeness was unclear",
+      "impact": null,
+      "confidence": null,
+      "findings": [],
+      "workaround": null,
+      "workflow": {
+        "status": "wont_act",
+        "assignee": null,
+        "tags": ["timeline", "insufficient-evidence"],
+        "internalNote": "Single low-evidence report; reopen if it recurs."
+      }
+    }
+  ],
+  "supportingInteractions": [
+    {
+      "key": "refund-preflight-70c1",
+      "sessionKey": "refund-acct-70c1",
+      "sessionSource": "mcp",
+      "hoursAgo": 6,
+      "surface": "mcp",
+      "operation": "refund_status",
+      "statusCode": 200,
+      "durationMs": 480,
+      "customerRef": "acct_70c1",
+      "runtimeHint": "claude-code/2.1",
+      "runtimeHintSource": "client_info"
+    },
+    {
+      "key": "knowledge-resolve-5aa4",
+      "sessionKey": "knowledge-acct-5aa4",
+      "sessionSource": "mcp",
+      "hoursAgo": 13,
+      "surface": "mcp",
+      "operation": "knowledge_resolve",
+      "statusCode": 200,
+      "durationMs": 370,
+      "customerRef": "acct_5aa4",
+      "runtimeHint": "openai-agents-js/0.8",
+      "runtimeHintSource": "client_info"
+    },
+    {
+      "key": "subscription-lookup-c21e",
+      "sessionKey": "subscription-acct-c21e",
+      "sessionSource": "mcp",
+      "hoursAgo": 30,
+      "surface": "mcp",
+      "operation": "subscription_lookup",
+      "statusCode": 200,
+      "durationMs": 250,
+      "customerRef": "acct_c21e",
+      "runtimeHint": "codex-cli/0.25",
+      "runtimeHintSource": "client_info"
+    },
+    {
+      "key": "timeline-page-11b8",
+      "sessionKey": "case-acct-11b8",
+      "sessionSource": "mcp",
+      "hoursAgo": 54,
+      "surface": "mcp",
+      "operation": "customer_timeline",
+      "statusCode": 200,
+      "durationMs": 610,
+      "customerRef": "acct_11b8",
+      "runtimeHint": "cursor-agent/1.3",
+      "runtimeHintSource": "client_info"
+    },
+    {
+      "key": "order-lookup-11b8",
+      "sessionKey": "case-acct-11b8",
+      "sessionSource": "mcp",
+      "hoursAgo": 59,
+      "surface": "mcp",
+      "operation": "order_lookup",
+      "statusCode": 200,
+      "durationMs": 280,
+      "customerRef": "acct_11b8",
+      "runtimeHint": "cursor-agent/1.3",
+      "runtimeHintSource": "client_info"
+    },
+    {
+      "key": "policy-lookup-4ee0",
+      "sessionKey": "draft-acct-4ee0",
+      "sessionSource": "mcp",
+      "hoursAgo": 212,
+      "surface": "mcp",
+      "operation": "policy_lookup",
+      "statusCode": 200,
+      "durationMs": 310,
+      "customerRef": "acct_4ee0",
+      "runtimeHint": "langgraph/0.6",
+      "runtimeHintSource": "client_info"
+    },
+    {
+      "key": "refund-failed-144f",
+      "sessionKey": "refund-acct-144f",
+      "sessionSource": "mcp",
+      "hoursAgo": 275,
+      "surface": "mcp",
+      "operation": "refund_create",
+      "statusCode": 500,
+      "durationMs": 15000,
+      "customerRef": "acct_144f",
+      "runtimeHint": "claude-code/2.1",
+      "runtimeHintSource": "client_info"
+    },
+    {
+      "key": "timeline-page-aa72",
+      "sessionKey": "timeline-acct-aa72",
+      "sessionSource": "mcp",
+      "hoursAgo": 306,
+      "surface": "mcp",
+      "operation": "customer_timeline",
+      "statusCode": 200,
+      "durationMs": 520,
+      "customerRef": "acct_aa72",
+      "runtimeHint": "codex-cli/0.25",
+      "runtimeHintSource": "client_info"
+    },
+    {
+      "key": "unreviewed-knowledge-recent",
+      "sessionKey": null,
+      "sessionSource": null,
+      "hoursAgo": 3,
+      "surface": "http_json",
+      "operation": "/v1/knowledge/search",
+      "statusCode": 200,
+      "durationMs": 180,
+      "customerRef": "acct_39fe",
+      "runtimeHint": "openai-node/5.10",
+      "runtimeHintSource": "user_agent"
+    },
+    {
+      "key": "unreviewed-knowledge-mid",
+      "sessionKey": null,
+      "sessionSource": null,
+      "hoursAgo": 80,
+      "surface": "http_json",
+      "operation": "/v1/knowledge/search",
+      "statusCode": 200,
+      "durationMs": 760,
+      "customerRef": "acct_650d",
+      "runtimeHint": "openai-python/1.92",
+      "runtimeHintSource": "user_agent"
+    },
+    {
+      "key": "unreviewed-knowledge-previous",
+      "sessionKey": null,
+      "sessionSource": null,
+      "hoursAgo": 201,
+      "surface": "http_json",
+      "operation": "/v1/knowledge/search",
+      "statusCode": 200,
+      "durationMs": 0,
+      "customerRef": "acct_e901",
+      "runtimeHint": "openai-python/1.92",
+      "runtimeHintSource": "user_agent"
+    },
+    {
+      "key": "unreviewed-order-lookup",
+      "sessionKey": null,
+      "sessionSource": null,
+      "hoursAgo": 175,
+      "surface": "http_json",
+      "operation": "/v1/orders/:id",
+      "statusCode": 200,
+      "durationMs": 290,
+      "customerRef": "acct_531a",
+      "runtimeHint": "openai-node/5.10",
+      "runtimeHintSource": "user_agent"
+    },
+    {
+      "key": "unreviewed-case-status",
+      "sessionKey": null,
+      "sessionSource": null,
+      "hoursAgo": 155,
+      "surface": "http_headers",
+      "operation": "/v1/cases/:id/status",
+      "statusCode": 304,
+      "durationMs": 90,
+      "customerRef": "acct_b55c",
+      "runtimeHint": "curl/8.10",
+      "runtimeHintSource": "user_agent"
+    },
+    {
+      "key": "unreviewed-help-page",
+      "sessionKey": null,
+      "sessionSource": null,
+      "hoursAgo": 220,
+      "surface": "http_html",
+      "operation": "/help/returns",
+      "statusCode": 200,
+      "durationMs": null,
+      "customerRef": null,
+      "runtimeHint": "browser-agent/1.4",
+      "runtimeHintSource": "user_agent"
+    }
+  ]
+}
