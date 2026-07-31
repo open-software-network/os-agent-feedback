@@ -76,20 +76,20 @@ use crate::{
         bearer_token, clear_cookie, cookie, http_only_cookie, random_token, reject_sensitive_fields,
     },
     store::{
-        GithubInstallationUpsert, accept_team_invitation, agent_product_auth,
-        backfill_report_groups, bump_last_commented_report_count, claim_group_issue_state_refresh,
-        clear_product_github_repo, create_api_key, create_product_with_default_key,
-        create_team_invitation, dashboard_interaction_by_id, dashboard_report_by_id,
-        dashboard_session_by_id, dashboard_with_limits, delete_product, feedback_consent_state,
-        feedback_list_interactions, feedback_list_reports, get_group_github_issue,
-        get_group_github_issue_in_transaction, get_or_create_workspace, get_product_github_repo,
-        github_installation_workspace, group_issue_context, group_issue_context_in_transaction,
-        group_issue_sync_context, ingest_telemetry_batch, list_github_installations,
-        list_product_groups, lock_group_issue_filing, purge_expired_product_data,
-        read_product_auth, record_feedback_consent_decision, record_group_github_issue,
-        regroup_report_groups, remove_team_member, rename_product, rename_workspace,
-        resolve_workspace_access, revert_last_commented_report_count, revoke_api_key,
-        revoke_github_installation, revoke_team_invitation, rotate_api_key,
+        GithubInstallationUpsert, GroupIssueSyncContext, accept_team_invitation,
+        agent_product_auth, backfill_report_groups, bump_last_commented_report_count,
+        claim_group_issue_state_refresh, clear_product_github_repo, create_api_key,
+        create_product_with_default_key, create_team_invitation, dashboard_interaction_by_id,
+        dashboard_report_by_id, dashboard_session_by_id, dashboard_with_limits, delete_product,
+        feedback_consent_state, feedback_list_interactions, feedback_list_reports,
+        get_group_github_issue, get_group_github_issue_in_transaction, get_or_create_workspace,
+        get_product_github_repo, github_installation_workspace, group_issue_context,
+        group_issue_context_in_transaction, group_issue_sync_context, ingest_telemetry_batch,
+        list_github_installations, list_product_groups, lock_group_issue_filing,
+        purge_expired_product_data, read_product_auth, record_feedback_consent_decision,
+        record_group_github_issue, regroup_report_groups, remove_team_member, rename_product,
+        rename_workspace, resolve_workspace_access, revert_last_commented_report_count,
+        revoke_api_key, revoke_github_installation, revoke_team_invitation, rotate_api_key,
         set_product_github_repo, submit_product_feedback, transfer_team_ownership,
         update_feedback_workflow, update_group_issue_state, update_policy, update_team_member_role,
         upsert_github_installation,
@@ -1394,11 +1394,14 @@ async fn product_groups_handler(
         list_product_groups(&state.pool, context.workspace.id, product_id, limit, offset).await?;
     let mut spawned_syncs = 0_usize;
     let mut dropped_syncs = 0_usize;
+    let sync_checked_at = Utc::now();
     for listed in &page.groups {
         if group_issue_sync_needed(
             listed.group.github_issue.is_some(),
             listed.group.report_count,
             listed.last_commented_report_count,
+            listed.state_refreshed_at,
+            sync_checked_at,
         ) {
             if spawned_syncs >= MAX_GROUP_ISSUE_SYNCS_PER_REQUEST {
                 dropped_syncs += 1;
@@ -1582,14 +1585,28 @@ fn spawn_group_issue_sync(state: Arc<AppState>, workspace_id: Uuid, group_key: S
     });
 }
 
+/// A sync is worth spawning when there is new evidence to comment on, OR when
+/// the cached issue state is stale enough to re-read.
+///
+/// The state refresh is deliberately NOT conditioned on new reports arriving: a
+/// group that has gone quiet is exactly the one whose issue is most likely to
+/// have been closed or reopened on GitHub, and gating on new evidence would pin
+/// its badge to whatever it was when the last report landed. Call volume stays
+/// bounded by the `state_refreshed_at` throttle and the per-request fan-out cap
+/// rather than by the presence of new reports.
 fn group_issue_sync_needed(
     has_github_issue: bool,
     current_report_count: i64,
     last_commented_report_count: Option<i64>,
+    state_refreshed_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
 ) -> bool {
-    has_github_issue
-        && last_commented_report_count
-            .is_some_and(|last_commented| current_report_count > last_commented)
+    if !has_github_issue {
+        return false;
+    }
+    let new_evidence = last_commented_report_count
+        .is_some_and(|last_commented| current_report_count > last_commented);
+    new_evidence || group_issue_state_refresh_due(state_refreshed_at, now)
 }
 
 fn group_issue_state_refresh_due(
@@ -1614,23 +1631,50 @@ async fn sync_group_github_issue(
         tx.commit().await?;
         return Ok(());
     };
-    if context.current_report_count <= context.observed_report_count {
-        tx.commit().await?;
-        return Ok(());
-    }
-    let claimed = bump_last_commented_report_count(
-        &mut tx,
-        workspace_id,
-        group_key,
-        context.observed_report_count,
-        context.current_report_count,
-    )
-    .await?;
+    // Claim the comment only when there is genuinely new evidence. Whether or
+    // not there is, the state refresh below still gets its chance — a quiet
+    // group is the one most likely to have been closed or reopened on GitHub.
+    let claimed = if context.current_report_count > context.observed_report_count {
+        bump_last_commented_report_count(
+            &mut tx,
+            workspace_id,
+            group_key,
+            context.observed_report_count,
+            context.current_report_count,
+        )
+        .await?
+    } else {
+        false
+    };
     tx.commit().await?;
-    if !claimed {
-        return Ok(());
+
+    if claimed {
+        post_group_evidence_comment(state, github, workspace_id, group_key, &context).await;
     }
 
+    let refresh_checked_at = Utc::now();
+    let refresh_cutoff =
+        refresh_checked_at - Duration::minutes(GROUP_ISSUE_STATE_REFRESH_INTERVAL_MINUTES);
+    if group_issue_state_refresh_due(context.state_refreshed_at, refresh_checked_at)
+        && claim_group_issue_state_refresh(&state.pool, workspace_id, group_key, refresh_cutoff)
+            .await?
+    {
+        refresh_group_issue_state(state, github, workspace_id, group_key, &context).await;
+    }
+    Ok(())
+}
+
+/// Posts the evidence comment for an already-claimed counter bump.
+///
+/// Never returns an error: a GitHub failure reverts the claim so a later sync
+/// retries, and must not abort the caller's state refresh.
+async fn post_group_evidence_comment(
+    state: &AppState,
+    github: &GithubAppClient,
+    workspace_id: Uuid,
+    group_key: &str,
+    context: &GroupIssueSyncContext,
+) {
     let body = render_evidence_comment(
         context.current_report_count - context.observed_report_count,
         context.earliest_new_occurred_at,
@@ -1679,39 +1723,48 @@ async fn sync_group_github_issue(
             issue_number = context.issue_number,
             "GitHub evidence comment failed; report counter will be retried when safely reverted"
         );
-        return Ok(());
     }
+}
 
-    let refresh_checked_at = Utc::now();
-    let refresh_cutoff =
-        refresh_checked_at - Duration::minutes(GROUP_ISSUE_STATE_REFRESH_INTERVAL_MINUTES);
-    if group_issue_state_refresh_due(context.state_refreshed_at, refresh_checked_at)
-        && claim_group_issue_state_refresh(&state.pool, workspace_id, group_key, refresh_cutoff)
-            .await?
+/// Re-reads the issue state for an already-claimed refresh slot.
+///
+/// Never returns an error: a stale badge is not worth failing a background sync.
+async fn refresh_group_issue_state(
+    state: &AppState,
+    github: &GithubAppClient,
+    workspace_id: Uuid,
+    group_key: &str,
+    context: &GroupIssueSyncContext,
+) {
+    match github
+        .issue(
+            context.installation_id,
+            &context.repo_full_name,
+            context.issue_number,
+        )
+        .await
     {
-        match github
-            .issue(
-                context.installation_id,
-                &context.repo_full_name,
-                context.issue_number,
-            )
-            .await
-        {
-            Ok(issue) => {
-                update_group_issue_state(&state.pool, workspace_id, group_key, &issue.state)
-                    .await?;
+        Ok(issue) => {
+            if let Err(error) =
+                update_group_issue_state(&state.pool, workspace_id, group_key, &issue.state).await
+            {
+                tracing::warn!(
+                    status = %error.status,
+                    %workspace_id,
+                    %group_key,
+                    "GitHub issue state update failed"
+                );
             }
-            Err(error) => tracing::warn!(
-                %error,
-                %workspace_id,
-                %group_key,
-                repo_full_name = %context.repo_full_name,
-                issue_number = context.issue_number,
-                "GitHub issue state refresh failed"
-            ),
         }
+        Err(error) => tracing::warn!(
+            %error,
+            %workspace_id,
+            %group_key,
+            repo_full_name = %context.repo_full_name,
+            issue_number = context.issue_number,
+            "GitHub issue state refresh failed"
+        ),
     }
-    Ok(())
 }
 
 fn require_github(state: &AppState) -> Result<&GithubAppClient, ApiError> {
@@ -3529,12 +3582,22 @@ mod page_tests {
 
     #[test]
     fn group_issue_sync_requires_new_evidence_and_throttles_state_refresh() {
-        assert!(!group_issue_sync_needed(false, 2, None));
-        assert!(!group_issue_sync_needed(true, 2, Some(2)));
-        assert!(!group_issue_sync_needed(true, 1, Some(2)));
-        assert!(group_issue_sync_needed(true, 3, Some(2)));
-
         let now = Utc::now();
+        let fresh = Some(now - Duration::minutes(1));
+        let stale = Some(now - Duration::minutes(30));
+
+        // No issue: never sync, however stale.
+        assert!(!group_issue_sync_needed(false, 2, None, stale, now));
+        // Recently refreshed and no new evidence: steady state costs nothing.
+        assert!(!group_issue_sync_needed(true, 2, Some(2), fresh, now));
+        assert!(!group_issue_sync_needed(true, 1, Some(2), fresh, now));
+        // New evidence always syncs, even just-refreshed.
+        assert!(group_issue_sync_needed(true, 3, Some(2), fresh, now));
+        // A quiet group whose state has gone stale must still refresh, or a
+        // closed/reopened issue would keep a stale badge forever.
+        assert!(group_issue_sync_needed(true, 2, Some(2), stale, now));
+        assert!(group_issue_sync_needed(true, 2, Some(2), None, now));
+
         assert!(group_issue_state_refresh_due(None, now));
         assert!(group_issue_state_refresh_due(
             Some(now - Duration::minutes(16)),

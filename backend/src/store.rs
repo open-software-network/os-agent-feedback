@@ -79,6 +79,7 @@ pub(crate) struct GroupIssueContext {
 pub(crate) struct ListedProductGroup {
     pub(crate) group: ProductReportGroup,
     pub(crate) last_commented_report_count: Option<i64>,
+    pub(crate) state_refreshed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug)]
@@ -690,6 +691,7 @@ struct ProductGroupListRow {
     issue_url: Option<String>,
     issue_state: Option<String>,
     last_commented_report_count: Option<i64>,
+    state_refreshed_at: Option<DateTime<Utc>>,
 }
 
 pub(crate) async fn list_product_groups(
@@ -712,7 +714,8 @@ pub(crate) async fn list_product_groups(
           issue.issue_number,
           issue.url AS issue_url,
           issue.state AS issue_state,
-          issue.last_commented_report_count
+          issue.last_commented_report_count,
+          issue.state_refreshed_at
         FROM report_groups report_group
         JOIN products product
           ON product.id = report_group.product_id
@@ -733,7 +736,7 @@ pub(crate) async fn list_product_groups(
         WHERE report_group.workspace_id = $1 AND report_group.product_id = $2
         GROUP BY report_group.id, report_group.group_key, report_group.explanation,
           issue.repo_full_name, issue.issue_number, issue.url, issue.state,
-          issue.last_commented_report_count
+          issue.last_commented_report_count, issue.state_refreshed_at
         ORDER BY MAX(interaction.occurred_at) DESC NULLS LAST,
           report_group.updated_at DESC, report_group.group_key
         LIMIT $3 OFFSET $4",
@@ -774,6 +777,7 @@ pub(crate) async fn list_product_groups(
                     github_issue,
                 },
                 last_commented_report_count: row.last_commented_report_count,
+                state_refreshed_at: row.state_refreshed_at,
             }
         })
         .collect();
