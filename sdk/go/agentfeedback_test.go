@@ -1,12 +1,14 @@
 package agentfeedback
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -108,6 +110,30 @@ func TestEndpointEnvVarIsDefaultAndExplicitOptionWins(t *testing.T) {
 	defer explicit.Shutdown(context.Background())
 	if explicit.options.Endpoint != "https://feedback.test" {
 		t.Fatalf("expected explicit endpoint to win, got %q", explicit.options.Endpoint)
+	}
+}
+
+func TestAskOnceWithoutCustomerRefWarnsOnce(t *testing.T) {
+	var buffer bytes.Buffer
+	runtime, err := New(Options{
+		APIKey:       conformanceKey,
+		Endpoint:     "https://feedback.test",
+		FeedbackMode: FeedbackAskOnce,
+		Logger:       log.New(&buffer, "", 0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Shutdown(context.Background())
+	if state := runtime.cachedConsent(""); state != "unknown" {
+		t.Fatalf("expected unknown consent, got %q", state)
+	}
+	if state := runtime.resolveConsent(" "); state != "unknown" {
+		t.Fatalf("expected unknown consent, got %q", state)
+	}
+	warnings := strings.Count(buffer.String(), "per-interaction permission question")
+	if warnings != 1 {
+		t.Fatalf("expected exactly one warning, got %d in %q", warnings, buffer.String())
 	}
 }
 

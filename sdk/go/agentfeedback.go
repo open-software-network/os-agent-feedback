@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"regexp"
@@ -76,6 +77,9 @@ type Options struct {
 	ConsentTimeout       time.Duration
 	ConsentCacheTTL      time.Duration
 	Sender               func(context.Context, string, http.Header, []byte) error
+	// Logger receives one-time operational warnings. Defaults to the standard
+	// library's default logger.
+	Logger *log.Logger
 }
 
 type SubmitContract struct {
@@ -216,6 +220,7 @@ type Runtime struct {
 	consentCache     map[string]cachedConsent
 	consentLookups   map[string]struct{}
 	consentSlots     chan struct{}
+	warnCustomerRef  sync.Once
 }
 
 type cachedConsent struct {
@@ -288,6 +293,16 @@ func (r *Runtime) enabled() bool {
 	return r.options.FeedbackMode != FeedbackOff && os.Getenv("AGENT_FEEDBACK_ENABLED") != "false"
 }
 
+func (r *Runtime) warnMissingCustomerRef() {
+	r.warnCustomerRef.Do(func() {
+		logger := r.options.Logger
+		if logger == nil {
+			logger = log.Default()
+		}
+		logger.Printf("[agent-feedback] Ask once needs CustomerRef to remember a decision across interactions. This request will use a safe per-interaction permission question.")
+	})
+}
+
 func (r *Runtime) matches(path string) bool {
 	if !r.enabled() {
 		return false
@@ -346,6 +361,7 @@ func (r *Runtime) resolveConsent(customerRef string) string {
 		return "unknown"
 	}
 	if strings.TrimSpace(customerRef) == "" {
+		r.warnMissingCustomerRef()
 		return "unknown"
 	}
 	subject, err := r.consentSubject(customerRef)
@@ -364,7 +380,11 @@ func (r *Runtime) cachedConsent(customerRef string) string {
 	if r.options.FeedbackMode == FeedbackNeverAsk {
 		return "approved"
 	}
-	if r.options.FeedbackMode != FeedbackAskOnce || strings.TrimSpace(customerRef) == "" {
+	if r.options.FeedbackMode != FeedbackAskOnce {
+		return "unknown"
+	}
+	if strings.TrimSpace(customerRef) == "" {
+		r.warnMissingCustomerRef()
 		return "unknown"
 	}
 	subject, err := r.consentSubject(customerRef)

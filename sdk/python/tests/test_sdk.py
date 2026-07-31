@@ -61,6 +61,17 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         default = AgentFeedback(AgentFeedbackOptions(api_key=KEY))
         self.assertEqual(default.options.endpoint, "https://app.epode.ai")
 
+    def test_ask_once_without_customer_ref_warns_once(self) -> None:
+        runtime = AgentFeedback(
+            AgentFeedbackOptions(api_key=KEY, feedback_mode="ask_once", sender=lambda *_: None)
+        )
+        with self.assertLogs("agent_feedback", level="WARNING") as captured:
+            self.assertEqual(runtime.cached_consent(None), "unknown")
+            self.assertEqual(runtime.resolve_consent(None), "unknown")
+        self.assertEqual(len(captured.records), 1)
+        self.assertIn("per-interaction permission", captured.records[0].getMessage())
+        runtime.shutdown()
+
     def test_capability_conformance(self) -> None:
         claims = {
             "v": 1,

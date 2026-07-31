@@ -5,6 +5,7 @@ import fnmatch
 import hashlib
 import hmac
 import json
+import logging
 import os
 import queue
 import re
@@ -34,6 +35,8 @@ SHARED_CACHE_CONTROL = re.compile(
     re.IGNORECASE,
 )
 MAX_CONCURRENT_CONSENT_WARMS = 8
+
+logger = logging.getLogger("agent_feedback")
 
 
 def _default_endpoint() -> str:
@@ -183,6 +186,17 @@ class AgentFeedback:
         self._consent_lookups: set[str] = set()
         self._consent_warm_slots = threading.BoundedSemaphore(MAX_CONCURRENT_CONSENT_WARMS)
         self._warned_missing_customer_ref = False
+        self._warn_lock = threading.Lock()
+
+    def _warn_missing_customer_ref(self) -> None:
+        with self._warn_lock:
+            if self._warned_missing_customer_ref:
+                return
+            self._warned_missing_customer_ref = True
+        logger.warning(
+            "[agent-feedback] Ask once needs customer_ref to remember a decision across "
+            "interactions. This request will use a safe per-interaction permission question."
+        )
 
     @property
     def enabled(self) -> bool:
@@ -407,7 +421,7 @@ class AgentFeedback:
         if self.options.feedback_mode != "ask_once":
             return "unknown"
         if not customer_ref:
-            self._warned_missing_customer_ref = True
+            self._warn_missing_customer_ref()
             return "unknown"
         subject = self.consent_subject(customer_ref)
         return self._cached_consent_subject(subject) or "unknown"
@@ -452,7 +466,7 @@ class AgentFeedback:
         if self.options.feedback_mode != "ask_once":
             return "unknown"
         if not customer_ref:
-            self._warned_missing_customer_ref = True
+            self._warn_missing_customer_ref()
             return "unknown"
         subject = self.consent_subject(customer_ref)
         return self._cached_consent_subject(subject) or self._lookup_consent_subject(subject)
