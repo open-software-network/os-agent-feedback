@@ -128,7 +128,8 @@ class _TelemetryQueue:
         while not self.stop.wait(self.options.flush_interval):
             self.flush()
 
-    def flush(self) -> None:
+    def flush(self) -> bool:
+        """Send one batch. Returns False when delivery terminally failed."""
         batch: list[dict[str, Any]] = []
         while len(batch) < 50:
             try:
@@ -136,7 +137,7 @@ class _TelemetryQueue:
             except queue.Empty:
                 break
         if not batch:
-            return
+            return True
         url = f"{self.options.endpoint.rstrip('/')}/api/v2/telemetry/batches"
         headers = {
             "authorization": f"Bearer {self.options.api_key}",
@@ -152,20 +153,27 @@ class _TelemetryQueue:
                     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
                     with urllib.request.urlopen(request, timeout=self.options.telemetry_timeout):
                         pass
-                return
+                return True
             except urllib.error.HTTPError as error:
                 if error.code not in {408, 429} and error.code < 500:
-                    return
+                    return False
             except Exception:
                 pass
             if attempt + 1 < self.options.max_telemetry_attempts:
                 time.sleep(min(8.0, 0.5 * (2**attempt)))
+        return False
 
-    def shutdown(self) -> None:
+    def shutdown(self) -> bool:
+        """Flush remaining telemetry. Returns False if any batch was lost."""
         self.stop.set()
-        self.flush()
+        flushed = True
+        while not self.events.empty():
+            if not self.flush():
+                flushed = False
+                break
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=1)
+        return flushed
 
 
 class AgentFeedback:
@@ -521,8 +529,9 @@ class AgentFeedback:
             event["runtimeHintSource"] = "http"
         self.telemetry.push(event)
 
-    def shutdown(self) -> None:
-        self.telemetry.shutdown()
+    def shutdown(self) -> bool:
+        """Flush pending telemetry. Returns False when a flush terminally failed."""
+        return self.telemetry.shutdown()
 
 
 def encoded_envelope(envelope: Mapping[str, Any]) -> str:

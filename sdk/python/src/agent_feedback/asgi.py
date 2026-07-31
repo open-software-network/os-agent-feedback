@@ -146,5 +146,5 @@ class AgentFeedbackASGI:
 
         await self.app(scope, receive, wrapped_send)
 
-    def shutdown(self) -> None:
-        self.runtime.shutdown()
+    def shutdown(self) -> bool:
+        return self.runtime.shutdown()

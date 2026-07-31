@@ -72,6 +72,37 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("per-interaction permission", captured.records[0].getMessage())
         runtime.shutdown()
 
+    def test_shutdown_reports_flush_status(self) -> None:
+        delivered: list[bytes] = []
+        healthy = AgentFeedback(
+            AgentFeedbackOptions(
+                api_key=KEY,
+                endpoint="https://feedback.test",
+                sender=lambda _url, _headers, body: delivered.append(body),
+            )
+        )
+        healthy.record(
+            healthy.prepare(), surface="http", operation="/status", status_code=200, duration_ms=1
+        )
+        self.assertTrue(healthy.shutdown())
+        self.assertEqual(len(delivered), 1)
+
+        def failing_sender(_url: str, _headers: dict, _body: bytes) -> None:
+            raise RuntimeError("telemetry endpoint unreachable")
+
+        failing = AgentFeedback(
+            AgentFeedbackOptions(
+                api_key=KEY,
+                endpoint="https://feedback.test",
+                max_telemetry_attempts=1,
+                sender=failing_sender,
+            )
+        )
+        failing.record(
+            failing.prepare(), surface="http", operation="/status", status_code=200, duration_ms=1
+        )
+        self.assertFalse(failing.shutdown())
+
     def test_capability_conformance(self) -> None:
         claims = {
             "v": 1,

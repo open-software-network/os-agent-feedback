@@ -136,5 +136,5 @@ class AgentFeedbackWSGI:
             return [output or b""]
         return chunks if chunks is not None else body
 
-    def shutdown(self) -> None:
-        self.runtime.shutdown()
+    def shutdown(self) -> bool:
+        return self.runtime.shutdown()
