@@ -389,15 +389,6 @@ pub(crate) async fn group_issue_context(
     group_issue_context_with_executor(pool, workspace_id, group_key, backlink).await
 }
 
-pub(crate) async fn group_issue_context_in_transaction(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    group_key: &str,
-    backlink: String,
-) -> Result<Option<GroupIssueContext>, ApiError> {
-    group_issue_context_with_executor(&mut **tx, workspace_id, group_key, backlink).await
-}
-
 async fn group_issue_context_with_executor<'executor>(
     executor: impl Executor<'executor, Database = Postgres>,
     workspace_id: Uuid,
@@ -571,37 +562,6 @@ async fn group_issue_context_with_executor<'executor>(
     .transpose()
 }
 
-pub(crate) async fn lock_group_issue_filing(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    group_key: &str,
-) -> Result<(), ApiError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(group_key)
-        .execute(&mut **tx)
-        .await?;
-    let group_exists = sqlx::query_scalar::<_, Uuid>(
-        r"SELECT report_group.id
-        FROM report_groups report_group
-        JOIN products product
-          ON product.id = report_group.product_id
-         AND product.workspace_id = report_group.workspace_id
-        WHERE report_group.workspace_id = $1 AND report_group.group_key = $2
-        FOR KEY SHARE OF report_group, product",
-    )
-    .bind(workspace_id)
-    .bind(group_key)
-    .fetch_optional(&mut **tx)
-    .await?
-    .is_some();
-    if !group_exists {
-        return Err(ApiError::not_found(
-            "Feedback group not found for this team",
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) async fn get_group_github_issue(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -613,7 +573,8 @@ pub(crate) async fn get_group_github_issue(
         JOIN report_groups report_group
           ON report_group.group_key = issue.group_key
          AND report_group.workspace_id = issue.workspace_id
-        WHERE issue.workspace_id = $1 AND issue.group_key = $2",
+        WHERE issue.workspace_id = $1 AND issue.group_key = $2
+          AND issue.filing_state = 'filed'",
     )
     .bind(workspace_id)
     .bind(group_key)
@@ -621,63 +582,126 @@ pub(crate) async fn get_group_github_issue(
     .await?)
 }
 
-pub(crate) async fn get_group_github_issue_in_transaction(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    group_key: &str,
-) -> Result<Option<GroupGithubIssueRow>, ApiError> {
-    Ok(sqlx::query_as::<_, GroupGithubIssueRow>(
-        r"SELECT issue.repo_full_name, issue.issue_number, issue.url, issue.state
-        FROM group_github_issues issue
-        JOIN report_groups report_group
-          ON report_group.group_key = issue.group_key
-         AND report_group.workspace_id = issue.workspace_id
-        WHERE issue.workspace_id = $1 AND issue.group_key = $2",
-    )
-    .bind(workspace_id)
-    .bind(group_key)
-    .fetch_optional(&mut **tx)
-    .await?)
+/// Outcome of trying to claim a group for issue filing.
+#[derive(Debug)]
+pub(crate) enum GroupIssueFilingClaim {
+    /// The caller owns the claim and should now call GitHub.
+    Claimed,
+    /// An issue already exists; return it and call nothing.
+    AlreadyFiled(Box<GroupGithubIssueRow>),
+    /// Another filer holds a fresh claim.
+    InProgress,
 }
 
-pub(crate) async fn record_group_github_issue(
-    tx: &mut Transaction<'_, Postgres>,
+/// Claims a group for filing before any GitHub call is made.
+///
+/// The primary key on `group_key` is what de-duplicates concurrent filers, so
+/// no database connection has to be held across the network request. A filer
+/// that dies mid-call leaves a `pending` row, which becomes reclaimable once it
+/// is older than `stale_cutoff` — that window only needs to exceed the HTTP
+/// timeout.
+pub(crate) async fn claim_group_issue_filing(
+    pool: &PgPool,
     workspace_id: Uuid,
     group_key: &str,
-    link: &GithubIssueLink,
+    installation_id: i64,
+    repo_full_name: &str,
     created_by: &str,
-    report_count: i64,
-) -> Result<(GroupGithubIssueRow, bool), ApiError> {
-    let inserted = sqlx::query_as::<_, GroupGithubIssueRow>(
+    stale_cutoff: DateTime<Utc>,
+) -> Result<GroupIssueFilingClaim, ApiError> {
+    let claimed = sqlx::query_scalar::<_, i32>(
         r"INSERT INTO group_github_issues
-        (group_key, workspace_id, repo_full_name, issue_number, url, state, created_by,
-         last_commented_report_count, state_refreshed_at)
-        SELECT report_group.group_key, report_group.workspace_id, $3, $4, $5, $6, $7, $8, NOW()
+        (group_key, workspace_id, installation_id, repo_full_name, created_by,
+         filing_state, claimed_at)
+        SELECT report_group.group_key, report_group.workspace_id, $3, $4, $5, 'pending', NOW()
         FROM report_groups report_group
         JOIN products product
           ON product.id = report_group.product_id
          AND product.workspace_id = report_group.workspace_id
         WHERE report_group.workspace_id = $1 AND report_group.group_key = $2
         ON CONFLICT (group_key) DO NOTHING
+        RETURNING 1",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(installation_id)
+    .bind(repo_full_name)
+    .bind(created_by)
+    .fetch_optional(pool)
+    .await?;
+    if claimed.is_some() {
+        return Ok(GroupIssueFilingClaim::Claimed);
+    }
+
+    if let Some(existing) = get_group_github_issue(pool, workspace_id, group_key).await? {
+        return Ok(GroupIssueFilingClaim::AlreadyFiled(Box::new(existing)));
+    }
+
+    // A pending row exists. Take it over only if it is stale enough that its
+    // owner cannot still be waiting on GitHub.
+    let reclaimed = sqlx::query_scalar::<_, i32>(
+        r"UPDATE group_github_issues
+        SET installation_id = $3, repo_full_name = $4, created_by = $5,
+            claimed_at = NOW(), updated_at = NOW()
+        WHERE workspace_id = $1 AND group_key = $2
+          AND filing_state = 'pending' AND claimed_at <= $6
+        RETURNING 1",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(installation_id)
+    .bind(repo_full_name)
+    .bind(created_by)
+    .bind(stale_cutoff)
+    .fetch_optional(pool)
+    .await?;
+    if reclaimed.is_some() {
+        return Ok(GroupIssueFilingClaim::Claimed);
+    }
+    Ok(GroupIssueFilingClaim::InProgress)
+}
+
+/// Records the issue GitHub returned against a claim this caller owns.
+pub(crate) async fn complete_group_issue_filing(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    link: &GithubIssueLink,
+    report_count: i64,
+) -> Result<GroupGithubIssueRow, ApiError> {
+    sqlx::query_as::<_, GroupGithubIssueRow>(
+        r"UPDATE group_github_issues
+        SET issue_number = $3, url = $4, state = $5, filing_state = 'filed',
+            last_commented_report_count = $6, state_refreshed_at = NOW(), updated_at = NOW()
+        WHERE workspace_id = $1 AND group_key = $2 AND filing_state = 'pending'
         RETURNING repo_full_name, issue_number, url, state",
     )
     .bind(workspace_id)
     .bind(group_key)
-    .bind(&link.repo_full_name)
     .bind(link.issue_number)
     .bind(&link.url)
     .bind(&link.state)
-    .bind(created_by)
     .bind(report_count)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| ApiError::internal("GitHub issue filing claim disappeared before it completed"))
+}
+
+/// Drops a claim whose GitHub call failed, so a retry can file cleanly.
+pub(crate) async fn release_group_issue_filing_claim(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        r"DELETE FROM group_github_issues
+        WHERE workspace_id = $1 AND group_key = $2 AND filing_state = 'pending'",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .execute(pool)
     .await?;
-    if let Some(inserted) = inserted {
-        return Ok((inserted, true));
-    }
-    get_group_github_issue_in_transaction(tx, workspace_id, group_key)
-        .await?
-        .map(|existing| (existing, false))
-        .ok_or_else(|| ApiError::not_found("Feedback group not found for this team"))
+    Ok(())
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -733,6 +757,7 @@ pub(crate) async fn list_product_groups(
         LEFT JOIN group_github_issues issue
           ON issue.group_key = report_group.group_key
          AND issue.workspace_id = report_group.workspace_id
+         AND issue.filing_state = 'filed'
         WHERE report_group.workspace_id = $1 AND report_group.product_id = $2
         GROUP BY report_group.id, report_group.group_key, report_group.explanation,
           issue.repo_full_name, issue.issue_number, issue.url, issue.state,
@@ -791,10 +816,15 @@ pub(crate) async fn group_issue_sync_context(
 ) -> Result<Option<GroupIssueSyncContext>, ApiError> {
     Ok(sqlx::query_as::<_, GroupIssueSyncContext>(
         r"WITH scoped_issue AS (
+          -- The installation comes from the ISSUE, not the product's current
+          -- repo mapping. Remapping a product to another repo must not route
+          -- comments for an existing issue through an installation that does
+          -- not own that issue's repository: the issue keeps being updated
+          -- where it actually lives.
           SELECT issue.group_key, issue.repo_full_name, issue.issue_number,
             issue.last_commented_report_count, issue.state_refreshed_at,
             report_group.id AS group_id,
-            report_group.product_id, mapping.installation_id
+            report_group.product_id, issue.installation_id
           FROM group_github_issues issue
           JOIN report_groups report_group
             ON report_group.group_key = issue.group_key
@@ -802,14 +832,12 @@ pub(crate) async fn group_issue_sync_context(
           JOIN products product
             ON product.id = report_group.product_id
            AND product.workspace_id = report_group.workspace_id
-          JOIN product_github_repos mapping
-            ON mapping.product_id = report_group.product_id
-           AND mapping.workspace_id = report_group.workspace_id
           JOIN github_installations installation
-            ON installation.installation_id = mapping.installation_id
-           AND installation.workspace_id = report_group.workspace_id
+            ON installation.installation_id = issue.installation_id
+           AND installation.workspace_id = issue.workspace_id
            AND installation.revoked_at IS NULL
           WHERE issue.workspace_id = $1 AND issue.group_key = $2
+            AND issue.filing_state = 'filed'
         ),
         ordered_reports AS (
           SELECT interaction.occurred_at,
@@ -4107,31 +4135,62 @@ mod product_tests {
                 url: "https://github.com/open-software/epode-test/issues/42".to_owned(),
                 state: "open".to_owned(),
             };
-            let mut tx = pool.begin().await?;
-            let (first, first_inserted) = record_group_github_issue(
-                &mut tx,
+            let stale_cutoff = Utc::now() - Duration::minutes(5);
+            let first_claim = claim_group_issue_filing(
+                &pool,
                 fixture.workspace_id,
                 &fixture.group_key,
-                &link,
+                4_433_427,
+                &link.repo_full_name,
                 "usr_test",
-                2,
+                stale_cutoff,
             )
             .await
             .map_err(test_error)?;
-            let (second, second_inserted) = record_group_github_issue(
-                &mut tx,
+            anyhow::ensure!(matches!(first_claim, GroupIssueFilingClaim::Claimed));
+
+            // A concurrent filer must be turned away while the claim is fresh,
+            // so only one GitHub issue is ever created.
+            let contended = claim_group_issue_filing(
+                &pool,
+                fixture.workspace_id,
+                &fixture.group_key,
+                4_433_427,
+                &link.repo_full_name,
+                "usr_other",
+                stale_cutoff,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(matches!(contended, GroupIssueFilingClaim::InProgress));
+
+            let first = complete_group_issue_filing(
+                &pool,
                 fixture.workspace_id,
                 &fixture.group_key,
                 &link,
-                "usr_other",
                 2,
             )
             .await
             .map_err(test_error)?;
-            tx.commit().await?;
 
-            anyhow::ensure!(first_inserted);
-            anyhow::ensure!(!second_inserted);
+            // Once filed, a later attempt returns the existing issue instead of
+            // claiming again.
+            let second = claim_group_issue_filing(
+                &pool,
+                fixture.workspace_id,
+                &fixture.group_key,
+                4_433_427,
+                &link.repo_full_name,
+                "usr_other",
+                stale_cutoff,
+            )
+            .await
+            .map_err(test_error)?;
+            let GroupIssueFilingClaim::AlreadyFiled(second) = second else {
+                anyhow::bail!("expected the second claim to see an already filed issue");
+            };
+
             anyhow::ensure!(first.link() == link);
             anyhow::ensure!(second.link() == link);
             let count: i64 =
@@ -4243,18 +4302,21 @@ mod product_tests {
                 url: "https://github.com/open-software/epode-test/issues/84".to_owned(),
                 state: "open".to_owned(),
             };
-            let mut tx = pool.begin().await?;
-            record_group_github_issue(
-                &mut tx,
+            let claim = claim_group_issue_filing(
+                &pool,
                 fixture.workspace_id,
                 &fixture.group_key,
-                &link,
+                4_433_427,
+                &link.repo_full_name,
                 "usr_test",
-                2,
+                Utc::now() - Duration::minutes(5),
             )
             .await
             .map_err(test_error)?;
-            tx.commit().await?;
+            anyhow::ensure!(matches!(claim, GroupIssueFilingClaim::Claimed));
+            complete_group_issue_filing(&pool, fixture.workspace_id, &fixture.group_key, &link, 2)
+                .await
+                .map_err(test_error)?;
 
             let page = list_product_groups(&pool, fixture.workspace_id, fixture.product_id, 50, 0)
                 .await

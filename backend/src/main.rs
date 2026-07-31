@@ -76,23 +76,23 @@ use crate::{
         bearer_token, clear_cookie, cookie, http_only_cookie, random_token, reject_sensitive_fields,
     },
     store::{
-        GithubInstallationUpsert, GroupIssueSyncContext, accept_team_invitation,
-        agent_product_auth, backfill_report_groups, bump_last_commented_report_count,
-        claim_group_issue_state_refresh, clear_product_github_repo, create_api_key,
-        create_product_with_default_key, create_team_invitation, dashboard_interaction_by_id,
-        dashboard_report_by_id, dashboard_session_by_id, dashboard_with_limits, delete_product,
-        feedback_consent_state, feedback_list_interactions, feedback_list_reports,
-        get_group_github_issue, get_group_github_issue_in_transaction, get_or_create_workspace,
+        GithubInstallationUpsert, GroupIssueFilingClaim, GroupIssueSyncContext,
+        accept_team_invitation, agent_product_auth, backfill_report_groups,
+        bump_last_commented_report_count, claim_group_issue_filing,
+        claim_group_issue_state_refresh, clear_product_github_repo, complete_group_issue_filing,
+        create_api_key, create_product_with_default_key, create_team_invitation,
+        dashboard_interaction_by_id, dashboard_report_by_id, dashboard_session_by_id,
+        dashboard_with_limits, delete_product, feedback_consent_state, feedback_list_interactions,
+        feedback_list_reports, get_group_github_issue, get_or_create_workspace,
         get_product_github_repo, github_installation_workspace, group_issue_context,
-        group_issue_context_in_transaction, group_issue_sync_context, ingest_telemetry_batch,
-        list_github_installations, list_product_groups, lock_group_issue_filing,
-        purge_expired_product_data, read_product_auth, record_feedback_consent_decision,
-        record_group_github_issue, regroup_report_groups, remove_team_member, rename_product,
-        rename_workspace, resolve_workspace_access, revert_last_commented_report_count,
-        revoke_api_key, revoke_github_installation, revoke_team_invitation, rotate_api_key,
-        set_product_github_repo, submit_product_feedback, transfer_team_ownership,
-        update_feedback_workflow, update_group_issue_state, update_policy, update_team_member_role,
-        upsert_github_installation,
+        group_issue_sync_context, ingest_telemetry_batch, list_github_installations,
+        list_product_groups, purge_expired_product_data, read_product_auth,
+        record_feedback_consent_decision, regroup_report_groups, release_group_issue_filing_claim,
+        remove_team_member, rename_product, rename_workspace, resolve_workspace_access,
+        revert_last_commented_report_count, revoke_api_key, revoke_github_installation,
+        revoke_team_invitation, rotate_api_key, set_product_github_repo, submit_product_feedback,
+        transfer_team_ownership, update_feedback_workflow, update_group_issue_state, update_policy,
+        update_team_member_role, upsert_github_installation,
     },
 };
 
@@ -112,6 +112,12 @@ const GITHUB_STATE_COOKIE: &str = "af_gh_state";
 const GITHUB_WORKSPACE_COOKIE: &str = "af_gh_ws";
 const MAX_GROUP_ISSUE_SYNCS_PER_REQUEST: usize = 5;
 const GROUP_ISSUE_STATE_REFRESH_INTERVAL_MINUTES: i64 = 15;
+
+/// How long a `pending` filing claim is respected before another request may
+/// take it over. Comfortably above the GitHub client's 15s request timeout, so
+/// a live filer is never displaced; short enough that a crashed process does
+/// not block filing for long.
+const GROUP_ISSUE_FILING_CLAIM_STALE_MINUTES: i64 = 5;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -1478,26 +1484,38 @@ async fn file_group_github_issue_handler(
         spawn_group_issue_sync(Arc::clone(&state), workspace_id, group_key);
         return dashboard_response(&state, Json(existing.link()), tokens);
     }
-    validate_group_repo_mapping(&initial_context)?;
+    let (installation_id, repo_full_name) = validate_group_repo_mapping(&initial_context)?;
     let github = require_github(&state)?;
 
-    let mut tx = state.pool.begin().await?;
-    lock_group_issue_filing(&mut tx, workspace_id, &group_key).await?;
-    if let Some(existing) =
-        get_group_github_issue_in_transaction(&mut tx, workspace_id, &group_key).await?
+    // Claim the group BEFORE calling GitHub. The primary key on `group_key`
+    // makes concurrent filers mutually exclusive without any database
+    // connection being held across the network call.
+    let stale_cutoff = Utc::now() - Duration::minutes(GROUP_ISSUE_FILING_CLAIM_STALE_MINUTES);
+    match claim_group_issue_filing(
+        &state.pool,
+        workspace_id,
+        &group_key,
+        installation_id,
+        repo_full_name,
+        &context.user.id,
+        stale_cutoff,
+    )
+    .await?
     {
-        tx.commit().await?;
-        spawn_group_issue_sync(Arc::clone(&state), workspace_id, group_key);
-        return dashboard_response(&state, Json(existing.link()), tokens);
+        GroupIssueFilingClaim::AlreadyFiled(existing) => {
+            spawn_group_issue_sync(Arc::clone(&state), workspace_id, group_key);
+            return dashboard_response(&state, Json(existing.link()), tokens);
+        }
+        GroupIssueFilingClaim::InProgress => {
+            return Err(ApiError::conflict(
+                "A GitHub issue is already being filed for this feedback group",
+            ));
+        }
+        GroupIssueFilingClaim::Claimed => {}
     }
 
-    let filing_context =
-        group_issue_context_in_transaction(&mut tx, workspace_id, &group_key, backlink)
-            .await?
-            .ok_or_else(|| ApiError::not_found("Feedback group not found for this team"))?;
-    let (installation_id, repo_full_name) = validate_group_repo_mapping(&filing_context)?;
-    let title = render_issue_title(&filing_context.template);
-    let body = render_issue_body(&filing_context.template);
+    let title = render_issue_title(&initial_context.template);
+    let body = render_issue_body(&initial_context.template);
     let issue = match github
         .create_issue(installation_id, repo_full_name, &title, &body)
         .await
@@ -1511,7 +1529,18 @@ async fn file_group_github_issue_handler(
                 repo_full_name,
                 "GitHub issue creation failed"
             );
-            let _ = tx.rollback().await;
+            // Drop the claim so a retry can file rather than being told a
+            // filing is in progress for the next few minutes.
+            if let Err(release_error) =
+                release_group_issue_filing_claim(&state.pool, workspace_id, &group_key).await
+            {
+                tracing::warn!(
+                    status = %release_error.status,
+                    %workspace_id,
+                    %group_key,
+                    "failed to release GitHub issue filing claim"
+                );
+            }
             return Err(ApiError::new(
                 StatusCode::BAD_GATEWAY,
                 "GitHub did not accept the issue creation request",
@@ -1524,28 +1553,15 @@ async fn file_group_github_issue_handler(
         url: issue.html_url,
         state: issue.state,
     };
-    let (stored, inserted) = record_group_github_issue(
-        &mut tx,
+    let stored = complete_group_issue_filing(
+        &state.pool,
         workspace_id,
         &group_key,
         &link,
-        &context.user.id,
-        filing_context.template.report_count,
+        initial_context.template.report_count,
     )
     .await?;
-    tx.commit().await?;
-    dashboard_response(
-        &state,
-        (
-            if inserted {
-                StatusCode::CREATED
-            } else {
-                StatusCode::OK
-            },
-            Json(stored.link()),
-        ),
-        tokens,
-    )
+    dashboard_response(&state, (StatusCode::CREATED, Json(stored.link())), tokens)
 }
 
 fn validate_group_repo_mapping(
