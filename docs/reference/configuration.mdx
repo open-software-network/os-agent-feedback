@@ -15,6 +15,18 @@ description: "Server environment variables and adapter options."
 Do not use `AGENT_FEEDBACK_READ_KEY` in a product integration. Read keys are for the optional Epode dashboard MCP
 client and cannot sign feedback capabilities.
 
+## Mode precedence
+
+The server-side collection policy configured in the Epode dashboard always wins. The SDK
+`feedbackMode` / `AGENT_FEEDBACK_MODE` option is a hint that shapes local behavior (for example
+consent-cache warming); it never overrides the mode the server enforces when it signs feedback
+capabilities and builds envelopes.
+
+Drift symptom: the envelope's `mode` (the effective mode for this interaction) differs from what
+your SDK configuration suggests, or `configuredMode` differs from the mode you set locally. When
+that happens, check the product's collection policy in the dashboard — it is the source of truth —
+and align the SDK option with it to avoid confusion.
+
 ## Common adapter options
 
 | Option | Purpose |

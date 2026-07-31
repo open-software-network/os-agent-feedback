@@ -26,6 +26,8 @@ An eligible JSON object appends `_agentFeedback` without wrapping the original r
       "reportSchema": {
         "required": ["summary"],
         "optional": ["impact", "confidence", "findings", "workaround"],
+        "summaryMinLength": 8,
+        "summaryMaxLength": 700,
         "impacts": ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"],
         "findingKinds": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"],
         "findingSeverities": ["minor", "major", "blocking"],
@@ -33,8 +35,12 @@ An eligible JSON object appends `_agentFeedback` without wrapping the original r
         "findingRequired": ["kind", "topic", "detail"],
         "findingOptional": ["severity"],
         "findingTopicFormat": "lowercase_slug",
+        "findingDetailMinLength": 3,
+        "findingDetailMaxLength": 350,
         "workaroundRequired": ["used"],
         "workaroundOptional": ["detail"],
+        "workaroundDetailMinLength": 3,
+        "workaroundDetailMaxLength": 350,
         "maxFindings": 8
       }
     },
@@ -47,6 +53,20 @@ An eligible JSON object appends `_agentFeedback` without wrapping the original r
 The live envelope carries the complete bounded report shape so an agent does not need a second documentation
 fetch and does not have to guess whether a finding uses `detail`, `description`, or another key. Optional fields
 should be omitted when the agent cannot form them exactly.
+
+## Report field limits
+
+The backend enforces these bounds on `POST /api/v2/reports`; the envelope's `reportSchema`
+publishes them so an agent never has to discover a limit through a 400 response:
+
+| Field | Limit |
+| --- | --- |
+| `summary` | 8–700 characters |
+| `findings` | at most 8 entries |
+| `findings[].detail` | 3–350 characters |
+| `findings[].topic` | lowercase slug, at most 64 characters |
+| `workaround.detail` | 3–350 characters (required when `used` is true) |
+| `confidence` | number between 0 and 1 |
 
 ## Ask modes are two phase
 

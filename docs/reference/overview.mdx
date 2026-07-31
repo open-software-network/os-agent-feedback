@@ -37,6 +37,25 @@ Content-Type: application/json
 
 The subject is derived from a stable opaque `customerRef`; the raw reference is never sent to Epode.
 
+### How the `afsub1_` subject is derived
+
+Per the [protocol specification](https://github.com/open-software-network/os-epode/blob/main/protocol/v1/README.md)
+(also inside the downloadable protocol bundle below):
+
+```text
+subject = "afsub1_" + base64url(
+  HMAC-SHA256(
+    SHA256("epode-consent-scope:" + consent_scope),
+    "customer-ref:" + customerRef
+  )
+)
+```
+
+The HMAC key is the SHA-256 hash of the product's consent scope, so the subject stays stable across
+product-key rotation without ever exposing the raw customer reference. `conformance.json` in the
+protocol bundle contains a deterministic signing vector; older conformance keys without an explicit
+consent scope use the key ID as their scope.
+
 ## Capability-authenticated decision
 
 An unresolved ask-mode interaction carries no report schema. After asking the exact returned question, the
