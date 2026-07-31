@@ -112,6 +112,90 @@ pub(crate) struct GithubIssue {
     pub(crate) state: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GithubIssueCreationOutcome {
+    DefiniteFailure,
+    AmbiguousFailure,
+}
+
+#[derive(Debug)]
+pub(crate) struct GithubIssueCreationError {
+    outcome: GithubIssueCreationOutcome,
+    source: anyhow::Error,
+}
+
+impl GithubIssueCreationError {
+    const fn definite(source: anyhow::Error) -> Self {
+        Self {
+            outcome: GithubIssueCreationOutcome::DefiniteFailure,
+            source,
+        }
+    }
+
+    fn from_request(error: reqwest::Error, context: &'static str) -> Self {
+        let failure =
+            issue_creation_failure_kind(error.status(), error.is_timeout(), error.is_connect());
+        Self {
+            outcome: failure.outcome(),
+            source: anyhow::Error::new(error).context(context),
+        }
+    }
+
+    pub(crate) const fn outcome(&self) -> GithubIssueCreationOutcome {
+        self.outcome
+    }
+}
+
+impl fmt::Display for GithubIssueCreationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for GithubIssueCreationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GithubIssueCreationFailureKind {
+    ClientResponse,
+    ServerResponse,
+    Timeout,
+    Connect,
+    Transport,
+}
+
+impl GithubIssueCreationFailureKind {
+    const fn outcome(self) -> GithubIssueCreationOutcome {
+        match self {
+            Self::ClientResponse => GithubIssueCreationOutcome::DefiniteFailure,
+            Self::ServerResponse | Self::Timeout | Self::Connect | Self::Transport => {
+                GithubIssueCreationOutcome::AmbiguousFailure
+            }
+        }
+    }
+}
+
+fn issue_creation_failure_kind(
+    status: Option<reqwest::StatusCode>,
+    is_timeout: bool,
+    is_connect: bool,
+) -> GithubIssueCreationFailureKind {
+    if status.is_some_and(|status| status.is_client_error()) {
+        GithubIssueCreationFailureKind::ClientResponse
+    } else if status.is_some_and(|status| status.is_server_error()) {
+        GithubIssueCreationFailureKind::ServerResponse
+    } else if is_timeout {
+        GithubIssueCreationFailureKind::Timeout
+    } else if is_connect {
+        GithubIssueCreationFailureKind::Connect
+    } else {
+        GithubIssueCreationFailureKind::Transport
+    }
+}
+
 /// Repositories read from one installation, plus whether the pagination cap cut
 /// the listing short. GitHub's code-search and REST quotas are tight, so the
 /// listing stops at `MAX_REPOSITORY_PAGES` rather than walking an unbounded
@@ -159,6 +243,11 @@ impl fmt::Debug for InstallationTokenResponse {
 #[derive(Debug, Deserialize)]
 struct RepositoriesResponse {
     repositories: Vec<RepositoryResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchIssuesResponse {
+    items: Vec<GithubIssue>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -318,9 +407,14 @@ impl GithubAppClient {
         repo_full_name: &str,
         title: &str,
         body: &str,
-    ) -> anyhow::Result<GithubIssue> {
-        validate_repo_full_name(repo_full_name)?;
-        let token = self.installation_token(installation_id).await?;
+    ) -> Result<GithubIssue, GithubIssueCreationError> {
+        validate_repo_full_name(repo_full_name).map_err(GithubIssueCreationError::definite)?;
+        // A token-mint failure happens before the issue request is sent, so it
+        // is a definite non-creation even when the token call itself times out.
+        let token = self
+            .installation_token(installation_id)
+            .await
+            .map_err(GithubIssueCreationError::definite)?;
         Self::request(
             self.http
                 .post(format!("{GITHUB_API_URL}/repos/{repo_full_name}/issues")),
@@ -329,12 +423,55 @@ impl GithubAppClient {
         .json(&CreateIssueRequest { title, body })
         .send()
         .await
-        .context("GitHub issue creation request failed")?
+        .map_err(|error| {
+            GithubIssueCreationError::from_request(error, "GitHub issue creation request failed")
+        })?
         .error_for_status()
-        .context("GitHub issue creation request was rejected")?
+        .map_err(|error| {
+            GithubIssueCreationError::from_request(
+                error,
+                "GitHub issue creation request was rejected",
+            )
+        })?
         .json::<GithubIssue>()
         .await
-        .context("GitHub issue creation response was invalid")
+        .map_err(|error| {
+            // A successful status with an unreadable response can arrive after
+            // creation, so missing status information is deliberately ambiguous.
+            GithubIssueCreationError::from_request(
+                error,
+                "GitHub issue creation response was invalid",
+            )
+        })
+    }
+
+    pub(crate) async fn search_issue_by_group_key(
+        &self,
+        installation_id: i64,
+        repo_full_name: &str,
+        group_key: &str,
+    ) -> anyhow::Result<Option<GithubIssue>> {
+        validate_repo_full_name(repo_full_name)?;
+        let token = self.installation_token(installation_id).await?;
+        // GitHub's issue-search endpoint has its own tighter rate limit.
+        // Reconciliation is rare, so one marker search per throttled attempt
+        // is preferable to ever filing a possible duplicate public issue.
+        let query = format!("repo:{repo_full_name} in:body {group_key}");
+        let response = Self::request(
+            self.http
+                .get(format!("{GITHUB_API_URL}/search/issues"))
+                .query(&[("q", query)]),
+        )
+        .bearer_auth(token)
+        .send()
+        .await
+        .context("GitHub issue reconciliation search failed")?
+        .error_for_status()
+        .context("GitHub issue reconciliation search was rejected")?
+        .json::<SearchIssuesResponse>()
+        .await
+        .context("GitHub issue reconciliation search response was invalid")?;
+        Ok(response.items.into_iter().next())
     }
 
     pub(crate) async fn create_issue_comment(
@@ -591,5 +728,33 @@ mod tests {
             serde_json::json!({"body": "Evidence"})
         );
         Ok(())
+    }
+
+    #[test]
+    fn classifies_issue_creation_failures_by_certainty() {
+        use reqwest::StatusCode;
+
+        for status in [StatusCode::BAD_REQUEST, StatusCode::TOO_MANY_REQUESTS] {
+            assert_eq!(
+                issue_creation_failure_kind(Some(status), false, false).outcome(),
+                GithubIssueCreationOutcome::DefiniteFailure
+            );
+        }
+        assert_eq!(
+            issue_creation_failure_kind(Some(StatusCode::BAD_GATEWAY), false, false).outcome(),
+            GithubIssueCreationOutcome::AmbiguousFailure
+        );
+        assert_eq!(
+            issue_creation_failure_kind(None, true, false).outcome(),
+            GithubIssueCreationOutcome::AmbiguousFailure
+        );
+        assert_eq!(
+            issue_creation_failure_kind(None, false, true).outcome(),
+            GithubIssueCreationOutcome::AmbiguousFailure
+        );
+        assert_eq!(
+            issue_creation_failure_kind(None, false, false).outcome(),
+            GithubIssueCreationOutcome::AmbiguousFailure
+        );
     }
 }

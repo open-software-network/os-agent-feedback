@@ -34,6 +34,7 @@ pub(crate) struct IssueFindingRollup {
 
 #[derive(Debug, Clone)]
 pub(crate) struct IssueTemplateData {
+    pub(crate) group_key: String,
     pub(crate) explanation: String,
     pub(crate) primary_kind: String,
     pub(crate) primary_topic: String,
@@ -183,9 +184,16 @@ pub(crate) fn render_issue_body(data: &IssueTemplateData) -> String {
     body.push_str("\n## Volume\n");
     let _ = writeln!(body, "{} report(s)", data.report_count);
 
+    let group_key = data
+        .group_key
+        .chars()
+        .filter(char::is_ascii_hexdigit)
+        .take(64)
+        .collect::<String>();
     let backlink = clean_link(&data.backlink);
-    let _ = write!(body, "\n[View this feedback group in Epode]({backlink})");
-    cap_body(body, &backlink)
+    let footer = issue_footer(&group_key, &backlink);
+    body.push_str(&footer);
+    cap_body(body, &footer)
 }
 
 pub(crate) fn render_evidence_comment(
@@ -483,13 +491,17 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     truncated
 }
 
-fn cap_body(mut body: String, backlink: &str) -> String {
+fn issue_footer(group_key: &str, backlink: &str) -> String {
+    format!(
+        "\n\n<!-- epode-group: {group_key} -->\n\n[View this feedback group in Epode]({backlink})"
+    )
+}
+
+fn cap_body(mut body: String, footer: &str) -> String {
     if body.len() <= GITHUB_BODY_LIMIT {
         return body;
     }
-    let suffix = format!(
-        "\n\n… and additional content was omitted.\n\n[View this feedback group in Epode]({backlink})"
-    );
+    let suffix = format!("\n\n… and additional content was omitted.{footer}");
     // Reserve room for a closing fence as well: customer text is rendered
     // inside ```text blocks, so a cut can land inside an open one.
     let fence_close = "\n```";
@@ -533,6 +545,7 @@ mod tests {
 
     fn template() -> IssueTemplateData {
         IssueTemplateData {
+            group_key: "0123456789abcdef0123456789abcdef".to_owned(),
             explanation: "A stable feedback group.".to_owned(),
             primary_kind: "defect".to_owned(),
             primary_topic: "authentication".to_owned(),
@@ -580,6 +593,7 @@ mod tests {
         assert!(body.contains("Status codes: 401, 503"));
         assert!(body.contains("2026-07-31 01:02:03 UTC → 2026-07-31 04:02:03 UTC"));
         assert!(body.contains(&data.backlink));
+        assert!(body.contains("<!-- epode-group: 0123456789abcdef0123456789abcdef -->"));
         assert_eq!(
             render_issue_title(&data),
             "[epode] defect: authentication in create_session"
@@ -621,7 +635,10 @@ mod tests {
         let open_fence_body = format!("intro\n\n```text\n{}\n", "x".repeat(GITHUB_BODY_LIMIT));
         let capped = cap_body(
             open_fence_body,
-            "https://app.example/?view=feedback&group=abc",
+            &issue_footer(
+                "0123456789abcdef0123456789abcdef",
+                "https://app.example/?view=feedback&group=abc",
+            ),
         );
 
         assert!(capped.len() <= GITHUB_BODY_LIMIT);
@@ -633,6 +650,7 @@ mod tests {
         assert!(capped.ends_with(
             "[View this feedback group in Epode](https://app.example/?view=feedback&group=abc)"
         ));
+        assert!(capped.contains("<!-- epode-group: 0123456789abcdef0123456789abcdef -->"));
         assert!(capped.contains("… and additional content was omitted."));
     }
 

@@ -1291,7 +1291,7 @@
             }
           },
           "409": {
-            "description": "The group's product has no usable GitHub repository mapping",
+            "description": "The group cannot be filed yet because its mapping is unusable or reconciliation is in progress",
             "content": {
               "application/json": {
                 "schema": {
@@ -1321,7 +1321,7 @@
             }
           },
           "502": {
-            "description": "GitHub did not accept the issue creation request",
+            "description": "GitHub issue creation failed or has an ambiguous outcome being reconciled",
             "content": {
               "application/json": {
                 "schema": {

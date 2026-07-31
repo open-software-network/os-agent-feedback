@@ -2128,7 +2128,7 @@ export interface operations {
                     "application/json": components["schemas"]["ApiErrorEnvelope"];
                 };
             };
-            /** @description The group's product has no usable GitHub repository mapping */
+            /** @description The group cannot be filed yet because its mapping is unusable or reconciliation is in progress */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2155,7 +2155,7 @@ export interface operations {
                     "application/json": components["schemas"]["ApiErrorEnvelope"];
                 };
             };
-            /** @description GitHub did not accept the issue creation request */
+            /** @description GitHub issue creation failed or has an ambiguous outcome being reconciled */
             502: {
                 headers: {
                     [name: string]: unknown;

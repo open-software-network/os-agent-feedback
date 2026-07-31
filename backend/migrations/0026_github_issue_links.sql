@@ -27,10 +27,11 @@ CREATE TABLE group_github_issues (
   state TEXT,
   -- 'pending' claims the group for one filer BEFORE the GitHub call, so the
   -- primary key de-duplicates concurrent requests without holding a database
-  -- connection across the network. A filer that dies mid-call leaves a stale
-  -- 'pending' row, reclaimable after a short window.
+  -- connection across the network. 'needs_reconciliation' retains that claim
+  -- when GitHub may have created an issue but did not return a definite answer;
+  -- it must be searched and settled before any later filing is allowed.
   filing_state TEXT NOT NULL DEFAULT 'filed'
-    CHECK (filing_state IN ('pending', 'filed')),
+    CHECK (filing_state IN ('pending', 'needs_reconciliation', 'filed')),
   claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   created_by TEXT NOT NULL,
   last_commented_report_count BIGINT NOT NULL DEFAULT 0,
@@ -38,7 +39,7 @@ CREATE TABLE group_github_issues (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CHECK (
-    filing_state = 'pending'
+    filing_state IN ('pending', 'needs_reconciliation')
     OR (issue_number IS NOT NULL AND url IS NOT NULL AND state IS NOT NULL)
   )
 );

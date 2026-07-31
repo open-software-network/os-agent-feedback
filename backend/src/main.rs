@@ -51,7 +51,9 @@ use crate::{
         UpdatedResponse, WorkspaceResponse,
     },
     error::{ApiError, ApiErrorEnvelope},
-    github::{GithubAppClient, GithubAppConfig, validate_repo_full_name},
+    github::{
+        GithubAppClient, GithubAppConfig, GithubIssueCreationOutcome, validate_repo_full_name,
+    },
     grouping::FingerprintGrouper,
     issue_template::{
         group_backlink, render_evidence_comment, render_issue_body, render_issue_title,
@@ -79,20 +81,23 @@ use crate::{
         GithubInstallationUpsert, GroupIssueFilingClaim, GroupIssueSyncContext,
         accept_team_invitation, agent_product_auth, backfill_report_groups,
         bump_last_commented_report_count, claim_group_issue_filing,
-        claim_group_issue_state_refresh, clear_product_github_repo, complete_group_issue_filing,
-        create_api_key, create_product_with_default_key, create_team_invitation,
-        dashboard_interaction_by_id, dashboard_report_by_id, dashboard_session_by_id,
-        dashboard_with_limits, delete_product, feedback_consent_state, feedback_list_interactions,
-        feedback_list_reports, get_group_github_issue, get_or_create_workspace,
-        get_product_github_repo, github_installation_workspace, group_issue_context,
-        group_issue_sync_context, ingest_telemetry_batch, list_github_installations,
-        list_product_groups, purge_expired_product_data, read_product_auth,
-        record_feedback_consent_decision, regroup_report_groups, release_group_issue_filing_claim,
-        remove_team_member, rename_product, rename_workspace, resolve_workspace_access,
-        revert_last_commented_report_count, revoke_api_key, revoke_github_installation,
-        revoke_team_invitation, rotate_api_key, set_product_github_repo, submit_product_feedback,
-        transfer_team_ownership, update_feedback_workflow, update_group_issue_state, update_policy,
-        update_team_member_role, upsert_github_installation,
+        claim_group_issue_reconciliation, claim_group_issue_state_refresh,
+        clear_product_github_repo, complete_group_issue_filing,
+        complete_group_issue_reconciliation, create_api_key, create_product_with_default_key,
+        create_team_invitation, dashboard_interaction_by_id, dashboard_report_by_id,
+        dashboard_session_by_id, dashboard_with_limits, delete_product, feedback_consent_state,
+        feedback_list_interactions, feedback_list_reports, get_group_github_issue,
+        get_or_create_workspace, get_product_github_repo, github_installation_workspace,
+        group_issue_context, group_issue_sync_context, ingest_telemetry_batch,
+        list_github_installations, list_product_groups, mark_group_issue_filing_for_reconciliation,
+        purge_expired_product_data, read_product_auth, record_feedback_consent_decision,
+        regroup_report_groups, release_group_issue_filing_claim,
+        release_group_issue_reconciliation_claim, remove_team_member, rename_product,
+        rename_workspace, resolve_workspace_access, revert_last_commented_report_count,
+        revoke_api_key, revoke_github_installation, revoke_team_invitation, rotate_api_key,
+        set_product_github_repo, submit_product_feedback, transfer_team_ownership,
+        update_feedback_workflow, update_group_issue_state, update_policy, update_team_member_role,
+        upsert_github_installation,
     },
 };
 
@@ -112,11 +117,12 @@ const GITHUB_STATE_COOKIE: &str = "af_gh_state";
 const GITHUB_WORKSPACE_COOKIE: &str = "af_gh_ws";
 const MAX_GROUP_ISSUE_SYNCS_PER_REQUEST: usize = 5;
 const GROUP_ISSUE_STATE_REFRESH_INTERVAL_MINUTES: i64 = 15;
+const GROUP_ISSUE_RECONCILIATION_RETRY_MINUTES: i64 = 1;
+const GROUP_ISSUE_RECONCILIATION_GRACE_MINUTES: i64 = 10;
 
-/// How long a `pending` filing claim is respected before another request may
-/// take it over. Comfortably above the GitHub client's 15s request timeout, so
-/// a live filer is never displaced; short enough that a crashed process does
-/// not block filing for long.
+/// How long a `pending` filing claim is respected before a crashed filer is
+/// moved into reconciliation. Comfortably above the GitHub client's 15s
+/// request timeout, so a live filer is never displaced.
 const GROUP_ISSUE_FILING_CLAIM_STALE_MINUTES: i64 = 5;
 
 #[derive(OpenApi)]
@@ -1404,6 +1410,7 @@ async fn product_groups_handler(
     for listed in &page.groups {
         if group_issue_sync_needed(
             listed.group.github_issue.is_some(),
+            listed.needs_reconciliation,
             listed.group.report_count,
             listed.last_commented_report_count,
             listed.state_refreshed_at,
@@ -1458,10 +1465,10 @@ async fn product_groups_handler(
         (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
         (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
         (status = 404, description = "Feedback group not found for this team", body = ApiErrorEnvelope),
-        (status = 409, description = "The group's product has no usable GitHub repository mapping", body = ApiErrorEnvelope),
+        (status = 409, description = "The group cannot be filed yet because its mapping is unusable or reconciliation is in progress", body = ApiErrorEnvelope),
         (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
         (status = 500, description = "GitHub issue linkage could not be persisted", body = ApiErrorEnvelope),
-        (status = 502, description = "GitHub did not accept the issue creation request", body = ApiErrorEnvelope),
+        (status = 502, description = "GitHub issue creation failed or has an ambiguous outcome being reconciled", body = ApiErrorEnvelope),
         (status = 503, description = "GitHub App integration is not configured", body = ApiErrorEnvelope)
     ),
     security(("session_cookie" = []))
@@ -1511,6 +1518,12 @@ async fn file_group_github_issue_handler(
                 "A GitHub issue is already being filed for this feedback group",
             ));
         }
+        GroupIssueFilingClaim::NeedsReconciliation => {
+            spawn_group_issue_sync(Arc::clone(&state), workspace_id, group_key);
+            return Err(ApiError::conflict(
+                "GitHub issue reconciliation is in progress for this feedback group",
+            ));
+        }
         GroupIssueFilingClaim::Claimed => {}
     }
 
@@ -1522,28 +1535,52 @@ async fn file_group_github_issue_handler(
     {
         Ok(issue) => issue,
         Err(error) => {
+            let outcome = error.outcome();
             tracing::warn!(
                 %error,
+                ?outcome,
                 %workspace_id,
                 %group_key,
                 repo_full_name,
                 "GitHub issue creation failed"
             );
-            // Drop the claim so a retry can file rather than being told a
-            // filing is in progress for the next few minutes.
-            if let Err(release_error) =
-                release_group_issue_filing_claim(&state.pool, workspace_id, &group_key).await
+            if outcome == GithubIssueCreationOutcome::DefiniteFailure {
+                if let Err(release_error) =
+                    release_group_issue_filing_claim(&state.pool, workspace_id, &group_key).await
+                {
+                    tracing::warn!(
+                        status = %release_error.status,
+                        %workspace_id,
+                        %group_key,
+                        "failed to release definite GitHub issue filing failure"
+                    );
+                }
+                return Err(ApiError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "GitHub did not accept the issue creation request",
+                ));
+            }
+
+            match mark_group_issue_filing_for_reconciliation(&state.pool, workspace_id, &group_key)
+                .await
             {
-                tracing::warn!(
-                    status = %release_error.status,
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
                     %workspace_id,
                     %group_key,
-                    "failed to release GitHub issue filing claim"
-                );
+                    "ambiguous GitHub issue filing claim was no longer pending"
+                ),
+                Err(mark_error) => tracing::warn!(
+                    status = %mark_error.status,
+                    %workspace_id,
+                    %group_key,
+                    "failed to mark ambiguous GitHub issue filing for reconciliation"
+                ),
             }
+            spawn_group_issue_sync(Arc::clone(&state), workspace_id, group_key);
             return Err(ApiError::new(
                 StatusCode::BAD_GATEWAY,
-                "GitHub did not accept the issue creation request",
+                "GitHub issue filing is being reconciled; retry shortly",
             ));
         }
     };
@@ -1601,8 +1638,8 @@ fn spawn_group_issue_sync(state: Arc<AppState>, workspace_id: Uuid, group_key: S
     });
 }
 
-/// A sync is worth spawning when there is new evidence to comment on, OR when
-/// the cached issue state is stale enough to re-read.
+/// A sync is worth spawning for a due reconciliation, new evidence to comment
+/// on, or a cached issue state stale enough to re-read.
 ///
 /// The state refresh is deliberately NOT conditioned on new reports arriving: a
 /// group that has gone quiet is exactly the one whose issue is most likely to
@@ -1612,17 +1649,53 @@ fn spawn_group_issue_sync(state: Arc<AppState>, workspace_id: Uuid, group_key: S
 /// rather than by the presence of new reports.
 fn group_issue_sync_needed(
     has_github_issue: bool,
+    needs_reconciliation: bool,
     current_report_count: i64,
     last_commented_report_count: Option<i64>,
     state_refreshed_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> bool {
+    if needs_reconciliation {
+        return group_issue_reconciliation_retry_due(state_refreshed_at, now);
+    }
     if !has_github_issue {
         return false;
     }
     let new_evidence = last_commented_report_count
         .is_some_and(|last_commented| current_report_count > last_commented);
     new_evidence || group_issue_state_refresh_due(state_refreshed_at, now)
+}
+
+fn group_issue_reconciliation_retry_due(
+    state_refreshed_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> bool {
+    state_refreshed_at.is_none_or(|last_attempt| {
+        last_attempt <= now - Duration::minutes(GROUP_ISSUE_RECONCILIATION_RETRY_MINUTES)
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupIssueReconciliationDecision {
+    Adopt,
+    KeepWaiting,
+    Release,
+}
+
+fn group_issue_reconciliation_decision(
+    issue_found: bool,
+    needs_reconciliation_since: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> GroupIssueReconciliationDecision {
+    if issue_found {
+        GroupIssueReconciliationDecision::Adopt
+    } else if needs_reconciliation_since
+        <= now - Duration::minutes(GROUP_ISSUE_RECONCILIATION_GRACE_MINUTES)
+    {
+        GroupIssueReconciliationDecision::Release
+    } else {
+        GroupIssueReconciliationDecision::KeepWaiting
+    }
 }
 
 fn group_issue_state_refresh_due(
@@ -1642,6 +1715,9 @@ async fn sync_group_github_issue(
     let Some(github) = state.github.as_ref() else {
         return Ok(());
     };
+    if reconcile_group_github_issue(state, github, workspace_id, group_key).await? {
+        return Ok(());
+    }
     let mut tx = state.pool.begin().await?;
     let Some(context) = group_issue_sync_context(&mut tx, workspace_id, group_key).await? else {
         tx.commit().await?;
@@ -1678,6 +1754,96 @@ async fn sync_group_github_issue(
         refresh_group_issue_state(state, github, workspace_id, group_key, &context).await;
     }
     Ok(())
+}
+
+async fn reconcile_group_github_issue(
+    state: &AppState,
+    github: &GithubAppClient,
+    workspace_id: Uuid,
+    group_key: &str,
+) -> Result<bool, ApiError> {
+    let checked_at = Utc::now();
+    let refresh_cutoff = checked_at - Duration::minutes(GROUP_ISSUE_RECONCILIATION_RETRY_MINUTES);
+    let Some(context) =
+        claim_group_issue_reconciliation(&state.pool, workspace_id, group_key, refresh_cutoff)
+            .await?
+    else {
+        return Ok(false);
+    };
+
+    let found = match github
+        .search_issue_by_group_key(context.installation_id, &context.repo_full_name, group_key)
+        .await
+    {
+        Ok(found) => found,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                %workspace_id,
+                %group_key,
+                repo_full_name = %context.repo_full_name,
+                "GitHub issue reconciliation search failed; claim remains quarantined"
+            );
+            return Ok(true);
+        }
+    };
+
+    match group_issue_reconciliation_decision(
+        found.is_some(),
+        context.needs_reconciliation_since,
+        checked_at,
+    ) {
+        GroupIssueReconciliationDecision::Adopt => {
+            let Some(issue) = found else {
+                tracing::warn!(
+                    %workspace_id,
+                    %group_key,
+                    "GitHub issue reconciliation adopt decision had no issue"
+                );
+                return Ok(true);
+            };
+            let link = GithubIssueLink {
+                repo_full_name: context.repo_full_name,
+                issue_number: issue.number,
+                url: issue.html_url,
+                state: issue.state,
+            };
+            if !complete_group_issue_reconciliation(
+                &state.pool,
+                workspace_id,
+                group_key,
+                context.reconciliation_claimed_at,
+                &link,
+                context.current_report_count,
+            )
+            .await?
+            {
+                tracing::warn!(
+                    %workspace_id,
+                    %group_key,
+                    "GitHub issue reconciliation adoption lost its conditional claim"
+                );
+            }
+        }
+        GroupIssueReconciliationDecision::KeepWaiting => {}
+        GroupIssueReconciliationDecision::Release => {
+            if !release_group_issue_reconciliation_claim(
+                &state.pool,
+                workspace_id,
+                group_key,
+                context.reconciliation_claimed_at,
+            )
+            .await?
+            {
+                tracing::warn!(
+                    %workspace_id,
+                    %group_key,
+                    "GitHub issue reconciliation release lost its conditional claim"
+                );
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// Posts the evidence comment for an already-claimed counter bump.
@@ -3558,7 +3724,8 @@ mod page_tests {
     use axum::{body::to_bytes, http::StatusCode};
 
     use super::{
-        ApiError, build_app_router, feedback_discovery, github_callback_redirect_target,
+        ApiError, GroupIssueReconciliationDecision, build_app_router, feedback_discovery,
+        github_callback_redirect_target, group_issue_reconciliation_decision,
         group_issue_state_refresh_due, group_issue_sync_needed, mcp_auth_error, mcp_tool_allowed,
         mcp_tools, resolve_web_app_url, reveal_auth_error,
     };
@@ -3600,19 +3767,44 @@ mod page_tests {
     fn group_issue_sync_requires_new_evidence_and_throttles_state_refresh() {
         let now = Utc::now();
         let fresh = Some(now - Duration::minutes(1));
+        let reconciliation_fresh = Some(now - Duration::seconds(30));
         let stale = Some(now - Duration::minutes(30));
 
         // No issue: never sync, however stale.
-        assert!(!group_issue_sync_needed(false, 2, None, stale, now));
+        assert!(!group_issue_sync_needed(false, false, 2, None, stale, now));
         // Recently refreshed and no new evidence: steady state costs nothing.
-        assert!(!group_issue_sync_needed(true, 2, Some(2), fresh, now));
-        assert!(!group_issue_sync_needed(true, 1, Some(2), fresh, now));
+        assert!(!group_issue_sync_needed(
+            true,
+            false,
+            2,
+            Some(2),
+            fresh,
+            now
+        ));
+        assert!(!group_issue_sync_needed(
+            true,
+            false,
+            1,
+            Some(2),
+            fresh,
+            now
+        ));
         // New evidence always syncs, even just-refreshed.
-        assert!(group_issue_sync_needed(true, 3, Some(2), fresh, now));
+        assert!(group_issue_sync_needed(true, false, 3, Some(2), fresh, now));
         // A quiet group whose state has gone stale must still refresh, or a
         // closed/reopened issue would keep a stale badge forever.
-        assert!(group_issue_sync_needed(true, 2, Some(2), stale, now));
-        assert!(group_issue_sync_needed(true, 2, Some(2), None, now));
+        assert!(group_issue_sync_needed(true, false, 2, Some(2), stale, now));
+        assert!(group_issue_sync_needed(true, false, 2, Some(2), None, now));
+        // A quarantined claim self-heals even though it has no filed link yet.
+        assert!(group_issue_sync_needed(false, true, 2, Some(0), None, now));
+        assert!(!group_issue_sync_needed(
+            false,
+            true,
+            2,
+            Some(0),
+            reconciliation_fresh,
+            now
+        ));
 
         assert!(group_issue_state_refresh_due(None, now));
         assert!(group_issue_state_refresh_due(
@@ -3623,6 +3815,26 @@ mod page_tests {
             Some(now - Duration::minutes(14)),
             now
         ));
+    }
+
+    #[test]
+    fn reconciliation_waits_for_search_lag_before_releasing() {
+        let now = Utc::now();
+        let young = now - Duration::minutes(9);
+        let old = now - Duration::minutes(11);
+
+        assert_eq!(
+            group_issue_reconciliation_decision(true, young, now),
+            GroupIssueReconciliationDecision::Adopt
+        );
+        assert_eq!(
+            group_issue_reconciliation_decision(false, young, now),
+            GroupIssueReconciliationDecision::KeepWaiting
+        );
+        assert_eq!(
+            group_issue_reconciliation_decision(false, old, now),
+            GroupIssueReconciliationDecision::Release
+        );
     }
 
     #[test]

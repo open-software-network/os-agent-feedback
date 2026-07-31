@@ -80,6 +80,7 @@ pub(crate) struct ListedProductGroup {
     pub(crate) group: ProductReportGroup,
     pub(crate) last_commented_report_count: Option<i64>,
     pub(crate) state_refreshed_at: Option<DateTime<Utc>>,
+    pub(crate) needs_reconciliation: bool,
 }
 
 #[derive(Debug)]
@@ -98,6 +99,15 @@ pub(crate) struct GroupIssueSyncContext {
     pub(crate) earliest_new_occurred_at: Option<DateTime<Utc>>,
     pub(crate) latest_new_occurred_at: Option<DateTime<Utc>>,
     pub(crate) state_refreshed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub(crate) struct GroupIssueReconciliationContext {
+    pub(crate) installation_id: i64,
+    pub(crate) repo_full_name: String,
+    pub(crate) needs_reconciliation_since: DateTime<Utc>,
+    pub(crate) reconciliation_claimed_at: DateTime<Utc>,
+    pub(crate) current_report_count: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,6 +372,7 @@ pub(crate) async fn clear_product_github_repo(
 
 #[derive(Debug, sqlx::FromRow)]
 struct GroupIssueContextRow {
+    group_key: String,
     explanation: String,
     installation_id: Option<i64>,
     repo_full_name: Option<String>,
@@ -464,7 +475,7 @@ async fn group_issue_context_with_executor<'executor>(
             occurred_at, report_id, ordinality
           LIMIT 1
         )
-        SELECT g.explanation, g.installation_id, g.repo_full_name,
+        SELECT g.group_key, g.explanation, g.installation_id, g.repo_full_name,
           g.installation_active,
           (SELECT COUNT(*)::BIGINT FROM scoped_reports) AS report_count,
           (SELECT MIN(occurred_at) FROM scoped_reports) AS earliest_occurred_at,
@@ -540,6 +551,7 @@ async fn group_issue_context_with_executor<'executor>(
             repo_full_name: row.repo_full_name,
             installation_active: row.installation_active,
             template: IssueTemplateData {
+                group_key: row.group_key,
                 explanation: row.explanation,
                 primary_kind: row.primary_kind.unwrap_or_else(|| "none".to_owned()),
                 primary_topic: row.primary_topic.unwrap_or_else(|| "none".to_owned()),
@@ -591,15 +603,17 @@ pub(crate) enum GroupIssueFilingClaim {
     AlreadyFiled(Box<GroupGithubIssueRow>),
     /// Another filer holds a fresh claim.
     InProgress,
+    /// GitHub may already have created the issue; reconcile before filing.
+    NeedsReconciliation,
 }
 
 /// Claims a group for filing before any GitHub call is made.
 ///
 /// The primary key on `group_key` is what de-duplicates concurrent filers, so
 /// no database connection has to be held across the network request. A filer
-/// that dies mid-call leaves a `pending` row, which becomes reclaimable once it
-/// is older than `stale_cutoff` — that window only needs to exceed the HTTP
-/// timeout.
+/// that dies mid-call leaves a `pending` row. Once it is older than
+/// `stale_cutoff`, the outcome is ambiguous, so it is quarantined for
+/// reconciliation instead of being handed to another blind filer.
 pub(crate) async fn claim_group_issue_filing(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -637,26 +651,38 @@ pub(crate) async fn claim_group_issue_filing(
         return Ok(GroupIssueFilingClaim::AlreadyFiled(Box::new(existing)));
     }
 
-    // A pending row exists. Take it over only if it is stale enough that its
-    // owner cannot still be waiting on GitHub.
-    let reclaimed = sqlx::query_scalar::<_, i32>(
+    let needs_reconciliation = sqlx::query_scalar::<_, bool>(
+        r"SELECT EXISTS (
+          SELECT 1 FROM group_github_issues
+          WHERE workspace_id = $1 AND group_key = $2
+            AND filing_state = 'needs_reconciliation'
+        )",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .fetch_one(pool)
+    .await?;
+    if needs_reconciliation {
+        return Ok(GroupIssueFilingClaim::NeedsReconciliation);
+    }
+
+    // A stale pending owner may have died after GitHub accepted the request.
+    // Quarantine it for a marker search rather than filing a possible duplicate.
+    let quarantined = sqlx::query_scalar::<_, i32>(
         r"UPDATE group_github_issues
-        SET installation_id = $3, repo_full_name = $4, created_by = $5,
-            claimed_at = NOW(), updated_at = NOW()
+        SET filing_state = 'needs_reconciliation', claimed_at = NOW(),
+            state_refreshed_at = NULL, updated_at = NOW()
         WHERE workspace_id = $1 AND group_key = $2
-          AND filing_state = 'pending' AND claimed_at <= $6
+          AND filing_state = 'pending' AND claimed_at <= $3
         RETURNING 1",
     )
     .bind(workspace_id)
     .bind(group_key)
-    .bind(installation_id)
-    .bind(repo_full_name)
-    .bind(created_by)
     .bind(stale_cutoff)
     .fetch_optional(pool)
     .await?;
-    if reclaimed.is_some() {
-        return Ok(GroupIssueFilingClaim::Claimed);
+    if quarantined.is_some() {
+        return Ok(GroupIssueFilingClaim::NeedsReconciliation);
     }
     Ok(GroupIssueFilingClaim::InProgress)
 }
@@ -704,6 +730,130 @@ pub(crate) async fn release_group_issue_filing_claim(
     Ok(())
 }
 
+/// Retains an ambiguous filing outcome until GitHub search can settle it.
+pub(crate) async fn mark_group_issue_filing_for_reconciliation(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE group_github_issues
+        SET filing_state = 'needs_reconciliation', claimed_at = NOW(),
+            state_refreshed_at = NULL, updated_at = NOW()
+        WHERE workspace_id = $1 AND group_key = $2 AND filing_state = 'pending'",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Claims one throttled reconciliation attempt and returns its pinned repo.
+pub(crate) async fn claim_group_issue_reconciliation(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    refresh_cutoff: DateTime<Utc>,
+) -> Result<Option<GroupIssueReconciliationContext>, ApiError> {
+    Ok(sqlx::query_as::<_, GroupIssueReconciliationContext>(
+        r"WITH candidate AS (
+          SELECT issue.group_key, COUNT(report.id)::BIGINT AS current_report_count
+          FROM group_github_issues issue
+          JOIN report_groups report_group
+            ON report_group.group_key = issue.group_key
+           AND report_group.workspace_id = issue.workspace_id
+          JOIN products product
+            ON product.id = report_group.product_id
+           AND product.workspace_id = report_group.workspace_id
+          JOIN github_installations installation
+            ON installation.installation_id = issue.installation_id
+           AND installation.workspace_id = issue.workspace_id
+           AND installation.revoked_at IS NULL
+          LEFT JOIN feedback_reports report
+            ON report.group_id = report_group.id
+           AND report.workspace_id = report_group.workspace_id
+          WHERE issue.workspace_id = $1 AND issue.group_key = $2
+            AND issue.filing_state = 'needs_reconciliation'
+          GROUP BY issue.group_key
+        ), claimed AS (
+          UPDATE group_github_issues issue
+          SET state_refreshed_at = NOW(), updated_at = NOW()
+          FROM candidate
+          WHERE issue.group_key = candidate.group_key
+            AND issue.workspace_id = $1
+            AND issue.filing_state = 'needs_reconciliation'
+            AND (
+              issue.state_refreshed_at IS NULL
+              OR issue.state_refreshed_at <= $3
+            )
+          RETURNING issue.group_key, issue.installation_id, issue.repo_full_name,
+            issue.claimed_at AS needs_reconciliation_since,
+            issue.state_refreshed_at AS reconciliation_claimed_at
+        )
+        SELECT claimed.installation_id, claimed.repo_full_name,
+          claimed.needs_reconciliation_since, claimed.reconciliation_claimed_at,
+          candidate.current_report_count
+        FROM claimed
+        JOIN candidate ON candidate.group_key = claimed.group_key",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(refresh_cutoff)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Adopts the issue found by marker search if this task still owns the attempt.
+pub(crate) async fn complete_group_issue_reconciliation(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    reconciliation_claimed_at: DateTime<Utc>,
+    link: &GithubIssueLink,
+    report_count: i64,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE group_github_issues
+        SET issue_number = $4, url = $5, state = $6, filing_state = 'filed',
+            last_commented_report_count = $7, state_refreshed_at = NOW(), updated_at = NOW()
+        WHERE workspace_id = $1 AND group_key = $2
+          AND filing_state = 'needs_reconciliation'
+          AND state_refreshed_at = $3",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(reconciliation_claimed_at)
+    .bind(link.issue_number)
+    .bind(&link.url)
+    .bind(&link.state)
+    .bind(report_count)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Releases a definitively absent issue if this task still owns the attempt.
+pub(crate) async fn release_group_issue_reconciliation_claim(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    reconciliation_claimed_at: DateTime<Utc>,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"DELETE FROM group_github_issues
+        WHERE workspace_id = $1 AND group_key = $2
+          AND filing_state = 'needs_reconciliation'
+          AND state_refreshed_at = $3",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(reconciliation_claimed_at)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct ProductGroupListRow {
     group_key: String,
@@ -716,6 +866,7 @@ struct ProductGroupListRow {
     issue_state: Option<String>,
     last_commented_report_count: Option<i64>,
     state_refreshed_at: Option<DateTime<Utc>>,
+    filing_state: Option<String>,
 }
 
 pub(crate) async fn list_product_groups(
@@ -739,7 +890,8 @@ pub(crate) async fn list_product_groups(
           issue.url AS issue_url,
           issue.state AS issue_state,
           issue.last_commented_report_count,
-          issue.state_refreshed_at
+          issue.state_refreshed_at,
+          issue.filing_state
         FROM report_groups report_group
         JOIN products product
           ON product.id = report_group.product_id
@@ -757,11 +909,11 @@ pub(crate) async fn list_product_groups(
         LEFT JOIN group_github_issues issue
           ON issue.group_key = report_group.group_key
          AND issue.workspace_id = report_group.workspace_id
-         AND issue.filing_state = 'filed'
         WHERE report_group.workspace_id = $1 AND report_group.product_id = $2
         GROUP BY report_group.id, report_group.group_key, report_group.explanation,
           issue.repo_full_name, issue.issue_number, issue.url, issue.state,
-          issue.last_commented_report_count, issue.state_refreshed_at
+          issue.last_commented_report_count, issue.state_refreshed_at,
+          issue.filing_state
         ORDER BY MAX(interaction.occurred_at) DESC NULLS LAST,
           report_group.updated_at DESC, report_group.group_key
         LIMIT $3 OFFSET $4",
@@ -803,6 +955,7 @@ pub(crate) async fn list_product_groups(
                 },
                 last_commented_report_count: row.last_commented_report_count,
                 state_refreshed_at: row.state_refreshed_at,
+                needs_reconciliation: row.filing_state.as_deref() == Some("needs_reconciliation"),
             }
         })
         .collect();
@@ -888,6 +1041,7 @@ pub(crate) async fn bump_last_commented_report_count(
           AND issue.workspace_id = report_group.workspace_id
           AND issue.workspace_id = $1
           AND issue.group_key = $2
+          AND issue.filing_state = 'filed'
           AND issue.last_commented_report_count = $3
           AND $4 > $3",
     )
@@ -915,6 +1069,7 @@ pub(crate) async fn revert_last_commented_report_count(
           AND issue.workspace_id = report_group.workspace_id
           AND issue.workspace_id = $1
           AND issue.group_key = $2
+          AND issue.filing_state = 'filed'
           AND issue.last_commented_report_count = $4",
     )
     .bind(workspace_id)
@@ -940,6 +1095,7 @@ pub(crate) async fn claim_group_issue_state_refresh(
           AND issue.workspace_id = report_group.workspace_id
           AND issue.workspace_id = $1
           AND issue.group_key = $2
+          AND issue.filing_state = 'filed'
           AND (
             issue.state_refreshed_at IS NULL
             OR issue.state_refreshed_at <= $3
@@ -966,7 +1122,8 @@ pub(crate) async fn update_group_issue_state(
         WHERE issue.group_key = report_group.group_key
           AND issue.workspace_id = report_group.workspace_id
           AND issue.workspace_id = $1
-          AND issue.group_key = $2",
+          AND issue.group_key = $2
+          AND issue.filing_state = 'filed'",
     )
     .bind(workspace_id)
     .bind(group_key)
@@ -4199,6 +4356,158 @@ mod product_tests {
                     .fetch_one(&pool)
                     .await?;
             anyhow::ensure!(count == 1);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn ambiguous_filing_refuses_a_subsequent_claim() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let fixture = github_issue_group_fixture(&pool, "Ambiguous filing test", 2).await?;
+
+        let result = async {
+            let claim = claim_group_issue_filing(
+                &pool,
+                fixture.workspace_id,
+                &fixture.group_key,
+                fixture.installation_id,
+                "open-software/epode-test",
+                "usr_test",
+                Utc::now() - Duration::minutes(5),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(matches!(claim, GroupIssueFilingClaim::Claimed));
+            anyhow::ensure!(
+                mark_group_issue_filing_for_reconciliation(
+                    &pool,
+                    fixture.workspace_id,
+                    &fixture.group_key,
+                )
+                .await
+                .map_err(test_error)?
+            );
+
+            let filing_state: String = sqlx::query_scalar(
+                "SELECT filing_state FROM group_github_issues WHERE group_key = $1",
+            )
+            .bind(&fixture.group_key)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(filing_state == "needs_reconciliation");
+
+            let retry = claim_group_issue_filing(
+                &pool,
+                fixture.workspace_id,
+                &fixture.group_key,
+                fixture.installation_id,
+                "open-software/epode-test",
+                "usr_retry",
+                Utc::now() - Duration::minutes(5),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(matches!(retry, GroupIssueFilingClaim::NeedsReconciliation));
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn reconciliation_adopts_the_found_issue_and_current_report_count() -> anyhow::Result<()>
+    {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let fixture = github_issue_group_fixture(&pool, "Issue adoption test", 2).await?;
+
+        let result = async {
+            let claim = claim_group_issue_filing(
+                &pool,
+                fixture.workspace_id,
+                &fixture.group_key,
+                fixture.installation_id,
+                "open-software/epode-test",
+                "usr_test",
+                Utc::now() - Duration::minutes(5),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(matches!(claim, GroupIssueFilingClaim::Claimed));
+            anyhow::ensure!(
+                mark_group_issue_filing_for_reconciliation(
+                    &pool,
+                    fixture.workspace_id,
+                    &fixture.group_key,
+                )
+                .await
+                .map_err(test_error)?
+            );
+            let reconciliation = claim_group_issue_reconciliation(
+                &pool,
+                fixture.workspace_id,
+                &fixture.group_key,
+                Utc::now(),
+            )
+            .await
+            .map_err(test_error)?
+            .ok_or_else(|| anyhow::anyhow!("reconciliation should be claimable"))?;
+            anyhow::ensure!(reconciliation.current_report_count == 2);
+
+            let link = GithubIssueLink {
+                repo_full_name: "open-software/epode-test".to_owned(),
+                issue_number: 142,
+                url: "https://github.com/open-software/epode-test/issues/142".to_owned(),
+                state: "open".to_owned(),
+            };
+            anyhow::ensure!(
+                complete_group_issue_reconciliation(
+                    &pool,
+                    fixture.workspace_id,
+                    &fixture.group_key,
+                    reconciliation.reconciliation_claimed_at,
+                    &link,
+                    reconciliation.current_report_count,
+                )
+                .await
+                .map_err(test_error)?
+            );
+
+            let adopted = get_group_github_issue(&pool, fixture.workspace_id, &fixture.group_key)
+                .await
+                .map_err(test_error)?
+                .ok_or_else(|| anyhow::anyhow!("adopted issue should be filed"))?;
+            anyhow::ensure!(adopted.link() == link);
+            let report_count: i64 = sqlx::query_scalar(
+                "SELECT last_commented_report_count FROM group_github_issues WHERE group_key = $1",
+            )
+            .bind(&fixture.group_key)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(report_count == 2);
             Ok::<(), anyhow::Error>(())
         }
         .await;
