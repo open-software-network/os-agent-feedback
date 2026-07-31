@@ -1,6 +1,7 @@
 mod api_types;
 mod error;
 mod github;
+mod grouping;
 mod models;
 mod os_accounts;
 mod security;
@@ -50,6 +51,7 @@ use crate::{
     },
     error::{ApiError, ApiErrorEnvelope},
     github::{GithubAppClient, GithubAppConfig},
+    grouping::FingerprintGrouper,
     models::{
         ClassificationDiscovery, ConsentDecisionInput, ConsentStateInput, ConsentStateResponse,
         CreateApiKeyInput, CreateProductInput, CreateTeamInvitationInput, CurrentUser,
@@ -69,13 +71,14 @@ use crate::{
         bearer_token, clear_cookie, cookie, http_only_cookie, random_token, reject_sensitive_fields,
     },
     store::{
-        GithubInstallationUpsert, accept_team_invitation, agent_product_auth, create_api_key,
-        create_product_with_default_key, create_team_invitation, dashboard_interaction_by_id,
-        dashboard_report_by_id, dashboard_session_by_id, dashboard_with_limits, delete_product,
-        feedback_consent_state, feedback_list_interactions, feedback_list_reports,
-        get_or_create_workspace, github_installation_workspace, ingest_telemetry_batch,
-        list_github_installations, purge_expired_product_data, read_product_auth,
-        record_feedback_consent_decision, remove_team_member, rename_product, rename_workspace,
+        GithubInstallationUpsert, accept_team_invitation, agent_product_auth,
+        backfill_report_groups, create_api_key, create_product_with_default_key,
+        create_team_invitation, dashboard_interaction_by_id, dashboard_report_by_id,
+        dashboard_session_by_id, dashboard_with_limits, delete_product, feedback_consent_state,
+        feedback_list_interactions, feedback_list_reports, get_or_create_workspace,
+        github_installation_workspace, ingest_telemetry_batch, list_github_installations,
+        purge_expired_product_data, read_product_auth, record_feedback_consent_decision,
+        regroup_report_groups, remove_team_member, rename_product, rename_workspace,
         resolve_workspace_access, revoke_api_key, revoke_github_installation,
         revoke_team_invitation, rotate_api_key, submit_product_feedback, transfer_team_ownership,
         update_feedback_workflow, update_policy, update_team_member_role,
@@ -223,7 +226,8 @@ fn print_openapi() -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    if env::args().nth(1).as_deref() == Some("--print-openapi") {
+    let command = env::args().nth(1);
+    if command.as_deref() == Some("--print-openapi") {
         print_openapi()?;
         return Ok(());
     }
@@ -241,6 +245,103 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tracing_subscriber::fmt().with_env_filter(filter).init();
     }
+
+    let database_url =
+        env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL is required"))?;
+    let database_max_connections = match env::var("DATABASE_MAX_CONNECTIONS") {
+        Ok(value) => value
+            .parse::<u32>()
+            .map_err(|_| anyhow::anyhow!("DATABASE_MAX_CONNECTIONS must be an integer"))?,
+        Err(env::VarError::NotPresent) => 10,
+        Err(env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("DATABASE_MAX_CONNECTIONS must be valid Unicode")
+        }
+    };
+    anyhow::ensure!(
+        (1..=100).contains(&database_max_connections),
+        "DATABASE_MAX_CONNECTIONS must be between 1 and 100"
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(database_max_connections)
+        .connect(&database_url)
+        .await?;
+    sqlx::migrate!().run(&pool).await?;
+    if command.as_deref() == Some("--backfill-report-groups") {
+        let summary = backfill_report_groups(&pool, &FingerprintGrouper, None)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        tracing::info!(
+            scanned = summary.scanned,
+            grouped = summary.grouped,
+            skipped = summary.skipped,
+            skipped_findings = summary.skipped_findings,
+            exhausted = summary.exhausted,
+            "report group backfill completed"
+        );
+        return Ok(());
+    }
+    if command.as_deref() == Some("--regroup-report-groups") {
+        let summary = regroup_report_groups(&pool, &FingerprintGrouper)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        tracing::info!(
+            scanned = summary.scanned,
+            moved = summary.moved,
+            unchanged = summary.unchanged,
+            skipped = summary.skipped,
+            skipped_findings = summary.skipped_findings,
+            "report group regroup completed"
+        );
+        return Ok(());
+    }
+
+    // Group any reports that predate grouping, so a normal deploy converges
+    // without an operator remembering to run the CLI. This runs to completion
+    // rather than under a total cap, because a deployment with more history
+    // than any cap would otherwise never finish grouping on its own.
+    //
+    // It is deliberately detached: boot and readiness never await it, so a
+    // large historical table cannot delay the listener or trip a healthcheck.
+    // Work stays bounded per step by the batch size and by a short yield
+    // between batches, so it cannot monopolise the connection pool. Reports
+    // already grouped are excluded by the `group_id IS NULL` filter, which is
+    // what makes running this on every boot cheap and idempotent.
+    let backfill_pool = pool.clone();
+    tokio::spawn(async move {
+        // Transient database errors must not strand ungrouped reports until
+        // the next boot: retry with capped exponential backoff. The work is
+        // idempotent (`group_id IS NULL`), so re-running after a partial
+        // failure is always safe.
+        let max_backoff = std::time::Duration::from_mins(5);
+        let mut backoff = std::time::Duration::from_secs(1);
+        loop {
+            match backfill_report_groups(&backfill_pool, &FingerprintGrouper, None).await {
+                Ok(summary) => {
+                    if summary.scanned > 0 {
+                        tracing::info!(
+                            scanned = summary.scanned,
+                            grouped = summary.grouped,
+                            skipped = summary.skipped,
+                            skipped_findings = summary.skipped_findings,
+                            "startup report group backfill completed"
+                        );
+                    }
+                    break;
+                }
+                // Never escalate to the process: the API is useful without
+                // grouping. Retry from wherever this run stopped.
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error.message,
+                        retry_in_secs = backoff.as_secs(),
+                        "startup report group backfill failed; retrying"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(max_backoff);
+                }
+            }
+        }
+    });
 
     let port = env::var("PORT")
         .ok()
@@ -266,26 +367,6 @@ async fn main() -> anyhow::Result<()> {
     }
     let accounts = OsAccountsClient::from_env(&public_base_url)?;
     let github = GithubAppConfig::from_env()?.map(GithubAppClient::new);
-    let database_url =
-        env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL is required"))?;
-    let database_max_connections = match env::var("DATABASE_MAX_CONNECTIONS") {
-        Ok(value) => value
-            .parse::<u32>()
-            .map_err(|_| anyhow::anyhow!("DATABASE_MAX_CONNECTIONS must be an integer"))?,
-        Err(env::VarError::NotPresent) => 10,
-        Err(env::VarError::NotUnicode(_)) => {
-            anyhow::bail!("DATABASE_MAX_CONNECTIONS must be valid Unicode")
-        }
-    };
-    anyhow::ensure!(
-        (1..=100).contains(&database_max_connections),
-        "DATABASE_MAX_CONNECTIONS must be between 1 and 100"
-    );
-    let pool = PgPoolOptions::new()
-        .max_connections(database_max_connections)
-        .connect(&database_url)
-        .await?;
-    sqlx::migrate!().run(&pool).await?;
     let mcp_allowed_origins = env::var("MCP_ALLOWED_ORIGINS")
         .unwrap_or_default()
         .split(',')
