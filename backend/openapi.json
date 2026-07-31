@@ -4868,9 +4868,20 @@
         "type": "object",
         "required": [
           "state",
+          "decidedAt",
+          "changed",
           "feedback"
         ],
         "properties": {
+          "changed": {
+            "type": "boolean",
+            "description": "True when this call recorded the standing decision; false when a prior\ndecision already stood and was returned unchanged."
+          },
+          "decidedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the standing decision was made. Matches the request time when this\ncall recorded the decision, and the original decision time when a prior\ndecision stands."
+          },
           "feedback": {},
           "state": {
             "type": "string"
