@@ -255,17 +255,37 @@ pub(crate) fn contains_sensitive_report_text(value: &str) -> bool {
     // strong semantic signal and deliberately does not use entropy or shape.
     // Publication has the separate, aggressive `must_redact_before_publishing`
     // policy below, where a hit costs only one public field.
+    // AWS access key IDs are uppercase and start with "AKIA" (long-lived) or
+    // "ASIA" (temporary). Match case-sensitively on the raw value so ordinary
+    // words such as "Asia" do not reject a report; requiring a run of
+    // uppercase key characters after the prefix is a semantic signal, not
+    // entropy scanning.
+    let aws_access_key = ["AKIA", "ASIA"].iter().any(|prefix| {
+        value.match_indices(prefix).any(|(index, _)| {
+            let suffix = &value[index + prefix.len()..];
+            suffix.len() >= 12
+                && suffix
+                    .chars()
+                    .take(12)
+                    .all(|character| character.is_ascii_uppercase() || character.is_ascii_digit())
+        })
+    });
     let value = value.to_ascii_lowercase();
     let forbidden_pattern = [
         "af_live_",
         "af_read_",
         "github_pat_",
+        "ghp_",
+        "aws_secret",
+        "sk-ant-",
         "-----begin ",
         "xoxb-",
         "xoxp-",
         "sk-proj-",
         "api key",
         "password",
+        "prompt was",
+        "user asked",
         "transcript:",
         "prompt:",
         "raw input:",
@@ -294,7 +314,7 @@ pub(crate) fn contains_sensitive_report_text(value: &str) -> bool {
                 .chars()
                 .all(|character| character.is_ascii_alphanumeric() || "-._~+/=".contains(character))
     });
-    forbidden_pattern || bearer_credential || email_like
+    forbidden_pattern || bearer_credential || email_like || aws_access_key
 }
 
 #[derive(Debug, Default)]
@@ -1157,6 +1177,32 @@ mod tests {
 
     #[test]
     fn sensitive_guard_does_not_redact_ordinary_report_text() {
+        // Ingest-side high-signal credential and prompt-paraphrase patterns.
+        for sensitive in [
+            "Access key AKIAIOSFODNN7EXAMPLE was rejected",
+            "Temporary key ASIAJEXAMPLEKEY12345 expired mid-request",
+            "config leaked aws_secret_access_key into the error body",
+            "token ghp_16C7e42F292c6912E7710c838347Ae178B4a is invalid",
+            "the response echoed sk-ant-api03-abc123",
+            "the prompt was to summarize the customer's contract",
+            "the user asked for a refund and the API refused",
+        ] {
+            assert!(
+                contains_sensitive_report_text(sensitive),
+                "expected ingest rejection for: {sensitive}"
+            );
+        }
+        // Prose that merely mentions these providers or regions must pass.
+        for benign in [
+            "Requests from the Asia region timed out",
+            "The AWS secret manager integration returned 403",
+            "The ask-once flow succeeded for this user",
+        ] {
+            assert!(
+                !contains_sensitive_report_text(benign),
+                "unexpected ingest rejection for: {benign}"
+            );
+        }
         // Long identifiers and prose must survive; over-redacting would gut the
         // issue body that makes filing useful.
         for benign in [
