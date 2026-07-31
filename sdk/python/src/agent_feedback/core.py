@@ -36,6 +36,10 @@ SHARED_CACHE_CONTROL = re.compile(
 MAX_CONCURRENT_CONSENT_WARMS = 8
 
 
+def _default_endpoint() -> str:
+    return os.getenv("AGENT_FEEDBACK_URL") or DEFAULT_ENDPOINT
+
+
 def _base64url(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
 
@@ -75,7 +79,7 @@ def normalize_operation(path: str) -> str:
 @dataclass(slots=True)
 class AgentFeedbackOptions:
     api_key: str
-    endpoint: str = DEFAULT_ENDPOINT
+    endpoint: str = field(default_factory=_default_endpoint)
     include: tuple[str, ...] = ()
     exclude: tuple[str, ...] = ()
     feedback_mode: str | None = None
@@ -169,7 +173,7 @@ class AgentFeedback:
             raise ValueError("feedback_mode must be never_ask, ask_once, ask_always, or off")
         if options.cache_mode not in {"safe", "private", "request"}:
             raise ValueError("cache_mode must be safe, private, or request")
-        options.endpoint = options.endpoint.rstrip("/")
+        options.endpoint = (options.endpoint or _default_endpoint()).rstrip("/")
         self.options = options
         self.telemetry = _TelemetryQueue(options)
         self._sequence = 0

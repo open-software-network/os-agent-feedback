@@ -45,6 +45,22 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "cache_mode must be safe, private, or request"):
             AgentFeedback(AgentFeedbackOptions(api_key=KEY, cache_mode="surprise"))
 
+    def test_endpoint_env_var_is_default_and_explicit_option_wins(self) -> None:
+        import os
+
+        os.environ["AGENT_FEEDBACK_URL"] = "https://canary.epode.test/"
+        try:
+            from_env = AgentFeedback(AgentFeedbackOptions(api_key=KEY))
+            self.assertEqual(from_env.options.endpoint, "https://canary.epode.test")
+            explicit = AgentFeedback(
+                AgentFeedbackOptions(api_key=KEY, endpoint="https://feedback.test")
+            )
+            self.assertEqual(explicit.options.endpoint, "https://feedback.test")
+        finally:
+            del os.environ["AGENT_FEEDBACK_URL"]
+        default = AgentFeedback(AgentFeedbackOptions(api_key=KEY))
+        self.assertEqual(default.options.endpoint, "https://app.epode.ai")
+
     def test_capability_conformance(self) -> None:
         claims = {
             "v": 1,

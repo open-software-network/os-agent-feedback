@@ -91,6 +91,26 @@ func TestInvalidCacheModeIsRejected(t *testing.T) {
 	}
 }
 
+func TestEndpointEnvVarIsDefaultAndExplicitOptionWins(t *testing.T) {
+	t.Setenv("AGENT_FEEDBACK_URL", "https://canary.epode.test/")
+	fromEnv, err := New(Options{APIKey: conformanceKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fromEnv.Shutdown(context.Background())
+	if fromEnv.options.Endpoint != "https://canary.epode.test" {
+		t.Fatalf("expected env endpoint, got %q", fromEnv.options.Endpoint)
+	}
+	explicit, err := New(Options{APIKey: conformanceKey, Endpoint: "https://feedback.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer explicit.Shutdown(context.Background())
+	if explicit.options.Endpoint != "https://feedback.test" {
+		t.Fatalf("expected explicit endpoint to win, got %q", explicit.options.Endpoint)
+	}
+}
+
 func TestMiddlewareCacheModesPreservePublicResponsesUnlessExplicit(t *testing.T) {
 	tests := []struct {
 		name         string

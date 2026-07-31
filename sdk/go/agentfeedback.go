@@ -228,7 +228,10 @@ func New(options Options) (*Runtime, error) {
 		return nil, err
 	}
 	if options.Endpoint == "" {
-		options.Endpoint = DefaultEndpoint
+		options.Endpoint = os.Getenv("AGENT_FEEDBACK_URL")
+		if options.Endpoint == "" {
+			options.Endpoint = DefaultEndpoint
+		}
 	}
 	options.Endpoint = strings.TrimRight(options.Endpoint, "/")
 	if options.FeedbackMode == "" {

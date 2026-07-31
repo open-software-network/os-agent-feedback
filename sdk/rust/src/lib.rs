@@ -88,9 +88,14 @@ impl Options {
             .filter(|value| *value > 0)
             .map(Duration::from_millis)
             .unwrap_or_else(|| Duration::from_millis(750));
+        let endpoint = std::env::var("AGENT_FEEDBACK_URL")
+            .ok()
+            .map(|value| value.trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| DEFAULT_ENDPOINT.into());
         Self {
             api_key: api_key.into(),
-            endpoint: DEFAULT_ENDPOINT.into(),
+            endpoint,
             include: Vec::new(),
             exclude: Vec::new(),
             feedback_mode,
