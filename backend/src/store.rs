@@ -3,6 +3,8 @@
     reason = "crate-restricted visibility satisfies unreachable_pub in this binary-only crate"
 )]
 
+use std::collections::BTreeMap;
+
 use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
@@ -2170,14 +2172,23 @@ pub(crate) async fn ingest_telemetry_batch(
     let mut accepted = 0;
     let mut dropped = 0;
     let mut changed_interaction_ids = Vec::with_capacity(event_count);
+    let mut session_evidence_by_interaction = BTreeMap::new();
+    let mut events = input.events;
+    events.sort_by_key(|event| event.interaction_id);
     let mut tx = pool.begin().await?;
-    for event in input.events {
+    for event in events {
         let mut event_tx = tx.begin().await?;
         match ingest_telemetry_event(&mut event_tx, auth, event).await {
-            Ok(changed_interaction_id) => {
+            Ok(result) => {
                 event_tx.commit().await?;
-                if let Some(interaction_id) = changed_interaction_id {
-                    changed_interaction_ids.push(interaction_id);
+                if result.grouping_facts_changed {
+                    changed_interaction_ids.push(result.interaction_id);
+                }
+                let evidence = session_evidence_by_interaction
+                    .entry(result.interaction_id)
+                    .or_insert(None);
+                if evidence.is_none() {
+                    *evidence = result.session_evidence;
                 }
                 accepted += 1;
             }
@@ -2188,6 +2199,7 @@ pub(crate) async fn ingest_telemetry_batch(
             Err(error) => return Err(error),
         }
     }
+    correlate_telemetry_sessions(&mut tx, auth, session_evidence_by_interaction).await?;
     regroup_changed_interaction_reports(&mut tx, &changed_interaction_ids).await?;
     tx.commit().await?;
     Ok(TelemetryBatchResult { accepted, dropped })
@@ -2196,16 +2208,21 @@ pub(crate) async fn ingest_telemetry_batch(
 #[derive(Debug, sqlx::FromRow)]
 struct TelemetryUpsertResult {
     id: Uuid,
-    session_id: Option<Uuid>,
-    occurred_at: DateTime<Utc>,
     grouping_facts_changed: bool,
+}
+
+#[derive(Debug)]
+struct AcceptedTelemetryEvent {
+    interaction_id: Uuid,
+    grouping_facts_changed: bool,
+    session_evidence: Option<(String, String)>,
 }
 
 async fn ingest_telemetry_event(
     tx: &mut Transaction<'_, Postgres>,
     auth: &ProductAuth,
     event: InteractionTelemetryInput,
-) -> Result<Option<Uuid>, ApiError> {
+) -> Result<AcceptedTelemetryEvent, ApiError> {
     validate_telemetry(&event)?;
     let occurred_at = event.occurred_at.unwrap_or_else(Utc::now);
     if occurred_at > Utc::now() + Duration::minutes(5)
@@ -2262,9 +2279,9 @@ async fn ingest_telemetry_event(
           END,
           updated_at = NOW()
         WHERE interactions_v2.environment_id = EXCLUDED.environment_id
-          RETURNING id, session_id, surface, operation, status_code, occurred_at
+          RETURNING id, surface, operation, status_code
         )
-        SELECT u.id, u.session_id, u.occurred_at,
+        SELECT u.id,
           p.id IS NOT NULL AND (
             p.surface IS DISTINCT FROM u.surface
             OR p.operation IS DISTINCT FROM u.operation
@@ -2293,33 +2310,124 @@ async fn ingest_telemetry_event(
     .await?;
     let row =
         row.ok_or_else(|| ApiError::conflict("interactionId belongs to another workspace"))?;
-    if let Some(session_id) = row.session_id {
+    Ok(AcceptedTelemetryEvent {
+        interaction_id: row.id,
+        grouping_facts_changed: row.grouping_facts_changed,
+        session_evidence,
+    })
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct InteractionSessionState {
+    interaction_id: Uuid,
+    occurred_at: DateTime<Utc>,
+    session_id: Option<Uuid>,
+    session_source: Option<String>,
+    session_ref_hash: Option<Vec<u8>>,
+}
+
+#[derive(Debug)]
+struct SessionCorrelationAction {
+    interaction_id: Uuid,
+    occurred_at: DateTime<Utc>,
+    session_id: Option<Uuid>,
+    session_evidence: Option<(String, String)>,
+    sort_source: String,
+    sort_ref_hash: Vec<u8>,
+}
+
+async fn correlate_telemetry_sessions(
+    tx: &mut Transaction<'_, Postgres>,
+    auth: &ProductAuth,
+    mut evidence_by_interaction: BTreeMap<Uuid, Option<(String, String)>>,
+) -> Result<(), ApiError> {
+    let interaction_ids = evidence_by_interaction.keys().copied().collect::<Vec<_>>();
+    let states = sqlx::query_as::<_, InteractionSessionState>(
+        r"SELECT i.id AS interaction_id, i.occurred_at, i.session_id,
+          s.source AS session_source, s.ref_hash AS session_ref_hash
+        FROM interactions_v2 i
+        LEFT JOIN sessions_v2 s ON s.id = i.session_id
+        WHERE i.id = ANY($1)",
+    )
+    .bind(&interaction_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    if states.len() != interaction_ids.len() {
+        return Err(ApiError::internal(
+            "accepted telemetry interaction disappeared before session correlation",
+        ));
+    }
+
+    let mut actions = Vec::with_capacity(states.len());
+    for state in states {
+        let evidence = evidence_by_interaction
+            .remove(&state.interaction_id)
+            .flatten();
+        let (sort_source, sort_ref_hash) = if state.session_id.is_some() {
+            (
+                state.session_source.clone().ok_or_else(|| {
+                    ApiError::internal("linked telemetry interaction has no session source")
+                })?,
+                state.session_ref_hash.clone().ok_or_else(|| {
+                    ApiError::internal("linked telemetry interaction has no session ref hash")
+                })?,
+            )
+        } else if let Some((session_ref, session_source)) = evidence.as_ref() {
+            (session_source.clone(), sha256(session_ref))
+        } else {
+            continue;
+        };
+        actions.push(SessionCorrelationAction {
+            interaction_id: state.interaction_id,
+            occurred_at: state.occurred_at,
+            session_id: state.session_id,
+            session_evidence: evidence,
+            sort_source,
+            sort_ref_hash,
+        });
+    }
+    actions.sort_by(|left, right| {
+        (&left.sort_source, &left.sort_ref_hash, left.interaction_id).cmp(&(
+            &right.sort_source,
+            &right.sort_ref_hash,
+            right.interaction_id,
+        ))
+    });
+
+    for action in actions {
+        let session_id = if let Some(session_id) = action.session_id {
+            session_id
+        } else {
+            let (session_ref, session_source) = action.session_evidence.ok_or_else(|| {
+                ApiError::internal("unlinked correlation action has no session evidence")
+            })?;
+            let session_id = resolve_v2_session(
+                tx,
+                auth.workspace.id,
+                auth.environment.id,
+                &session_ref,
+                &session_source,
+                action.occurred_at,
+            )
+            .await?;
+            sqlx::query("UPDATE interactions_v2 SET session_id = $2 WHERE id = $1")
+                .bind(action.interaction_id)
+                .bind(session_id)
+                .execute(&mut **tx)
+                .await?;
+            session_id
+        };
         sqlx::query(
             r"UPDATE sessions_v2
             SET started_at = LEAST(started_at, $2), last_seen_at = GREATEST(last_seen_at, $2)
             WHERE id = $1",
         )
         .bind(session_id)
-        .bind(row.occurred_at)
+        .bind(action.occurred_at)
         .execute(&mut **tx)
         .await?;
-    } else if let Some((session_ref, session_source)) = session_evidence {
-        let session_id = resolve_v2_session(
-            tx,
-            auth.workspace.id,
-            auth.environment.id,
-            &session_ref,
-            &session_source,
-            row.occurred_at,
-        )
-        .await?;
-        sqlx::query("UPDATE interactions_v2 SET session_id = $2 WHERE id = $1")
-            .bind(row.id)
-            .bind(session_id)
-            .execute(&mut **tx)
-            .await?;
     }
-    Ok(row.grouping_facts_changed.then_some(row.id))
+    Ok(())
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -3124,10 +3232,12 @@ mod product_tests {
         reason = "test failures should abort at the assertion site with explicit context"
     )]
 
+    use std::str::FromStr;
+
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
-    use sqlx::postgres::PgPoolOptions;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     use crate::models::{ConsentDecisionInput, CurrentUser};
 
@@ -4489,6 +4599,52 @@ mod product_tests {
             .map_err(test_error)?;
             anyhow::ensure!(interaction_session(&pool, unlinked_id).await?.is_some());
 
+            let coalesced_id = Uuid::new_v4();
+            let coalesced = ingest_telemetry_batch(
+                &pool,
+                &primary_auth,
+                TelemetryBatchInput {
+                    events: vec![
+                        mcp_telemetry_event(
+                            coalesced_id,
+                            Some(3),
+                            "coalesced_evidence",
+                            None,
+                            None,
+                            first_at,
+                        ),
+                        mcp_telemetry_event(
+                            coalesced_id,
+                            Some(3),
+                            "coalesced_evidence",
+                            Some("workflow:first_valid_proof"),
+                            Some("mcp"),
+                            first_at,
+                        ),
+                        mcp_telemetry_event(
+                            coalesced_id,
+                            Some(3),
+                            "coalesced_evidence",
+                            Some("workflow:later_proof"),
+                            Some("mcp"),
+                            first_at,
+                        ),
+                    ],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(coalesced.accepted == 3 && coalesced.dropped == 0);
+            let coalesced_ref_hash: Vec<u8> = sqlx::query_scalar(
+                r"SELECT s.ref_hash FROM sessions_v2 s
+                JOIN interactions_v2 i ON i.session_id = s.id
+                WHERE i.id = $1",
+            )
+            .bind(coalesced_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(coalesced_ref_hash == sha256("workflow:first_valid_proof"));
+
             let cross_environment = ingest_telemetry_batch(
                 &pool,
                 &isolated_auth,
@@ -4636,6 +4792,149 @@ mod product_tests {
                     .fetch_one(&pool)
                     .await?;
             anyhow::ensure!(stored_session == linked_session);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn batch_session_correlation_avoids_interaction_session_deadlock() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Batch lock ordering conformance").await?;
+
+        let result = async {
+            let (_, auth) = telemetry_test_product(&pool, &workspace, "Batch lock product").await?;
+            let occurred_at = Utc::now();
+            let mut interaction_ids = [Uuid::new_v4(), Uuid::new_v4()];
+            interaction_ids.sort();
+            let [first_id, blocked_id] = interaction_ids;
+            let session_ref = "workflow:batch_lock_order";
+            ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![
+                        mcp_telemetry_event(
+                            first_id,
+                            Some(1),
+                            "first_interaction",
+                            Some(session_ref),
+                            Some("mcp"),
+                            occurred_at,
+                        ),
+                        mcp_telemetry_event(
+                            blocked_id,
+                            Some(2),
+                            "blocked_interaction",
+                            Some(session_ref),
+                            Some("mcp"),
+                            occurred_at,
+                        ),
+                    ],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let session_id = interaction_session(&pool, first_id)
+                .await?
+                .expect("initial batch should link both interactions");
+            anyhow::ensure!(interaction_session(&pool, blocked_id).await? == Some(session_id));
+
+            let mut blocker = pool.begin().await?;
+            sqlx::query("SELECT id FROM interactions_v2 WHERE id = $1 FOR UPDATE")
+                .bind(blocked_id)
+                .execute(&mut *blocker)
+                .await?;
+            let delivery_application_name = format!("epode-deadlock-{}", workspace.id.simple());
+            let delivery_options = PgConnectOptions::from_str(&database_url)?
+                .application_name(&delivery_application_name);
+            let delivery_pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(delivery_options)
+                .await?;
+            let delivery_auth = auth.clone();
+            let delivery = tokio::spawn(async move {
+                ingest_telemetry_batch(
+                    &delivery_pool,
+                    &delivery_auth,
+                    TelemetryBatchInput {
+                        events: vec![
+                            mcp_telemetry_event(
+                                first_id,
+                                Some(1),
+                                "first_interaction",
+                                Some(session_ref),
+                                Some("mcp"),
+                                occurred_at,
+                            ),
+                            mcp_telemetry_event(
+                                blocked_id,
+                                Some(2),
+                                "blocked_interaction",
+                                Some(session_ref),
+                                Some("mcp"),
+                                occurred_at,
+                            ),
+                        ],
+                    },
+                )
+                .await
+            });
+
+            let mut waiting_on_interaction = false;
+            for _ in 0..100 {
+                waiting_on_interaction = sqlx::query_scalar(
+                    r"SELECT EXISTS(
+                      SELECT 1 FROM pg_stat_activity
+                      WHERE datname = current_database()
+                        AND pid <> pg_backend_pid()
+                        AND application_name = $1
+                        AND wait_event_type = 'Lock'
+                        AND query LIKE '%WITH previous AS MATERIALIZED%'
+                    )",
+                )
+                .bind(&delivery_application_name)
+                .fetch_one(&pool)
+                .await?;
+                if waiting_on_interaction {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            if !waiting_on_interaction {
+                blocker.rollback().await?;
+                delivery.abort();
+                return Err(anyhow::anyhow!(
+                    "telemetry batch did not block on the second interaction"
+                ));
+            }
+
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                sqlx::query("UPDATE sessions_v2 SET last_seen_at = last_seen_at WHERE id = $1")
+                    .bind(session_id)
+                    .execute(&mut *blocker),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("session lock acquisition timed out"))??;
+            blocker.commit().await?;
+            let delivery_result = tokio::time::timeout(std::time::Duration::from_secs(5), delivery)
+                .await
+                .map_err(|_| anyhow::anyhow!("telemetry batch timed out after lock release"))??
+                .map_err(test_error)?;
+            anyhow::ensure!(delivery_result.accepted == 2 && delivery_result.dropped == 0);
             Ok::<(), anyhow::Error>(())
         }
         .await;
