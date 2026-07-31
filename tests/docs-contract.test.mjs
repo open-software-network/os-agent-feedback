@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 const docsConfig = JSON.parse(await read("docs/docs.json"));
@@ -248,12 +250,10 @@ test("every public docs page has a title and actionable description", async () =
   }
 });
 
-test("the downloadable protocol bundle contains only the current report contract", () => {
-  const listing = execFileSync(
-    "unzip",
-    ["-Z1", new URL("../backend/public/agent-feedback-protocol-v1.zip", import.meta.url).pathname],
-    { encoding: "utf8" },
-  );
+test("the downloadable protocol bundle contains only the current report contract", async () => {
+  const bundle = new URL("../backend/public/agent-feedback-protocol-v1.zip", import.meta.url)
+    .pathname;
+  const listing = execFileSync("unzip", ["-Z1", bundle], { encoding: "utf8" });
   assert.doesNotMatch(listing, /outcome\.schema\.json/);
   for (const required of [
     "README.md",
@@ -264,4 +264,54 @@ test("the downloadable protocol bundle contains only the current report contract
   ]) {
     assert.match(listing, new RegExp(`protocol/v1/${required.replaceAll(".", "\\.")}$`, "m"));
   }
+  assert.deepEqual(
+    JSON.parse(
+      execFileSync("unzip", ["-p", bundle, "protocol/v1/telemetry-batch.schema.json"], {
+        encoding: "utf8",
+      }),
+    ),
+    JSON.parse(await read("protocol/v1/telemetry-batch.schema.json")),
+  );
+});
+
+test("the telemetry schema accepts only bounded opaque correlation evidence", async () => {
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  const validate = ajv.compile(JSON.parse(await read("protocol/v1/telemetry-batch.schema.json")));
+  const event = {
+    interactionId: "018f1f2e-7b4a-7c12-9c8d-123456789abc",
+    surface: "mcp",
+    operation: "summarize",
+    classification: "confirmed",
+    confirmationMethod: "mcp",
+    occurredAt: "2026-07-31T00:00:00.000Z",
+  };
+  const batch = (overrides = {}) => ({ events: [{ ...event, ...overrides }] });
+
+  assert.equal(validate(batch()), true, JSON.stringify(validate.errors));
+  assert.equal(
+    validate(
+      batch({
+        sequence: Number.MAX_SAFE_INTEGER,
+        customerRef: "account_42",
+        sessionRef: "workflow:canonical_42",
+        sessionSource: "mcp",
+      }),
+    ),
+    true,
+    JSON.stringify(validate.errors),
+  );
+
+  for (const sessionRef of [
+    "customer@example.com",
+    "workflow with spaces",
+    "workflow/with/path",
+    "x".repeat(161),
+  ]) {
+    assert.equal(validate(batch({ sessionRef, sessionSource: "mcp" })), false, sessionRef);
+  }
+  assert.equal(validate(batch({ sequence: 0 })), false);
+  assert.equal(validate(batch({ sequence: Number.MAX_SAFE_INTEGER + 1 })), false);
+  assert.equal(validate(batch({ sessionRef: "workflow_42", sessionSource: "transport" })), false);
+  assert.equal(validate(batch({ unexpectedCorrelationHint: "workflow_42" })), false);
 });
