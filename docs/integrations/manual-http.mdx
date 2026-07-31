@@ -22,6 +22,9 @@ AGENT_FEEDBACK_KEY=af_live_...
 AGENT_FEEDBACK_MODE=never_ask
 ```
 
+For durable `ask_once`, obtain a stable opaque customer or tenant ID from your existing product
+authentication. Never use a name, email address, prompt, or agent-supplied value.
+
 ## Implement the response path
 
 <Steps>
@@ -32,33 +35,42 @@ AGENT_FEEDBACK_MODE=never_ask
     Include only configured product routes. Exclude errors, redirects, assets, health/metrics, streams,
     binaries, and Epode's own endpoints.
   </Step>
-  <Step title="Sign a capability locally">
-    Follow the exact compact claim order and signing vector in `protocol/v1/conformance.json`. The capability
-    must expire within two hours and contain no customer or product data.
+  <Step title="Resolve Ask once state">
+    For `ask_once` with a stable customer reference, derive
+    `afsub1_ + base64url(HMAC-SHA256(SHA256(product_key), "customer-ref:" + trimmed_customer_ref))`.
+    POST that subject to `/api/v2/consent/state` with the product key and a bounded timeout (750 ms by
+    default). Cache known decisions briefly. If the lookup is unavailable, omit feedback instructions and
+    return the normal product response.
   </Step>
-  <Step title="Add the handoff">
+  <Step title="Sign a capability locally">
+    Follow the compact claim order and signing vector in `protocol/v1/conformance.json`. The capability
+    must expire within two hours. Append the derived subject as the optional `s` claim only for durable
+    Ask once; never include the raw customer reference or product data.
+  </Step>
+  <Step title="Add the stage-appropriate handoff">
     Append `_agentFeedback` to JSON objects without wrapping them. Use the `Agent-Feedback` header for arrays,
-    scalars, or immutable shapes. Add `Cache-Control: private, no-store`.
+    scalars, or immutable shapes. Add `Cache-Control: private, no-store`. `never_ask` and previously approved
+    Ask once interactions use `state: "feedback_ready"`. Unknown Ask once and every Ask always interaction use
+    `state: "consent_required"` with only `requiredAction.submitDecision`; do not expose `submit` or a report
+    schema before approval. A declined or unavailable Ask once decision emits no handoff.
   </Step>
   <Step title="Queue telemetry">
-    Send opportunity telemetry in bounded background batches. Never wait on Epode before returning your response.
+    Send opportunity telemetry in bounded background batches. Telemetry delivery never delays the response;
+    the bounded Ask once state lookup is the only synchronous Epode request.
   </Step>
 </Steps>
 
 ## HTML
 
-For safe, finite server-rendered HTML, embed the same envelope:
-
-```html
-<script id="agent-feedback" type="application/json">{"v":1,"mode":"never_ask"}</script>
-```
-
-Serialize the full valid envelope and escape it for an HTML script-data context. If safe mutation is not possible,
-use the response header contract.
+For safe, finite server-rendered HTML, serialize the same complete, schema-valid envelope inside
+`<script id="agent-feedback" type="application/json">`. Escape it for an HTML script-data context. If safe
+mutation is not possible, use the response header contract.
 
 ## Verify
 
-Run the signing vector, validate produced envelopes against `envelope.schema.json`, simulate Epode downtime,
-and verify that a duplicate report returns the first accepted result. See [Protocol overview](/reference/overview).
+Run the signing vector, validate produced envelopes and decisions against `envelope.schema.json` and
+`consent-decision.schema.json`, and exercise `never_ask`, unknown/approved/declined Ask once, and Ask always.
+Simulate Epode downtime and verify that a duplicate report returns the first accepted result. See
+[Protocol overview](/reference/overview).
 
 [View the runnable language-neutral HTTP example](https://github.com/open-software-network/os-epode/tree/main/examples/setup-matrix-manual-http)

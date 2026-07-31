@@ -9,6 +9,7 @@ const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 const docsConfig = JSON.parse(await read("docs/docs.json"));
 const dashboard = await read("backend/public/app.js");
 const mintIgnore = await read("docs/.mintignore");
+const protocolReadme = await read("protocol/v1/README.md");
 
 const httpIntegrations = [
   {
@@ -59,7 +60,15 @@ const httpIntegrations = [
   {
     id: "manual-http",
     page: "docs/integrations/manual-http.mdx",
-    required: ["agent-feedback-protocol-v1.zip", "HMAC-SHA256", "_agentFeedback", "Cache-Control"],
+    required: [
+      "agent-feedback-protocol-v1.zip",
+      "HMAC-SHA256",
+      "_agentFeedback",
+      "Cache-Control",
+      "/api/v2/consent/state",
+      "requiredAction.submitDecision",
+      "consent-decision.schema.json",
+    ],
   },
 ];
 
@@ -71,7 +80,10 @@ const mcpIntegrations = [
       "createMcpInstrumentation",
       "createMcpHandler",
       "feedback.instrument(server)",
+      "record_product_feedback_consent",
       "report_product_feedback",
+      "consent_required",
+      "feedback_ready",
       "2026-07-28",
     ],
   },
@@ -83,7 +95,10 @@ const mcpIntegrations = [
       "MCP-Protocol-Version",
       "Mcp-Method",
       "Mcp-Name",
+      "record_product_feedback_consent",
       "report_product_feedback",
+      "consent_required",
+      "feedback_ready",
     ],
   },
 ];
@@ -198,6 +213,23 @@ test("both MCP setup permutations document the stateless 2026 feedback-tool cont
   assert.equal(mcpIntegrations.length, 2);
 });
 
+test("verification and reference docs preserve the two-stage consent workflow", async () => {
+  const pages = await Promise.all([
+    read("docs/quickstart.mdx"),
+    read("docs/guides/verify.mdx"),
+    read("docs/reference/mcp-2026-07-28.mdx"),
+  ]);
+  for (const content of pages) {
+    assert.match(content, /record_product_feedback_consent/);
+    assert.match(content, /report_product_feedback/);
+    assert.match(content, /consent_required/);
+    assert.match(content, /feedback_ready/);
+  }
+  const reference = pages.at(-1);
+  assert.match(reference, /only the action allowed at that stage/i);
+  assert.match(reference, /Never call `report_product_feedback` from a `consent_required` result/);
+});
+
 test("docs explain the product/customer-agent boundary and evidence model", async () => {
   const overview = await read("docs/index.mdx");
   const reliability = await read("docs/concepts/reliability.mdx");
@@ -239,6 +271,23 @@ test("docs and dashboard publish the same install artifacts and feedback modes",
   }
 });
 
+test("the HTTP reference publishes the complete report shape", async () => {
+  const content = await read("docs/reference/http-envelope.mdx");
+  for (const field of ["impacts", "findingKinds", "findingSeverities", "maxFindings"]) {
+    assert.ok(content.includes(`"${field}"`), `HTTP envelope reference omits ${field}`);
+  }
+  assert.match(content, /"state": "feedback_ready"/);
+  assert.match(content, /"state": "consent_required"/);
+  assert.doesNotMatch(content, /"optional": \[[^\]]*"consent"/);
+});
+
+test("repository overview matches the current team and frontend implementation", async () => {
+  const repositoryReadme = await read("README.md");
+  assert.match(repositoryReadme, /share link that lasts 24 hours/i);
+  assert.match(repositoryReadme, /`web\/` — Next\.js dashboard frontend/);
+  assert.doesNotMatch(repositoryReadme, /`app\/` — public product site/);
+});
+
 test("every public docs page has a title and actionable description", async () => {
   for (const page of navigationPages(docsConfig.navigation)) {
     const content = await read(`docs/${page}.mdx`);
@@ -255,8 +304,8 @@ test("the downloadable protocol bundle contains only the current report contract
     .pathname;
   const protocolFiles = [
     "README.md",
-    "conformance.json",
     "consent-decision.schema.json",
+    "conformance.json",
     "envelope.schema.json",
     "feedback-report.schema.json",
     "telemetry-batch.schema.json",
@@ -276,6 +325,12 @@ test("the downloadable protocol bundle contains only the current report contract
       `${file} in the downloadable protocol bundle is stale`,
     );
   }
+  const bundledReadme = execFileSync("unzip", ["-p", bundle, "protocol/v1/README.md"], {
+    encoding: "utf8",
+  });
+  assert.equal(bundledReadme, protocolReadme, "hosted protocol README is stale");
+  assert.match(protocolReadme, /"state": "feedback_ready"/);
+  assert.doesNotMatch(protocolReadme, /"optional": \[[^\]]*"consent"/);
 });
 
 test("the telemetry schema accepts only bounded opaque correlation evidence", async () => {

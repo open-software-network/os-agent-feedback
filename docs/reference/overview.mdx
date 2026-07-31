@@ -25,6 +25,33 @@ Content-Type: application/json
 
 Only company-side SDKs use the product key. Telemetry must be queued and sent off the primary response path.
 
+For durable Ask once, the company-side adapter also uses the product key for a bounded state lookup:
+
+```http
+POST https://app.epode.ai/api/v2/consent/state
+Authorization: Bearer af_live_...
+Content-Type: application/json
+
+{"subject":"afsub1_..."}
+```
+
+The subject is derived from a stable opaque `customerRef`; the raw reference is never sent to Epode.
+
+## Capability-authenticated decision
+
+An unresolved ask-mode interaction carries no report schema. After asking the exact returned question, the
+customer's agent submits only the explicit decision:
+
+```http
+POST https://app.epode.ai/api/v2/consent/decisions
+Authorization: Bearer afr2_...
+Content-Type: application/json
+
+{"decision":"approved"}
+```
+
+Approval returns a separate report action. Refusal returns no action, and silence stores no decision.
+
 ## Capability-authenticated report
 
 ```http
@@ -43,4 +70,3 @@ unzip agent-feedback-protocol-v1.zip
 ```
 
 Use the included schemas and signing vector as the source of truth for a new adapter.
-

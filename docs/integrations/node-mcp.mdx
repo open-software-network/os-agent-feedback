@@ -3,8 +3,9 @@ title: "Node MCP"
 description: "Instrument a stateless MCP 2026-07-28 server and register structured feedback automatically."
 ---
 
-MCP is Epode's strongest integration: every completed product-tool call is a confirmed interaction, and
-the customer agent sees an explicit `report_product_feedback` tool.
+MCP is Epode's strongest integration: every completed product-tool call is a confirmed interaction. Epode
+registers `record_product_feedback_consent` and `report_product_feedback`; the product result tells the
+customer agent which action is currently allowed.
 
 ## Install
 
@@ -89,6 +90,8 @@ const feedback = createMcpInstrumentation({
 - `shouldRequestFeedback` can inspect a completed result when the boundary is dynamic.
 - `sessionRef` may inspect both arguments and the completed result, so a session-creation call can use the
   identifier it returns.
+- `customerRef` must come from verified product authentication and is required to remember Ask once across
+  interactions. Without it, Ask once safely falls back to per-interaction permission.
 
 Epode adds a monotonic client sequence to preserve rapid tool order. The backend also reconciles a report
 that arrives before its background interaction metadata.
@@ -98,14 +101,19 @@ that arrives before its background interaction metadata.
 From an MCP 2026-07-28 client:
 
 1. Call `server/discover`.
-2. Call `tools/list` and confirm your product tool plus `report_product_feedback` are present.
+2. Call `tools/list` and confirm your product tool, `record_product_feedback_consent`, and
+   `report_product_feedback` are present.
 3. Call one normal product tool and confirm its result contains `_agentFeedback`.
-4. Call `report_product_feedback` using the returned `feedbackHandle`.
-5. Confirm the interaction and report appear in Epode.
+4. If the result has `state: "consent_required"`, ask its exact question and call
+   `record_product_feedback_consent` with only `approved` or `declined`. Do not call the report tool unless an
+   approved decision returns `state: "feedback_ready"` and a report action.
+5. When the product result or approved decision returns `state: "feedback_ready"`, call
+   `report_product_feedback` with that action's `feedbackHandle`.
+6. Confirm the interaction and report appear in Epode.
 
-Call the feedback tool once under normal conditions. If it returns `retryable: true`, retry exactly once with
-the same `feedbackHandle` and identical report. Capabilities are idempotent, so a lost success response cannot
-create a second report.
+Call the report tool once under normal conditions. If it returns `retryable: true`, retry exactly once with the
+same `feedbackHandle` and identical report. Capabilities are idempotent, so a lost success response cannot create
+a second report.
 
 The report tool allows 10 seconds by default; set `reportTimeoutMs` only for unusually slow private
 deployments. Background telemetry uses bounded exponential retry and a longer timeout, but never blocks the

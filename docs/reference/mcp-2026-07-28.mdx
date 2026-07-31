@@ -22,11 +22,14 @@ Implement `server/discover` and advertise `2026-07-28` plus the `tools` capabili
 
 ## Feedback binding
 
-The server registers `report_product_feedback` and decorates product-tool results with:
+The server registers `record_product_feedback_consent` and `report_product_feedback`. `tools/list` can advertise
+both, but each product result exposes only the action allowed at that stage. A Never ask or previously approved
+Ask once result uses:
 
 ```json
 {
   "_agentFeedback": {
+    "state": "feedback_ready",
     "reliability": "protocol_tool",
     "reportTool": "report_product_feedback",
     "feedbackHandle": "afr2_...",
@@ -35,12 +38,31 @@ The server registers `report_product_feedback` and decorates product-tool result
 }
 ```
 
+An unresolved Ask once or Ask always result withholds the report action and schema:
+
+```json
+{
+  "_agentFeedback": {
+    "state": "consent_required",
+    "consentManagedBy": "epode",
+    "consentTool": "record_product_feedback_consent",
+    "feedbackHandle": "afr2_...",
+    "question": "May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.",
+    "decisionSchema": { "decision": ["approved", "declined"] }
+  }
+}
+```
+
+Ask the exact question and pass only the explicit answer to `record_product_feedback_consent`. Approval returns
+a new `feedback_ready` action for the same interaction. Refusal returns no report action, and silence creates no
+decision. Never call `report_product_feedback` from a `consent_required` result.
+
 The product-tool call is confirmed immediately with confirmation method `mcp`. The later report enriches that
 same interaction.
 
-Put the outcome action near the start of the MCP server's `instructions`, and keep the full report shape in the
-native `report_product_feedback` input schema. The result-local `_agentFeedback` block supplies the scoped
-handle and timing; it is not a substitute for registering the tool.
+Put the stage-aware outcome action near the start of the MCP server's `instructions`. Keep the two-value decision
+shape in the native consent tool and the full report shape in the native report tool. The result-local
+`_agentFeedback` block supplies the scoped handle and timing; it is not a substitute for registering both tools.
 
 ## 2025 compatibility
 

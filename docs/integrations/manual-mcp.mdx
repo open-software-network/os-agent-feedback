@@ -20,8 +20,15 @@ unzip agent-feedback-protocol-v1.zip
 4. Require current protocol metadata in `params._meta` for every request.
 5. Return `resultType: "complete"`, server identity metadata, and deterministic tool-list cache hints.
 6. Emit confirmed telemetry when a normal product tool completes.
-7. Decorate the product result with `_agentFeedback` and a scoped `feedbackHandle`.
-8. Register `report_product_feedback` and forward its bounded report with the capability.
+7. Register both `record_product_feedback_consent` and `report_product_feedback` with strict input schemas.
+8. Decorate the product result with `_agentFeedback`, its `state`, and the action currently allowed. A
+   `consent_required` result carries `consentTool`, the exact question, and a scoped `feedbackHandle`; it must
+   not carry a report schema or report action.
+9. Forward only `approved` or `declined` from `record_product_feedback_consent` to
+   `/api/v2/consent/decisions`. Approval returns a separate `feedback_ready` report action. Refusal returns no
+   report action, and silence must never be inferred as approval.
+10. Call `report_product_feedback` only from a `feedback_ready` action and forward its bounded report with the
+    scoped capability. Reports never contain consent fields.
 
 If delivery returns `retryable: true`, tell the agent to retry exactly once with the same handle and report.
 Do not retry validation, consent, or other non-retryable failures.
@@ -34,7 +41,8 @@ sessions for modern requests.
 ## Verify
 
 Test discovery, unsupported-version errors, origin rejection, header/body version consistency, deterministic
-`tools/list`, a product-tool call, feedback-tool submission, idempotency, and the 2025-11-25 compatibility path.
+`tools/list`, a product-tool call, `consent_required` and `feedback_ready` actions, approval and refusal,
+feedback-tool submission, idempotency, and the 2025-11-25 compatibility path.
 
 See [MCP 2026-07-28 reference](/reference/mcp-2026-07-28) for the exact contract.
 

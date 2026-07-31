@@ -4,7 +4,7 @@ Collect one structured feedback report from the independent customer agents usin
 
 There are two reliability levels:
 
-- **MCP is protocol-backed.** The SDK registers an explicit `report_product_feedback` tool, which compatible agents can call autonomously.
+- **MCP is protocol-backed.** The SDK registers explicit `record_product_feedback_consent` and `report_product_feedback` tools. Each product result directs compatible agents to the action currently allowed.
 - **Ask once is Epode-managed.** Unknown customers receive only the exact question and an `approved|declined` action. Epode remembers the answer by product plus an opaque subject derived from `customerRef`; agents store nothing.
 - **Ask every time is also two phase.** Approval reveals a report action for that interaction only. Silence or refusal never reveals it.
 - **Consent is enforced end to end.** Ask-mode report schemas are withheld until approval, and report bodies never contain consent attestations.
@@ -75,7 +75,7 @@ const handleMcp = toNodeHandler(mcp);
 app.all("/mcp", (req, res) => handleMcp(req, res, req.body));
 ```
 
-The official handler implements `server/discover`, per-request protocol metadata, `Mcp-Method`/`Mcp-Name` validation, cache hints, and the required `resultType` field. Its legacy fallback keeps 2025-era clients working without transport-session state. Business-tool results are decorated automatically and `report_product_feedback` is registered for the customer agent. MCP tool use is a confirmed agent interaction.
+The official handler implements `server/discover`, per-request protocol metadata, `Mcp-Method`/`Mcp-Name` validation, cache hints, and the required `resultType` field. Its legacy fallback keeps 2025-era clients working without transport-session state. Business-tool results are decorated automatically and both feedback tools are registered for the customer agent. MCP tool use is a confirmed agent interaction.
 
 `includeTools` controls which business tools become interactions. `feedbackTools` narrows feedback requests to meaningful outcome boundaries while retaining the whole journey in Sessions. `shouldRequestFeedback` can make that decision from the completed result. Extractors receive `(arguments, context, result?)`, which supports grouping a session-creation call by the ID it returns.
 

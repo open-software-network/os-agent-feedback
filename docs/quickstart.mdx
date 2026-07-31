@@ -59,9 +59,10 @@ a public repository, or an MCP client configuration.
     ```
 
     In `never_ask` mode, the doctor submits a real synthetic report. In an ask mode, it validates
-    the contract but never impersonates user permission. MCP integrations should call
-    `server/discover`, one normal product tool, and then `report_product_feedback`. If that tool returns
-    `retryable: true`, retry it exactly once with the same handle and report.
+    the contract but never impersonates user permission. MCP integrations should call `server/discover` and one
+    normal product tool. For `consent_required`, ask the exact question and call
+    `record_product_feedback_consent`; call `report_product_feedback` only from a `feedback_ready` action. If the
+    report tool returns `retryable: true`, retry it exactly once with the same handle and report.
   </Step>
 </Steps>
 

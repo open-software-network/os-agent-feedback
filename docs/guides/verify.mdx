@@ -12,14 +12,17 @@ Verification should test the whole loop, not only whether a field appeared in on
     Confirm the response status, original fields/body, cache behavior, and latency remain correct.
   </Step>
   <Step title="Check the handoff">
-    Find `_agentFeedback`, the HTML script, or the `Agent-Feedback` header. Confirm the submit URL is HTTPS,
-    the capability starts with `afr2_`, and no `af_live_` product key appears.
+    Find `_agentFeedback`, the HTML script, or the `Agent-Feedback` header. Confirm the action URL is HTTPS,
+    its capability starts with `afr2_`, and no `af_live_` product key appears. A `consent_required` handoff has
+    only `requiredAction.submitDecision`; a `feedback_ready` handoff has `submit`.
   </Step>
   <Step title="Check the evidence state">
     The response creates an opportunity, not a confirmed interaction.
   </Step>
-  <Step title="Submit one bounded report">
-    Use the capability once. Confirm the linked interaction becomes confirmed and the report is visible.
+  <Step title="Follow the current action">
+    In Never ask, submit one bounded report. In an ask mode, use an actual explicit user decision: submit only
+    `approved` or `declined`, and submit a report only when approval returns a separate `feedback_ready` action.
+    Confirm the linked interaction becomes confirmed and any approved report is visible.
   </Step>
   <Step title="Check idempotency">
     Submit a contradictory duplicate and confirm Epode returns the original accepted report.
@@ -34,8 +37,10 @@ npx agent-feedback-doctor https://your-product.example/search?q=epode-test
 
 ## MCP
 
-Call `server/discover`, `tools/list`, one normal product tool, and `report_product_feedback`. Confirm the product
-tool creates a confirmed MCP interaction even before feedback returns.
+Call `server/discover`, `tools/list`, and one normal product tool. Confirm the product tool creates a confirmed MCP
+interaction even before feedback returns. For `consent_required`, ask the exact question and call
+`record_product_feedback_consent`; call `report_product_feedback` only when the result or approved decision returns
+`feedback_ready`.
 
 If the feedback tool returns `retryable: true`, retry it once with the identical handle and report. A second
 successful response must resolve to the same stored report.

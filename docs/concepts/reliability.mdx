@@ -41,9 +41,10 @@ themselves at request time, `cacheMode: "request"` instruments only requests wit
 
 ## Why MCP is stronger
 
-MCP exposes tools to a tool-capable client. Epode registers `report_product_feedback` alongside your
-business tools and decorates the result with a scoped feedback handle. A business-tool call is therefore
-a confirmed interaction even if no report follows.
+MCP exposes tools to a tool-capable client. Epode registers `record_product_feedback_consent` and
+`report_product_feedback` alongside your business tools, then decorates each result with the action currently
+allowed and a scoped feedback handle. A business-tool call is therefore a confirmed interaction even if no
+decision or report follows.
 
 Keep the server instruction concise and action-oriented, and put field-level constraints in the native
 report tool schema. Do not replace the report tool with prose in a product result.

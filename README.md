@@ -21,7 +21,7 @@ Agent Feedback does not identify agents. HTTP responses are unclassified opportu
 
 Dashboard data is organized as workspace → product → integration. Users choose a product once; its Home overview, keys, interactions, feedback, sessions, and collection policy stay scoped to that product.
 
-Workspaces support OS Account teams. Owners can invite admins or members, change roles, and remove teammates. Admins can manage products and member invitations. Members have read-only access to feedback and observability data. Invitations are bound to the recipient's OS Account email or handle and can be accepted through a seven-day share link.
+Workspaces support OS Account teams. Owners can invite admins or members, change roles, and remove teammates. Admins can manage products and member invitations. Members have read-only access to feedback and observability data. Email-bound invitations last seven days. Teams can also create a reusable, member-only share link that lasts 24 hours.
 
 ## Protocol-first integrations
 
@@ -69,7 +69,7 @@ For Codex and Claude Code users, **Epode Companion** is the trusted host adapter
 - `examples/go-http/` — standard-library Go product example
 - `examples/rust-axum/` — Rust Axum product example
 - `examples/customer-agent-http/` — optional deterministic HTTP/HTML agent-side adapter
-- `app/` — public product site
+- `web/` — Next.js dashboard frontend
 
 ## Production
 

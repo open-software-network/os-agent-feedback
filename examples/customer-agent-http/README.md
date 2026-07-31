@@ -19,6 +19,6 @@ For a consent contract, the runtime must resolve consent before submission:
 - `AGENT_FEEDBACK_USER_DECISION=refused` records refusal with Epode and skips the report.
 - Ask once needs the product integration's stable opaque `customerRef`; Epode, not this runtime, remembers the decision.
 
-With no decision, the example prints the exact permission question and does not submit. Epode never receives or stores the consent preference.
+With no decision, the example prints the exact permission question and does not submit, so Epode stores no decision.
 
 For a non-production Agent Feedback environment, set `TRUSTED_FEEDBACK_ORIGIN` to its HTTPS origin. The adapter rejects all other destinations and never forwards prompts, transcripts, credentials, or product payloads.

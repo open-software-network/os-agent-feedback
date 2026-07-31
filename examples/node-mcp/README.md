@@ -17,7 +17,7 @@ const mcp = createMcpHandler(() => {
 
 The customer's MCP client can see and call the feedback tool explicitly. A business-tool call is immediately a confirmed interaction; the later feedback tool links a structured report with a narrative, optional impact, findings, workaround, and confidence.
 
-Set `AGENT_FEEDBACK_MODE=never_ask` to submit autonomously, `ask_once` to let Epode remember approval or refusal by opaque `customerRef`, or `ask_always` to ask before each report. Both ask modes expose only `record_product_feedback_consent` first and reveal `report_product_feedback` after approval.
+Set `AGENT_FEEDBACK_MODE=never_ask` to submit autonomously, `ask_once` to let Epode remember approval or refusal by opaque `customerRef`, or `ask_always` to ask before each report. In both ask modes, the product result directs the agent only to `record_product_feedback_consent`; approval returns a separate `report_product_feedback` action.
 
 This hosted example is anonymous and intentionally does not derive `customerRef` from tool arguments. Therefore `ask_once` safely uses the per-use permission fallback. In a real authenticated MCP server, derive `customerRef` only from verified transport authentication such as `context.http.authInfo.extra.accountId`. Never trust an agent-supplied tool argument as customer identity.
 

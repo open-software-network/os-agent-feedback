@@ -7,7 +7,7 @@ This protocol is the source of truth for every Agent Feedback SDK. It is deliber
 | Product surface | Initial classification | Feedback behavior |
 | --- | --- | --- |
 | HTTP JSON, HTML, or headers | `unclassified` opportunity | Best-effort for generic agents; deterministic when their runtime consumes the contract explicitly |
-| MCP tool call | `confirmed` interaction | Protocol-backed through the registered `report_product_feedback` tool |
+| MCP tool call | `confirmed` interaction | Protocol-backed through registered consent and report tools |
 
 An SDK must never claim to identify an agent. `customerRef`, session continuity, and runtime hints are optional context with explicit provenance.
 
@@ -23,7 +23,7 @@ For each eligible product response:
 
 1. Generate a UUID interaction ID and an 18-byte cryptographically random nonce.
 2. Set `iat` to the current Unix timestamp and `exp` to no more than two hours later.
-3. Serialize the claims in this compact order: `v`, `i`, `iat`, `exp`, `n`.
+3. Serialize the claims in this compact order: `v`, `i`, `iat`, `exp`, `n`, followed by optional `s` for a durable Ask once consent subject.
 4. Base64url-encode the UTF-8 JSON without padding.
 5. Create `signing_input = "afr2_" + key_id + "." + payload`.
 6. Create `signing_key = SHA256(full_product_key)`.
@@ -43,6 +43,7 @@ Eligible 2xx JSON objects append `_agentFeedback` without wrapping or changing e
   "_agentFeedback": {
     "v": 1,
     "mode": "never_ask",
+    "state": "feedback_ready",
     "requested": true,
     "consentRequired": false,
     "consentPolicy": "none",
@@ -56,7 +57,7 @@ Eligible 2xx JSON objects append `_agentFeedback` without wrapping or changing e
       "contentType": "application/json",
       "reportSchema": {
         "required": ["summary"],
-        "optional": ["impact", "confidence", "findings", "workaround", "consent"],
+        "optional": ["impact", "confidence", "findings", "workaround"],
         "impacts": ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"],
         "findingKinds": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"],
         "findingSeverities": ["minor", "major", "blocking"],
