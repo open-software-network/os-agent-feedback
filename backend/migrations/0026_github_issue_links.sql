@@ -10,6 +10,9 @@ CREATE TABLE product_github_repos (
 );
 
 CREATE TABLE group_github_issues (
+  -- Deliberate privacy tradeoff: deleting the owning product/group also deletes
+  -- Epode's repo/issue reference. The customer's GitHub issue remains untouched,
+  -- while Epode does not retain customer repository metadata after product deletion.
   group_key TEXT PRIMARY KEY REFERENCES report_groups(group_key) ON DELETE CASCADE,
   workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   repo_full_name TEXT NOT NULL,
@@ -18,6 +21,7 @@ CREATE TABLE group_github_issues (
   state TEXT NOT NULL,
   created_by TEXT NOT NULL,
   last_commented_report_count BIGINT NOT NULL DEFAULT 0,
+  state_refreshed_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

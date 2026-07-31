@@ -20,7 +20,7 @@ use axum::{
     routing::get,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -77,18 +77,19 @@ use crate::{
     },
     store::{
         GithubInstallationUpsert, accept_team_invitation, agent_product_auth,
-        backfill_report_groups, bump_last_commented_report_count, clear_product_github_repo,
-        create_api_key, create_product_with_default_key, create_team_invitation,
-        dashboard_interaction_by_id, dashboard_report_by_id, dashboard_session_by_id,
-        dashboard_with_limits, delete_product, feedback_consent_state, feedback_list_interactions,
-        feedback_list_reports, get_group_github_issue, get_group_github_issue_in_transaction,
-        get_or_create_workspace, get_product_github_repo, github_installation_workspace,
-        group_issue_context, group_issue_context_in_transaction, group_issue_sync_context,
-        ingest_telemetry_batch, list_github_installations, list_product_groups,
-        lock_group_issue_filing, purge_expired_product_data, read_product_auth,
-        record_feedback_consent_decision, record_group_github_issue, regroup_report_groups,
-        remove_team_member, rename_product, rename_workspace, resolve_workspace_access,
-        revoke_api_key, revoke_github_installation, revoke_team_invitation, rotate_api_key,
+        backfill_report_groups, bump_last_commented_report_count, claim_group_issue_state_refresh,
+        clear_product_github_repo, create_api_key, create_product_with_default_key,
+        create_team_invitation, dashboard_interaction_by_id, dashboard_report_by_id,
+        dashboard_session_by_id, dashboard_with_limits, delete_product, feedback_consent_state,
+        feedback_list_interactions, feedback_list_reports, get_group_github_issue,
+        get_group_github_issue_in_transaction, get_or_create_workspace, get_product_github_repo,
+        github_installation_workspace, group_issue_context, group_issue_context_in_transaction,
+        group_issue_sync_context, ingest_telemetry_batch, list_github_installations,
+        list_product_groups, lock_group_issue_filing, purge_expired_product_data,
+        read_product_auth, record_feedback_consent_decision, record_group_github_issue,
+        regroup_report_groups, remove_team_member, rename_product, rename_workspace,
+        resolve_workspace_access, revert_last_commented_report_count, revoke_api_key,
+        revoke_github_installation, revoke_team_invitation, rotate_api_key,
         set_product_github_repo, submit_product_feedback, transfer_team_ownership,
         update_feedback_workflow, update_group_issue_state, update_policy, update_team_member_role,
         upsert_github_installation,
@@ -109,6 +110,8 @@ struct AppState {
 const TEAM_INVITE_COOKIE: &str = "af_team_invite";
 const GITHUB_STATE_COOKIE: &str = "af_gh_state";
 const GITHUB_WORKSPACE_COOKIE: &str = "af_gh_ws";
+const MAX_GROUP_ISSUE_SYNCS_PER_REQUEST: usize = 5;
+const GROUP_ISSUE_STATE_REFRESH_INTERVAL_MINUTES: i64 = 15;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -1389,14 +1392,34 @@ async fn product_groups_handler(
     }
     let page =
         list_product_groups(&state.pool, context.workspace.id, product_id, limit, offset).await?;
+    let mut spawned_syncs = 0_usize;
+    let mut dropped_syncs = 0_usize;
     for listed in &page.groups {
-        if listed.group.github_issue.is_some() {
+        if group_issue_sync_needed(
+            listed.group.github_issue.is_some(),
+            listed.group.report_count,
+            listed.last_commented_report_count,
+        ) {
+            if spawned_syncs >= MAX_GROUP_ISSUE_SYNCS_PER_REQUEST {
+                dropped_syncs += 1;
+                continue;
+            }
             spawn_group_issue_sync(
                 Arc::clone(&state),
                 context.workspace.id,
                 listed.group.group_key.clone(),
             );
+            spawned_syncs += 1;
         }
+    }
+    if dropped_syncs > 0 {
+        tracing::warn!(
+            workspace_id = %context.workspace.id,
+            %product_id,
+            dropped_syncs,
+            cap = MAX_GROUP_ISSUE_SYNCS_PER_REQUEST,
+            "GitHub issue sync fan-out capped; deferred groups will retry on a later listing"
+        );
     }
     let groups = page.groups.into_iter().map(|listed| listed.group).collect();
     dashboard_response(
@@ -1559,6 +1582,25 @@ fn spawn_group_issue_sync(state: Arc<AppState>, workspace_id: Uuid, group_key: S
     });
 }
 
+fn group_issue_sync_needed(
+    has_github_issue: bool,
+    current_report_count: i64,
+    last_commented_report_count: Option<i64>,
+) -> bool {
+    has_github_issue
+        && last_commented_report_count
+            .is_some_and(|last_commented| current_report_count > last_commented)
+}
+
+fn group_issue_state_refresh_due(
+    state_refreshed_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> bool {
+    state_refreshed_at.is_none_or(|last_refreshed| {
+        last_refreshed <= now - Duration::minutes(GROUP_ISSUE_STATE_REFRESH_INTERVAL_MINUTES)
+    })
+}
+
 async fn sync_group_github_issue(
     state: &AppState,
     workspace_id: Uuid,
@@ -1572,64 +1614,102 @@ async fn sync_group_github_issue(
         tx.commit().await?;
         return Ok(());
     };
-    if context.current_report_count > context.observed_report_count {
-        let claimed = bump_last_commented_report_count(
-            &mut tx,
+    if context.current_report_count <= context.observed_report_count {
+        tx.commit().await?;
+        return Ok(());
+    }
+    let claimed = bump_last_commented_report_count(
+        &mut tx,
+        workspace_id,
+        group_key,
+        context.observed_report_count,
+        context.current_report_count,
+    )
+    .await?;
+    tx.commit().await?;
+    if !claimed {
+        return Ok(());
+    }
+
+    let body = render_evidence_comment(
+        context.current_report_count - context.observed_report_count,
+        context.earliest_new_occurred_at,
+        context.latest_new_occurred_at,
+    );
+    if let Err(error) = github
+        .create_issue_comment(
+            context.installation_id,
+            &context.repo_full_name,
+            context.issue_number,
+            &body,
+        )
+        .await
+    {
+        match revert_last_commented_report_count(
+            &state.pool,
             workspace_id,
             group_key,
             context.observed_report_count,
             context.current_report_count,
         )
-        .await?;
-        if claimed {
-            let body = render_evidence_comment(
-                context.current_report_count - context.observed_report_count,
-                context.earliest_new_occurred_at,
-                context.latest_new_occurred_at,
-            );
-            if let Err(error) = github
-                .create_issue_comment(
-                    context.installation_id,
-                    &context.repo_full_name,
-                    context.issue_number,
-                    &body,
-                )
-                .await
-            {
-                tracing::warn!(
-                    %error,
-                    %workspace_id,
-                    %group_key,
-                    repo_full_name = %context.repo_full_name,
-                    issue_number = context.issue_number,
-                    "GitHub evidence comment failed; report counter will be retried"
-                );
-                tx.rollback().await?;
-                return Ok(());
-            }
-        }
-    }
-    tx.commit().await?;
-
-    match github
-        .issue(
-            context.installation_id,
-            &context.repo_full_name,
-            context.issue_number,
-        )
         .await
-    {
-        Ok(issue) => {
-            update_group_issue_state(&state.pool, workspace_id, group_key, &issue.state).await?;
+        {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(
+                %workspace_id,
+                %group_key,
+                observed_report_count = context.observed_report_count,
+                claimed_report_count = context.current_report_count,
+                "GitHub evidence comment counter revert lost its conditional race"
+            ),
+            Err(revert_error) => tracing::warn!(
+                status = %revert_error.status,
+                %workspace_id,
+                %group_key,
+                observed_report_count = context.observed_report_count,
+                claimed_report_count = context.current_report_count,
+                "GitHub evidence comment counter revert failed"
+            ),
         }
-        Err(error) => tracing::warn!(
+        tracing::warn!(
             %error,
             %workspace_id,
             %group_key,
             repo_full_name = %context.repo_full_name,
             issue_number = context.issue_number,
-            "GitHub issue state refresh failed"
-        ),
+            "GitHub evidence comment failed; report counter will be retried when safely reverted"
+        );
+        return Ok(());
+    }
+
+    let refresh_checked_at = Utc::now();
+    let refresh_cutoff =
+        refresh_checked_at - Duration::minutes(GROUP_ISSUE_STATE_REFRESH_INTERVAL_MINUTES);
+    if group_issue_state_refresh_due(context.state_refreshed_at, refresh_checked_at)
+        && claim_group_issue_state_refresh(&state.pool, workspace_id, group_key, refresh_cutoff)
+            .await?
+    {
+        match github
+            .issue(
+                context.installation_id,
+                &context.repo_full_name,
+                context.issue_number,
+            )
+            .await
+        {
+            Ok(issue) => {
+                update_group_issue_state(&state.pool, workspace_id, group_key, &issue.state)
+                    .await?;
+            }
+            Err(error) => tracing::warn!(
+                %error,
+                %workspace_id,
+                %group_key,
+                repo_full_name = %context.repo_full_name,
+                issue_number = context.issue_number,
+                "GitHub issue state refresh failed"
+            ),
+        }
     }
     Ok(())
 }
@@ -3410,8 +3490,10 @@ mod page_tests {
 
     use super::{
         ApiError, build_app_router, feedback_discovery, github_callback_redirect_target,
-        mcp_auth_error, mcp_tool_allowed, mcp_tools, resolve_web_app_url, reveal_auth_error,
+        group_issue_state_refresh_due, group_issue_sync_needed, mcp_auth_error, mcp_tool_allowed,
+        mcp_tools, resolve_web_app_url, reveal_auth_error,
     };
+    use chrono::{Duration, Utc};
     use serde_json::{Value, json};
 
     const NON_API_ROUTES: &[&str] = &["GET /"];
@@ -3443,6 +3525,25 @@ mod page_tests {
             resolve_web_app_url("http://localhost:8080/", None),
             "http://localhost:8080"
         );
+    }
+
+    #[test]
+    fn group_issue_sync_requires_new_evidence_and_throttles_state_refresh() {
+        assert!(!group_issue_sync_needed(false, 2, None));
+        assert!(!group_issue_sync_needed(true, 2, Some(2)));
+        assert!(!group_issue_sync_needed(true, 1, Some(2)));
+        assert!(group_issue_sync_needed(true, 3, Some(2)));
+
+        let now = Utc::now();
+        assert!(group_issue_state_refresh_due(None, now));
+        assert!(group_issue_state_refresh_due(
+            Some(now - Duration::minutes(16)),
+            now
+        ));
+        assert!(!group_issue_state_refresh_due(
+            Some(now - Duration::minutes(14)),
+            now
+        ));
     }
 
     #[test]

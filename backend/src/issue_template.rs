@@ -53,16 +53,20 @@ pub(crate) struct IssueTemplateData {
 pub(crate) fn render_issue_title(data: &IssueTemplateData) -> String {
     let title = format!(
         "[epode] {}: {} in {}",
-        clean_markdown_text(&data.primary_kind, 40),
-        clean_markdown_text(&data.primary_topic, 48),
-        clean_markdown_text(&data.primary_operation, 48)
+        safe_customer_title_text(&data.primary_kind, 40),
+        safe_customer_title_text(&data.primary_topic, 48),
+        safe_customer_title_text(&data.primary_operation, 48)
     );
     truncate_chars(&title, 120)
 }
 
 pub(crate) fn render_issue_body(data: &IssueTemplateData) -> String {
     let mut body = String::new();
-    let _ = writeln!(body, "{}", clean_markdown_text(&data.explanation, 1_000));
+    let _ = writeln!(
+        body,
+        "{}",
+        safe_customer_inline_text(&data.explanation, 1_000)
+    );
 
     body.push_str("\n## Impact\n");
     if data.impacts.is_empty() {
@@ -72,7 +76,7 @@ pub(crate) fn render_issue_body(data: &IssueTemplateData) -> String {
             let _ = writeln!(
                 body,
                 "- {}: {}",
-                clean_markdown_text(&impact.value, 100),
+                safe_customer_inline_text(&impact.value, 100),
                 impact.count
             );
         }
@@ -103,7 +107,7 @@ pub(crate) fn render_issue_body(data: &IssueTemplateData) -> String {
                     sensitive += 1;
                     continue;
                 }
-                let _ = writeln!(body, "  - {}", clean_markdown_text(detail, 300));
+                render_fenced_detail(&mut body, "  ", "Detail", detail, 300);
                 emitted += 1;
                 if emitted >= i64::try_from(MAX_DETAILS_PER_FINDING).unwrap_or(i64::MAX) {
                     break;
@@ -267,15 +271,16 @@ fn render_workaround(body: &mut String, workaround: &Value) {
             );
         }
         Some(detail) => {
-            let _ = writeln!(
+            render_fenced_detail(
                 body,
-                "- {} {}",
+                "",
                 if used == Some(true) {
-                    "Used:"
+                    "Used"
                 } else {
-                    "Reported:"
+                    "Reported"
                 },
-                clean_markdown_text(detail, 350)
+                detail,
+                350,
             );
         }
         None => {
@@ -299,7 +304,7 @@ fn render_values(values: &[String], limit: usize) -> String {
     let mut rendered = values
         .iter()
         .take(limit)
-        .map(|value| clean_markdown_text(value, 100))
+        .map(|value| safe_customer_inline_text(value, 100))
         .collect::<Vec<_>>()
         .join(", ");
     if values.len() > limit {
@@ -314,15 +319,67 @@ fn append_more_line(body: &mut String, actual: usize, shown: usize, noun: &str) 
     }
 }
 
-fn clean_markdown_text(value: &str, max_chars: usize) -> String {
+fn clean_text(value: &str, max_chars: usize) -> String {
     truncate_chars(
         &value.split_whitespace().collect::<Vec<_>>().join(" "),
         max_chars,
     )
 }
 
+fn safe_customer_title_text(value: &str, max_chars: usize) -> String {
+    if contains_sensitive_report_text(value) {
+        return "[redacted]".to_owned();
+    }
+    neutralize_github_references(&clean_text(value, max_chars))
+}
+
+fn safe_customer_inline_text(value: &str, max_chars: usize) -> String {
+    if contains_sensitive_report_text(value) {
+        return "[redacted]".to_owned();
+    }
+    let value = neutralize_github_references(&clean_text(value, max_chars));
+    let mut escaped = String::with_capacity(value.len());
+    for (index, character) in value.chars().enumerate() {
+        if matches!(
+            character,
+            '\\' | '`' | '*' | '_' | '~' | '[' | ']' | '(' | ')' | '<' | '>' | '|' | '!'
+        ) || (index == 0 && matches!(character, '-' | '+' | '>'))
+        {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
 fn clean_code_text(value: &str, max_chars: usize) -> String {
-    clean_markdown_text(value, max_chars).replace('`', "'")
+    if contains_sensitive_report_text(value) {
+        return "redacted".to_owned();
+    }
+    neutralize_github_references(&clean_text(value, max_chars)).replace('`', "'")
+}
+
+fn neutralize_github_references(value: &str) -> String {
+    value
+        .replace('@', "@\u{200b}")
+        .replace('#', "#\u{200b}")
+        .replace("://", ":\u{200b}//")
+        .replace("www.", "www\u{200b}.")
+}
+
+fn render_fenced_detail(
+    body: &mut String,
+    prefix: &str,
+    label: &str,
+    detail: &str,
+    max_chars: usize,
+) {
+    let detail = clean_text(&detail.replace("```", ""), max_chars);
+    let indent = format!("{prefix}  ");
+    let _ = writeln!(body, "{prefix}- {label}:");
+    let _ = writeln!(body, "{indent}```text");
+    let _ = writeln!(body, "{indent}{detail}");
+    let _ = writeln!(body, "{indent}```");
 }
 
 fn clean_link(value: &str) -> String {
@@ -473,6 +530,49 @@ mod tests {
         assert!(!body.contains("github_pat_"));
         assert!(body.contains("sensitive detail(s) omitted"));
         assert!(body.contains("Sensitive detail omitted"));
+    }
+
+    #[test]
+    fn issue_template_redacts_sensitive_operation_and_other_inline_fields() {
+        let mut data = template();
+        let secret = "GET /sessions?key=af_live_not_a_real_secret";
+        data.explanation = format!("operation {secret}");
+        data.primary_operation = secret.to_owned();
+        data.operations = vec![secret.to_owned()];
+        data.surfaces = vec!["github_pat_not_a_real_token".to_owned()];
+        data.primary_topic = "sk-proj-not-a-real-key".to_owned();
+        data.findings[0].topic = "sk-proj-not-a-real-key".to_owned();
+
+        let title = render_issue_title(&data);
+        let body = render_issue_body(&data);
+        for sensitive in ["af_live_", "github_pat_", "sk-proj-"] {
+            assert!(!title.contains(sensitive));
+            assert!(!body.contains(sensitive));
+        }
+        assert!(title.contains("[redacted]"));
+        assert!(body.contains("[redacted]"));
+    }
+
+    #[test]
+    fn issue_template_neutralizes_inline_markdown_and_fences_free_text() {
+        let mut data = template();
+        data.explanation = "# heading @ops [link](https://example.test)".to_owned();
+        data.operations = vec!["> quoted @ops #123".to_owned()];
+        data.findings[0].details =
+            vec!["@ops [link](https://example.test) ``` ## forged".to_owned()];
+        data.workarounds =
+            vec![json!({"used": true, "detail": "@ops ``` [link](https://example.test)"})];
+
+        let body = render_issue_body(&data);
+        let summary = body.lines().next().expect("summary line should exist");
+        assert!(summary.starts_with("#\u{200b} heading"));
+        assert!(!summary.starts_with("# "));
+        assert!(!summary.contains("@ops"));
+        assert!(summary.contains("@\u{200b}ops"));
+        assert!(summary.contains("\\[link\\]\\(https:\u{200b}//example.test\\)"));
+        assert!(!summary.contains("https://"));
+        assert_eq!(body.matches("```").count(), 4);
+        assert!(body.contains("```text"));
     }
 
     #[test]

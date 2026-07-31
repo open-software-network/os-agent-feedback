@@ -3,7 +3,7 @@
     reason = "crate-restricted visibility satisfies unreachable_pub in this binary-only crate"
 )]
 
-use std::{env, fmt};
+use std::{env, fmt, time::Duration as StdDuration};
 
 use anyhow::Context as _;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -181,10 +181,21 @@ struct CreateIssueCommentRequest<'a> {
 
 impl GithubAppClient {
     pub(crate) fn new(config: GithubAppConfig) -> Self {
-        Self {
-            http: Client::new(),
-            config,
-        }
+        let http = match Client::builder()
+            .connect_timeout(StdDuration::from_secs(5))
+            .timeout(StdDuration::from_secs(15))
+            .build()
+        {
+            Ok(http) => http,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "failed to build bounded GitHub HTTP client; using reqwest defaults"
+                );
+                Client::new()
+            }
+        };
+        Self { http, config }
     }
 
     pub(crate) fn install_url(&self, state: &str) -> String {
@@ -388,6 +399,8 @@ pub(crate) fn validate_repo_full_name(value: &str) -> anyhow::Result<()> {
     let repository = parts.next().unwrap_or_default();
     let valid_component = |component: &str| {
         !component.is_empty()
+            && component != "."
+            && component != ".."
             && component
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
@@ -545,6 +558,10 @@ mod tests {
     fn validates_repository_full_names_before_url_interpolation() {
         assert!(validate_repo_full_name("owner/name").is_ok());
         for invalid in [
+            "./x",
+            "x/.",
+            "../x",
+            "x/..",
             "owner/../name",
             "/owner",
             "owner/name with spaces",

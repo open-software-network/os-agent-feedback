@@ -78,6 +78,7 @@ pub(crate) struct GroupIssueContext {
 #[derive(Debug)]
 pub(crate) struct ListedProductGroup {
     pub(crate) group: ProductReportGroup,
+    pub(crate) last_commented_report_count: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -95,6 +96,7 @@ pub(crate) struct GroupIssueSyncContext {
     pub(crate) current_report_count: i64,
     pub(crate) earliest_new_occurred_at: Option<DateTime<Utc>>,
     pub(crate) latest_new_occurred_at: Option<DateTime<Utc>>,
+    pub(crate) state_refreshed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -648,8 +650,8 @@ pub(crate) async fn record_group_github_issue(
     let inserted = sqlx::query_as::<_, GroupGithubIssueRow>(
         r"INSERT INTO group_github_issues
         (group_key, workspace_id, repo_full_name, issue_number, url, state, created_by,
-         last_commented_report_count)
-        SELECT report_group.group_key, report_group.workspace_id, $3, $4, $5, $6, $7, $8
+         last_commented_report_count, state_refreshed_at)
+        SELECT report_group.group_key, report_group.workspace_id, $3, $4, $5, $6, $7, $8, NOW()
         FROM report_groups report_group
         JOIN products product
           ON product.id = report_group.product_id
@@ -687,6 +689,7 @@ struct ProductGroupListRow {
     issue_number: Option<i64>,
     issue_url: Option<String>,
     issue_state: Option<String>,
+    last_commented_report_count: Option<i64>,
 }
 
 pub(crate) async fn list_product_groups(
@@ -708,7 +711,8 @@ pub(crate) async fn list_product_groups(
           issue.repo_full_name AS issue_repo_full_name,
           issue.issue_number,
           issue.url AS issue_url,
-          issue.state AS issue_state
+          issue.state AS issue_state,
+          issue.last_commented_report_count
         FROM report_groups report_group
         JOIN products product
           ON product.id = report_group.product_id
@@ -728,7 +732,8 @@ pub(crate) async fn list_product_groups(
          AND issue.workspace_id = report_group.workspace_id
         WHERE report_group.workspace_id = $1 AND report_group.product_id = $2
         GROUP BY report_group.id, report_group.group_key, report_group.explanation,
-          issue.repo_full_name, issue.issue_number, issue.url, issue.state
+          issue.repo_full_name, issue.issue_number, issue.url, issue.state,
+          issue.last_commented_report_count
         ORDER BY MAX(interaction.occurred_at) DESC NULLS LAST,
           report_group.updated_at DESC, report_group.group_key
         LIMIT $3 OFFSET $4",
@@ -768,6 +773,7 @@ pub(crate) async fn list_product_groups(
                     latest_occurred_at: row.latest_occurred_at,
                     github_issue,
                 },
+                last_commented_report_count: row.last_commented_report_count,
             }
         })
         .collect();
@@ -782,7 +788,8 @@ pub(crate) async fn group_issue_sync_context(
     Ok(sqlx::query_as::<_, GroupIssueSyncContext>(
         r"WITH scoped_issue AS (
           SELECT issue.group_key, issue.repo_full_name, issue.issue_number,
-            issue.last_commented_report_count, report_group.id AS group_id,
+            issue.last_commented_report_count, issue.state_refreshed_at,
+            report_group.id AS group_id,
             report_group.product_id, mapping.installation_id
           FROM group_github_issues issue
           JOIN report_groups report_group
@@ -821,11 +828,12 @@ pub(crate) async fn group_issue_sync_context(
           ) AS earliest_new_occurred_at,
           MAX(report.occurred_at) FILTER (
             WHERE report.report_number > issue.last_commented_report_count
-          ) AS latest_new_occurred_at
+          ) AS latest_new_occurred_at,
+          issue.state_refreshed_at
         FROM scoped_issue issue
         LEFT JOIN ordered_reports report ON TRUE
         GROUP BY issue.installation_id, issue.repo_full_name, issue.issue_number,
-          issue.last_commented_report_count",
+          issue.last_commented_report_count, issue.state_refreshed_at",
     )
     .bind(workspace_id)
     .bind(group_key)
@@ -860,6 +868,59 @@ pub(crate) async fn bump_last_commented_report_count(
     Ok(result.rows_affected() == 1)
 }
 
+pub(crate) async fn revert_last_commented_report_count(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    observed_report_count: i64,
+    claimed_report_count: i64,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE group_github_issues issue
+        SET last_commented_report_count = $3, updated_at = NOW()
+        FROM report_groups report_group
+        WHERE issue.group_key = report_group.group_key
+          AND issue.workspace_id = report_group.workspace_id
+          AND issue.workspace_id = $1
+          AND issue.group_key = $2
+          AND issue.last_commented_report_count = $4",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(observed_report_count)
+    .bind(claimed_report_count)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+pub(crate) async fn claim_group_issue_state_refresh(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    refresh_cutoff: DateTime<Utc>,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE group_github_issues issue
+        SET state_refreshed_at = NOW(), updated_at = NOW()
+        FROM report_groups report_group
+        WHERE issue.group_key = report_group.group_key
+          AND issue.workspace_id = report_group.workspace_id
+          AND issue.workspace_id = $1
+          AND issue.group_key = $2
+          AND (
+            issue.state_refreshed_at IS NULL
+            OR issue.state_refreshed_at <= $3
+          )",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(refresh_cutoff)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
 pub(crate) async fn update_group_issue_state(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -868,7 +929,7 @@ pub(crate) async fn update_group_issue_state(
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
         r"UPDATE group_github_issues issue
-        SET state = $3, updated_at = NOW()
+        SET state = $3, state_refreshed_at = NOW(), updated_at = NOW()
         FROM report_groups report_group
         WHERE issue.group_key = report_group.group_key
           AND issue.workspace_id = report_group.workspace_id
@@ -1638,6 +1699,19 @@ pub(crate) async fn delete_product(
             "Type the exact product name to confirm deletion",
         ));
     }
+    let removed_issue_links = sqlx::query_as::<_, (String, i64)>(
+        r"SELECT issue.repo_full_name, issue.issue_number
+        FROM group_github_issues issue
+        JOIN report_groups report_group
+          ON report_group.group_key = issue.group_key
+         AND report_group.workspace_id = issue.workspace_id
+        WHERE report_group.workspace_id = $1 AND report_group.product_id = $2
+        ORDER BY issue.repo_full_name, issue.issue_number",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .fetch_all(&mut *tx)
+    .await?;
     let deleted = sqlx::query_as::<_, Product>(
         "DELETE FROM products WHERE id = $1 AND workspace_id = $2 RETURNING *",
     )
@@ -1646,6 +1720,15 @@ pub(crate) async fn delete_product(
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
+    for (repo_full_name, issue_number) in removed_issue_links {
+        tracing::info!(
+            %workspace_id,
+            %product_id,
+            %repo_full_name,
+            issue_number,
+            "product deletion removed Epode's GitHub issue link; customer issue remains"
+        );
+    }
     Ok(deleted)
 }
 
@@ -4174,7 +4257,9 @@ mod product_tests {
                 .map_err(test_error)?;
             anyhow::ensure!(!page.has_more);
             anyhow::ensure!(page.groups.len() == 1);
-            let group = &page.groups[0].group;
+            let listed_group = &page.groups[0];
+            anyhow::ensure!(listed_group.last_commented_report_count == Some(2));
+            let group = &listed_group.group;
             anyhow::ensure!(group.report_count == 2);
             anyhow::ensure!(group.latest_occurred_at.is_some());
             anyhow::ensure!(group.github_issue.as_ref() == Some(&link));
