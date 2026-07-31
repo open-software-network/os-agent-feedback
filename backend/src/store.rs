@@ -635,13 +635,32 @@ pub(crate) struct GroupIssueFilingRequest<'a> {
 /// `claim_report_count` becomes the evidence baseline on either direct filing
 /// or later adoption; a live recount at adoption would silently swallow reports
 /// that arrived after the rendered body.
-/// Returns the group this one was merged into, if any.
-pub(crate) async fn group_merge_target(
+pub(crate) async fn claim_group_issue_filing(
     pool: &PgPool,
-    workspace_id: Uuid,
-    group_key: &str,
-) -> Result<Option<String>, ApiError> {
-    Ok(sqlx::query_scalar::<_, Option<String>>(
+    request: GroupIssueFilingRequest<'_>,
+    stale_cutoff: DateTime<Utc>,
+) -> Result<GroupIssueFilingClaim, ApiError> {
+    let mut tx = pool.begin().await?;
+
+    // Take the SAME advisory lock `merge_report_groups` takes, on the same key.
+    // Row locks cannot close this race in either direction: a merge locks the
+    // `group_github_issues` rows that exist, but a filing that has not claimed
+    // yet has no row to lock, and a merge that has not committed its lineage
+    // yet is invisible to the filing's check. The advisory lock is a mutual
+    // exclusion point that exists before any row does.
+    //
+    // This does not reintroduce the connection-holding problem that removed the
+    // old filing lock: the GitHub call now happens after this transaction
+    // commits, so the lock is held only for these few statements.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(request.group_key)
+        .execute(&mut *tx)
+        .await?;
+
+    // Re-check lineage under the lock. A merge that committed while this
+    // request was in flight is now visible, and a merge still running cannot
+    // interleave past this point.
+    let merge_target = sqlx::query_scalar::<_, Option<String>>(
         r"SELECT report_group.merged_into_group_key
         FROM report_groups report_group
         JOIN products product
@@ -649,25 +668,12 @@ pub(crate) async fn group_merge_target(
          AND product.workspace_id = report_group.workspace_id
         WHERE report_group.workspace_id = $1 AND report_group.group_key = $2",
     )
-    .bind(workspace_id)
-    .bind(group_key)
-    .fetch_optional(pool)
+    .bind(request.workspace_id)
+    .bind(request.group_key)
+    .fetch_optional(&mut *tx)
     .await?
-    .flatten())
-}
-
-pub(crate) async fn claim_group_issue_filing(
-    pool: &PgPool,
-    request: GroupIssueFilingRequest<'_>,
-    stale_cutoff: DateTime<Utc>,
-) -> Result<GroupIssueFilingClaim, ApiError> {
-    // A merged-away group must not be filed: its reports now belong to the
-    // merge target, so an issue opened here would describe evidence the group
-    // no longer owns. Report the real reason — a generic mapping error would
-    // send the operator to inspect repository settings that are fine.
-    if let Some(target_group_key) =
-        group_merge_target(pool, request.workspace_id, request.group_key).await?
-    {
+    .flatten();
+    if let Some(target_group_key) = merge_target {
         return Err(ApiError::conflict(format!(
             "Feedback group was merged into {target_group_key}; file the target group instead"
         )));
@@ -692,15 +698,28 @@ pub(crate) async fn claim_group_issue_filing(
     .bind(request.repo_full_name)
     .bind(request.created_by)
     .bind(request.claim_report_count)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
     if claimed.is_some() {
+        tx.commit().await?;
         return Ok(GroupIssueFilingClaim::Claimed);
     }
 
-    if let Some(existing) =
-        get_group_github_issue(pool, request.workspace_id, request.group_key).await?
-    {
+    let existing = sqlx::query_as::<_, GroupGithubIssueRow>(
+        r"SELECT issue.repo_full_name, issue.issue_number, issue.url, issue.state
+        FROM group_github_issues issue
+        JOIN report_groups report_group
+          ON report_group.group_key = issue.group_key
+         AND report_group.workspace_id = issue.workspace_id
+        WHERE issue.workspace_id = $1 AND issue.group_key = $2
+          AND issue.filing_state = 'filed'",
+    )
+    .bind(request.workspace_id)
+    .bind(request.group_key)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(existing) = existing {
+        tx.commit().await?;
         return Ok(GroupIssueFilingClaim::AlreadyFiled(Box::new(existing)));
     }
 
@@ -713,9 +732,10 @@ pub(crate) async fn claim_group_issue_filing(
     )
     .bind(request.workspace_id)
     .bind(request.group_key)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
     if needs_reconciliation {
+        tx.commit().await?;
         return Ok(GroupIssueFilingClaim::NeedsReconciliation);
     }
 
@@ -733,8 +753,9 @@ pub(crate) async fn claim_group_issue_filing(
     .bind(request.workspace_id)
     .bind(request.group_key)
     .bind(stale_cutoff)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
+    tx.commit().await?;
     if quarantined.is_some() {
         return Ok(GroupIssueFilingClaim::NeedsReconciliation);
     }
@@ -5709,6 +5730,92 @@ mod product_tests {
             .expect_err("a final target cannot be merged away into a chain");
             anyhow::ensure!(final_target.status == StatusCode::CONFLICT);
             anyhow::ensure!(final_target.message.contains("final target"));
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    /// A filing that begins AFTER a merge has checked for issue rows but BEFORE
+    /// the merge commits its lineage must not slip through and open a public
+    /// issue on a group that is about to be merged away. Row locks cannot close
+    /// this: at that instant the filing has no row to lock and the merge's
+    /// lineage write is not yet visible. The shared advisory lock is what makes
+    /// the two mutually exclusive.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn filing_cannot_race_past_an_uncommitted_merge() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let fixture = merge_groups_fixture(&pool, "Merge filing race").await?;
+
+        let result = async {
+            // Stand in for a merge mid-flight: hold the advisory lock and write
+            // the lineage without committing.
+            let mut merging = pool.begin().await?;
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(&fixture.source_group_key)
+                .execute(&mut *merging)
+                .await?;
+            sqlx::query(
+                r"UPDATE report_groups
+                SET merged_into_group_key = $1, merged_at = NOW(), merged_by = 'usr_race'
+                WHERE workspace_id = $2 AND group_key = $3",
+            )
+            .bind(&fixture.target_group_key)
+            .bind(fixture.workspace_id)
+            .bind(&fixture.source_group_key)
+            .execute(&mut *merging)
+            .await?;
+
+            // Start the filing while the merge is still open. It must block on
+            // the advisory lock rather than observe the pre-merge lineage.
+            let racing_pool = pool.clone();
+            let workspace_id = fixture.workspace_id;
+            let racing_key = fixture.source_group_key.clone();
+            let filing = tokio::spawn(async move {
+                claim_group_issue_filing(
+                    &racing_pool,
+                    GroupIssueFilingRequest {
+                        workspace_id,
+                        group_key: &racing_key,
+                        installation_id: 4_433_427,
+                        repo_full_name: "open-software/merge-test",
+                        created_by: "usr_race",
+                        claim_report_count: 1,
+                    },
+                    Utc::now() - Duration::minutes(5),
+                )
+                .await
+            });
+            for _ in 0..64 {
+                tokio::task::yield_now().await;
+            }
+            anyhow::ensure!(!filing.is_finished(), "filing must wait for the merge");
+
+            merging.commit().await?;
+
+            let claim = filing.await?;
+            let error = claim.expect_err("filing must refuse a merged-away group");
+            anyhow::ensure!(error.status == StatusCode::CONFLICT, "{}", error.message);
+            anyhow::ensure!(error.message.contains("merged into"), "{}", error.message);
+
+            // Nothing may have been claimed for the merged-away group.
+            let rows: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM group_github_issues WHERE group_key = $1")
+                    .bind(&fixture.source_group_key)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(rows == 0, "a merged-away group must hold no filing claim");
             Ok::<(), anyhow::Error>(())
         }
         .await;
