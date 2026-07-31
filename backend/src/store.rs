@@ -15697,6 +15697,17 @@ mod product_tests {
             let acme_interaction_id = Uuid::new_v4();
             let acme_followup_id = Uuid::new_v4();
             let globex_interaction_id = Uuid::new_v4();
+            let runtime_hint = format!("{}🚀", "x".repeat(199));
+            let mut create_event = mcp_telemetry_event(
+                create_id,
+                Some(1),
+                "summarize",
+                Some(canonical_ref),
+                Some("mcp"),
+                occurred_at,
+            );
+            create_event.runtime_hint = Some(runtime_hint.clone());
+            create_event.runtime_hint_source = Some("mcp".into());
 
             let mut tenant_a = mcp_telemetry_event(
                 acme_interaction_id,
@@ -15731,14 +15742,7 @@ mod product_tests {
                 &primary_auth,
                 TelemetryBatchInput {
                     events: vec![
-                        mcp_telemetry_event(
-                            create_id,
-                            Some(1),
-                            "summarize",
-                            Some(canonical_ref),
-                            Some("mcp"),
-                            occurred_at,
-                        ),
+                        create_event,
                         mcp_telemetry_event(
                             followup_id,
                             Some(2),
@@ -15826,6 +15830,13 @@ mod product_tests {
             let mcp_session = interaction_session(&pool, create_id)
                 .await?
                 .expect("explicit MCP proof should create a session");
+            let stored_runtime: (Option<String>, Option<String>) = sqlx::query_as(
+                "SELECT runtime_hint, runtime_hint_source FROM interactions_v2 WHERE id = $1",
+            )
+            .bind(create_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(stored_runtime == (Some(runtime_hint), Some("mcp".into())));
             anyhow::ensure!(interaction_session(&pool, followup_id).await? == Some(mcp_session));
             anyhow::ensure!(interaction_session(&pool, dedup_id).await? == Some(mcp_session));
             let customer_session = interaction_session(&pool, customer_default_id)
