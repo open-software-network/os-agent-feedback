@@ -107,7 +107,7 @@ pub(crate) struct GroupIssueReconciliationContext {
     pub(crate) repo_full_name: String,
     pub(crate) needs_reconciliation_since: DateTime<Utc>,
     pub(crate) reconciliation_claimed_at: DateTime<Utc>,
-    pub(crate) current_report_count: i64,
+    pub(crate) claim_report_count: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -607,6 +607,17 @@ pub(crate) enum GroupIssueFilingClaim {
     NeedsReconciliation,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GroupIssueFilingRequest<'a> {
+    pub(crate) workspace_id: Uuid,
+    pub(crate) group_key: &'a str,
+    pub(crate) installation_id: i64,
+    pub(crate) repo_full_name: &'a str,
+    pub(crate) created_by: &'a str,
+    /// Exact report count represented by the body rendered before this claim.
+    pub(crate) claim_report_count: i64,
+}
+
 /// Claims a group for filing before any GitHub call is made.
 ///
 /// The primary key on `group_key` is what de-duplicates concurrent filers, so
@@ -614,20 +625,20 @@ pub(crate) enum GroupIssueFilingClaim {
 /// that dies mid-call leaves a `pending` row. Once it is older than
 /// `stale_cutoff`, the outcome is ambiguous, so it is quarantined for
 /// reconciliation instead of being handed to another blind filer.
+/// `claim_report_count` becomes the evidence baseline on either direct filing
+/// or later adoption; a live recount at adoption would silently swallow reports
+/// that arrived after the rendered body.
 pub(crate) async fn claim_group_issue_filing(
     pool: &PgPool,
-    workspace_id: Uuid,
-    group_key: &str,
-    installation_id: i64,
-    repo_full_name: &str,
-    created_by: &str,
+    request: GroupIssueFilingRequest<'_>,
     stale_cutoff: DateTime<Utc>,
 ) -> Result<GroupIssueFilingClaim, ApiError> {
     let claimed = sqlx::query_scalar::<_, i32>(
         r"INSERT INTO group_github_issues
         (group_key, workspace_id, installation_id, repo_full_name, created_by,
-         filing_state, claimed_at)
-        SELECT report_group.group_key, report_group.workspace_id, $3, $4, $5, 'pending', NOW()
+         filing_state, claimed_at, last_commented_report_count)
+        SELECT report_group.group_key, report_group.workspace_id, $3, $4, $5,
+          'pending', NOW(), $6
         FROM report_groups report_group
         JOIN products product
           ON product.id = report_group.product_id
@@ -636,18 +647,21 @@ pub(crate) async fn claim_group_issue_filing(
         ON CONFLICT (group_key) DO NOTHING
         RETURNING 1",
     )
-    .bind(workspace_id)
-    .bind(group_key)
-    .bind(installation_id)
-    .bind(repo_full_name)
-    .bind(created_by)
+    .bind(request.workspace_id)
+    .bind(request.group_key)
+    .bind(request.installation_id)
+    .bind(request.repo_full_name)
+    .bind(request.created_by)
+    .bind(request.claim_report_count)
     .fetch_optional(pool)
     .await?;
     if claimed.is_some() {
         return Ok(GroupIssueFilingClaim::Claimed);
     }
 
-    if let Some(existing) = get_group_github_issue(pool, workspace_id, group_key).await? {
+    if let Some(existing) =
+        get_group_github_issue(pool, request.workspace_id, request.group_key).await?
+    {
         return Ok(GroupIssueFilingClaim::AlreadyFiled(Box::new(existing)));
     }
 
@@ -658,8 +672,8 @@ pub(crate) async fn claim_group_issue_filing(
             AND filing_state = 'needs_reconciliation'
         )",
     )
-    .bind(workspace_id)
-    .bind(group_key)
+    .bind(request.workspace_id)
+    .bind(request.group_key)
     .fetch_one(pool)
     .await?;
     if needs_reconciliation {
@@ -667,17 +681,18 @@ pub(crate) async fn claim_group_issue_filing(
     }
 
     // A stale pending owner may have died after GitHub accepted the request.
-    // Quarantine it for a marker search rather than filing a possible duplicate.
+    // Quarantine it for a consistent marker listing rather than filing a
+    // possible duplicate.
     let quarantined = sqlx::query_scalar::<_, i32>(
         r"UPDATE group_github_issues
-        SET filing_state = 'needs_reconciliation', claimed_at = NOW(),
-            state_refreshed_at = NULL, updated_at = NOW()
+        SET filing_state = 'needs_reconciliation', state_refreshed_at = NULL,
+            updated_at = NOW()
         WHERE workspace_id = $1 AND group_key = $2
           AND filing_state = 'pending' AND claimed_at <= $3
         RETURNING 1",
     )
-    .bind(workspace_id)
-    .bind(group_key)
+    .bind(request.workspace_id)
+    .bind(request.group_key)
     .bind(stale_cutoff)
     .fetch_optional(pool)
     .await?;
@@ -738,8 +753,8 @@ pub(crate) async fn mark_group_issue_filing_for_reconciliation(
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
         r"UPDATE group_github_issues
-        SET filing_state = 'needs_reconciliation', claimed_at = NOW(),
-            state_refreshed_at = NULL, updated_at = NOW()
+        SET filing_state = 'needs_reconciliation', state_refreshed_at = NULL,
+            updated_at = NOW()
         WHERE workspace_id = $1 AND group_key = $2 AND filing_state = 'pending'",
     )
     .bind(workspace_id)
@@ -758,7 +773,7 @@ pub(crate) async fn claim_group_issue_reconciliation(
 ) -> Result<Option<GroupIssueReconciliationContext>, ApiError> {
     Ok(sqlx::query_as::<_, GroupIssueReconciliationContext>(
         r"WITH candidate AS (
-          SELECT issue.group_key, COUNT(report.id)::BIGINT AS current_report_count
+          SELECT issue.group_key
           FROM group_github_issues issue
           JOIN report_groups report_group
             ON report_group.group_key = issue.group_key
@@ -770,12 +785,8 @@ pub(crate) async fn claim_group_issue_reconciliation(
             ON installation.installation_id = issue.installation_id
            AND installation.workspace_id = issue.workspace_id
            AND installation.revoked_at IS NULL
-          LEFT JOIN feedback_reports report
-            ON report.group_id = report_group.id
-           AND report.workspace_id = report_group.workspace_id
           WHERE issue.workspace_id = $1 AND issue.group_key = $2
             AND issue.filing_state = 'needs_reconciliation'
-          GROUP BY issue.group_key
         ), claimed AS (
           UPDATE group_github_issues issue
           SET state_refreshed_at = NOW(), updated_at = NOW()
@@ -789,11 +800,12 @@ pub(crate) async fn claim_group_issue_reconciliation(
             )
           RETURNING issue.group_key, issue.installation_id, issue.repo_full_name,
             issue.claimed_at AS needs_reconciliation_since,
-            issue.state_refreshed_at AS reconciliation_claimed_at
+            issue.state_refreshed_at AS reconciliation_claimed_at,
+            issue.last_commented_report_count AS claim_report_count
         )
         SELECT claimed.installation_id, claimed.repo_full_name,
           claimed.needs_reconciliation_since, claimed.reconciliation_claimed_at,
-          candidate.current_report_count
+          claimed.claim_report_count
         FROM claimed
         JOIN candidate ON candidate.group_key = claimed.group_key",
     )
@@ -804,14 +816,14 @@ pub(crate) async fn claim_group_issue_reconciliation(
     .await?)
 }
 
-/// Adopts the issue found by marker search if this task still owns the attempt.
+/// Adopts the exactly marked issue if this task still owns the attempt.
 pub(crate) async fn complete_group_issue_reconciliation(
     pool: &PgPool,
     workspace_id: Uuid,
     group_key: &str,
     reconciliation_claimed_at: DateTime<Utc>,
     link: &GithubIssueLink,
-    report_count: i64,
+    claim_report_count: i64,
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
         r"UPDATE group_github_issues
@@ -827,7 +839,7 @@ pub(crate) async fn complete_group_issue_reconciliation(
     .bind(link.issue_number)
     .bind(&link.url)
     .bind(&link.state)
-    .bind(report_count)
+    .bind(claim_report_count)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() == 1)
@@ -4173,6 +4185,8 @@ mod product_tests {
     struct GithubIssueGroupFixture {
         workspace_id: Uuid,
         product_id: Uuid,
+        environment_id: Uuid,
+        group_id: Uuid,
         group_key: String,
         installation_id: i64,
     }
@@ -4269,6 +4283,8 @@ mod product_tests {
         Ok(GithubIssueGroupFixture {
             workspace_id,
             product_id: product.id,
+            environment_id: environment.id,
+            group_id,
             group_key,
             installation_id,
         })
@@ -4295,11 +4311,14 @@ mod product_tests {
             let stale_cutoff = Utc::now() - Duration::minutes(5);
             let first_claim = claim_group_issue_filing(
                 &pool,
-                fixture.workspace_id,
-                &fixture.group_key,
-                4_433_427,
-                &link.repo_full_name,
-                "usr_test",
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: 4_433_427,
+                    repo_full_name: &link.repo_full_name,
+                    created_by: "usr_test",
+                    claim_report_count: 2,
+                },
                 stale_cutoff,
             )
             .await
@@ -4310,11 +4329,14 @@ mod product_tests {
             // so only one GitHub issue is ever created.
             let contended = claim_group_issue_filing(
                 &pool,
-                fixture.workspace_id,
-                &fixture.group_key,
-                4_433_427,
-                &link.repo_full_name,
-                "usr_other",
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: 4_433_427,
+                    repo_full_name: &link.repo_full_name,
+                    created_by: "usr_other",
+                    claim_report_count: 2,
+                },
                 stale_cutoff,
             )
             .await
@@ -4335,11 +4357,14 @@ mod product_tests {
             // claiming again.
             let second = claim_group_issue_filing(
                 &pool,
-                fixture.workspace_id,
-                &fixture.group_key,
-                4_433_427,
-                &link.repo_full_name,
-                "usr_other",
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: 4_433_427,
+                    repo_full_name: &link.repo_full_name,
+                    created_by: "usr_other",
+                    claim_report_count: 2,
+                },
                 stale_cutoff,
             )
             .await
@@ -4381,16 +4406,25 @@ mod product_tests {
         let result = async {
             let claim = claim_group_issue_filing(
                 &pool,
-                fixture.workspace_id,
-                &fixture.group_key,
-                fixture.installation_id,
-                "open-software/epode-test",
-                "usr_test",
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: fixture.installation_id,
+                    repo_full_name: "open-software/epode-test",
+                    created_by: "usr_test",
+                    claim_report_count: 2,
+                },
                 Utc::now() - Duration::minutes(5),
             )
             .await
             .map_err(test_error)?;
             anyhow::ensure!(matches!(claim, GroupIssueFilingClaim::Claimed));
+            let claim_time: DateTime<Utc> = sqlx::query_scalar(
+                "SELECT claimed_at FROM group_github_issues WHERE group_key = $1",
+            )
+            .bind(&fixture.group_key)
+            .fetch_one(&pool)
+            .await?;
             anyhow::ensure!(
                 mark_group_issue_filing_for_reconciliation(
                     &pool,
@@ -4408,14 +4442,24 @@ mod product_tests {
             .fetch_one(&pool)
             .await?;
             anyhow::ensure!(filing_state == "needs_reconciliation");
+            let retained_claim_time: DateTime<Utc> = sqlx::query_scalar(
+                "SELECT claimed_at FROM group_github_issues WHERE group_key = $1",
+            )
+            .bind(&fixture.group_key)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(retained_claim_time == claim_time);
 
             let retry = claim_group_issue_filing(
                 &pool,
-                fixture.workspace_id,
-                &fixture.group_key,
-                fixture.installation_id,
-                "open-software/epode-test",
-                "usr_retry",
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: fixture.installation_id,
+                    repo_full_name: "open-software/epode-test",
+                    created_by: "usr_retry",
+                    claim_report_count: 2,
+                },
                 Utc::now() - Duration::minutes(5),
             )
             .await
@@ -4434,8 +4478,7 @@ mod product_tests {
 
     #[tokio::test]
     #[ignore = "requires DATABASE_URL"]
-    async fn reconciliation_adopts_the_found_issue_and_current_report_count() -> anyhow::Result<()>
-    {
+    async fn reconciliation_adopts_the_found_issue_and_claim_report_count() -> anyhow::Result<()> {
         let database_url = std::env::var("DATABASE_URL")?;
         let pool = PgPoolOptions::new()
             .max_connections(1)
@@ -4447,16 +4490,25 @@ mod product_tests {
         let result = async {
             let claim = claim_group_issue_filing(
                 &pool,
-                fixture.workspace_id,
-                &fixture.group_key,
-                fixture.installation_id,
-                "open-software/epode-test",
-                "usr_test",
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: fixture.installation_id,
+                    repo_full_name: "open-software/epode-test",
+                    created_by: "usr_test",
+                    claim_report_count: 2,
+                },
                 Utc::now() - Duration::minutes(5),
             )
             .await
             .map_err(test_error)?;
             anyhow::ensure!(matches!(claim, GroupIssueFilingClaim::Claimed));
+            let claim_time: DateTime<Utc> = sqlx::query_scalar(
+                "SELECT claimed_at FROM group_github_issues WHERE group_key = $1",
+            )
+            .bind(&fixture.group_key)
+            .fetch_one(&pool)
+            .await?;
             anyhow::ensure!(
                 mark_group_issue_filing_for_reconciliation(
                     &pool,
@@ -4466,6 +4518,37 @@ mod product_tests {
                 .await
                 .map_err(test_error)?
             );
+            let retained_claim_time: DateTime<Utc> = sqlx::query_scalar(
+                "SELECT claimed_at FROM group_github_issues WHERE group_key = $1",
+            )
+            .bind(&fixture.group_key)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(retained_claim_time == claim_time);
+            let interim_interaction_id = Uuid::new_v4();
+            sqlx::query(
+                r"INSERT INTO interactions_v2
+                (id, workspace_id, environment_id, surface, operation, status_code,
+                 classification, confirmation_method, occurred_at)
+                VALUES ($1, $2, $3, 'mcp', 'search_reports', 503, 'confirmed', 'mcp', NOW())",
+            )
+            .bind(interim_interaction_id)
+            .bind(fixture.workspace_id)
+            .bind(fixture.environment_id)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                r"INSERT INTO feedback_reports
+                (id, workspace_id, interaction_id, summary, impact, findings, workaround, group_id)
+                VALUES ($1, $2, $3, 'Interim report after the filing claim.', 'blocked',
+                  '[]'::JSONB, NULL, $4)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(fixture.workspace_id)
+            .bind(interim_interaction_id)
+            .bind(fixture.group_id)
+            .execute(&pool)
+            .await?;
             let reconciliation = claim_group_issue_reconciliation(
                 &pool,
                 fixture.workspace_id,
@@ -4475,7 +4558,15 @@ mod product_tests {
             .await
             .map_err(test_error)?
             .ok_or_else(|| anyhow::anyhow!("reconciliation should be claimable"))?;
-            anyhow::ensure!(reconciliation.current_report_count == 2);
+            anyhow::ensure!(reconciliation.claim_report_count == 2);
+            let live_report_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM feedback_reports WHERE workspace_id = $1 AND group_id = $2",
+            )
+            .bind(fixture.workspace_id)
+            .bind(fixture.group_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(live_report_count == 3);
 
             let link = GithubIssueLink {
                 repo_full_name: "open-software/epode-test".to_owned(),
@@ -4490,7 +4581,7 @@ mod product_tests {
                     &fixture.group_key,
                     reconciliation.reconciliation_claimed_at,
                     &link,
-                    reconciliation.current_report_count,
+                    reconciliation.claim_report_count,
                 )
                 .await
                 .map_err(test_error)?
@@ -4508,6 +4599,14 @@ mod product_tests {
             .fetch_one(&pool)
             .await?;
             anyhow::ensure!(report_count == 2);
+            let mut tx = pool.begin().await?;
+            let sync = group_issue_sync_context(&mut tx, fixture.workspace_id, &fixture.group_key)
+                .await
+                .map_err(test_error)?
+                .ok_or_else(|| anyhow::anyhow!("adopted issue should be syncable"))?;
+            anyhow::ensure!(sync.observed_report_count == 2);
+            anyhow::ensure!(sync.current_report_count == 3);
+            tx.rollback().await?;
             Ok::<(), anyhow::Error>(())
         }
         .await;
@@ -4613,11 +4712,14 @@ mod product_tests {
             };
             let claim = claim_group_issue_filing(
                 &pool,
-                fixture.workspace_id,
-                &fixture.group_key,
-                4_433_427,
-                &link.repo_full_name,
-                "usr_test",
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: 4_433_427,
+                    repo_full_name: &link.repo_full_name,
+                    created_by: "usr_test",
+                    claim_report_count: 2,
+                },
                 Utc::now() - Duration::minutes(5),
             )
             .await

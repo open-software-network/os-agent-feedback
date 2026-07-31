@@ -7,14 +7,12 @@ use std::{env, fmt, time::Duration as StdDuration};
 
 use anyhow::Context as _;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use hmac::{Hmac, Mac};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-
-use crate::issue_template::group_marker;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -24,6 +22,8 @@ const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_USER_AGENT: &str = "epode-agent-feedback";
 const REPOSITORIES_PER_PAGE: usize = 100;
 const MAX_REPOSITORY_PAGES: usize = 10;
+const ISSUES_PER_PAGE: usize = 100;
+const MAX_RECONCILIATION_ISSUE_PAGES: usize = 10;
 const REQUIRED_ENV: &[&str] = &[
     "GITHUB_APP_ID",
     "GITHUB_APP_SLUG",
@@ -98,6 +98,7 @@ pub(crate) struct GithubAppClient {
 pub(crate) struct InstallationAccount {
     pub(crate) login: String,
     pub(crate) account_type: String,
+    app_slug: String,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +113,60 @@ pub(crate) struct GithubIssue {
     pub(crate) number: i64,
     pub(crate) html_url: String,
     pub(crate) state: String,
+    pub(crate) body: Option<String>,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) pull_request: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GithubIssueListFailureKind {
+    Installation,
+    Access,
+    RateLimit,
+    Timeout,
+    NotFound,
+    Server,
+    InvalidResponse,
+    PaginationCap,
+    Transport,
+}
+
+#[derive(Debug)]
+pub(crate) struct GithubIssueListError {
+    kind: GithubIssueListFailureKind,
+    page: usize,
+    source: anyhow::Error,
+}
+
+impl GithubIssueListError {
+    const fn new(kind: GithubIssueListFailureKind, page: usize, source: anyhow::Error) -> Self {
+        Self { kind, page, source }
+    }
+
+    fn from_request(error: reqwest::Error, page: usize, context: &'static str) -> Self {
+        let kind = issue_list_failure_kind(error.status(), error.is_timeout());
+        Self::new(kind, page, anyhow::Error::new(error).context(context))
+    }
+
+    pub(crate) const fn kind(&self) -> GithubIssueListFailureKind {
+        self.kind
+    }
+
+    pub(crate) const fn page(&self) -> usize {
+        self.page
+    }
+}
+
+impl fmt::Display for GithubIssueListError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for GithubIssueListError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +253,22 @@ fn issue_creation_failure_kind(
     }
 }
 
+fn issue_list_failure_kind(
+    status: Option<reqwest::StatusCode>,
+    is_timeout: bool,
+) -> GithubIssueListFailureKind {
+    match status {
+        Some(reqwest::StatusCode::NOT_FOUND) => GithubIssueListFailureKind::NotFound,
+        Some(reqwest::StatusCode::TOO_MANY_REQUESTS | reqwest::StatusCode::FORBIDDEN) => {
+            GithubIssueListFailureKind::RateLimit
+        }
+        Some(status) if status.is_server_error() => GithubIssueListFailureKind::Server,
+        Some(_) => GithubIssueListFailureKind::Access,
+        None if is_timeout => GithubIssueListFailureKind::Timeout,
+        None => GithubIssueListFailureKind::Transport,
+    }
+}
+
 /// Repositories read from one installation, plus whether the pagination cap cut
 /// the listing short. GitHub's code-search and REST quotas are tight, so the
 /// listing stops at `MAX_REPOSITORY_PAGES` rather than walking an unbounded
@@ -219,6 +290,7 @@ struct AppClaims<'a> {
 #[derive(Debug, Deserialize)]
 struct InstallationResponse {
     account: AccountResponse,
+    app_slug: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -245,11 +317,6 @@ impl fmt::Debug for InstallationTokenResponse {
 #[derive(Debug, Deserialize)]
 struct RepositoriesResponse {
     repositories: Vec<RepositoryResponse>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SearchIssuesResponse {
-    items: Vec<GithubIssue>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -331,6 +398,7 @@ impl GithubAppClient {
         Ok(InstallationAccount {
             login: response.account.login,
             account_type: response.account.account_type,
+            app_slug: response.app_slug,
         })
     }
 
@@ -447,33 +515,82 @@ impl GithubAppClient {
         })
     }
 
-    pub(crate) async fn search_issue_by_group_key(
+    pub(crate) async fn reconciliation_issues(
         &self,
         installation_id: i64,
         repo_full_name: &str,
-        group_key: &str,
-    ) -> anyhow::Result<Option<GithubIssue>> {
-        validate_repo_full_name(repo_full_name)?;
-        let token = self.installation_token(installation_id).await?;
-        // GitHub's issue-search endpoint has its own tighter rate limit.
-        // Reconciliation is rare, so one marker search per throttled attempt
-        // is preferable to ever filing a possible duplicate public issue.
-        let query = issue_search_query(repo_full_name, group_key);
-        let response = Self::request(
-            self.http
-                .get(format!("{GITHUB_API_URL}/search/issues"))
-                .query(&[("q", query)]),
-        )
-        .bearer_auth(token)
-        .send()
-        .await
-        .context("GitHub issue reconciliation search failed")?
-        .error_for_status()
-        .context("GitHub issue reconciliation search was rejected")?
-        .json::<SearchIssuesResponse>()
-        .await
-        .context("GitHub issue reconciliation search response was invalid")?;
-        Ok(response.items.into_iter().next())
+        since: DateTime<Utc>,
+    ) -> Result<Vec<GithubIssue>, GithubIssueListError> {
+        validate_repo_full_name(repo_full_name).map_err(|error| {
+            GithubIssueListError::new(GithubIssueListFailureKind::Access, 0, error)
+        })?;
+        let installation = self.installation(installation_id).await.map_err(|error| {
+            GithubIssueListError::new(GithubIssueListFailureKind::Installation, 0, error)
+        })?;
+        let token = self
+            .installation_token(installation_id)
+            .await
+            .map_err(|error| {
+                GithubIssueListError::new(GithubIssueListFailureKind::Access, 0, error)
+            })?;
+        let creator = app_bot_login(&installation.app_slug);
+        let since = since.to_rfc3339_opts(SecondsFormat::Secs, true);
+        let mut issues = Vec::new();
+        for page in 1..=MAX_RECONCILIATION_ISSUE_PAGES {
+            let page_number = page.to_string();
+            let per_page = ISSUES_PER_PAGE.to_string();
+            let response = Self::request(
+                self.http
+                    .get(format!("{GITHUB_API_URL}/repos/{repo_full_name}/issues"))
+                    .query(&[
+                        ("state", "all"),
+                        ("creator", creator.as_str()),
+                        ("since", since.as_str()),
+                        ("per_page", per_page.as_str()),
+                        ("page", page_number.as_str()),
+                    ]),
+            )
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|error| {
+                GithubIssueListError::from_request(
+                    error,
+                    page,
+                    "GitHub reconciliation issue listing failed",
+                )
+            })?
+            .error_for_status()
+            .map_err(|error| {
+                GithubIssueListError::from_request(
+                    error,
+                    page,
+                    "GitHub reconciliation issue listing was rejected",
+                )
+            })?
+            .json::<Vec<GithubIssue>>()
+            .await
+            .map_err(|error| {
+                GithubIssueListError::new(
+                    GithubIssueListFailureKind::InvalidResponse,
+                    page,
+                    anyhow::Error::new(error)
+                        .context("GitHub reconciliation issue listing response was invalid"),
+                )
+            })?;
+            let page_len = response.len();
+            issues.extend(response);
+            if page_len < ISSUES_PER_PAGE {
+                return Ok(issues);
+            }
+        }
+        Err(GithubIssueListError::new(
+            GithubIssueListFailureKind::PaginationCap,
+            MAX_RECONCILIATION_ISSUE_PAGES,
+            anyhow::anyhow!(
+                "GitHub reconciliation issue listing hit the pagination cap before exhaustion"
+            ),
+        ))
     }
 
     pub(crate) async fn create_issue_comment(
@@ -532,8 +649,8 @@ impl GithubAppClient {
     }
 }
 
-pub(crate) fn issue_search_query(repo_full_name: &str, group_key: &str) -> String {
-    format!("repo:{repo_full_name} in:body {}", group_marker(group_key))
+fn app_bot_login(app_slug: &str) -> String {
+    format!("{app_slug}[bot]")
 }
 
 pub(crate) fn validate_repo_full_name(value: &str) -> anyhow::Result<()> {
@@ -761,6 +878,33 @@ mod tests {
         assert_eq!(
             issue_creation_failure_kind(None, false, false).outcome(),
             GithubIssueCreationOutcome::AmbiguousFailure
+        );
+    }
+
+    #[test]
+    fn reconciliation_listing_uses_installation_bot_identity_and_inconclusive_failures() {
+        use reqwest::StatusCode;
+
+        assert_eq!(app_bot_login("epode-ai"), "epode-ai[bot]");
+        assert_eq!(
+            issue_list_failure_kind(Some(StatusCode::TOO_MANY_REQUESTS), false),
+            GithubIssueListFailureKind::RateLimit
+        );
+        assert_eq!(
+            issue_list_failure_kind(Some(StatusCode::NOT_FOUND), false),
+            GithubIssueListFailureKind::NotFound
+        );
+        assert_eq!(
+            issue_list_failure_kind(Some(StatusCode::BAD_GATEWAY), false),
+            GithubIssueListFailureKind::Server
+        );
+        assert_eq!(
+            issue_list_failure_kind(None, true),
+            GithubIssueListFailureKind::Timeout
+        );
+        assert_eq!(
+            issue_list_failure_kind(None, false),
+            GithubIssueListFailureKind::Transport
         );
     }
 }

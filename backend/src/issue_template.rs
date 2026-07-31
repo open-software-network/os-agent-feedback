@@ -190,9 +190,8 @@ pub(crate) fn render_issue_body(data: &IssueTemplateData) -> String {
     body.push_str("\n## Volume\n");
     let _ = writeln!(body, "{} report(s)", data.report_count);
 
-    let group_key = group_marker(&data.group_key);
     let backlink = clean_link(&data.backlink);
-    let footer = issue_footer(&group_key, &backlink);
+    let footer = issue_footer(&data.group_key, &backlink);
     body.push_str(&footer);
     cap_body(body, &footer)
 }
@@ -235,6 +234,10 @@ pub(crate) fn group_marker(group_key: &str) -> String {
         marker.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     marker
+}
+
+pub(crate) fn group_marker_comment(group_key: &str) -> String {
+    format!("<!-- epode-group: {} -->", group_marker(group_key))
 }
 
 pub(crate) fn contains_sensitive_report_text(value: &str) -> bool {
@@ -909,7 +912,8 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 
 fn issue_footer(group_key: &str, backlink: &str) -> String {
     format!(
-        "\n\n<!-- epode-group: {group_key} -->\n\n[View this feedback group in Epode]({backlink})"
+        "\n\n{}\n\n[View this feedback group in Epode]({backlink})",
+        group_marker_comment(group_key)
     )
 }
 
@@ -1055,7 +1059,7 @@ mod tests {
         let capped = cap_body(
             open_fence_body,
             &issue_footer(
-                &group_marker("0123456789abcdef0123456789abcdef"),
+                "0123456789abcdef0123456789abcdef",
                 "https://app.example/?view=feedback&group=abc",
             ),
         );
@@ -1225,7 +1229,7 @@ mod tests {
     }
 
     #[test]
-    fn issue_marker_writer_and_searcher_use_identical_separator_safe_tokens() {
+    fn issue_marker_writer_and_reader_use_identical_separator_safe_comments() {
         for group_key in [
             "abc-def-012",
             "123e4567-e89b-12d3-a456-426614174000",
@@ -1240,19 +1244,11 @@ mod tests {
                 .and_then(|(_, suffix)| suffix.split_once(" -->"))
                 .map(|(marker, _)| marker)
                 .expect("rendered issue body should carry a group marker");
-            let query = crate::github::issue_search_query("owner/repository", group_key);
-            let query_marker = query
-                .rsplit_once(" in:body ")
-                .map(|(_, marker)| marker)
-                .expect("reconciliation query should search one body marker");
             let expected = group_marker(group_key);
+            let expected_comment = group_marker_comment(group_key);
 
-            assert_eq!(
-                body_marker.as_bytes(),
-                query_marker.as_bytes(),
-                "{group_key}"
-            );
             assert_eq!(body_marker, expected);
+            assert!(body.contains(&expected_comment));
             assert!(body_marker.bytes().all(|byte| byte.is_ascii_alphanumeric()));
         }
 

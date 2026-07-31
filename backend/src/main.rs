@@ -52,11 +52,13 @@ use crate::{
     },
     error::{ApiError, ApiErrorEnvelope},
     github::{
-        GithubAppClient, GithubAppConfig, GithubIssueCreationOutcome, validate_repo_full_name,
+        GithubAppClient, GithubAppConfig, GithubIssue, GithubIssueCreationOutcome,
+        GithubIssueListError, GithubIssueListFailureKind, validate_repo_full_name,
     },
     grouping::FingerprintGrouper,
     issue_template::{
-        group_backlink, render_evidence_comment, render_issue_body, render_issue_title,
+        group_backlink, group_marker_comment, render_evidence_comment, render_issue_body,
+        render_issue_title,
     },
     models::{
         ClassificationDiscovery, ConsentDecisionInput, ConsentStateInput, ConsentStateResponse,
@@ -78,8 +80,8 @@ use crate::{
         bearer_token, clear_cookie, cookie, http_only_cookie, random_token, reject_sensitive_fields,
     },
     store::{
-        GithubInstallationUpsert, GroupIssueFilingClaim, GroupIssueSyncContext,
-        accept_team_invitation, agent_product_auth, backfill_report_groups,
+        GithubInstallationUpsert, GroupIssueFilingClaim, GroupIssueFilingRequest,
+        GroupIssueSyncContext, accept_team_invitation, agent_product_auth, backfill_report_groups,
         bump_last_commented_report_count, claim_group_issue_filing,
         claim_group_issue_reconciliation, claim_group_issue_state_refresh,
         clear_product_github_repo, complete_group_issue_filing,
@@ -118,7 +120,7 @@ const GITHUB_WORKSPACE_COOKIE: &str = "af_gh_ws";
 const MAX_GROUP_ISSUE_SYNCS_PER_REQUEST: usize = 5;
 const GROUP_ISSUE_STATE_REFRESH_INTERVAL_MINUTES: i64 = 15;
 const GROUP_ISSUE_RECONCILIATION_RETRY_MINUTES: i64 = 1;
-const GROUP_ISSUE_RECONCILIATION_GRACE_MINUTES: i64 = 10;
+const GROUP_ISSUE_RECONCILIATION_CLOCK_SKEW_MINUTES: i64 = 5;
 
 /// How long a `pending` filing claim is respected before a crashed filer is
 /// moved into reconciliation. Comfortably above the GitHub client's 15s
@@ -1500,11 +1502,14 @@ async fn file_group_github_issue_handler(
     let stale_cutoff = Utc::now() - Duration::minutes(GROUP_ISSUE_FILING_CLAIM_STALE_MINUTES);
     match claim_group_issue_filing(
         &state.pool,
-        workspace_id,
-        &group_key,
-        installation_id,
-        repo_full_name,
-        &context.user.id,
+        GroupIssueFilingRequest {
+            workspace_id,
+            group_key: &group_key,
+            installation_id,
+            repo_full_name,
+            created_by: &context.user.id,
+            claim_report_count: initial_context.template.report_count,
+        },
         stale_cutoff,
     )
     .await?
@@ -1682,19 +1687,114 @@ enum GroupIssueReconciliationDecision {
     Release,
 }
 
-fn group_issue_reconciliation_decision(
-    issue_found: bool,
-    needs_reconciliation_since: DateTime<Utc>,
-    now: DateTime<Utc>,
-) -> GroupIssueReconciliationDecision {
-    if issue_found {
-        GroupIssueReconciliationDecision::Adopt
-    } else if needs_reconciliation_since
-        <= now - Duration::minutes(GROUP_ISSUE_RECONCILIATION_GRACE_MINUTES)
-    {
-        GroupIssueReconciliationDecision::Release
-    } else {
-        GroupIssueReconciliationDecision::KeepWaiting
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupIssueReconciliationInconclusive {
+    RateLimit,
+    Timeout,
+    NotFound,
+    PaginationCap,
+    IncompletePagination,
+    Server,
+    InstallationAccess,
+    InvalidResponse,
+    Transport,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum GroupIssueReconciliationEvidence<'a> {
+    Complete(&'a [GithubIssue]),
+    Inconclusive(GroupIssueReconciliationInconclusive),
+}
+
+#[derive(Debug)]
+struct GroupIssueReconciliationResolution<'a> {
+    decision: GroupIssueReconciliationDecision,
+    issue: Option<&'a GithubIssue>,
+    matching_issue_count: usize,
+}
+
+fn group_issue_reconciliation_resolution<'a>(
+    evidence: GroupIssueReconciliationEvidence<'a>,
+    group_key: &str,
+) -> GroupIssueReconciliationResolution<'a> {
+    let issues = match evidence {
+        GroupIssueReconciliationEvidence::Complete(issues) => issues,
+        GroupIssueReconciliationEvidence::Inconclusive(reason) => {
+            let decision = match reason {
+                GroupIssueReconciliationInconclusive::RateLimit
+                | GroupIssueReconciliationInconclusive::Timeout
+                | GroupIssueReconciliationInconclusive::NotFound
+                | GroupIssueReconciliationInconclusive::PaginationCap
+                | GroupIssueReconciliationInconclusive::IncompletePagination
+                | GroupIssueReconciliationInconclusive::Server
+                | GroupIssueReconciliationInconclusive::InstallationAccess
+                | GroupIssueReconciliationInconclusive::InvalidResponse
+                | GroupIssueReconciliationInconclusive::Transport => {
+                    GroupIssueReconciliationDecision::KeepWaiting
+                }
+            };
+            return GroupIssueReconciliationResolution {
+                decision,
+                issue: None,
+                matching_issue_count: 0,
+            };
+        }
+    };
+    let marker = group_marker_comment(group_key);
+    let mut oldest = None;
+    let mut matching_issue_count = 0;
+    for issue in issues.iter().filter(|issue| {
+        issue.pull_request.is_none()
+            && issue
+                .body
+                .as_deref()
+                .is_some_and(|body| body.contains(&marker))
+    }) {
+        matching_issue_count += 1;
+        if oldest.is_none_or(|current: &GithubIssue| {
+            (issue.created_at, issue.number) < (current.created_at, current.number)
+        }) {
+            oldest = Some(issue);
+        }
+    }
+    GroupIssueReconciliationResolution {
+        decision: if oldest.is_some() {
+            GroupIssueReconciliationDecision::Adopt
+        } else {
+            // A complete REST listing is positive evidence that the canonical
+            // marker is absent. No fuzzy candidate or time delay can replace
+            // that exact-marker check.
+            GroupIssueReconciliationDecision::Release
+        },
+        issue: oldest,
+        matching_issue_count,
+    }
+}
+
+fn reconciliation_inconclusive_reason(
+    error: &GithubIssueListError,
+) -> GroupIssueReconciliationInconclusive {
+    if error.kind() == GithubIssueListFailureKind::PaginationCap {
+        return GroupIssueReconciliationInconclusive::PaginationCap;
+    }
+    if error.page() > 1 {
+        return GroupIssueReconciliationInconclusive::IncompletePagination;
+    }
+    match error.kind() {
+        GithubIssueListFailureKind::RateLimit => GroupIssueReconciliationInconclusive::RateLimit,
+        GithubIssueListFailureKind::Timeout => GroupIssueReconciliationInconclusive::Timeout,
+        GithubIssueListFailureKind::NotFound => GroupIssueReconciliationInconclusive::NotFound,
+        GithubIssueListFailureKind::PaginationCap => {
+            GroupIssueReconciliationInconclusive::PaginationCap
+        }
+        GithubIssueListFailureKind::Installation | GithubIssueListFailureKind::Access => {
+            GroupIssueReconciliationInconclusive::InstallationAccess
+        }
+        GithubIssueListFailureKind::Server => GroupIssueReconciliationInconclusive::Server,
+        GithubIssueListFailureKind::InvalidResponse => {
+            GroupIssueReconciliationInconclusive::InvalidResponse
+        }
+        GithubIssueListFailureKind::Transport => GroupIssueReconciliationInconclusive::Transport,
     }
 }
 
@@ -1762,6 +1862,18 @@ async fn reconcile_group_github_issue(
     workspace_id: Uuid,
     group_key: &str,
 ) -> Result<bool, ApiError> {
+    // External-consistency invariant: only a fully exhausted REST issue listing
+    // may release a quarantined claim. Rate limits, timeouts, 404s (including a
+    // stale renamed/transferred repo), revoked installation access, invalid
+    // responses, and any partial/capped pagination all remain inconclusive.
+    //
+    // ACCEPTED LIMITATIONS: GitHub cannot list a human-deleted issue or one
+    // transferred out of the repository, so a complete listing may look absent
+    // after either action. The five-minute lower-bound skew covers ordinary
+    // clock disagreement, but not larger clock faults. Repository identity is
+    // pinned as owner/name because the current schema does not retain GitHub's
+    // immutable repository id; redirects are followed, while a 404 is retained
+    // for retry rather than treated as absence.
     let checked_at = Utc::now();
     let refresh_cutoff = checked_at - Duration::minutes(GROUP_ISSUE_RECONCILIATION_RETRY_MINUTES);
     let Some(context) =
@@ -1771,30 +1883,43 @@ async fn reconcile_group_github_issue(
         return Ok(false);
     };
 
-    let found = match github
-        .search_issue_by_group_key(context.installation_id, &context.repo_full_name, group_key)
-        .await
-    {
-        Ok(found) => found,
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                %workspace_id,
-                %group_key,
-                repo_full_name = %context.repo_full_name,
-                "GitHub issue reconciliation search failed; claim remains quarantined"
-            );
-            return Ok(true);
-        }
+    let since = context.needs_reconciliation_since
+        - Duration::minutes(GROUP_ISSUE_RECONCILIATION_CLOCK_SKEW_MINUTES);
+    let read = github
+        .reconciliation_issues(context.installation_id, &context.repo_full_name, since)
+        .await;
+    let evidence = match &read {
+        Ok(issues) => GroupIssueReconciliationEvidence::Complete(issues),
+        Err(error) => GroupIssueReconciliationEvidence::Inconclusive(
+            reconciliation_inconclusive_reason(error),
+        ),
     };
+    let resolution = group_issue_reconciliation_resolution(evidence, group_key);
+    if let Err(error) = &read {
+        tracing::warn!(
+            %error,
+            ?resolution.decision,
+            reason = ?reconciliation_inconclusive_reason(error),
+            page = error.page(),
+            %workspace_id,
+            %group_key,
+            repo_full_name = %context.repo_full_name,
+            "GitHub issue reconciliation listing was inconclusive; claim remains quarantined"
+        );
+    }
+    if resolution.matching_issue_count > 1 {
+        tracing::warn!(
+            %workspace_id,
+            %group_key,
+            repo_full_name = %context.repo_full_name,
+            matches = resolution.matching_issue_count,
+            "multiple GitHub issues carry the exact group marker; adopting the oldest"
+        );
+    }
 
-    match group_issue_reconciliation_decision(
-        found.is_some(),
-        context.needs_reconciliation_since,
-        checked_at,
-    ) {
+    match resolution.decision {
         GroupIssueReconciliationDecision::Adopt => {
-            let Some(issue) = found else {
+            let Some(issue) = resolution.issue else {
                 tracing::warn!(
                     %workspace_id,
                     %group_key,
@@ -1805,8 +1930,8 @@ async fn reconcile_group_github_issue(
             let link = GithubIssueLink {
                 repo_full_name: context.repo_full_name,
                 issue_number: issue.number,
-                url: issue.html_url,
-                state: issue.state,
+                url: issue.html_url.clone(),
+                state: issue.state.clone(),
             };
             if !complete_group_issue_reconciliation(
                 &state.pool,
@@ -1814,7 +1939,7 @@ async fn reconcile_group_github_issue(
                 group_key,
                 context.reconciliation_claimed_at,
                 &link,
-                context.current_report_count,
+                context.claim_report_count,
             )
             .await?
             {
@@ -1827,6 +1952,9 @@ async fn reconcile_group_github_issue(
         }
         GroupIssueReconciliationDecision::KeepWaiting => {}
         GroupIssueReconciliationDecision::Release => {
+            // This branch is reachable only from a complete, exhausted REST
+            // listing with no exact canonical marker. Every inconclusive read
+            // resolves to KeepWaiting above and therefore retains the claim.
             if !release_group_issue_reconciliation_claim(
                 &state.pool,
                 workspace_id,
@@ -3724,12 +3852,13 @@ mod page_tests {
     use axum::{body::to_bytes, http::StatusCode};
 
     use super::{
-        ApiError, GroupIssueReconciliationDecision, build_app_router, feedback_discovery,
-        github_callback_redirect_target, group_issue_reconciliation_decision,
-        group_issue_state_refresh_due, group_issue_sync_needed, mcp_auth_error, mcp_tool_allowed,
-        mcp_tools, resolve_web_app_url, reveal_auth_error,
+        ApiError, GithubIssue, GroupIssueReconciliationDecision, GroupIssueReconciliationEvidence,
+        GroupIssueReconciliationInconclusive, build_app_router, feedback_discovery,
+        github_callback_redirect_target, group_issue_reconciliation_resolution,
+        group_issue_state_refresh_due, group_issue_sync_needed, group_marker_comment,
+        mcp_auth_error, mcp_tool_allowed, mcp_tools, resolve_web_app_url, reveal_auth_error,
     };
-    use chrono::{Duration, Utc};
+    use chrono::{Duration, TimeZone as _, Utc};
     use serde_json::{Value, json};
 
     const NON_API_ROUTES: &[&str] = &["GET /"];
@@ -3818,23 +3947,83 @@ mod page_tests {
     }
 
     #[test]
-    fn reconciliation_waits_for_search_lag_before_releasing() {
-        let now = Utc::now();
-        let young = now - Duration::minutes(9);
-        let old = now - Duration::minutes(11);
+    fn reconciliation_release_rule_requires_complete_consistent_evidence() {
+        let absent = group_issue_reconciliation_resolution(
+            GroupIssueReconciliationEvidence::Complete(&[]),
+            "group-a",
+        );
+        assert_eq!(absent.decision, GroupIssueReconciliationDecision::Release);
 
-        assert_eq!(
-            group_issue_reconciliation_decision(true, young, now),
-            GroupIssueReconciliationDecision::Adopt
+        for reason in [
+            GroupIssueReconciliationInconclusive::RateLimit,
+            GroupIssueReconciliationInconclusive::Timeout,
+            GroupIssueReconciliationInconclusive::NotFound,
+            GroupIssueReconciliationInconclusive::PaginationCap,
+            GroupIssueReconciliationInconclusive::IncompletePagination,
+            GroupIssueReconciliationInconclusive::Server,
+            GroupIssueReconciliationInconclusive::InstallationAccess,
+            GroupIssueReconciliationInconclusive::InvalidResponse,
+            GroupIssueReconciliationInconclusive::Transport,
+        ] {
+            let resolution = group_issue_reconciliation_resolution(
+                GroupIssueReconciliationEvidence::Inconclusive(reason),
+                "group-a",
+            );
+            assert_eq!(
+                resolution.decision,
+                GroupIssueReconciliationDecision::KeepWaiting,
+                "{reason:?} must retain the claim"
+            );
+        }
+    }
+
+    #[test]
+    fn reconciliation_adopts_only_exact_markers_and_chooses_the_oldest_issue() {
+        let created_at = |hour| {
+            Utc.with_ymd_and_hms(2026, 7, 31, hour, 0, 0)
+                .single()
+                .expect("fixed reconciliation timestamp should exist")
+        };
+        let issue = |number, body: String, hour, pull_request| GithubIssue {
+            number,
+            html_url: format!("https://github.test/issues/{number}"),
+            state: "open".to_owned(),
+            body: Some(body),
+            created_at: created_at(hour),
+            pull_request,
+        };
+        let exact = group_marker_comment("group-a");
+        let issues = vec![
+            issue(
+                30,
+                format!("copied {}", group_marker_comment("group-b")),
+                1,
+                None,
+            ),
+            issue(20, format!("body {exact}"), 3, None),
+            issue(10, format!("body {exact}"), 2, None),
+            issue(
+                5,
+                format!("pull request {exact}"),
+                0,
+                Some(serde_json::json!({})),
+            ),
+        ];
+        let resolution = group_issue_reconciliation_resolution(
+            GroupIssueReconciliationEvidence::Complete(&issues),
+            "group-a",
         );
-        assert_eq!(
-            group_issue_reconciliation_decision(false, young, now),
-            GroupIssueReconciliationDecision::KeepWaiting
+        assert_eq!(resolution.decision, GroupIssueReconciliationDecision::Adopt);
+        assert_eq!(resolution.matching_issue_count, 2);
+        assert_eq!(resolution.issue.map(|issue| issue.number), Some(10));
+
+        let mismatch_only = &issues[..1];
+        let mismatch = group_issue_reconciliation_resolution(
+            GroupIssueReconciliationEvidence::Complete(mismatch_only),
+            "group-a",
         );
-        assert_eq!(
-            group_issue_reconciliation_decision(false, old, now),
-            GroupIssueReconciliationDecision::Release
-        );
+        assert_ne!(mismatch.decision, GroupIssueReconciliationDecision::Adopt);
+        assert!(mismatch.issue.is_none());
     }
 
     #[test]
