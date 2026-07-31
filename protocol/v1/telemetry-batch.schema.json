@@ -21,12 +21,22 @@
           "statusCode": { "type": "integer", "minimum": 100, "maximum": 599 },
           "durationMs": { "type": "integer", "minimum": 0 },
           "sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
-          "customerRef": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "customerRef": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": "^[A-Za-z0-9_.:-]+$"
+          },
           "classification": { "enum": ["unclassified", "confirmed"] },
           "confirmationMethod": { "enum": ["mcp"] },
           "runtimeHint": { "type": "string", "minLength": 1, "maxLength": 200 },
           "runtimeHintSource": { "enum": ["http", "mcp"] },
-          "sessionRef": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "sessionRef": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": "^[A-Za-z0-9_.:-]+$"
+          },
           "sessionSource": { "enum": ["customer", "mcp", "continuation"] },
           "occurredAt": { "type": "string", "format": "date-time" }
         }
