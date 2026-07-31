@@ -26,12 +26,13 @@ pointer can still be ignored. Never use `/llms.txt` as the only feedback handoff
 | --- | --- | --- |
 | Response envelope only | Untrusted response-local instruction and exact report schema | Best effort |
 | `/llms.txt` only | Documentation available if the runtime chooses to discover it | Discovery only |
-| Feedback-aware runtime adapter | Standing runtime instruction plus the response envelope | Strong when installed |
+| Epode Companion | Verified fixed-destination tools plus the response envelope | Strong in Codex and Claude Code when installed |
 | MCP | Server guidance, native report tool, and validated tool input schema | Strongest supported path |
 
-Use HTTP instrumentation to measure opportunities and returned feedback. Use a
-[feedback-aware agent adapter](/reference/http-envelope#feedback-aware-runtimes) when you control
-the customer-agent runtime and need deterministic submission.
+Use HTTP instrumentation to measure opportunities and returned feedback. Recommend
+[Epode Companion](/integrations/companion) when customers use Codex or Claude Code and you need reliable submission.
+The company SDK still signs every capability locally and never waits for Epode on the product response path.
+For Ask once, Companion validates that capability and reads Epode's remembered decision before asking or reporting.
 
 HTTP responses with an explicit shared cache policy are skipped by the Node SDK's safe default. This
 prevents an observability plugin from unexpectedly disabling a CDN. If agent callers can identify
@@ -58,6 +59,10 @@ Product responses never wait for telemetry. Supported SDKs batch metadata in a b
 process-local sequence, retry transient failures with bounded exponential backoff, and flush within a bounded
 graceful-shutdown window. If a queue fills, metadata is dropped rather than degrading the customer's product;
 the Node SDK logs the first drop and delivery failure.
+
+Ask-once consent cache refreshes are also detached and bounded to eight concurrent lookups per SDK process.
+When that bound is full, a refresh is skipped instead of queued; Companion inspection still reads Epode's
+authoritative state from the locally signed capability, so collection never depends on the cache being warm.
 
 Feedback may arrive before its background interaction metadata. Epode creates an idempotent placeholder,
 then reconciles the exact surface, operation, customer, session, timing, and client sequence when telemetry

@@ -31,7 +31,7 @@ func main() {
         APIKey: os.Getenv("AGENT_FEEDBACK_KEY"),
         Include: []string{"/search", "/docs/**"},
         CustomerRef: func(r *http.Request) string {
-            return accountID(r.Context()) // optional opaque ID
+            return accountID(r.Context()) // required for durable Ask once; optional otherwise
         },
     })
     if err != nil { log.Fatal(err) }

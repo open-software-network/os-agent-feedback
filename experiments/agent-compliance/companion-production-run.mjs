@@ -275,10 +275,6 @@ async function prepareWorkspace(runtime) {
   return cwd;
 }
 
-function sqlLiteral(value) {
-  return `'${value.replaceAll("'", "''")}'`;
-}
-
 async function databaseRows(customerRefs) {
   const variables = await command(
     "railway",
@@ -288,13 +284,35 @@ async function databaseRows(customerRefs) {
   );
   if (variables.code !== 0) throw new Error(`Railway variables failed: ${variables.stderr}`);
   const databaseUrl = JSON.parse(variables.stdout).DATABASE_PUBLIC_URL;
-  const refs = customerRefs.map(sqlLiteral).join(",");
-  const sql = `SELECT i.customer_ref, COUNT(DISTINCT i.id), COUNT(r.id) FROM interactions_v2 i LEFT JOIN feedback_reports r ON r.interaction_id = i.id WHERE i.customer_ref IN (${refs}) GROUP BY i.customer_ref ORDER BY i.customer_ref`;
+  const script = `
+import json
+import os
+import psycopg
+
+refs = json.loads(os.environ["EPODE_CUSTOMER_REFS"])
+with psycopg.connect(os.environ["DATABASE_PUBLIC_URL"]) as connection:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """SELECT i.customer_ref, COUNT(DISTINCT i.id), COUNT(r.id)
+               FROM interactions_v2 i
+               LEFT JOIN feedback_reports r ON r.interaction_id = i.id
+               WHERE i.customer_ref = ANY(%s)
+               GROUP BY i.customer_ref
+               ORDER BY i.customer_ref""",
+            (refs,),
+        )
+        for customer_ref, interactions, reports in cursor:
+            print(f"{customer_ref}\\t{interactions}\\t{reports}")
+`;
   const query = await command(
-    "docker",
-    ["run", "--rm", "postgres:17-alpine", "psql", databaseUrl, "-At", "-F", "\t", "-c", sql],
+    "uv",
+    ["run", "--quiet", "--with", "psycopg[binary]", "python", "-c", script],
     process.cwd(),
     120_000,
+    {
+      DATABASE_PUBLIC_URL: databaseUrl,
+      EPODE_CUSTOMER_REFS: JSON.stringify(customerRefs),
+    },
   );
   if (query.code !== 0) throw new Error(`Production database query failed: ${query.stderr}`);
   return new Map(

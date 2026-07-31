@@ -23,7 +23,7 @@ client and cannot sign feedback capabilities.
 | `include` | Route patterns that receive feedback contracts |
 | `feedbackMode` / `feedback_mode` | Explicit mode override |
 | `customerRef` / `customer_ref` | Stable opaque product-auth account or tenant ID; required for durable Ask once |
-| `consentTimeoutMs` / `consent_timeout` / `AGENT_FEEDBACK_CONSENT_TIMEOUT_MS` | Bounded Ask once state lookup on a cache miss (default 750 ms) |
+| `consentTimeoutMs` / `consent_timeout` / `AGENT_FEEDBACK_CONSENT_TIMEOUT_MS` | Timeout for optional consent-cache warming or protocol-specific lookups (default 750 ms). HTTP product responses never await it. |
 | `endpoint` | Override Epode origin in tests |
 
 ## Route patterns

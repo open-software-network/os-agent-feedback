@@ -15,6 +15,7 @@ import {
 type RequestState = {
   started: number;
   prepared?: PreparedInteraction;
+  instrumentationSkipped?: boolean;
   surface?: ProductSurface;
   operation?: string;
   context: { customerRef?: string; sessionRef?: string; runtimeHint?: string };
@@ -32,15 +33,15 @@ export function agentFeedback(
   const states = new WeakMap<object, RequestState>();
 
   const implementation = async (app: FastifyInstance) => {
-    app.addHook("onRequest", async (request) => {
+    app.addHook("onRequest", (request, _reply, done) => {
       const context = runtime.context(request);
+      const matched = runtime.matches(request.url);
       states.set(request, {
         started: performance.now(),
         context,
-        consentState: runtime.matches(request.url)
-          ? await runtime.resolveConsent(context.customerRef)
-          : "unavailable",
+        consentState: matched ? runtime.cachedConsent(context.customerRef) : "unavailable",
       });
+      done();
     });
 
     const attach = (
@@ -55,7 +56,7 @@ export function agentFeedback(
     ): RequestState | undefined => {
       const state = states.get(request);
       if (!state) return undefined;
-      if (state.prepared) return state;
+      if (state.instrumentationSkipped) return undefined;
       if (
         reply.statusCode < 200 ||
         reply.statusCode >= 300 ||
@@ -64,6 +65,7 @@ export function agentFeedback(
       ) {
         return undefined;
       }
+      if (state.prepared) return state;
       if (
         !runtime.shouldInstrumentHttp({
           request,
@@ -101,6 +103,8 @@ export function agentFeedback(
     app.addHook("preSerialization", async (request, reply, payload) => {
       if (isPlainObject(payload)) {
         if (Object.hasOwn(payload, "_agentFeedback")) {
+          const state = states.get(request);
+          if (state) state.instrumentationSkipped = true;
           runtime.logger.warn(
             "[agent-feedback] Response already contains _agentFeedback; instrumentation was skipped.",
           );
@@ -120,7 +124,12 @@ export function agentFeedback(
         const prepared = attach(request, reply, "http_html", payload)?.prepared;
         return prepared?.envelope ? injectHtml(payload, prepared.envelope) : payload;
       }
-      if (!states.get(request)?.prepared && contentType.includes("application/json")) {
+      const state = states.get(request);
+      if (
+        !state?.prepared &&
+        !state?.instrumentationSkipped &&
+        contentType.includes("application/json")
+      ) {
         const state = attach(request, reply, "http_headers", payload);
         if (state?.prepared) headers(reply, state.prepared);
       }
@@ -129,7 +138,15 @@ export function agentFeedback(
 
     app.addHook("onResponse", async (request, reply) => {
       const state = states.get(request);
-      if (!state?.prepared || !state.surface || !state.operation) return;
+      if (
+        !state?.prepared ||
+        !state.surface ||
+        !state.operation ||
+        reply.statusCode < 200 ||
+        reply.statusCode >= 300
+      ) {
+        return;
+      }
       runtime.record(state.prepared, {
         surface: state.surface,
         operation: state.operation,
@@ -142,6 +159,7 @@ export function agentFeedback(
         sessionRef: state.context.sessionRef,
         sessionSource: state.context.sessionRef ? "customer" : undefined,
       });
+      runtime.warmConsent(state.context.customerRef);
     });
 
     app.addHook("onClose", async () => runtime.shutdown());

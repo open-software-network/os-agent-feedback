@@ -28,17 +28,15 @@ export type AgentFeedbackExpress = RequestHandler & {
 export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeedbackExpress {
   const runtime = new AgentFeedbackRuntime(options);
 
-  const middleware = (async (
-    request: InstrumentedRequest,
-    response: Response,
-    next: NextFunction,
-  ) => {
+  const middleware = ((request: InstrumentedRequest, response: Response, next: NextFunction) => {
     const started = performance.now();
     const requestContext = runtime.context(request);
-    const consentState = runtime.matches(request.originalUrl || request.url)
-      ? await runtime.resolveConsent(requestContext.customerRef)
+    const matched = runtime.matches(request.originalUrl || request.url);
+    const consentState = matched
+      ? runtime.cachedConsent(requestContext.customerRef)
       : "unavailable";
     let instrumentation: Instrumentation | undefined;
+    let instrumentationSkipped = false;
     let recorded = false;
     const originalJson = response.json.bind(response);
     const originalSend = response.send.bind(response);
@@ -50,7 +48,6 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
     };
 
     const attach = (surface: ProductSurface, body?: unknown): Instrumentation | undefined => {
-      if (instrumentation) return instrumentation;
       if (
         response.statusCode < 200 ||
         response.statusCode >= 300 ||
@@ -59,6 +56,7 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
       ) {
         return undefined;
       }
+      if (instrumentation) return instrumentation;
       if (
         !runtime.shouldInstrumentHttp({
           request,
@@ -95,6 +93,7 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
     response.json = ((body: unknown) => {
       if (isPlainObject(body)) {
         if (Object.hasOwn(body, "_agentFeedback")) {
+          instrumentationSkipped = true;
           runtime.logger.warn(
             "[agent-feedback] Response already contains _agentFeedback; instrumentation was skipped.",
           );
@@ -121,6 +120,7 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
         );
       }
       if (
+        !instrumentationSkipped &&
         !instrumentation &&
         contentType.includes("application/json") &&
         (typeof body === "string" || body === null)
@@ -132,7 +132,9 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
     }) as Response["send"];
 
     response.once("finish", () => {
-      if (!instrumentation || recorded) return;
+      if (!instrumentation || recorded || response.statusCode < 200 || response.statusCode >= 300) {
+        return;
+      }
       recorded = true;
       runtime.record(instrumentation.prepared, {
         surface: instrumentation.surface,
@@ -146,6 +148,7 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
         sessionRef: requestContext.sessionRef,
         sessionSource: requestContext.sessionRef ? "customer" : undefined,
       });
+      runtime.warmConsent(requestContext.customerRef);
     });
 
     next();

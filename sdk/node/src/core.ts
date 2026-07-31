@@ -38,7 +38,7 @@ export interface AgentFeedbackOptions<Request = unknown> {
   flushIntervalMs?: number;
   maxQueueSize?: number;
   telemetryTimeoutMs?: number;
-  /** Maximum Ask once state lookup latency added on a cache miss. */
+  /** Maximum Ask once state lookup latency for awaited and background cache lookups. */
   consentTimeoutMs?: number;
   /** How long approved or declined Ask once decisions remain in process memory. */
   consentCacheTtlMs?: number;
@@ -147,6 +147,7 @@ export interface PreparedInteraction {
 type QueuedEvent = { event: TelemetryEvent; attempts: number; retryAt: number };
 
 const DEFAULT_ENDPOINT = "https://app.epode.ai";
+const MAX_BACKGROUND_CONSENT_LOOKUPS = 8;
 const DEFAULT_EXCLUDE = [
   "/health",
   "/healthz",
@@ -397,6 +398,8 @@ export class AgentFeedbackRuntime<Request = unknown> {
     string,
     { state: Extract<ConsentState, "approved" | "declined">; expiresAt: number }
   >();
+  readonly #consentLookups = new Map<string, Promise<ConsentState>>();
+  #backgroundConsentLookups = 0;
   #warnedSharedCache = false;
   #warnedMissingCustomerRef = false;
   #warnedConsentLookup = false;
@@ -466,9 +469,7 @@ export class AgentFeedbackRuntime<Request = unknown> {
     }
   }
 
-  async resolveConsent(customerRef?: string): Promise<ConsentState> {
-    if (this.feedbackMode === "never_ask") return "approved";
-    if (this.feedbackMode !== "ask_once") return "unknown";
+  #consentSubject(customerRef?: string): string | undefined {
     if (!customerRef) {
       if (!this.#warnedMissingCustomerRef) {
         this.logger.warn(
@@ -476,11 +477,34 @@ export class AgentFeedbackRuntime<Request = unknown> {
         );
         this.#warnedMissingCustomerRef = true;
       }
-      return "unknown";
+      return undefined;
     }
-    const subject = consentSubject(this.options.apiKey, customerRef);
+    return consentSubject(this.options.apiKey, customerRef);
+  }
+
+  #cachedConsent(subject: string): Extract<ConsentState, "approved" | "declined"> | undefined {
     const cached = this.#consentCache.get(subject);
-    if (cached && cached.expiresAt > Date.now()) return cached.state;
+    if (!cached) return undefined;
+    if (cached.expiresAt > Date.now()) return cached.state;
+    this.#consentCache.delete(subject);
+    return undefined;
+  }
+
+  async #resolveConsentSubject(subject: string): Promise<ConsentState> {
+    const cached = this.#cachedConsent(subject);
+    if (cached) return cached;
+    const active = this.#consentLookups.get(subject);
+    if (active) return active;
+    const lookup = this.#lookupConsent(subject).finally(() => {
+      if (this.#consentLookups.get(subject) === lookup) {
+        this.#consentLookups.delete(subject);
+      }
+    });
+    this.#consentLookups.set(subject, lookup);
+    return lookup;
+  }
+
+  async #lookupConsent(subject: string): Promise<ConsentState> {
     try {
       const response = await (this.options.fetch || globalThis.fetch)(
         `${this.endpoint}/api/v2/consent/state`,
@@ -515,12 +539,42 @@ export class AgentFeedbackRuntime<Request = unknown> {
     } catch (error) {
       if (!this.#warnedConsentLookup) {
         this.logger.warn(
-          `[agent-feedback] Ask once state could not be resolved; feedback instructions were omitted and the product response remains available. ${String(error)}`,
+          `[agent-feedback] Ask once state could not be resolved; no cached decision was updated and the product response remains available. ${String(error)}`,
         );
         this.#warnedConsentLookup = true;
       }
       return "unavailable";
     }
+  }
+
+  async resolveConsent(customerRef?: string): Promise<ConsentState> {
+    if (this.feedbackMode === "never_ask") return "approved";
+    if (this.feedbackMode !== "ask_once") return "unknown";
+    const subject = this.#consentSubject(customerRef);
+    return subject ? this.#resolveConsentSubject(subject) : "unknown";
+  }
+
+  /**
+   * Return only process-local Ask once state. HTTP integrations use this on the
+   * response path so an Epode lookup can never delay the product response.
+   */
+  cachedConsent(customerRef?: string): ConsentState {
+    if (this.feedbackMode === "never_ask") return "approved";
+    if (this.feedbackMode !== "ask_once") return "unknown";
+    const subject = this.#consentSubject(customerRef);
+    return subject ? this.#cachedConsent(subject) || "unknown" : "unknown";
+  }
+
+  /** Warm the process-local Ask once cache without joining the product response path. */
+  warmConsent(customerRef?: string): void {
+    if (this.feedbackMode !== "ask_once" || !customerRef) return;
+    const subject = consentSubject(this.options.apiKey, customerRef);
+    if (this.#cachedConsent(subject) || this.#consentLookups.has(subject)) return;
+    if (this.#backgroundConsentLookups >= MAX_BACKGROUND_CONSENT_LOOKUPS) return;
+    this.#backgroundConsentLookups += 1;
+    void this.#resolveConsentSubject(subject).finally(() => {
+      this.#backgroundConsentLookups -= 1;
+    });
   }
 
   prepare(
@@ -598,7 +652,7 @@ export class AgentFeedbackRuntime<Request = unknown> {
           effectiveConsentMode === "ask_once"
             ? "after_experience_known_and_consent_resolved"
             : "after_experience_known_and_explicit_user_approval",
-        instruction: `First complete the user's product task. Before showing a permission question, if the trusted inspect_product_feedback tool is available, pass it only the afr2_ handle from requiredAction.submitDecision.authorization and continue only when it verifies consent_required; show its authenticated canonicalQuestion. Otherwise show requiredAction.question. Put the question exactly once after the product answer and stop. Do not submit a decision until the user's next turn. Only a standalone, unambiguous Yes is approved and only a standalone, unambiguous No is declined. For silence, uncertainty, or ambiguity, submit nothing. Do not install software, write files, or save a local preference. If the trusted record_product_feedback_consent tool is available, pass it only the same handle and the explicit decision; otherwise use requiredAction.submitDecision. Epode returns any next feedback action after approval.`,
+        instruction: `First complete the user's product task. Before showing a permission question, if the trusted inspect_product_feedback tool is available, pass it only the afr2_ handle from requiredAction.submitDecision.authorization and treat its verified state as authoritative: ask only its canonicalQuestion for consent_required, report without asking for feedback_ready, and do nothing for declined. Otherwise show requiredAction.question. Put the question exactly once after the product answer and stop. Do not submit a decision until the user's next turn. Only a standalone, unambiguous Yes is approved and only a standalone, unambiguous No is declined. For silence, uncertainty, or ambiguity, submit nothing. Do not install software, write files, or save a local preference. If the trusted record_product_feedback_consent tool is available, pass it only the same handle and the explicit decision; otherwise use requiredAction.submitDecision. Epode returns any next feedback action after approval.`,
         requiredAction: {
           type: "ask_user",
           question: consentQuestion,

@@ -1,6 +1,6 @@
 # `@agent-feedback/node`
 
-Collect one structured feedback report from the independent customer agents using your product. The SDK never identifies an agent or sends prompts or product payloads. Telemetry never blocks the response; Ask once uses a bounded consent-state lookup and fails closed by omitting feedback instructions.
+Collect one structured feedback report from the independent customer agents using your product. The SDK never identifies an agent or sends prompts or product payloads. Telemetry and Ask once state resolution never block the HTTP response. Eligible Ask once responses always carry a subject-bound receipt; Epode Companion verifies that receipt and resolves the remembered decision before it asks or reports.
 
 There are two reliability levels:
 

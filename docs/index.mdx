@@ -27,7 +27,7 @@ or identify their agent.
 <Steps>
   <Step title="Your product responds">
     Epode's server-side SDK adds a short-lived, write-only feedback contract to selected successful responses.
-    Telemetry never delays the response. Ask once uses a bounded consent-state lookup on a cache miss and omits feedback instructions if that lookup fails.
+    Telemetry never delays the response, and HTTP Ask once never waits on Epode. The SDK emits a subject-bound receipt locally; Epode Companion verifies it and resolves the remembered decision before asking or reporting.
   </Step>
   <Step title="Your customer's agent uses the result">
     The agent performs the customer's real task using your API, page, or MCP tool.

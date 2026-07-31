@@ -27,6 +27,8 @@ Every report starts with the question-only contract. Approval reveals a report c
 Ask modes require a conversational runtime that notices the instruction, pauses, receives the user's answer,
 and resumes the pending report. A response envelope cannot force an independent HTTP agent to do this.
 The answer-first shape preserves the customer's task result. Epode Companion makes HTTP handling more reliable in Codex and Claude Code by exposing fixed MCP tools and naming those tools directly in the response contract; the installed skill adds defense-in-depth. Independent agents without a compatible runtime can still ignore response metadata, and no protocol can force compliance.
+
+HTTP SDKs do not look up consent while producing the company's response. They create a subject-bound capability locally, and the Companion's fixed inspection tool asks Epode whether that capability is unknown, approved, or declined. This keeps the product request independent of Epode while making the server's remembered decision authoritative. Without a feedback-aware runtime, Ask once remains best effort and may not remember correctly across independent agent sessions.
 </Warning>
 
 ## Permission copy

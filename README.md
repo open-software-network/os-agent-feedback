@@ -2,7 +2,7 @@
 
 Epode tells companies whether their product actually worked for the independent customer agents using it.
 
-A company instruments selected API, website, or MCP surfaces once. Every SDK creates a short-lived, write-only interaction receipt locally and adds the same feedback contract to eligible successful responses. Telemetry is always asynchronous. Ask once performs a bounded consent-state lookup on a cache miss and safely omits feedback instructions if Epode is unavailable. After the customer agent understands the product's contribution, it can submit:
+A company instruments selected API, website, or MCP surfaces once. Every SDK creates a short-lived, write-only interaction receipt locally and adds the same feedback contract to eligible successful responses. Telemetry is always asynchronous, and HTTP responses never wait on Epode. In Ask once mode, the receipt carries an opaque subject so Epode Companion can resolve the remembered decision through its trusted inspection tool. After the customer agent understands the product's contribution, it can submit:
 
 ```json
 {

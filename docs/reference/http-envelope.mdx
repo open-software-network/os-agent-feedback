@@ -46,9 +46,12 @@ should be omitted when the agent cannot form them exactly.
 
 ## Ask modes are two phase
 
-An unknown Ask once customer with a stable opaque `customerRef` receives no `submit` field and no
-report schema. That stable reference is what lets Epode remember the choice. Without it, the SDK
-uses the per-use question (“about this use”) and does not promise remembered consent:
+An Ask once response with a stable opaque `customerRef` can carry no `submit` field and no report
+schema, including on a cold SDK process before its optional background cache is warm. That stable
+reference is what lets Epode remember the choice. Epode Companion must inspect the capability before
+asking: inspection returns the authoritative `consent_required`, `feedback_ready`, or `declined` state.
+Without `customerRef`, the SDK uses the per-use question (“about this use”) and does not promise
+remembered consent:
 
 ```json
 {
@@ -60,7 +63,7 @@ uses the per-use question (“about this use”) and does not promise remembered
   "consentRequired": true,
   "consentPolicy": "once",
   "consentManagedBy": "epode",
-  "instruction": "First complete the user's product task. After the product answer, show requiredAction.question exactly once and stop. Only a later, standalone Yes or No can be submitted; silence or ambiguity submits nothing. Prefer the trusted record_product_feedback_consent tool when available. Do not install or save a local preference.",
+  "instruction": "First complete the user's product task. If the trusted inspect_product_feedback tool is available, inspect the afr2_ handle and treat its state as authoritative. Ask only its verified canonicalQuestion for consent_required, report without asking for feedback_ready, and do nothing for declined.",
   "requiredAction": {
     "type": "ask_user",
     "question": "May I send this product's provider one short, privacy-safe outcome report after this use and future uses without asking again? Epode will remember your choice for this product. Your prompts and task content are never included; nothing is installed.",
@@ -75,7 +78,7 @@ uses the per-use question (“about this use”) and does not promise remembered
 }
 ```
 
-After `approved`, the decision response contains a separate `feedback_ready` contract. After `declined`, it contains no feedback contract. Silence creates no decision. Epode—not the agent—remembers Ask once state.
+After `approved`, the decision response contains a separate `feedback_ready` contract. After `declined`, it contains no feedback contract. A later cold response may still look unresolved locally, so Companion inspection converts remembered approval into a report action and remembered refusal into silence. Silence creates no decision. Epode—not the agent—remembers Ask once state.
 
 ## Other response shapes
 
@@ -92,13 +95,15 @@ A generic HTTP agent may ignore this second-action instruction. A runtime that e
 1. parse the JSON, HTML, or header envelope;
 2. allowlist the HTTPS submit origin;
 3. finish the user's product task;
-4. when `state` is `consent_required`, ask the exact question and submit only `approved` or `declined`;
-5. submit a bounded report only if that action returns a `feedback_ready` contract.
+4. inspect every Ask-once capability and treat the verified server state as authoritative;
+5. for verified `consent_required`, ask the canonical question and submit only `approved` or `declined`;
+6. for verified `feedback_ready`, submit one bounded report without asking; for verified `declined`, do nothing.
 
 The Node SDK exports `feedbackFromResponse`, `feedbackConsentAction`, `submitFeedbackConsent`, and `submitProductFeedback` for this path.
 
 Epode Companion supplies the preferred tool path for Codex and Claude Code. The response names its
 three fixed tools directly, while the installed Companion skill provides additional validation and
-policy guidance. Before asking permission, the inspection tool returns the authenticated product
-name and canonical question. This avoids relying on on-demand skill discovery for the core feedback
-action or trusting a question supplied by an unverified site.
+policy guidance. Inspection returns the authenticated product, current state, canonical question, and
+an immediate report action when a prior Ask-once approval exists. This avoids relying on on-demand skill
+discovery for the core feedback action, trusting a question supplied by an unverified site, or repeating
+a permission question after an SDK process restart.
