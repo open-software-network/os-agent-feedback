@@ -308,24 +308,38 @@ async fn main() -> anyhow::Result<()> {
     // what makes running this on every boot cheap and idempotent.
     let backfill_pool = pool.clone();
     tokio::spawn(async move {
-        match backfill_report_groups(&backfill_pool, &FingerprintGrouper, None).await {
-            Ok(summary) => {
-                if summary.scanned > 0 {
-                    tracing::info!(
-                        scanned = summary.scanned,
-                        grouped = summary.grouped,
-                        skipped = summary.skipped,
-                        skipped_findings = summary.skipped_findings,
-                        "startup report group backfill completed"
+        // Transient database errors must not strand ungrouped reports until
+        // the next boot: retry with capped exponential backoff. The work is
+        // idempotent (`group_id IS NULL`), so re-running after a partial
+        // failure is always safe.
+        let max_backoff = std::time::Duration::from_mins(5);
+        let mut backoff = std::time::Duration::from_secs(1);
+        loop {
+            match backfill_report_groups(&backfill_pool, &FingerprintGrouper, None).await {
+                Ok(summary) => {
+                    if summary.scanned > 0 {
+                        tracing::info!(
+                            scanned = summary.scanned,
+                            grouped = summary.grouped,
+                            skipped = summary.skipped,
+                            skipped_findings = summary.skipped_findings,
+                            "startup report group backfill completed"
+                        );
+                    }
+                    break;
+                }
+                // Never escalate to the process: the API is useful without
+                // grouping. Retry from wherever this run stopped.
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error.message,
+                        retry_in_secs = backoff.as_secs(),
+                        "startup report group backfill failed; retrying"
                     );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(max_backoff);
                 }
             }
-            // Never escalate: the API is useful without grouping and the next
-            // boot retries from wherever this run stopped.
-            Err(error) => tracing::error!(
-                error = %error.message,
-                "startup report group backfill failed; continuing without it"
-            ),
         }
     });
 
