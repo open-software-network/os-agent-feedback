@@ -3,27 +3,36 @@
     reason = "crate-restricted visibility satisfies unreachable_pub in this binary-only crate"
 )]
 
+use std::collections::BTreeMap;
+
 use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{Acquire, Executor, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
     error::ApiError,
+    github::validate_repo_full_name,
+    grouping::{GroupInput, ReportGrouper},
+    issue_template::{
+        IssueCount, IssueFindingRollup, IssueTemplateData, contains_sensitive_report_text,
+    },
     models::{
         ApiKeyPublic, CapabilityInspectionResponse, ConsentDecisionInput, ConsentStateInput,
         ConsentStateResponse, CreateProductInput, CreateTeamInvitationInput, DashboardContext,
         DashboardData, DashboardListState, DashboardSessionDetail, DeleteProductInput,
-        FeedbackInteractionItem, FeedbackInteractionsPage, FeedbackListInteractionsInput,
-        FeedbackListReportsInput, FeedbackOperationSummary, FeedbackReportItem,
-        FeedbackReportsPage, FeedbackReportsResponse, FeedbackSummary, FeedbackSurfaceSummary,
-        FeedbackWindow, InsightCount, Insights, InteractionTelemetryInput, PolicyInput, Product,
-        ProductAuth, ProductEnvironment, ProductFeedbackReport, ProductFeedbackReportInput,
-        ProductFeedbackReportWithInteraction, ProductInteraction, ProductSession, TeamInvitation,
-        TeamMember, TelemetryBatchInput, TelemetryBatchResult, UpdateFeedbackWorkflowInput,
-        UpdateNameInput, UpdateTeamMemberInput, Workspace, WorkspaceMembership,
+        FeedbackFindingInput, FeedbackInteractionItem, FeedbackInteractionsPage,
+        FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackOperationSummary,
+        FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse, FeedbackSummary,
+        FeedbackSurfaceSummary, FeedbackWindow, GithubIssueLink, InsightCount, Insights,
+        InteractionTelemetryInput, MergeReportGroupsResponse, PolicyInput, Product, ProductAuth,
+        ProductEnvironment, ProductFeedbackReport, ProductFeedbackReportInput,
+        ProductFeedbackReportWithInteraction, ProductGithubRepo, ProductGithubRepoInput,
+        ProductInteraction, ProductReportGroup, ProductSession, TeamInvitation, TeamMember,
+        TelemetryBatchInput, TelemetryBatchResult, UpdateFeedbackWorkflowInput, UpdateNameInput,
+        UpdateTeamMemberInput, Workspace, WorkspaceMembership,
     },
     os_accounts::OsUser,
     security::{
@@ -31,6 +40,84 @@ use crate::{
         verify_capability,
     },
 };
+
+#[derive(Debug, sqlx::FromRow)]
+pub(crate) struct GithubInstallationRow {
+    pub(crate) id: Uuid,
+    pub(crate) installation_id: i64,
+    pub(crate) account_login: String,
+    pub(crate) account_type: String,
+    pub(crate) created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct GroupGithubIssueRow {
+    pub(crate) repo_full_name: String,
+    pub(crate) issue_number: i64,
+    pub(crate) url: String,
+    pub(crate) state: String,
+}
+
+impl GroupGithubIssueRow {
+    pub(crate) fn link(&self) -> GithubIssueLink {
+        GithubIssueLink {
+            repo_full_name: self.repo_full_name.clone(),
+            issue_number: self.issue_number,
+            url: self.url.clone(),
+            state: self.state.clone(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct GroupIssueContext {
+    pub(crate) merged_into_group_key: Option<String>,
+    pub(crate) installation_id: Option<i64>,
+    pub(crate) repo_full_name: Option<String>,
+    pub(crate) installation_active: bool,
+    pub(crate) template: IssueTemplateData,
+}
+
+#[derive(Debug)]
+pub(crate) struct ListedProductGroup {
+    pub(crate) group: ProductReportGroup,
+    pub(crate) last_commented_report_count: Option<i64>,
+    pub(crate) state_refreshed_at: Option<DateTime<Utc>>,
+    pub(crate) needs_reconciliation: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct ProductGroupPage {
+    pub(crate) groups: Vec<ListedProductGroup>,
+    pub(crate) has_more: bool,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub(crate) struct GroupIssueSyncContext {
+    pub(crate) installation_id: i64,
+    pub(crate) repo_full_name: String,
+    pub(crate) issue_number: i64,
+    pub(crate) observed_report_count: i64,
+    pub(crate) current_report_count: i64,
+    pub(crate) earliest_new_occurred_at: Option<DateTime<Utc>>,
+    pub(crate) latest_new_occurred_at: Option<DateTime<Utc>>,
+    pub(crate) state_refreshed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub(crate) struct GroupIssueReconciliationContext {
+    pub(crate) installation_id: i64,
+    pub(crate) repo_full_name: String,
+    pub(crate) needs_reconciliation_since: DateTime<Utc>,
+    pub(crate) reconciliation_claimed_at: DateTime<Utc>,
+    pub(crate) claim_report_count: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GithubInstallationUpsert {
+    Bound,
+    ConflictingWorkspace,
+}
 
 pub(crate) fn clean(value: &str, max: usize) -> String {
     value
@@ -90,6 +177,1215 @@ fn validated_name(value: &str, entity: &str) -> Result<String, ApiError> {
         )));
     }
     Ok(name)
+}
+
+pub(crate) async fn upsert_github_installation(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    installation_id: i64,
+    login: &str,
+    account_type: &str,
+) -> Result<GithubInstallationUpsert, ApiError> {
+    let result = sqlx::query(
+        r"INSERT INTO github_installations
+        (id, workspace_id, installation_id, account_login, account_type)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (installation_id) DO UPDATE SET
+          account_login = EXCLUDED.account_login,
+          account_type = EXCLUDED.account_type,
+          revoked_at = NULL
+        WHERE github_installations.workspace_id = EXCLUDED.workspace_id",
+    )
+    .bind(Uuid::new_v4())
+    .bind(workspace_id)
+    .bind(installation_id)
+    .bind(login)
+    .bind(account_type)
+    .execute(pool)
+    .await?;
+    Ok(if result.rows_affected() == 0 {
+        GithubInstallationUpsert::ConflictingWorkspace
+    } else {
+        GithubInstallationUpsert::Bound
+    })
+}
+
+pub(crate) async fn revoke_github_installation(
+    pool: &PgPool,
+    installation_id: i64,
+) -> Result<(), ApiError> {
+    sqlx::query("UPDATE github_installations SET revoked_at = NOW() WHERE installation_id = $1")
+        .bind(installation_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn list_github_installations(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Vec<GithubInstallationRow>, ApiError> {
+    Ok(sqlx::query_as::<_, GithubInstallationRow>(
+        r"SELECT id, installation_id, account_login, account_type, created_at
+        FROM github_installations
+        WHERE workspace_id = $1 AND revoked_at IS NULL
+        ORDER BY account_login, installation_id",
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+pub(crate) async fn github_installation_workspace(
+    pool: &PgPool,
+    installation_id: i64,
+) -> Result<Option<Uuid>, ApiError> {
+    Ok(sqlx::query_scalar(
+        "SELECT workspace_id FROM github_installations WHERE installation_id = $1",
+    )
+    .bind(installation_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+pub(crate) async fn ensure_product_in_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+) -> Result<(), ApiError> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM products WHERE id = $1 AND workspace_id = $2)",
+    )
+    .bind(product_id)
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
+    if exists {
+        Ok(())
+    } else {
+        Err(ApiError::not_found("Product not found for this team"))
+    }
+}
+
+pub(crate) async fn set_product_github_repo(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    input: &ProductGithubRepoInput,
+) -> Result<ProductGithubRepo, ApiError> {
+    validate_repo_full_name(&input.repo_full_name)
+        .map_err(|_| ApiError::bad_request("Repository name must use the owner/name form"))?;
+    ensure_product_in_workspace(pool, workspace_id, product_id).await?;
+    let installation_exists: bool = sqlx::query_scalar(
+        r"SELECT EXISTS(
+          SELECT 1 FROM github_installations
+          WHERE installation_id = $1 AND workspace_id = $2 AND revoked_at IS NULL
+        )",
+    )
+    .bind(input.installation_id)
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
+    if !installation_exists {
+        return Err(ApiError::not_found(
+            "Active GitHub installation not found for this team",
+        ));
+    }
+    let default_branch = input.default_branch.trim();
+    if default_branch.is_empty()
+        || default_branch.len() > 255
+        || default_branch.chars().any(char::is_control)
+    {
+        return Err(ApiError::bad_request("Default branch is invalid"));
+    }
+    let path_prefix = input
+        .path_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if path_prefix.is_some_and(|value| value.len() > 500 || value.chars().any(char::is_control)) {
+        return Err(ApiError::bad_request("Path prefix is invalid"));
+    }
+
+    sqlx::query_as::<_, ProductGithubRepo>(
+        r"INSERT INTO product_github_repos
+        (product_id, workspace_id, installation_id, repo_full_name, default_branch, path_prefix)
+        SELECT p.id, p.workspace_id, $3, $4, $5, $6
+        FROM products p
+        JOIN github_installations installation
+          ON installation.installation_id = $3
+         AND installation.workspace_id = p.workspace_id
+         AND installation.revoked_at IS NULL
+        WHERE p.id = $2 AND p.workspace_id = $1
+        ON CONFLICT (product_id) DO UPDATE SET
+          workspace_id = EXCLUDED.workspace_id,
+          installation_id = EXCLUDED.installation_id,
+          repo_full_name = EXCLUDED.repo_full_name,
+          default_branch = EXCLUDED.default_branch,
+          path_prefix = EXCLUDED.path_prefix,
+          updated_at = NOW()
+        RETURNING product_id, installation_id, repo_full_name, default_branch, path_prefix,
+          created_at, updated_at",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(input.installation_id)
+    .bind(&input.repo_full_name)
+    .bind(default_branch)
+    .bind(path_prefix)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| {
+        ApiError::not_found("Product or active GitHub installation not found for this team")
+    })
+}
+
+pub(crate) async fn get_product_github_repo(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+) -> Result<Option<ProductGithubRepo>, ApiError> {
+    ensure_product_in_workspace(pool, workspace_id, product_id).await?;
+    Ok(sqlx::query_as::<_, ProductGithubRepo>(
+        r"SELECT product_id, installation_id, repo_full_name, default_branch, path_prefix,
+          created_at, updated_at
+        FROM product_github_repos
+        WHERE product_id = $1 AND workspace_id = $2",
+    )
+    .bind(product_id)
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+pub(crate) async fn clear_product_github_repo(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+) -> Result<bool, ApiError> {
+    ensure_product_in_workspace(pool, workspace_id, product_id).await?;
+    let result =
+        sqlx::query("DELETE FROM product_github_repos WHERE product_id = $1 AND workspace_id = $2")
+            .bind(product_id)
+            .bind(workspace_id)
+            .execute(pool)
+            .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct GroupIssueContextRow {
+    group_key: String,
+    explanation: String,
+    merged_into_group_key: Option<String>,
+    installation_id: Option<i64>,
+    repo_full_name: Option<String>,
+    installation_active: bool,
+    report_count: i64,
+    earliest_occurred_at: Option<DateTime<Utc>>,
+    latest_occurred_at: Option<DateTime<Utc>>,
+    primary_kind: Option<String>,
+    primary_topic: Option<String>,
+    primary_operation: Option<String>,
+    impacts: serde_json::Value,
+    findings: serde_json::Value,
+    workarounds: serde_json::Value,
+    operations: Vec<String>,
+    surfaces: Vec<String>,
+    status_codes: Vec<i32>,
+}
+
+pub(crate) async fn group_issue_context(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    backlink: String,
+) -> Result<Option<GroupIssueContext>, ApiError> {
+    group_issue_context_with_executor(pool, workspace_id, group_key, backlink).await
+}
+
+async fn group_issue_context_with_executor<'executor>(
+    executor: impl Executor<'executor, Database = Postgres>,
+    workspace_id: Uuid,
+    group_key: &str,
+    backlink: String,
+) -> Result<Option<GroupIssueContext>, ApiError> {
+    let row = sqlx::query_as::<_, GroupIssueContextRow>(
+        r"WITH scoped_group AS (
+          SELECT g.id, g.workspace_id, g.product_id, g.group_key, g.explanation,
+            g.merged_into_group_key,
+            mapping.installation_id, mapping.repo_full_name,
+            (installation.installation_id IS NOT NULL) AS installation_active
+          FROM report_groups g
+          JOIN products p
+            ON p.id = g.product_id AND p.workspace_id = g.workspace_id
+          LEFT JOIN product_github_repos mapping
+            ON mapping.product_id = g.product_id
+           AND mapping.workspace_id = g.workspace_id
+          LEFT JOIN github_installations installation
+            ON installation.installation_id = mapping.installation_id
+           AND installation.workspace_id = g.workspace_id
+           AND installation.revoked_at IS NULL
+          WHERE g.workspace_id = $1 AND g.group_key = $2
+        ),
+        scoped_reports AS (
+          SELECT r.id AS report_id, r.impact, r.findings, r.workaround, r.created_at,
+            i.operation, i.surface, i.status_code, i.occurred_at
+          FROM scoped_group g
+          JOIN feedback_reports r
+            ON r.group_id = g.id AND r.workspace_id = g.workspace_id
+          JOIN interactions_v2 i
+            ON i.id = r.interaction_id AND i.workspace_id = g.workspace_id
+          JOIN product_environments environment
+            ON environment.id = i.environment_id
+           AND environment.workspace_id = g.workspace_id
+           AND environment.product_id = g.product_id
+        ),
+        expanded_findings AS (
+          SELECT reports.report_id, reports.operation, reports.occurred_at,
+            finding.ordinality,
+            finding.value ->> 'kind' AS kind,
+            finding.value ->> 'topic' AS topic,
+            finding.value ->> 'severity' AS severity,
+            finding.value ->> 'detail' AS detail
+          FROM scoped_reports reports
+          CROSS JOIN LATERAL
+            jsonb_array_elements(reports.findings) WITH ORDINALITY AS finding(value, ordinality)
+          WHERE COALESCE(finding.value ->> 'kind', '') <> ''
+            AND COALESCE(finding.value ->> 'topic', '') <> ''
+        ),
+        finding_rollups AS (
+          SELECT kind, topic, COUNT(*)::BIGINT AS count,
+            COUNT(*) FILTER (WHERE COALESCE(detail, '') <> '')::BIGINT AS detail_count,
+            COALESCE(
+              (ARRAY_AGG(detail ORDER BY occurred_at, report_id, ordinality)
+                FILTER (WHERE COALESCE(detail, '') <> ''))[1:10],
+              ARRAY[]::TEXT[]
+            ) AS details
+          FROM expanded_findings
+          GROUP BY kind, topic
+        ),
+        primary_finding AS (
+          SELECT kind, topic, operation
+          FROM expanded_findings
+          ORDER BY
+            CASE severity
+              WHEN 'blocking' THEN 3 WHEN 'major' THEN 2 WHEN 'minor' THEN 1 ELSE 0
+            END DESC,
+            CASE kind
+              WHEN 'defect' THEN 7 WHEN 'friction' THEN 6 WHEN 'gap' THEN 5
+              WHEN 'uncertainty' THEN 4 WHEN 'suggestion' THEN 3 WHEN 'other' THEN 2
+              WHEN 'strength' THEN 1 ELSE 0
+            END DESC,
+            occurred_at, report_id, ordinality
+          LIMIT 1
+        )
+        SELECT g.group_key, g.explanation, g.merged_into_group_key,
+          g.installation_id, g.repo_full_name,
+          g.installation_active,
+          (SELECT COUNT(*)::BIGINT FROM scoped_reports) AS report_count,
+          (SELECT MIN(occurred_at) FROM scoped_reports) AS earliest_occurred_at,
+          (SELECT MAX(occurred_at) FROM scoped_reports) AS latest_occurred_at,
+          (SELECT kind FROM primary_finding) AS primary_kind,
+          (SELECT topic FROM primary_finding) AS primary_topic,
+          COALESCE(
+            (SELECT operation FROM primary_finding),
+            (SELECT MIN(operation) FROM scoped_reports),
+            'unknown'
+          ) AS primary_operation,
+          COALESCE((
+            SELECT JSONB_AGG(
+              JSONB_BUILD_OBJECT('value', impact, 'count', count)
+              ORDER BY impact
+            )
+            FROM (
+              SELECT impact, COUNT(*)::BIGINT AS count
+              FROM scoped_reports
+              WHERE impact IS NOT NULL
+              GROUP BY impact
+            ) impact_counts
+          ), '[]'::JSONB) AS impacts,
+          COALESCE((
+            SELECT JSONB_AGG(
+              JSONB_BUILD_OBJECT(
+                'kind', kind,
+                'topic', topic,
+                'count', count,
+                'detailCount', detail_count,
+                'details', details
+              )
+              ORDER BY count DESC, kind, topic
+            )
+            FROM finding_rollups
+          ), '[]'::JSONB) AS findings,
+          COALESCE((
+            SELECT JSONB_AGG(workaround ORDER BY workaround::TEXT)
+            FROM (
+              SELECT DISTINCT workaround
+              FROM scoped_reports
+              WHERE workaround IS NOT NULL
+            ) distinct_workarounds
+          ), '[]'::JSONB) AS workarounds,
+          ARRAY(
+            SELECT DISTINCT operation FROM scoped_reports ORDER BY operation
+          ) AS operations,
+          ARRAY(
+            SELECT DISTINCT surface FROM scoped_reports ORDER BY surface
+          ) AS surfaces,
+          ARRAY(
+            SELECT DISTINCT status_code
+            FROM scoped_reports
+            WHERE status_code IS NOT NULL
+            ORDER BY status_code
+          ) AS status_codes
+        FROM scoped_group g",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .fetch_optional(executor)
+    .await?;
+
+    row.map(|row| {
+        let impacts =
+            serde_json::from_value::<Vec<IssueCount>>(row.impacts).map_err(ApiError::internal)?;
+        let findings = serde_json::from_value::<Vec<IssueFindingRollup>>(row.findings)
+            .map_err(ApiError::internal)?;
+        let workarounds = serde_json::from_value::<Vec<serde_json::Value>>(row.workarounds)
+            .map_err(ApiError::internal)?;
+        Ok(GroupIssueContext {
+            merged_into_group_key: row.merged_into_group_key,
+            installation_id: row.installation_id,
+            repo_full_name: row.repo_full_name,
+            installation_active: row.installation_active,
+            template: IssueTemplateData {
+                group_key: row.group_key,
+                explanation: row.explanation,
+                primary_kind: row.primary_kind.unwrap_or_else(|| "none".to_owned()),
+                primary_topic: row.primary_topic.unwrap_or_else(|| "none".to_owned()),
+                primary_operation: row
+                    .primary_operation
+                    .unwrap_or_else(|| "unknown".to_owned()),
+                impacts,
+                findings,
+                workarounds,
+                operations: row.operations,
+                surfaces: row.surfaces,
+                status_codes: row.status_codes,
+                earliest_occurred_at: row.earliest_occurred_at,
+                latest_occurred_at: row.latest_occurred_at,
+                report_count: row.report_count,
+                backlink,
+            },
+        })
+    })
+    .transpose()
+}
+
+pub(crate) async fn get_group_github_issue(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+) -> Result<Option<GroupGithubIssueRow>, ApiError> {
+    Ok(sqlx::query_as::<_, GroupGithubIssueRow>(
+        r"SELECT issue.repo_full_name, issue.issue_number, issue.url, issue.state
+        FROM group_github_issues issue
+        JOIN report_groups report_group
+          ON report_group.group_key = issue.group_key
+         AND report_group.workspace_id = issue.workspace_id
+        WHERE issue.workspace_id = $1 AND issue.group_key = $2
+          AND issue.filing_state = 'filed'",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Outcome of trying to claim a group for issue filing.
+#[derive(Debug)]
+pub(crate) enum GroupIssueFilingClaim {
+    /// The caller owns the claim and should now call GitHub.
+    Claimed,
+    /// An issue already exists; return it and call nothing.
+    AlreadyFiled(Box<GroupGithubIssueRow>),
+    /// Another filer holds a fresh claim.
+    InProgress,
+    /// GitHub may already have created the issue; reconcile before filing.
+    NeedsReconciliation,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GroupIssueFilingRequest<'a> {
+    pub(crate) workspace_id: Uuid,
+    pub(crate) group_key: &'a str,
+    pub(crate) installation_id: i64,
+    pub(crate) repo_full_name: &'a str,
+    pub(crate) created_by: &'a str,
+    /// Exact report count represented by the body rendered before this claim.
+    pub(crate) claim_report_count: i64,
+}
+
+/// Claims a group for filing before any GitHub call is made.
+///
+/// The primary key on `group_key` is what de-duplicates concurrent filers, so
+/// no database connection has to be held across the network request. A filer
+/// that dies mid-call leaves a `pending` row. Once it is older than
+/// `stale_cutoff`, the outcome is ambiguous, so it is quarantined for
+/// reconciliation instead of being handed to another blind filer.
+/// `claim_report_count` becomes the evidence baseline on either direct filing
+/// or later adoption; a live recount at adoption would silently swallow reports
+/// that arrived after the rendered body.
+pub(crate) async fn claim_group_issue_filing(
+    pool: &PgPool,
+    request: GroupIssueFilingRequest<'_>,
+    stale_cutoff: DateTime<Utc>,
+) -> Result<GroupIssueFilingClaim, ApiError> {
+    let mut tx = pool.begin().await?;
+
+    // Take the SAME advisory lock `merge_report_groups` takes, on the same key.
+    // Row locks cannot close this race in either direction: a merge locks the
+    // `group_github_issues` rows that exist, but a filing that has not claimed
+    // yet has no row to lock, and a merge that has not committed its lineage
+    // yet is invisible to the filing's check. The advisory lock is a mutual
+    // exclusion point that exists before any row does.
+    //
+    // This does not reintroduce the connection-holding problem that removed the
+    // old filing lock: the GitHub call now happens after this transaction
+    // commits, so the lock is held only for these few statements.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(request.group_key)
+        .execute(&mut *tx)
+        .await?;
+
+    // Re-check lineage under the lock. A merge that committed while this
+    // request was in flight is now visible, and a merge still running cannot
+    // interleave past this point.
+    let merge_target = sqlx::query_scalar::<_, Option<String>>(
+        r"SELECT report_group.merged_into_group_key
+        FROM report_groups report_group
+        JOIN products product
+          ON product.id = report_group.product_id
+         AND product.workspace_id = report_group.workspace_id
+        WHERE report_group.workspace_id = $1 AND report_group.group_key = $2",
+    )
+    .bind(request.workspace_id)
+    .bind(request.group_key)
+    .fetch_optional(&mut *tx)
+    .await?
+    .flatten();
+    if let Some(target_group_key) = merge_target {
+        return Err(ApiError::conflict(format!(
+            "Feedback group was merged into {target_group_key}; file the target group instead"
+        )));
+    }
+    let claimed = sqlx::query_scalar::<_, i32>(
+        r"INSERT INTO group_github_issues
+        (group_key, workspace_id, installation_id, repo_full_name, created_by,
+         filing_state, claimed_at, last_commented_report_count)
+        SELECT report_group.group_key, report_group.workspace_id, $3, $4, $5,
+          'pending', NOW(), $6
+        FROM report_groups report_group
+        JOIN products product
+          ON product.id = report_group.product_id
+         AND product.workspace_id = report_group.workspace_id
+        WHERE report_group.workspace_id = $1 AND report_group.group_key = $2
+        ON CONFLICT (group_key) DO NOTHING
+        RETURNING 1",
+    )
+    .bind(request.workspace_id)
+    .bind(request.group_key)
+    .bind(request.installation_id)
+    .bind(request.repo_full_name)
+    .bind(request.created_by)
+    .bind(request.claim_report_count)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if claimed.is_some() {
+        tx.commit().await?;
+        return Ok(GroupIssueFilingClaim::Claimed);
+    }
+
+    let existing = sqlx::query_as::<_, GroupGithubIssueRow>(
+        r"SELECT issue.repo_full_name, issue.issue_number, issue.url, issue.state
+        FROM group_github_issues issue
+        JOIN report_groups report_group
+          ON report_group.group_key = issue.group_key
+         AND report_group.workspace_id = issue.workspace_id
+        WHERE issue.workspace_id = $1 AND issue.group_key = $2
+          AND issue.filing_state = 'filed'",
+    )
+    .bind(request.workspace_id)
+    .bind(request.group_key)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(existing) = existing {
+        tx.commit().await?;
+        return Ok(GroupIssueFilingClaim::AlreadyFiled(Box::new(existing)));
+    }
+
+    let needs_reconciliation = sqlx::query_scalar::<_, bool>(
+        r"SELECT EXISTS (
+          SELECT 1 FROM group_github_issues
+          WHERE workspace_id = $1 AND group_key = $2
+            AND filing_state = 'needs_reconciliation'
+        )",
+    )
+    .bind(request.workspace_id)
+    .bind(request.group_key)
+    .fetch_one(&mut *tx)
+    .await?;
+    if needs_reconciliation {
+        tx.commit().await?;
+        return Ok(GroupIssueFilingClaim::NeedsReconciliation);
+    }
+
+    // A stale pending owner may have died after GitHub accepted the request.
+    // Quarantine it for a consistent marker listing rather than filing a
+    // possible duplicate.
+    let quarantined = sqlx::query_scalar::<_, i32>(
+        r"UPDATE group_github_issues
+        SET filing_state = 'needs_reconciliation', state_refreshed_at = NULL,
+            updated_at = NOW()
+        WHERE workspace_id = $1 AND group_key = $2
+          AND filing_state = 'pending' AND claimed_at <= $3
+        RETURNING 1",
+    )
+    .bind(request.workspace_id)
+    .bind(request.group_key)
+    .bind(stale_cutoff)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    if quarantined.is_some() {
+        return Ok(GroupIssueFilingClaim::NeedsReconciliation);
+    }
+    Ok(GroupIssueFilingClaim::InProgress)
+}
+
+/// Records the issue GitHub returned against a claim this caller owns.
+pub(crate) async fn complete_group_issue_filing(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    link: &GithubIssueLink,
+    report_count: i64,
+) -> Result<GroupGithubIssueRow, ApiError> {
+    sqlx::query_as::<_, GroupGithubIssueRow>(
+        r"UPDATE group_github_issues
+        SET issue_number = $3, url = $4, state = $5, filing_state = 'filed',
+            last_commented_report_count = $6, state_refreshed_at = NOW(), updated_at = NOW()
+        WHERE workspace_id = $1 AND group_key = $2 AND filing_state = 'pending'
+        RETURNING repo_full_name, issue_number, url, state",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(link.issue_number)
+    .bind(&link.url)
+    .bind(&link.state)
+    .bind(report_count)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| ApiError::internal("GitHub issue filing claim disappeared before it completed"))
+}
+
+/// Drops a claim whose GitHub call failed, so a retry can file cleanly.
+pub(crate) async fn release_group_issue_filing_claim(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        r"DELETE FROM group_github_issues
+        WHERE workspace_id = $1 AND group_key = $2 AND filing_state = 'pending'",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Retains an ambiguous filing outcome until GitHub search can settle it.
+pub(crate) async fn mark_group_issue_filing_for_reconciliation(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE group_github_issues
+        SET filing_state = 'needs_reconciliation', state_refreshed_at = NULL,
+            updated_at = NOW()
+        WHERE workspace_id = $1 AND group_key = $2 AND filing_state = 'pending'",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Claims one throttled reconciliation attempt and returns its pinned repo.
+pub(crate) async fn claim_group_issue_reconciliation(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    refresh_cutoff: DateTime<Utc>,
+) -> Result<Option<GroupIssueReconciliationContext>, ApiError> {
+    Ok(sqlx::query_as::<_, GroupIssueReconciliationContext>(
+        r"WITH candidate AS (
+          SELECT issue.group_key
+          FROM group_github_issues issue
+          JOIN report_groups report_group
+            ON report_group.group_key = issue.group_key
+           AND report_group.workspace_id = issue.workspace_id
+          JOIN products product
+            ON product.id = report_group.product_id
+           AND product.workspace_id = report_group.workspace_id
+          JOIN github_installations installation
+            ON installation.installation_id = issue.installation_id
+           AND installation.workspace_id = issue.workspace_id
+           AND installation.revoked_at IS NULL
+          WHERE issue.workspace_id = $1 AND issue.group_key = $2
+            AND issue.filing_state = 'needs_reconciliation'
+        ), claimed AS (
+          UPDATE group_github_issues issue
+          SET state_refreshed_at = NOW(), updated_at = NOW()
+          FROM candidate
+          WHERE issue.group_key = candidate.group_key
+            AND issue.workspace_id = $1
+            AND issue.filing_state = 'needs_reconciliation'
+            AND (
+              issue.state_refreshed_at IS NULL
+              OR issue.state_refreshed_at <= $3
+            )
+          RETURNING issue.group_key, issue.installation_id, issue.repo_full_name,
+            issue.claimed_at AS needs_reconciliation_since,
+            issue.state_refreshed_at AS reconciliation_claimed_at,
+            issue.last_commented_report_count AS claim_report_count
+        )
+        SELECT claimed.installation_id, claimed.repo_full_name,
+          claimed.needs_reconciliation_since, claimed.reconciliation_claimed_at,
+          claimed.claim_report_count
+        FROM claimed
+        JOIN candidate ON candidate.group_key = claimed.group_key",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(refresh_cutoff)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Adopts the exactly marked issue if this task still owns the attempt.
+pub(crate) async fn complete_group_issue_reconciliation(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    reconciliation_claimed_at: DateTime<Utc>,
+    link: &GithubIssueLink,
+    claim_report_count: i64,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE group_github_issues
+        SET issue_number = $4, url = $5, state = $6, filing_state = 'filed',
+            last_commented_report_count = $7, state_refreshed_at = NOW(), updated_at = NOW()
+        WHERE workspace_id = $1 AND group_key = $2
+          AND filing_state = 'needs_reconciliation'
+          AND state_refreshed_at = $3",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(reconciliation_claimed_at)
+    .bind(link.issue_number)
+    .bind(&link.url)
+    .bind(&link.state)
+    .bind(claim_report_count)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Releases a definitively absent issue if this task still owns the attempt.
+pub(crate) async fn release_group_issue_reconciliation_claim(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    reconciliation_claimed_at: DateTime<Utc>,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"DELETE FROM group_github_issues
+        WHERE workspace_id = $1 AND group_key = $2
+          AND filing_state = 'needs_reconciliation'
+          AND state_refreshed_at = $3",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(reconciliation_claimed_at)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct MergeReportGroupRow {
+    id: Uuid,
+    group_key: String,
+    product_id: Uuid,
+    merged_into_group_key: Option<String>,
+}
+
+pub(crate) async fn merge_report_groups(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    source_group_key: &str,
+    target_group_key: &str,
+    actor_os_user_id: &str,
+) -> Result<MergeReportGroupsResponse, ApiError> {
+    if source_group_key == target_group_key {
+        return Err(ApiError::bad_request(
+            "Source and target feedback groups must be different",
+        ));
+    }
+
+    let mut tx = pool.begin().await?;
+    let mut lock_keys = [source_group_key, target_group_key];
+    lock_keys.sort_unstable();
+    for group_key in lock_keys {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(group_key)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    let groups = sqlx::query_as::<_, MergeReportGroupRow>(
+        r"SELECT id, group_key, product_id, merged_into_group_key
+        FROM report_groups
+        WHERE workspace_id = $1 AND (group_key = $2 OR group_key = $3)
+        ORDER BY group_key
+        FOR UPDATE",
+    )
+    .bind(workspace_id)
+    .bind(source_group_key)
+    .bind(target_group_key)
+    .fetch_all(&mut *tx)
+    .await?;
+    let source = groups
+        .iter()
+        .find(|group| group.group_key == source_group_key)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found("Source feedback group not found for this team"))?;
+    let target = groups
+        .iter()
+        .find(|group| group.group_key == target_group_key)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found("Target feedback group not found for this team"))?;
+
+    if source.product_id != target.product_id {
+        return Err(ApiError::conflict(
+            "Source and target feedback groups belong to different products",
+        ));
+    }
+    // Merge lineage is deliberately exactly one hop. Both sides must be final,
+    // unmerged groups, which prevents chains and makes cycles impossible.
+    if let Some(final_target) = source.merged_into_group_key {
+        return Err(ApiError::conflict(format!(
+            "Source feedback group is already merged into {final_target}"
+        )));
+    }
+    if let Some(final_target) = target.merged_into_group_key {
+        return Err(ApiError::conflict(format!(
+            "Target feedback group is already merged into {final_target}; merge into that final target directly"
+        )));
+    }
+    let source_has_merged_groups = sqlx::query_scalar::<_, bool>(
+        r"SELECT EXISTS (
+          SELECT 1
+          FROM report_groups
+          WHERE workspace_id = $1 AND merged_into_group_key = $2
+        )",
+    )
+    .bind(workspace_id)
+    .bind(source_group_key)
+    .fetch_one(&mut *tx)
+    .await?;
+    if source_has_merged_groups {
+        return Err(ApiError::conflict(
+            "Source feedback group is already the final target of another merge and cannot be merged away",
+        ));
+    }
+
+    // `issue_number` is NULL while a filing is in flight, so select the filing
+    // state too and decode the number as optional. Reading it as a bare `i64`
+    // would fail at runtime the moment a merge raced a filing.
+    let issue_rows = sqlx::query_as::<_, (String, Option<i64>, String)>(
+        r"SELECT group_key, issue_number, filing_state
+        FROM group_github_issues
+        WHERE workspace_id = $1 AND (group_key = $2 OR group_key = $3)
+        ORDER BY group_key
+        FOR UPDATE",
+    )
+    .bind(workspace_id)
+    .bind(source_group_key)
+    .bind(target_group_key)
+    .fetch_all(&mut *tx)
+    .await?;
+    // An unsettled filing on either side blocks the merge. Merging mid-filing
+    // would let the in-flight issue land against a group that no longer owns
+    // these reports, and reconciliation would then adopt it for the wrong
+    // group. Same spirit as the both-issues conflict below, but retriable:
+    // the claim settles on its own within minutes.
+    if let Some((group_key, _, filing_state)) = issue_rows
+        .iter()
+        .find(|(_, _, filing_state)| filing_state != "filed")
+    {
+        return Err(ApiError::conflict(format!(
+            "A GitHub issue filing is still in progress for {group_key} ({filing_state}); retry the merge once it settles"
+        )));
+    }
+    let source_issue_number = issue_rows.iter().find_map(|(group_key, issue_number, _)| {
+        (group_key == source_group_key)
+            .then_some(*issue_number)
+            .flatten()
+    });
+    let target_issue_number = issue_rows.iter().find_map(|(group_key, issue_number, _)| {
+        (group_key == target_group_key)
+            .then_some(*issue_number)
+            .flatten()
+    });
+    if let (Some(source_issue), Some(target_issue)) = (source_issue_number, target_issue_number) {
+        return Err(ApiError::conflict(format!(
+            "Source GitHub issue #{source_issue} and target GitHub issue #{target_issue} are both filed; close one on GitHub before merging"
+        )));
+    }
+
+    let moved = sqlx::query(
+        r"UPDATE feedback_reports
+        SET group_id = $1
+        WHERE workspace_id = $2 AND group_id = $3",
+    )
+    .bind(target.id)
+    .bind(workspace_id)
+    .bind(source.id)
+    .execute(&mut *tx)
+    .await?;
+
+    if source_issue_number.is_some() {
+        sqlx::query(
+            r"UPDATE group_github_issues
+            SET group_key = $1, last_commented_report_count = 0, updated_at = NOW()
+            WHERE workspace_id = $2 AND group_key = $3",
+        )
+        .bind(target_group_key)
+        .bind(workspace_id)
+        .bind(source_group_key)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    let lineage_updated = sqlx::query(
+        r"UPDATE report_groups
+        SET merged_into_group_key = $1, merged_at = NOW(), merged_by = $2, updated_at = NOW()
+        WHERE workspace_id = $3 AND id = $4 AND merged_into_group_key IS NULL",
+    )
+    .bind(target_group_key)
+    .bind(actor_os_user_id)
+    .bind(workspace_id)
+    .bind(source.id)
+    .execute(&mut *tx)
+    .await?;
+    if lineage_updated.rows_affected() != 1 {
+        return Err(ApiError::conflict(
+            "Source feedback group was merged concurrently",
+        ));
+    }
+
+    let reports_moved = i64::try_from(moved.rows_affected()).map_err(ApiError::internal)?;
+    tx.commit().await?;
+    Ok(MergeReportGroupsResponse {
+        reports_moved,
+        target_group_key: target_group_key.to_owned(),
+    })
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ProductGroupListRow {
+    group_key: String,
+    explanation: String,
+    report_count: i64,
+    latest_occurred_at: Option<DateTime<Utc>>,
+    issue_repo_full_name: Option<String>,
+    issue_number: Option<i64>,
+    issue_url: Option<String>,
+    issue_state: Option<String>,
+    last_commented_report_count: Option<i64>,
+    state_refreshed_at: Option<DateTime<Utc>>,
+    filing_state: Option<String>,
+}
+
+pub(crate) async fn list_product_groups(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<ProductGroupPage, ApiError> {
+    ensure_product_in_workspace(pool, workspace_id, product_id).await?;
+    let limit = limit.clamp(1, 100);
+    let offset = offset.max(0);
+    let rows = sqlx::query_as::<_, ProductGroupListRow>(
+        r"SELECT report_group.group_key, report_group.explanation,
+          COUNT(environment.id)::BIGINT AS report_count,
+          MAX(interaction.occurred_at) FILTER (
+            WHERE environment.id IS NOT NULL
+          ) AS latest_occurred_at,
+          issue.repo_full_name AS issue_repo_full_name,
+          issue.issue_number,
+          issue.url AS issue_url,
+          issue.state AS issue_state,
+          issue.last_commented_report_count,
+          issue.state_refreshed_at,
+          issue.filing_state
+        FROM report_groups report_group
+        JOIN products product
+          ON product.id = report_group.product_id
+         AND product.workspace_id = report_group.workspace_id
+        LEFT JOIN feedback_reports report
+          ON report.group_id = report_group.id
+         AND report.workspace_id = report_group.workspace_id
+        LEFT JOIN interactions_v2 interaction
+          ON interaction.id = report.interaction_id
+         AND interaction.workspace_id = report_group.workspace_id
+        LEFT JOIN product_environments environment
+          ON environment.id = interaction.environment_id
+         AND environment.workspace_id = report_group.workspace_id
+         AND environment.product_id = report_group.product_id
+        LEFT JOIN group_github_issues issue
+          ON issue.group_key = report_group.group_key
+         AND issue.workspace_id = report_group.workspace_id
+        WHERE report_group.workspace_id = $1
+          AND report_group.product_id = $2
+          AND report_group.merged_into_group_key IS NULL
+        GROUP BY report_group.id, report_group.group_key, report_group.explanation,
+          issue.repo_full_name, issue.issue_number, issue.url, issue.state,
+          issue.last_commented_report_count, issue.state_refreshed_at,
+          issue.filing_state
+        ORDER BY MAX(interaction.occurred_at) DESC NULLS LAST,
+          report_group.updated_at DESC, report_group.group_key
+        LIMIT $3 OFFSET $4",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(limit + 1)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+    let has_more = i64::try_from(rows.len()).is_ok_and(|count| count > limit);
+    let groups = rows
+        .into_iter()
+        .take(usize::try_from(limit).map_err(ApiError::internal)?)
+        .map(|row| {
+            let github_issue = match (
+                row.issue_repo_full_name,
+                row.issue_number,
+                row.issue_url,
+                row.issue_state,
+            ) {
+                (Some(repo_full_name), Some(issue_number), Some(url), Some(state)) => {
+                    Some(GithubIssueLink {
+                        repo_full_name,
+                        issue_number,
+                        url,
+                        state,
+                    })
+                }
+                _ => None,
+            };
+            ListedProductGroup {
+                group: ProductReportGroup {
+                    group_key: row.group_key,
+                    explanation: row.explanation,
+                    report_count: row.report_count,
+                    latest_occurred_at: row.latest_occurred_at,
+                    github_issue,
+                },
+                last_commented_report_count: row.last_commented_report_count,
+                state_refreshed_at: row.state_refreshed_at,
+                needs_reconciliation: row.filing_state.as_deref() == Some("needs_reconciliation"),
+            }
+        })
+        .collect();
+    Ok(ProductGroupPage { groups, has_more })
+}
+
+pub(crate) async fn group_issue_sync_context(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    group_key: &str,
+) -> Result<Option<GroupIssueSyncContext>, ApiError> {
+    Ok(sqlx::query_as::<_, GroupIssueSyncContext>(
+        r"WITH scoped_issue AS (
+          -- The installation comes from the ISSUE, not the product's current
+          -- repo mapping. Remapping a product to another repo must not route
+          -- comments for an existing issue through an installation that does
+          -- not own that issue's repository: the issue keeps being updated
+          -- where it actually lives.
+          SELECT issue.group_key, issue.repo_full_name, issue.issue_number,
+            issue.last_commented_report_count, issue.state_refreshed_at,
+            report_group.id AS group_id,
+            report_group.product_id, issue.installation_id
+          FROM group_github_issues issue
+          JOIN report_groups report_group
+            ON report_group.group_key = issue.group_key
+           AND report_group.workspace_id = issue.workspace_id
+          JOIN products product
+            ON product.id = report_group.product_id
+           AND product.workspace_id = report_group.workspace_id
+          JOIN github_installations installation
+            ON installation.installation_id = issue.installation_id
+           AND installation.workspace_id = issue.workspace_id
+           AND installation.revoked_at IS NULL
+          WHERE issue.workspace_id = $1 AND issue.group_key = $2
+            AND issue.filing_state = 'filed'
+        ),
+        ordered_reports AS (
+          SELECT interaction.occurred_at,
+            ROW_NUMBER() OVER (ORDER BY report.created_at, report.id) AS report_number
+          FROM scoped_issue issue
+          JOIN feedback_reports report
+            ON report.group_id = issue.group_id AND report.workspace_id = $1
+          JOIN interactions_v2 interaction
+            ON interaction.id = report.interaction_id AND interaction.workspace_id = $1
+          JOIN product_environments environment
+            ON environment.id = interaction.environment_id
+           AND environment.workspace_id = $1
+           AND environment.product_id = issue.product_id
+        )
+        SELECT issue.installation_id, issue.repo_full_name, issue.issue_number,
+          issue.last_commented_report_count AS observed_report_count,
+          COUNT(report.report_number)::BIGINT AS current_report_count,
+          MIN(report.occurred_at) FILTER (
+            WHERE report.report_number > issue.last_commented_report_count
+          ) AS earliest_new_occurred_at,
+          MAX(report.occurred_at) FILTER (
+            WHERE report.report_number > issue.last_commented_report_count
+          ) AS latest_new_occurred_at,
+          issue.state_refreshed_at
+        FROM scoped_issue issue
+        LEFT JOIN ordered_reports report ON TRUE
+        GROUP BY issue.installation_id, issue.repo_full_name, issue.issue_number,
+          issue.last_commented_report_count, issue.state_refreshed_at",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+pub(crate) async fn bump_last_commented_report_count(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    group_key: &str,
+    observed_report_count: i64,
+    current_report_count: i64,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE group_github_issues issue
+        SET last_commented_report_count = $4, updated_at = NOW()
+        FROM report_groups report_group
+        WHERE issue.group_key = report_group.group_key
+          AND issue.workspace_id = report_group.workspace_id
+          AND issue.workspace_id = $1
+          AND issue.group_key = $2
+          AND issue.filing_state = 'filed'
+          AND issue.last_commented_report_count = $3
+          AND $4 > $3",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(observed_report_count)
+    .bind(current_report_count)
+    .execute(&mut **tx)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+pub(crate) async fn revert_last_commented_report_count(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    observed_report_count: i64,
+    claimed_report_count: i64,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE group_github_issues issue
+        SET last_commented_report_count = $3, updated_at = NOW()
+        FROM report_groups report_group
+        WHERE issue.group_key = report_group.group_key
+          AND issue.workspace_id = report_group.workspace_id
+          AND issue.workspace_id = $1
+          AND issue.group_key = $2
+          AND issue.filing_state = 'filed'
+          AND issue.last_commented_report_count = $4",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(observed_report_count)
+    .bind(claimed_report_count)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+pub(crate) async fn claim_group_issue_state_refresh(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    refresh_cutoff: DateTime<Utc>,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE group_github_issues issue
+        SET state_refreshed_at = NOW(), updated_at = NOW()
+        FROM report_groups report_group
+        WHERE issue.group_key = report_group.group_key
+          AND issue.workspace_id = report_group.workspace_id
+          AND issue.workspace_id = $1
+          AND issue.group_key = $2
+          AND issue.filing_state = 'filed'
+          AND (
+            issue.state_refreshed_at IS NULL
+            OR issue.state_refreshed_at <= $3
+          )",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(refresh_cutoff)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+pub(crate) async fn update_group_issue_state(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    state: &str,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE group_github_issues issue
+        SET state = $3, state_refreshed_at = NOW(), updated_at = NOW()
+        FROM report_groups report_group
+        WHERE issue.group_key = report_group.group_key
+          AND issue.workspace_id = report_group.workspace_id
+          AND issue.workspace_id = $1
+          AND issue.group_key = $2
+          AND issue.filing_state = 'filed'",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(state)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
 }
 
 pub(crate) async fn get_or_create_workspace(
@@ -852,6 +2148,19 @@ pub(crate) async fn delete_product(
             "Type the exact product name to confirm deletion",
         ));
     }
+    let removed_issue_links = sqlx::query_as::<_, (String, i64)>(
+        r"SELECT issue.repo_full_name, issue.issue_number
+        FROM group_github_issues issue
+        JOIN report_groups report_group
+          ON report_group.group_key = issue.group_key
+         AND report_group.workspace_id = issue.workspace_id
+        WHERE report_group.workspace_id = $1 AND report_group.product_id = $2
+        ORDER BY issue.repo_full_name, issue.issue_number",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .fetch_all(&mut *tx)
+    .await?;
     let deleted = sqlx::query_as::<_, Product>(
         "DELETE FROM products WHERE id = $1 AND workspace_id = $2 RETURNING *",
     )
@@ -860,6 +2169,15 @@ pub(crate) async fn delete_product(
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
+    for (repo_full_name, issue_number) in removed_issue_links {
+        tracing::info!(
+            %workspace_id,
+            %product_id,
+            %repo_full_name,
+            issue_number,
+            "product deletion removed Epode's GitHub issue link; customer issue remains"
+        );
+    }
     Ok(deleted)
 }
 
@@ -1985,39 +3303,40 @@ pub(crate) async fn dashboard_session_by_id(
     })
 }
 
-fn opaque_ref(value: Option<String>, field: &str) -> Result<Option<String>, ApiError> {
-    let value = value
-        .map(|value| clean(&value, 160))
-        .filter(|value| !value.is_empty());
-    if value.as_ref().is_some_and(|value| {
-        value.contains('@')
-            || value.chars().any(char::is_whitespace)
-            || !value
+fn opaque_ref(value: Option<String>) -> Option<String> {
+    let value = value.filter(|value| !value.trim().is_empty());
+    value.filter(|value| {
+        value.chars().count() <= 160
+            && !value.contains('@')
+            && !value.chars().any(char::is_whitespace)
+            && value
                 .chars()
                 .all(|character| character.is_ascii_alphanumeric() || "-_.:".contains(character))
-    }) {
-        return Err(ApiError::bad_request(format!(
-            "{field} must be an opaque identifier, not a name or email"
-        )));
-    }
-    Ok(value)
+    })
 }
 
-async fn resolve_v2_session(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    environment_id: Uuid,
+fn session_evidence(
     session_ref: Option<String>,
     session_source: Option<String>,
-    occurred_at: DateTime<Utc>,
-) -> Result<Option<Uuid>, ApiError> {
-    let Some(session_ref) = opaque_ref(session_ref, "sessionRef")? else {
+) -> Result<Option<(String, String)>, ApiError> {
+    let Some(session_ref) = opaque_ref(session_ref) else {
         return Ok(None);
     };
     let source = session_source.unwrap_or_else(|| "customer".into());
     if !["customer", "mcp", "continuation"].contains(&source.as_str()) {
         return Err(ApiError::bad_request("Invalid sessionSource"));
     }
+    Ok(Some((session_ref, source)))
+}
+
+async fn resolve_v2_session(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    environment_id: Uuid,
+    session_ref: &str,
+    session_source: &str,
+    occurred_at: DateTime<Utc>,
+) -> Result<Uuid, ApiError> {
     let session_id = Uuid::new_v4();
     let ref_hint = format!("session-{}", &session_id.simple().to_string()[..8]);
     let resolved = sqlx::query_scalar::<_, Uuid>(
@@ -2032,13 +3351,13 @@ async fn resolve_v2_session(
     .bind(session_id)
     .bind(workspace_id)
     .bind(environment_id)
-    .bind(source)
-    .bind(sha256(&session_ref))
+    .bind(session_source)
+    .bind(sha256(session_ref))
     .bind(ref_hint)
     .bind(occurred_at)
     .fetch_one(&mut **tx)
     .await?;
-    Ok(Some(resolved))
+    Ok(resolved)
 }
 
 fn validate_telemetry(input: &InteractionTelemetryInput) -> Result<(), ApiError> {
@@ -2106,21 +3425,58 @@ pub(crate) async fn ingest_telemetry_batch(
     }
     let mut accepted = 0;
     let mut dropped = 0;
-    for event in input.events {
-        match ingest_telemetry_event(pool, auth, event).await {
-            Ok(()) => accepted += 1,
-            Err(error) if error.status.is_client_error() => dropped += 1,
+    let mut changed_interaction_ids = Vec::with_capacity(event_count);
+    let mut session_evidence_by_interaction = BTreeMap::new();
+    let mut events = input.events;
+    events.sort_by_key(|event| event.interaction_id);
+    let mut tx = pool.begin().await?;
+    for event in events {
+        let mut event_tx = tx.begin().await?;
+        match ingest_telemetry_event(&mut event_tx, auth, event).await {
+            Ok(result) => {
+                event_tx.commit().await?;
+                if result.grouping_facts_changed {
+                    changed_interaction_ids.push(result.interaction_id);
+                }
+                let evidence = session_evidence_by_interaction
+                    .entry(result.interaction_id)
+                    .or_insert(None);
+                if evidence.is_none() {
+                    *evidence = result.session_evidence;
+                }
+                accepted += 1;
+            }
+            Err(error) if error.status.is_client_error() => {
+                event_tx.rollback().await?;
+                dropped += 1;
+            }
             Err(error) => return Err(error),
         }
     }
+    correlate_telemetry_sessions(&mut tx, auth, session_evidence_by_interaction).await?;
+    regroup_changed_interaction_reports(&mut tx, &changed_interaction_ids).await?;
+    tx.commit().await?;
     Ok(TelemetryBatchResult { accepted, dropped })
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct TelemetryUpsertResult {
+    id: Uuid,
+    grouping_facts_changed: bool,
+}
+
+#[derive(Debug)]
+struct AcceptedTelemetryEvent {
+    interaction_id: Uuid,
+    grouping_facts_changed: bool,
+    session_evidence: Option<(String, String)>,
+}
+
 async fn ingest_telemetry_event(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     auth: &ProductAuth,
     event: InteractionTelemetryInput,
-) -> Result<(), ApiError> {
+) -> Result<AcceptedTelemetryEvent, ApiError> {
     validate_telemetry(&event)?;
     let occurred_at = event.occurred_at.unwrap_or_else(Utc::now);
     if occurred_at > Utc::now() + Duration::minutes(5)
@@ -2130,29 +3486,32 @@ async fn ingest_telemetry_event(
             "occurredAt is outside the accepted window",
         ));
     }
-    let customer_ref = opaque_ref(event.customer_ref, "customerRef")?;
-    let mut tx = pool.begin().await?;
-    let session_id = resolve_v2_session(
-        &mut tx,
-        auth.workspace.id,
-        auth.environment.id,
-        event.session_ref,
-        event.session_source,
-        occurred_at,
-    )
-    .await?;
+    let customer_ref = opaque_ref(event.customer_ref);
+    let session_evidence = session_evidence(event.session_ref, event.session_source)?;
     let classification = if event.surface == "mcp" {
         "confirmed".to_string()
     } else {
         "unclassified".to_string()
     };
     let confirmation_method = (event.surface == "mcp").then(|| "mcp".to_string());
-    let row = sqlx::query_as::<_, ProductInteraction>(
-        r"INSERT INTO interactions_v2
+    // The INSERT depends on the materialized `previous` CTE so PostgreSQL must
+    // lock and capture the pre-state before the upsert returns its post-state.
+    let row = sqlx::query_as::<_, TelemetryUpsertResult>(
+        r"WITH previous AS MATERIALIZED (
+          SELECT id, surface, operation, status_code
+          FROM interactions_v2
+          WHERE id = $1
+          FOR UPDATE
+        ),
+        upserted AS (
+          INSERT INTO interactions_v2
         (id, workspace_id, environment_id, api_key_id, session_id, surface, operation, status_code,
          duration_ms, customer_ref, classification, confirmation_method, runtime_hint,
          runtime_hint_source, client_sequence, occurred_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        SELECT COALESCE(p.id, input.id), $2, $3, $4, $5, $6, $7, $8,
+          $9, $10, $11, $12, $13, $14, $15, $16
+        FROM (VALUES ($1::uuid)) AS input(id)
+        LEFT JOIN previous p ON p.id = input.id
         ON CONFLICT (id) DO UPDATE SET
           api_key_id = COALESCE(interactions_v2.api_key_id, EXCLUDED.api_key_id),
           session_id = COALESCE(interactions_v2.session_id, EXCLUDED.session_id),
@@ -2174,15 +3533,22 @@ async fn ingest_telemetry_event(
           END,
           updated_at = NOW()
         WHERE interactions_v2.environment_id = EXCLUDED.environment_id
-        RETURNING id, workspace_id, environment_id, api_key_id, session_id, surface, operation,
-          status_code, duration_ms, customer_ref, classification, confirmation_method,
-          runtime_hint, runtime_hint_source, occurred_at, created_at, updated_at",
+          RETURNING id, surface, operation, status_code
+        )
+        SELECT u.id,
+          p.id IS NOT NULL AND (
+            p.surface IS DISTINCT FROM u.surface
+            OR p.operation IS DISTINCT FROM u.operation
+            OR p.status_code IS DISTINCT FROM u.status_code
+          ) AS grouping_facts_changed
+        FROM upserted u
+        LEFT JOIN previous p ON TRUE",
     )
     .bind(event.interaction_id)
     .bind(auth.workspace.id)
     .bind(auth.environment.id)
     .bind(auth.api_key_id)
-    .bind(session_id)
+    .bind(Option::<Uuid>::None)
     .bind(event.surface)
     .bind(clean(&event.operation, 160))
     .bind(event.status_code)
@@ -2194,58 +3560,192 @@ async fn ingest_telemetry_event(
     .bind(event.runtime_hint_source.map(|value| clean(&value, 60)))
     .bind(event.sequence)
     .bind(occurred_at)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
-    if row.is_none() {
-        return Err(ApiError::conflict(
-            "interactionId belongs to another workspace",
+    let row =
+        row.ok_or_else(|| ApiError::conflict("interactionId belongs to another workspace"))?;
+    Ok(AcceptedTelemetryEvent {
+        interaction_id: row.id,
+        grouping_facts_changed: row.grouping_facts_changed,
+        session_evidence,
+    })
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct InteractionSessionState {
+    interaction_id: Uuid,
+    occurred_at: DateTime<Utc>,
+    session_id: Option<Uuid>,
+    session_source: Option<String>,
+    session_ref_hash: Option<Vec<u8>>,
+}
+
+#[derive(Debug)]
+struct SessionCorrelationAction {
+    interaction_id: Uuid,
+    occurred_at: DateTime<Utc>,
+    session_id: Option<Uuid>,
+    session_evidence: Option<(String, String)>,
+    sort_source: String,
+    sort_ref_hash: Vec<u8>,
+}
+
+async fn correlate_telemetry_sessions(
+    tx: &mut Transaction<'_, Postgres>,
+    auth: &ProductAuth,
+    mut evidence_by_interaction: BTreeMap<Uuid, Option<(String, String)>>,
+) -> Result<(), ApiError> {
+    let interaction_ids = evidence_by_interaction.keys().copied().collect::<Vec<_>>();
+    let states = sqlx::query_as::<_, InteractionSessionState>(
+        r"SELECT i.id AS interaction_id, i.occurred_at, i.session_id,
+          s.source AS session_source, s.ref_hash AS session_ref_hash
+        FROM interactions_v2 i
+        LEFT JOIN sessions_v2 s ON s.id = i.session_id
+        WHERE i.id = ANY($1)",
+    )
+    .bind(&interaction_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    if states.len() != interaction_ids.len() {
+        return Err(ApiError::internal(
+            "accepted telemetry interaction disappeared before session correlation",
         ));
     }
-    tx.commit().await?;
+
+    let mut actions = Vec::with_capacity(states.len());
+    for state in states {
+        let evidence = evidence_by_interaction
+            .remove(&state.interaction_id)
+            .flatten();
+        let (sort_source, sort_ref_hash) = if state.session_id.is_some() {
+            (
+                state.session_source.clone().ok_or_else(|| {
+                    ApiError::internal("linked telemetry interaction has no session source")
+                })?,
+                state.session_ref_hash.clone().ok_or_else(|| {
+                    ApiError::internal("linked telemetry interaction has no session ref hash")
+                })?,
+            )
+        } else if let Some((session_ref, session_source)) = evidence.as_ref() {
+            (session_source.clone(), sha256(session_ref))
+        } else {
+            continue;
+        };
+        actions.push(SessionCorrelationAction {
+            interaction_id: state.interaction_id,
+            occurred_at: state.occurred_at,
+            session_id: state.session_id,
+            session_evidence: evidence,
+            sort_source,
+            sort_ref_hash,
+        });
+    }
+    actions.sort_by(|left, right| {
+        (&left.sort_source, &left.sort_ref_hash, left.interaction_id).cmp(&(
+            &right.sort_source,
+            &right.sort_ref_hash,
+            right.interaction_id,
+        ))
+    });
+
+    for action in actions {
+        let session_id = if let Some(session_id) = action.session_id {
+            session_id
+        } else {
+            let (session_ref, session_source) = action.session_evidence.ok_or_else(|| {
+                ApiError::internal("unlinked correlation action has no session evidence")
+            })?;
+            let session_id = resolve_v2_session(
+                tx,
+                auth.workspace.id,
+                auth.environment.id,
+                &session_ref,
+                &session_source,
+                action.occurred_at,
+            )
+            .await?;
+            sqlx::query("UPDATE interactions_v2 SET session_id = $2 WHERE id = $1")
+                .bind(action.interaction_id)
+                .bind(session_id)
+                .execute(&mut **tx)
+                .await?;
+            session_id
+        };
+        sqlx::query(
+            r"UPDATE sessions_v2
+            SET started_at = LEAST(started_at, $2), last_seen_at = GREATEST(last_seen_at, $2)
+            WHERE id = $1",
+        )
+        .bind(session_id)
+        .bind(action.occurred_at)
+        .execute(&mut **tx)
+        .await?;
+    }
     Ok(())
 }
 
-fn contains_sensitive_report_text(value: &str) -> bool {
-    let value = value.to_ascii_lowercase();
-    let forbidden_pattern = [
-        "af_live_",
-        "af_read_",
-        "github_pat_",
-        "-----begin ",
-        "xoxb-",
-        "xoxp-",
-        "sk-proj-",
-        "api key",
-        "password",
-        "transcript:",
-        "prompt:",
-        "raw input:",
-        "raw output:",
-    ]
-    .iter()
-    .any(|pattern| value.contains(pattern));
-    let email_like = value.split_whitespace().any(|word| {
-        let trimmed = word.trim_matches(|character: char| {
-            !character.is_ascii_alphanumeric() && !"@._+-".contains(character)
-        });
-        trimmed
-            .split_once('@')
-            .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.'))
-    });
-    let bearer_credential = value.match_indices("bearer ").any(|(index, _)| {
-        let candidate = value[index + "bearer ".len()..]
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .trim_matches(|character: char| {
-                !character.is_ascii_alphanumeric() && !"-._~+/=".contains(character)
-            });
-        candidate.len() >= 20
-            && candidate
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || "-._~+/=".contains(character))
-    });
-    forbidden_pattern || bearer_credential || email_like
+#[derive(Debug, sqlx::FromRow)]
+struct ChangedInteractionReportRow {
+    report_id: Uuid,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    operation: String,
+    surface: String,
+    status_code: Option<i32>,
+    findings: serde_json::Value,
+}
+
+async fn regroup_changed_interaction_reports(
+    tx: &mut Transaction<'_, Postgres>,
+    changed_interaction_ids: &[Uuid],
+) -> Result<(), ApiError> {
+    if changed_interaction_ids.is_empty() {
+        return Ok(());
+    }
+
+    let reports = sqlx::query_as::<_, ChangedInteractionReportRow>(
+        r"SELECT r.id AS report_id, r.workspace_id, e.product_id,
+          i.operation, i.surface, i.status_code, r.findings
+        FROM interactions_v2 i
+        JOIN feedback_reports r
+          ON r.interaction_id = i.id AND r.workspace_id = i.workspace_id
+        JOIN product_environments e
+          ON e.id = i.environment_id AND e.workspace_id = i.workspace_id
+        WHERE i.id = ANY($1)",
+    )
+    .bind(changed_interaction_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    for report in reports {
+        // Skip rather than fail: this runs inside telemetry ingest, so one
+        // report whose stored findings no longer deserialize must not take down
+        // an entire batch. Matches the backfill's skip-and-continue handling.
+        let Ok(findings) = serde_json::from_value::<Vec<FeedbackFindingInput>>(report.findings)
+        else {
+            tracing::warn!(
+                report_id = %report.report_id,
+                "skipping report with unreadable findings during telemetry regroup"
+            );
+            continue;
+        };
+        assign_report_group(
+            tx,
+            &crate::grouping::FingerprintGrouper,
+            report.workspace_id,
+            report.report_id,
+            &GroupInput {
+                product_id: report.product_id,
+                operation: &report.operation,
+                surface: &report.surface,
+                status_code: report.status_code,
+                findings: &findings,
+            },
+        )
+        .await?;
+    }
+
+    Ok(())
 }
 
 pub(crate) async fn feedback_consent_state(
@@ -2463,6 +3963,377 @@ pub(crate) async fn record_feedback_consent_decision(
     Ok((decision, key.1, claims.exp))
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct BackfillSummary {
+    pub(crate) scanned: u64,
+    pub(crate) grouped: u64,
+    pub(crate) skipped: u64,
+    pub(crate) skipped_findings: u64,
+    /// False when a batch cap stopped the run before the table was walked out,
+    /// so the caller can tell "nothing left to do" from "more remains".
+    pub(crate) exhausted: bool,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct UngroupedReportRow {
+    id: Uuid,
+    workspace_id: Uuid,
+    findings: serde_json::Value,
+    created_at: DateTime<Utc>,
+    product_id: Option<Uuid>,
+    operation: Option<String>,
+    surface: Option<String>,
+    status_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RegroupSummary {
+    pub(crate) scanned: u64,
+    pub(crate) moved: u64,
+    pub(crate) unchanged: u64,
+    pub(crate) skipped: u64,
+    pub(crate) skipped_findings: u64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct GroupedReportRow {
+    id: Uuid,
+    workspace_id: Uuid,
+    findings: serde_json::Value,
+    created_at: DateTime<Utc>,
+    product_id: Option<Uuid>,
+    operation: Option<String>,
+    surface: Option<String>,
+    status_code: Option<i32>,
+    current_group_id: Uuid,
+    current_merged_into_group_key: Option<String>,
+}
+
+pub(crate) async fn assign_report_group(
+    tx: &mut Transaction<'_, Postgres>,
+    grouper: &dyn ReportGrouper,
+    workspace_id: Uuid,
+    report_id: Uuid,
+    input: &GroupInput<'_>,
+) -> Result<Uuid, ApiError> {
+    let assignment = grouper.assign(input);
+    let (group_id, unresolved_lineage_group_key) = sqlx::query_as::<_, (Uuid, Option<String>)>(
+        r"WITH assigned_group AS (
+          INSERT INTO report_groups
+          (id, workspace_id, product_id, group_key, grouper_name, grouper_version, explanation)
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+          ON CONFLICT (group_key) DO UPDATE SET
+            grouper_name = EXCLUDED.grouper_name,
+            grouper_version = EXCLUDED.grouper_version,
+            explanation = EXCLUDED.explanation,
+            updated_at = NOW()
+          RETURNING id, workspace_id, product_id, group_key, merged_into_group_key
+        )
+        SELECT COALESCE(merge_target.id, assigned_group.id),
+          CASE
+            WHEN assigned_group.merged_into_group_key IS NOT NULL
+              AND merge_target.id IS NULL
+            THEN assigned_group.group_key
+          END
+        FROM assigned_group
+        LEFT JOIN report_groups merge_target
+         ON merge_target.group_key = assigned_group.merged_into_group_key
+         AND merge_target.workspace_id = assigned_group.workspace_id
+         AND merge_target.product_id = assigned_group.product_id
+         AND merge_target.merged_into_group_key IS NULL",
+    )
+    .bind(Uuid::new_v4())
+    .bind(workspace_id)
+    .bind(input.product_id)
+    .bind(assignment.group_key)
+    .bind(grouper.name())
+    .bind(grouper.version())
+    .bind(assignment.explanation)
+    .fetch_one(&mut **tx)
+    .await?;
+    if let Some(group_key) = unresolved_lineage_group_key {
+        tracing::warn!(
+            %group_key,
+            "report group merge lineage did not resolve in one hop; using computed group"
+        );
+    }
+    let updated = sqlx::query(
+        "UPDATE feedback_reports SET group_id = $1 WHERE id = $2 AND workspace_id = $3",
+    )
+    .bind(group_id)
+    .bind(report_id)
+    .bind(workspace_id)
+    .execute(&mut **tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(ApiError::internal(
+            "report disappeared while assigning its group",
+        ));
+    }
+    Ok(group_id)
+}
+
+async fn assign_report_to_lineage_target(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    report_id: Uuid,
+    target_group_key: &str,
+) -> Result<Uuid, ApiError> {
+    sqlx::query_scalar::<_, Uuid>(
+        r"UPDATE feedback_reports report
+        SET group_id = merge_target.id
+        FROM report_groups merge_target
+        WHERE report.id = $1
+          AND report.workspace_id = $2
+          AND merge_target.workspace_id = $2
+          AND merge_target.product_id = $3
+          AND merge_target.group_key = $4
+          AND merge_target.merged_into_group_key IS NULL
+        RETURNING report.group_id",
+    )
+    .bind(report_id)
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(target_group_key)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| ApiError::internal("current report group merge lineage did not resolve"))
+}
+
+/// Groups every report that has no group yet.
+///
+/// `max_batches` bounds the run: `None` walks the table to completion (both the
+/// manual CLI path and the detached startup task), while `Some(n)` stops after
+/// `n` batches and reports `exhausted = false` for callers that want a partial
+/// pass. Either way the scan filters on `group_id IS NULL`, so a run always
+/// resumes from wherever the last one stopped.
+///
+/// Between batches the task yields, so a long backfill running in the
+/// background cannot monopolise the connection pool ahead of request traffic.
+pub(crate) async fn backfill_report_groups(
+    pool: &PgPool,
+    grouper: &dyn ReportGrouper,
+    max_batches: Option<u32>,
+) -> Result<BackfillSummary, ApiError> {
+    const BATCH_SIZE: i64 = 500;
+    /// Emit a progress line periodically so a long background run is
+    /// observable rather than silent until it finishes.
+    const PROGRESS_LOG_EVERY_BATCHES: u32 = 10;
+
+    let mut summary = BackfillSummary::default();
+    let mut cursor_created_at = None;
+    let mut cursor_id = None;
+    let mut batches_run: u32 = 0;
+
+    loop {
+        if max_batches.is_some_and(|limit| batches_run >= limit) {
+            summary.exhausted = false;
+            return Ok(summary);
+        }
+        batches_run += 1;
+        let mut tx = pool.begin().await?;
+        let rows = sqlx::query_as::<_, UngroupedReportRow>(
+            r"SELECT r.id, r.workspace_id, r.findings, r.created_at,
+              p.id AS product_id, i.operation, i.surface, i.status_code
+            FROM feedback_reports r
+            LEFT JOIN interactions_v2 i
+              ON i.id = r.interaction_id AND i.workspace_id = r.workspace_id
+            LEFT JOIN product_environments e
+              ON e.id = i.environment_id AND e.workspace_id = r.workspace_id
+            LEFT JOIN products p
+              ON p.id = e.product_id AND p.workspace_id = r.workspace_id
+            WHERE r.group_id IS NULL
+              AND (
+                $1::timestamptz IS NULL
+                OR r.created_at > $1
+                OR (r.created_at = $1 AND r.id > $2)
+              )
+            ORDER BY r.created_at, r.id
+            LIMIT $3",
+        )
+        .bind(cursor_created_at)
+        .bind(cursor_id)
+        .bind(BATCH_SIZE)
+        .fetch_all(&mut *tx)
+        .await?;
+        if rows.is_empty() {
+            tx.commit().await?;
+            summary.exhausted = true;
+            break;
+        }
+
+        summary.scanned += u64::try_from(rows.len()).map_err(ApiError::internal)?;
+        let next_cursor = rows
+            .last()
+            .map(|row| (row.created_at, row.id))
+            .ok_or_else(|| ApiError::internal("backfill batch unexpectedly empty"))?;
+
+        for row in rows {
+            let (Some(product_id), Some(operation), Some(surface)) = (
+                row.product_id,
+                row.operation.as_deref(),
+                row.surface.as_deref(),
+            ) else {
+                summary.skipped += 1;
+                continue;
+            };
+            let Ok(findings) = serde_json::from_value::<Vec<FeedbackFindingInput>>(row.findings)
+            else {
+                summary.skipped += 1;
+                summary.skipped_findings += 1;
+                tracing::warn!(
+                    report_id = %row.id,
+                    "skipping report with unreadable findings during group backfill"
+                );
+                continue;
+            };
+            assign_report_group(
+                &mut tx,
+                grouper,
+                row.workspace_id,
+                row.id,
+                &GroupInput {
+                    product_id,
+                    operation,
+                    surface,
+                    status_code: row.status_code,
+                    findings: &findings,
+                },
+            )
+            .await?;
+            summary.grouped += 1;
+        }
+
+        tx.commit().await?;
+        cursor_created_at = Some(next_cursor.0);
+        cursor_id = Some(next_cursor.1);
+
+        if batches_run.is_multiple_of(PROGRESS_LOG_EVERY_BATCHES) {
+            tracing::info!(
+                scanned = summary.scanned,
+                grouped = summary.grouped,
+                skipped = summary.skipped,
+                "report group backfill in progress"
+            );
+        }
+        // Hand the connection pool back to request traffic before the next
+        // batch: this loop can run for a long time on a large history.
+        tokio::task::yield_now().await;
+    }
+
+    Ok(summary)
+}
+
+pub(crate) async fn regroup_report_groups(
+    pool: &PgPool,
+    grouper: &dyn ReportGrouper,
+) -> Result<RegroupSummary, ApiError> {
+    const BATCH_SIZE: i64 = 500;
+
+    let mut summary = RegroupSummary::default();
+    let mut cursor_created_at = None;
+    let mut cursor_id = None;
+
+    loop {
+        let mut tx = pool.begin().await?;
+        let rows = sqlx::query_as::<_, GroupedReportRow>(
+            r"SELECT r.id, r.workspace_id, r.findings, r.created_at,
+              p.id AS product_id, i.operation, i.surface, i.status_code,
+              g.id AS current_group_id,
+              g.merged_into_group_key AS current_merged_into_group_key
+            FROM feedback_reports r
+            JOIN report_groups g
+              ON g.id = r.group_id AND g.workspace_id = r.workspace_id
+            LEFT JOIN interactions_v2 i
+              ON i.id = r.interaction_id AND i.workspace_id = r.workspace_id
+            LEFT JOIN product_environments e
+              ON e.id = i.environment_id AND e.workspace_id = r.workspace_id
+            LEFT JOIN products p
+              ON p.id = e.product_id AND p.workspace_id = r.workspace_id
+            WHERE r.group_id IS NOT NULL
+              AND (
+                $1::timestamptz IS NULL
+                OR r.created_at > $1
+                OR (r.created_at = $1 AND r.id > $2)
+              )
+            ORDER BY r.created_at, r.id
+            LIMIT $3",
+        )
+        .bind(cursor_created_at)
+        .bind(cursor_id)
+        .bind(BATCH_SIZE)
+        .fetch_all(&mut *tx)
+        .await?;
+        if rows.is_empty() {
+            tx.commit().await?;
+            break;
+        }
+
+        summary.scanned += u64::try_from(rows.len()).map_err(ApiError::internal)?;
+        let next_cursor = rows
+            .last()
+            .map(|row| (row.created_at, row.id))
+            .ok_or_else(|| ApiError::internal("regroup batch unexpectedly empty"))?;
+
+        for row in rows {
+            let (Some(product_id), Some(operation), Some(surface)) = (
+                row.product_id,
+                row.operation.as_deref(),
+                row.surface.as_deref(),
+            ) else {
+                summary.skipped += 1;
+                continue;
+            };
+            let Ok(findings) = serde_json::from_value::<Vec<FeedbackFindingInput>>(row.findings)
+            else {
+                summary.skipped += 1;
+                summary.skipped_findings += 1;
+                tracing::warn!(
+                    report_id = %row.id,
+                    "skipping report with unreadable findings during report regroup"
+                );
+                continue;
+            };
+            let input = GroupInput {
+                product_id,
+                operation,
+                surface,
+                status_code: row.status_code,
+                findings: &findings,
+            };
+            // A current manual merge wins over a newly computed fingerprint.
+            // Otherwise always reassign: even an unchanged key may carry newer
+            // grouper metadata, and the upsert refreshes that audit trail.
+            let assigned_group_id =
+                if let Some(target_group_key) = row.current_merged_into_group_key.as_deref() {
+                    assign_report_to_lineage_target(
+                        &mut tx,
+                        row.workspace_id,
+                        product_id,
+                        row.id,
+                        target_group_key,
+                    )
+                    .await?
+                } else {
+                    assign_report_group(&mut tx, grouper, row.workspace_id, row.id, &input).await?
+                };
+            let moved = assigned_group_id != row.current_group_id;
+            if moved {
+                summary.moved += 1;
+            } else {
+                summary.unchanged += 1;
+            }
+        }
+
+        tx.commit().await?;
+        cursor_created_at = Some(next_cursor.0);
+        cursor_id = Some(next_cursor.1);
+    }
+
+    Ok(summary)
+}
+
 pub(crate) async fn submit_product_feedback(
     pool: &PgPool,
     capability: &str,
@@ -2583,15 +4454,15 @@ pub(crate) async fn submit_product_feedback(
     } else {
         None
     };
-    let findings = serde_json::to_value(findings).map_err(ApiError::internal)?;
+    let findings_json = serde_json::to_value(&findings).map_err(ApiError::internal)?;
     let workaround = workaround
         .map(serde_json::to_value)
         .transpose()
         .map_err(ApiError::internal)?;
 
     let parsed = parse_capability(capability)?;
-    let key = sqlx::query_as::<_, (Uuid, Vec<u8>, String, Uuid)>(
-        r"SELECT k.workspace_id, k.key_hash, e.feedback_mode, k.environment_id
+    let key = sqlx::query_as::<_, (Uuid, Vec<u8>, String, Uuid, Uuid)>(
+        r"SELECT k.workspace_id, k.key_hash, e.feedback_mode, k.environment_id, e.product_id
         FROM api_keys k
         JOIN product_environments e ON e.id = k.environment_id
         WHERE k.id = $1 AND k.kind = 'write' AND k.revoked_at IS NULL
@@ -2703,9 +4574,23 @@ pub(crate) async fn submit_product_feedback(
     .bind(summary)
     .bind(input.impact)
     .bind(input.confidence)
-    .bind(findings)
+    .bind(findings_json)
     .bind(workaround)
     .fetch_one(&mut *tx)
+    .await?;
+    assign_report_group(
+        &mut tx,
+        &crate::grouping::FingerprintGrouper,
+        key.0,
+        report.id,
+        &GroupInput {
+            product_id: key.4,
+            operation: &interaction.operation,
+            surface: &interaction.surface,
+            status_code: interaction.status_code,
+            findings: &findings,
+        },
+    )
     .await?;
     tx.commit().await?;
     Ok((interaction, report))
@@ -2718,10 +4603,12 @@ mod product_tests {
         reason = "test failures should abort at the assertion site with explicit context"
     )]
 
+    use std::str::FromStr;
+
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
-    use sqlx::postgres::PgPoolOptions;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     use crate::models::{ConsentDecisionInput, CurrentUser};
 
@@ -2782,6 +4669,2128 @@ mod product_tests {
         }
     }
 
+    fn feedback_input_with_finding(summary: &str, topic: &str) -> ProductFeedbackReportInput {
+        let mut input = feedback_input(summary);
+        input.findings = vec![FeedbackFindingInput {
+            kind: "defect".into(),
+            topic: topic.into(),
+            severity: Some("major".into()),
+            detail: "Search failed for a valid request.".into(),
+        }];
+        input
+    }
+
+    fn grouping_telemetry_event(interaction_id: Uuid) -> InteractionTelemetryInput {
+        InteractionTelemetryInput {
+            interaction_id,
+            sequence: Some(1),
+            surface: "mcp".into(),
+            operation: "search_reports".into(),
+            status_code: Some(503),
+            duration_ms: Some(25),
+            customer_ref: None,
+            classification: Some("confirmed".into()),
+            confirmation_method: Some("mcp".into()),
+            runtime_hint: None,
+            runtime_hint_source: None,
+            session_ref: None,
+            session_source: None,
+            occurred_at: Some(Utc::now()),
+        }
+    }
+
+    #[derive(Debug)]
+    struct MetadataRefreshingGrouper;
+
+    impl ReportGrouper for MetadataRefreshingGrouper {
+        fn name(&self) -> &'static str {
+            "metadata-test"
+        }
+
+        fn version(&self) -> i32 {
+            2
+        }
+
+        fn assign(&self, input: &GroupInput<'_>) -> crate::grouping::GroupAssignment {
+            let mut assignment = crate::grouping::FingerprintGrouper.assign(input);
+            assignment.explanation = "refreshed grouper explanation".into();
+            assignment
+        }
+    }
+
+    async fn telemetry_test_workspace(pool: &PgPool, label: &str) -> anyhow::Result<Workspace> {
+        let workspace_id = Uuid::new_v4();
+        sqlx::query_as::<_, Workspace>(
+            r"INSERT INTO workspaces (id, os_user_id, name, slug)
+            VALUES ($1, $2, $3, $4) RETURNING *",
+        )
+        .bind(workspace_id)
+        .bind(format!("usr_telemetry_{}", workspace_id.simple()))
+        .bind(label)
+        .bind(format!(
+            "telemetry-{}",
+            &workspace_id.simple().to_string()[..12]
+        ))
+        .fetch_one(pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn telemetry_test_product(
+        pool: &PgPool,
+        workspace: &Workspace,
+        name: &str,
+    ) -> anyhow::Result<(Product, ProductAuth)> {
+        let (product, environment) =
+            create_product(pool, workspace.id, CreateProductInput { name: name.into() })
+                .await
+                .map_err(test_error)?;
+        let (key, _) = create_api_key(
+            pool,
+            workspace.id,
+            environment.id,
+            Some(format!("{name} telemetry")),
+            None,
+            None,
+        )
+        .await
+        .map_err(test_error)?;
+        Ok((
+            product,
+            ProductAuth {
+                workspace: workspace.clone(),
+                environment,
+                api_key_id: key.id,
+            },
+        ))
+    }
+
+    fn mcp_telemetry_event(
+        interaction_id: Uuid,
+        sequence: Option<i64>,
+        operation: &str,
+        session_ref: Option<&str>,
+        session_source: Option<&str>,
+        occurred_at: DateTime<Utc>,
+    ) -> InteractionTelemetryInput {
+        InteractionTelemetryInput {
+            interaction_id,
+            sequence,
+            surface: "mcp".into(),
+            operation: operation.into(),
+            status_code: Some(200),
+            duration_ms: Some(10),
+            customer_ref: None,
+            classification: Some("confirmed".into()),
+            confirmation_method: Some("mcp".into()),
+            runtime_hint: None,
+            runtime_hint_source: None,
+            session_ref: session_ref.map(str::to_owned),
+            session_source: session_source.map(str::to_owned),
+            occurred_at: Some(occurred_at),
+        }
+    }
+
+    async fn interaction_session(
+        pool: &PgPool,
+        interaction_id: Uuid,
+    ) -> anyhow::Result<Option<Uuid>> {
+        sqlx::query_scalar("SELECT session_id FROM interactions_v2 WHERE id = $1")
+            .bind(interaction_id)
+            .fetch_one(pool)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn github_test_workspace(pool: &PgPool, label: &str) -> anyhow::Result<Uuid> {
+        let workspace_id = Uuid::new_v4();
+        sqlx::query(
+            r"INSERT INTO workspaces (id, os_user_id, name, slug)
+            VALUES ($1, $2, $3, $4)",
+        )
+        .bind(workspace_id)
+        .bind(format!("usr_github_{}", workspace_id.simple()))
+        .bind(label)
+        .bind(format!(
+            "github-{}",
+            &workspace_id.simple().to_string()[..12]
+        ))
+        .execute(pool)
+        .await?;
+        Ok(workspace_id)
+    }
+
+    #[derive(Debug)]
+    struct GithubIssueGroupFixture {
+        workspace_id: Uuid,
+        product_id: Uuid,
+        environment_id: Uuid,
+        group_id: Uuid,
+        group_key: String,
+        installation_id: i64,
+    }
+
+    async fn github_issue_group_fixture(
+        pool: &PgPool,
+        label: &str,
+        report_count: usize,
+    ) -> anyhow::Result<GithubIssueGroupFixture> {
+        let workspace_id = github_test_workspace(pool, label).await?;
+        let (product, environment) = create_product(
+            pool,
+            workspace_id,
+            CreateProductInput {
+                name: label.to_owned(),
+            },
+        )
+        .await
+        .map_err(test_error)?;
+        let installation_id = i64::from(Uuid::new_v4().as_fields().0);
+        upsert_github_installation(
+            pool,
+            workspace_id,
+            installation_id,
+            "epode-test",
+            "Organization",
+        )
+        .await
+        .map_err(test_error)?;
+        set_product_github_repo(
+            pool,
+            workspace_id,
+            product.id,
+            &ProductGithubRepoInput {
+                installation_id,
+                repo_full_name: "open-software/epode-test".to_owned(),
+                default_branch: "main".to_owned(),
+                path_prefix: None,
+            },
+        )
+        .await
+        .map_err(test_error)?;
+        let group_id = Uuid::new_v4();
+        let group_key = Uuid::new_v4().simple().to_string();
+        sqlx::query(
+            r"INSERT INTO report_groups
+            (id, workspace_id, product_id, group_key, grouper_name, grouper_version, explanation)
+            VALUES ($1, $2, $3, $4, 'fingerprint', 1, 'test issue filing group')",
+        )
+        .bind(group_id)
+        .bind(workspace_id)
+        .bind(product.id)
+        .bind(&group_key)
+        .execute(pool)
+        .await?;
+        for index in 0..report_count {
+            let interaction_id = Uuid::new_v4();
+            let occurred_at = Utc::now() + Duration::seconds(i64::try_from(index)?);
+            sqlx::query(
+                r"INSERT INTO interactions_v2
+                (id, workspace_id, environment_id, surface, operation, status_code,
+                 classification, confirmation_method, occurred_at)
+                VALUES ($1, $2, $3, 'mcp', 'search_reports', 503, 'confirmed', 'mcp', $4)",
+            )
+            .bind(interaction_id)
+            .bind(workspace_id)
+            .bind(environment.id)
+            .bind(occurred_at)
+            .execute(pool)
+            .await?;
+            sqlx::query(
+                r"INSERT INTO feedback_reports
+                (id, workspace_id, interaction_id, summary, impact, findings, workaround, group_id)
+                VALUES ($1, $2, $3, $4, 'blocked', $5, $6, $7)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(workspace_id)
+            .bind(interaction_id)
+            .bind(format!("GitHub issue fixture report number {index}."))
+            .bind(serde_json::json!([{
+                "kind": "defect",
+                "topic": "search_failure",
+                "severity": "major",
+                "detail": "Search failed for a valid request."
+            }]))
+            .bind(serde_json::json!({
+                "used": true,
+                "detail": "Retried the request once."
+            }))
+            .bind(group_id)
+            .execute(pool)
+            .await?;
+        }
+        Ok(GithubIssueGroupFixture {
+            workspace_id,
+            product_id: product.id,
+            environment_id: environment.id,
+            group_id,
+            group_key,
+            installation_id,
+        })
+    }
+
+    #[derive(Debug)]
+    struct MergeGroupsFixture {
+        workspace_id: Uuid,
+        product_id: Uuid,
+        write_key_id: Uuid,
+        write_secret: String,
+        source_report_id: Uuid,
+        source_interaction_id: Uuid,
+        source_group_id: Uuid,
+        source_group_key: String,
+        target_group_id: Uuid,
+        target_group_key: String,
+    }
+
+    async fn report_group_for_report(
+        pool: &PgPool,
+        report_id: Uuid,
+    ) -> anyhow::Result<(Uuid, String)> {
+        Ok(sqlx::query_as::<_, (Uuid, String)>(
+            r"SELECT report_group.id, report_group.group_key
+            FROM feedback_reports report
+            JOIN report_groups report_group ON report_group.id = report.group_id
+            WHERE report.id = $1",
+        )
+        .bind(report_id)
+        .fetch_one(pool)
+        .await?)
+    }
+
+    async fn merge_groups_fixture(
+        pool: &PgPool,
+        label: &str,
+    ) -> anyhow::Result<MergeGroupsFixture> {
+        let workspace_id = github_test_workspace(pool, label).await?;
+        let (product, environment) = create_product(
+            pool,
+            workspace_id,
+            CreateProductInput {
+                name: label.to_owned(),
+            },
+        )
+        .await
+        .map_err(test_error)?;
+        let (write_key, write_secret) = create_api_key(
+            pool,
+            workspace_id,
+            environment.id,
+            Some("Merge group writer".into()),
+            Some("write".into()),
+            None,
+        )
+        .await
+        .map_err(test_error)?;
+        let source_capability = test_capability(&write_secret, write_key.id, Uuid::new_v4());
+        let target_capability = test_capability(&write_secret, write_key.id, Uuid::new_v4());
+        let (_, source_report) = submit_product_feedback(
+            pool,
+            &source_capability,
+            feedback_input_with_finding(
+                "The source report belongs to a manually merged group.",
+                "source_failure",
+            ),
+        )
+        .await
+        .map_err(test_error)?;
+        let (_, target_report) = submit_product_feedback(
+            pool,
+            &target_capability,
+            feedback_input_with_finding(
+                "The target report receives manually merged evidence.",
+                "target_failure",
+            ),
+        )
+        .await
+        .map_err(test_error)?;
+        let (source_group_id, source_group_key) =
+            report_group_for_report(pool, source_report.id).await?;
+        let (target_group_id, target_group_key) =
+            report_group_for_report(pool, target_report.id).await?;
+        anyhow::ensure!(source_group_id != target_group_id);
+
+        Ok(MergeGroupsFixture {
+            workspace_id,
+            product_id: product.id,
+            write_key_id: write_key.id,
+            write_secret,
+            source_report_id: source_report.id,
+            source_interaction_id: source_report.interaction_id,
+            source_group_id,
+            source_group_key,
+            target_group_id,
+            target_group_key,
+        })
+    }
+
+    async fn record_test_group_issue(
+        pool: &PgPool,
+        workspace_id: Uuid,
+        group_key: &str,
+        issue_number: i64,
+        report_count: i64,
+    ) -> anyhow::Result<()> {
+        let link = GithubIssueLink {
+            repo_full_name: "open-software/merge-test".to_owned(),
+            issue_number,
+            url: format!("https://github.com/open-software/merge-test/issues/{issue_number}"),
+            state: "open".to_owned(),
+        };
+        let claim = claim_group_issue_filing(
+            pool,
+            GroupIssueFilingRequest {
+                workspace_id,
+                group_key,
+                installation_id: 4_433_427,
+                repo_full_name: &link.repo_full_name,
+                created_by: "usr_merge_test",
+                claim_report_count: report_count,
+            },
+            Utc::now() - Duration::minutes(5),
+        )
+        .await
+        .map_err(test_error)?;
+        anyhow::ensure!(matches!(claim, GroupIssueFilingClaim::Claimed));
+        complete_group_issue_filing(pool, workspace_id, group_key, &link, report_count)
+            .await
+            .map_err(test_error)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn recording_one_group_issue_twice_returns_the_existing_link() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let fixture = github_issue_group_fixture(&pool, "Issue idempotency test", 2).await?;
+
+        let result = async {
+            let link = GithubIssueLink {
+                repo_full_name: "open-software/epode-test".to_owned(),
+                issue_number: 42,
+                url: "https://github.com/open-software/epode-test/issues/42".to_owned(),
+                state: "open".to_owned(),
+            };
+            let stale_cutoff = Utc::now() - Duration::minutes(5);
+            let first_claim = claim_group_issue_filing(
+                &pool,
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: 4_433_427,
+                    repo_full_name: &link.repo_full_name,
+                    created_by: "usr_test",
+                    claim_report_count: 2,
+                },
+                stale_cutoff,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(matches!(first_claim, GroupIssueFilingClaim::Claimed));
+
+            // A concurrent filer must be turned away while the claim is fresh,
+            // so only one GitHub issue is ever created.
+            let contended = claim_group_issue_filing(
+                &pool,
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: 4_433_427,
+                    repo_full_name: &link.repo_full_name,
+                    created_by: "usr_other",
+                    claim_report_count: 2,
+                },
+                stale_cutoff,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(matches!(contended, GroupIssueFilingClaim::InProgress));
+
+            let first = complete_group_issue_filing(
+                &pool,
+                fixture.workspace_id,
+                &fixture.group_key,
+                &link,
+                2,
+            )
+            .await
+            .map_err(test_error)?;
+
+            // Once filed, a later attempt returns the existing issue instead of
+            // claiming again.
+            let second = claim_group_issue_filing(
+                &pool,
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: 4_433_427,
+                    repo_full_name: &link.repo_full_name,
+                    created_by: "usr_other",
+                    claim_report_count: 2,
+                },
+                stale_cutoff,
+            )
+            .await
+            .map_err(test_error)?;
+            let GroupIssueFilingClaim::AlreadyFiled(second) = second else {
+                anyhow::bail!("expected the second claim to see an already filed issue");
+            };
+
+            anyhow::ensure!(first.link() == link);
+            anyhow::ensure!(second.link() == link);
+            let count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM group_github_issues WHERE group_key = $1")
+                    .bind(&fixture.group_key)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(count == 1);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn ambiguous_filing_refuses_a_subsequent_claim() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let fixture = github_issue_group_fixture(&pool, "Ambiguous filing test", 2).await?;
+
+        let result = async {
+            let claim = claim_group_issue_filing(
+                &pool,
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: fixture.installation_id,
+                    repo_full_name: "open-software/epode-test",
+                    created_by: "usr_test",
+                    claim_report_count: 2,
+                },
+                Utc::now() - Duration::minutes(5),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(matches!(claim, GroupIssueFilingClaim::Claimed));
+            let claim_time: DateTime<Utc> = sqlx::query_scalar(
+                "SELECT claimed_at FROM group_github_issues WHERE group_key = $1",
+            )
+            .bind(&fixture.group_key)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                mark_group_issue_filing_for_reconciliation(
+                    &pool,
+                    fixture.workspace_id,
+                    &fixture.group_key,
+                )
+                .await
+                .map_err(test_error)?
+            );
+
+            let filing_state: String = sqlx::query_scalar(
+                "SELECT filing_state FROM group_github_issues WHERE group_key = $1",
+            )
+            .bind(&fixture.group_key)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(filing_state == "needs_reconciliation");
+            let retained_claim_time: DateTime<Utc> = sqlx::query_scalar(
+                "SELECT claimed_at FROM group_github_issues WHERE group_key = $1",
+            )
+            .bind(&fixture.group_key)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(retained_claim_time == claim_time);
+
+            let retry = claim_group_issue_filing(
+                &pool,
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: fixture.installation_id,
+                    repo_full_name: "open-software/epode-test",
+                    created_by: "usr_retry",
+                    claim_report_count: 2,
+                },
+                Utc::now() - Duration::minutes(5),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(matches!(retry, GroupIssueFilingClaim::NeedsReconciliation));
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn reconciliation_adopts_the_found_issue_and_claim_report_count() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let fixture = github_issue_group_fixture(&pool, "Issue adoption test", 2).await?;
+
+        let result = async {
+            let claim = claim_group_issue_filing(
+                &pool,
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: fixture.installation_id,
+                    repo_full_name: "open-software/epode-test",
+                    created_by: "usr_test",
+                    claim_report_count: 2,
+                },
+                Utc::now() - Duration::minutes(5),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(matches!(claim, GroupIssueFilingClaim::Claimed));
+            let claim_time: DateTime<Utc> = sqlx::query_scalar(
+                "SELECT claimed_at FROM group_github_issues WHERE group_key = $1",
+            )
+            .bind(&fixture.group_key)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                mark_group_issue_filing_for_reconciliation(
+                    &pool,
+                    fixture.workspace_id,
+                    &fixture.group_key,
+                )
+                .await
+                .map_err(test_error)?
+            );
+            let retained_claim_time: DateTime<Utc> = sqlx::query_scalar(
+                "SELECT claimed_at FROM group_github_issues WHERE group_key = $1",
+            )
+            .bind(&fixture.group_key)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(retained_claim_time == claim_time);
+            let interim_interaction_id = Uuid::new_v4();
+            sqlx::query(
+                r"INSERT INTO interactions_v2
+                (id, workspace_id, environment_id, surface, operation, status_code,
+                 classification, confirmation_method, occurred_at)
+                VALUES ($1, $2, $3, 'mcp', 'search_reports', 503, 'confirmed', 'mcp', NOW())",
+            )
+            .bind(interim_interaction_id)
+            .bind(fixture.workspace_id)
+            .bind(fixture.environment_id)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                r"INSERT INTO feedback_reports
+                (id, workspace_id, interaction_id, summary, impact, findings, workaround, group_id)
+                VALUES ($1, $2, $3, 'Interim report after the filing claim.', 'blocked',
+                  '[]'::JSONB, NULL, $4)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(fixture.workspace_id)
+            .bind(interim_interaction_id)
+            .bind(fixture.group_id)
+            .execute(&pool)
+            .await?;
+            let reconciliation = claim_group_issue_reconciliation(
+                &pool,
+                fixture.workspace_id,
+                &fixture.group_key,
+                Utc::now(),
+            )
+            .await
+            .map_err(test_error)?
+            .ok_or_else(|| anyhow::anyhow!("reconciliation should be claimable"))?;
+            anyhow::ensure!(reconciliation.claim_report_count == 2);
+            let live_report_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM feedback_reports WHERE workspace_id = $1 AND group_id = $2",
+            )
+            .bind(fixture.workspace_id)
+            .bind(fixture.group_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(live_report_count == 3);
+
+            let link = GithubIssueLink {
+                repo_full_name: "open-software/epode-test".to_owned(),
+                issue_number: 142,
+                url: "https://github.com/open-software/epode-test/issues/142".to_owned(),
+                state: "open".to_owned(),
+            };
+            anyhow::ensure!(
+                complete_group_issue_reconciliation(
+                    &pool,
+                    fixture.workspace_id,
+                    &fixture.group_key,
+                    reconciliation.reconciliation_claimed_at,
+                    &link,
+                    reconciliation.claim_report_count,
+                )
+                .await
+                .map_err(test_error)?
+            );
+
+            let adopted = get_group_github_issue(&pool, fixture.workspace_id, &fixture.group_key)
+                .await
+                .map_err(test_error)?
+                .ok_or_else(|| anyhow::anyhow!("adopted issue should be filed"))?;
+            anyhow::ensure!(adopted.link() == link);
+            let report_count: i64 = sqlx::query_scalar(
+                "SELECT last_commented_report_count FROM group_github_issues WHERE group_key = $1",
+            )
+            .bind(&fixture.group_key)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(report_count == 2);
+            let mut tx = pool.begin().await?;
+            let sync = group_issue_sync_context(&mut tx, fixture.workspace_id, &fixture.group_key)
+                .await
+                .map_err(test_error)?
+                .ok_or_else(|| anyhow::anyhow!("adopted issue should be syncable"))?;
+            anyhow::ensure!(sync.observed_report_count == 2);
+            anyhow::ensure!(sync.current_report_count == 3);
+            tx.rollback().await?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn product_mapping_rejects_another_workspaces_installation() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let original_workspace = github_test_workspace(&pool, "Mapping owner").await?;
+        let other_workspace = github_test_workspace(&pool, "Mapping attacker").await?;
+        let (other_product, _) = create_product(
+            &pool,
+            other_workspace,
+            CreateProductInput {
+                name: "Other workspace product".to_owned(),
+            },
+        )
+        .await
+        .map_err(test_error)?;
+        let installation_id = i64::from(Uuid::new_v4().as_fields().0);
+        upsert_github_installation(
+            &pool,
+            original_workspace,
+            installation_id,
+            "mapping-owner",
+            "Organization",
+        )
+        .await
+        .map_err(test_error)?;
+
+        let error = set_product_github_repo(
+            &pool,
+            other_workspace,
+            other_product.id,
+            &ProductGithubRepoInput {
+                installation_id,
+                repo_full_name: "open-software/private".to_owned(),
+                default_branch: "main".to_owned(),
+                path_prefix: None,
+            },
+        )
+        .await
+        .expect_err("a foreign installation must not be accepted");
+        anyhow::ensure!(error.status == StatusCode::NOT_FOUND);
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM product_github_repos WHERE product_id = $1")
+                .bind(other_product.id)
+                .fetch_one(&pool)
+                .await?;
+        anyhow::ensure!(count == 0);
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1 OR id = $2")
+            .bind(original_workspace)
+            .bind(other_workspace)
+            .execute(&pool)
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn product_group_listing_includes_counts_and_linked_issue() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let fixture = github_issue_group_fixture(&pool, "Group listing test", 2).await?;
+
+        let result = async {
+            let context = group_issue_context(
+                &pool,
+                fixture.workspace_id,
+                &fixture.group_key,
+                "https://app.epode.test/?view=feedback&group=test".to_owned(),
+            )
+            .await
+            .map_err(test_error)?
+            .ok_or_else(|| anyhow::anyhow!("fixture group should be found"))?;
+            anyhow::ensure!(context.installation_id == Some(fixture.installation_id));
+            anyhow::ensure!(context.installation_active);
+            anyhow::ensure!(context.template.report_count == 2);
+            anyhow::ensure!(context.template.findings[0].count == 2);
+
+            let link = GithubIssueLink {
+                repo_full_name: "open-software/epode-test".to_owned(),
+                issue_number: 84,
+                url: "https://github.com/open-software/epode-test/issues/84".to_owned(),
+                state: "open".to_owned(),
+            };
+            let claim = claim_group_issue_filing(
+                &pool,
+                GroupIssueFilingRequest {
+                    workspace_id: fixture.workspace_id,
+                    group_key: &fixture.group_key,
+                    installation_id: 4_433_427,
+                    repo_full_name: &link.repo_full_name,
+                    created_by: "usr_test",
+                    claim_report_count: 2,
+                },
+                Utc::now() - Duration::minutes(5),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(matches!(claim, GroupIssueFilingClaim::Claimed));
+            complete_group_issue_filing(&pool, fixture.workspace_id, &fixture.group_key, &link, 2)
+                .await
+                .map_err(test_error)?;
+
+            let page = list_product_groups(&pool, fixture.workspace_id, fixture.product_id, 50, 0)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(!page.has_more);
+            anyhow::ensure!(page.groups.len() == 1);
+            let listed_group = &page.groups[0];
+            anyhow::ensure!(listed_group.last_commented_report_count == Some(2));
+            let group = &listed_group.group;
+            anyhow::ensure!(group.report_count == 2);
+            anyhow::ensure!(group.latest_occurred_at.is_some());
+            anyhow::ensure!(group.github_issue.as_ref() == Some(&link));
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn report_group_merge_survives_regroup_and_routes_future_reports() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let fixture = merge_groups_fixture(&pool, "Durable report group merge").await?;
+
+        let result = async {
+            let summary = merge_report_groups(
+                &pool,
+                fixture.workspace_id,
+                &fixture.source_group_key,
+                &fixture.target_group_key,
+                "usr_merge_actor",
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                summary
+                    == MergeReportGroupsResponse {
+                        reports_moved: 1,
+                        target_group_key: fixture.target_group_key.clone(),
+                    }
+            );
+
+            let lineage =
+                sqlx::query_as::<_, (Option<String>, Option<DateTime<Utc>>, Option<String>)>(
+                    r"SELECT merged_into_group_key, merged_at, merged_by
+                FROM report_groups WHERE id = $1",
+                )
+                .bind(fixture.source_group_id)
+                .fetch_one(&pool)
+                .await?;
+            anyhow::ensure!(lineage.0.as_deref() == Some(fixture.target_group_key.as_str()));
+            anyhow::ensure!(lineage.1.is_some());
+            anyhow::ensure!(lineage.2.as_deref() == Some("usr_merge_actor"));
+            let retained_source_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM report_groups WHERE id = $1")
+                    .bind(fixture.source_group_id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(retained_source_count == 1);
+            let merged_report_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(fixture.source_report_id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(merged_report_group == Some(fixture.target_group_id));
+
+            regroup_report_groups(&pool, &crate::grouping::FingerprintGrouper)
+                .await
+                .map_err(test_error)?;
+            let regrouped_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(fixture.source_report_id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(regrouped_group == Some(fixture.target_group_id));
+
+            // Exercise repair of a report still pointing at the retained
+            // source even when its newly computed fingerprint no longer names
+            // that source: current merge lineage remains authoritative.
+            sqlx::query("UPDATE feedback_reports SET group_id = $1 WHERE id = $2")
+                .bind(fixture.source_group_id)
+                .bind(fixture.source_report_id)
+                .execute(&pool)
+                .await?;
+            sqlx::query(
+                "UPDATE interactions_v2 SET operation = 'changed_after_merge' WHERE id = $1",
+            )
+            .bind(fixture.source_interaction_id)
+            .execute(&pool)
+            .await?;
+            regroup_report_groups(&pool, &crate::grouping::FingerprintGrouper)
+                .await
+                .map_err(test_error)?;
+            let repaired_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(fixture.source_report_id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(repaired_group == Some(fixture.target_group_id));
+
+            let future_capability =
+                test_capability(&fixture.write_secret, fixture.write_key_id, Uuid::new_v4());
+            let (_, future_report) = submit_product_feedback(
+                &pool,
+                &future_capability,
+                feedback_input_with_finding(
+                    "A future matching report follows durable merge lineage.",
+                    "source_failure",
+                ),
+            )
+            .await
+            .map_err(test_error)?;
+            let future_group = report_group_for_report(&pool, future_report.id).await?;
+            anyhow::ensure!(future_group.0 == fixture.target_group_id);
+
+            let page = list_product_groups(&pool, fixture.workspace_id, fixture.product_id, 50, 0)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(page.groups.len() == 1);
+            anyhow::ensure!(page.groups[0].group.group_key == fixture.target_group_key);
+            anyhow::ensure!(page.groups[0].group.report_count == 3);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn unresolvable_report_group_lineage_preserves_future_report() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let fixture = merge_groups_fixture(&pool, "Broken report group lineage").await?;
+
+        let result = async {
+            let terminal_capability =
+                test_capability(&fixture.write_secret, fixture.write_key_id, Uuid::new_v4());
+            let (_, terminal_report) = submit_product_feedback(
+                &pool,
+                &terminal_capability,
+                feedback_input_with_finding(
+                    "A terminal group makes the malformed lineage two hops long.",
+                    "terminal_failure",
+                ),
+            )
+            .await
+            .map_err(test_error)?;
+            let (_, terminal_group_key) =
+                report_group_for_report(&pool, terminal_report.id).await?;
+
+            // Product code prevents chains, so construct one directly to
+            // exercise ingestion's last-resort preservation behavior.
+            sqlx::query(
+                r"UPDATE report_groups
+                SET merged_into_group_key = $1, merged_at = NOW(), merged_by = 'test_corruption'
+                WHERE id = $2",
+            )
+            .bind(&terminal_group_key)
+            .bind(fixture.target_group_id)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                r"UPDATE report_groups
+                SET merged_into_group_key = $1, merged_at = NOW(), merged_by = 'test_corruption'
+                WHERE id = $2",
+            )
+            .bind(&fixture.target_group_key)
+            .bind(fixture.source_group_id)
+            .execute(&pool)
+            .await?;
+
+            let future_capability =
+                test_capability(&fixture.write_secret, fixture.write_key_id, Uuid::new_v4());
+            let (_, future_report) = submit_product_feedback(
+                &pool,
+                &future_capability,
+                feedback_input_with_finding(
+                    "A matching report remains available despite malformed lineage.",
+                    "source_failure",
+                ),
+            )
+            .await
+            .map_err(test_error)?;
+            let future_group = report_group_for_report(&pool, future_report.id).await?;
+            anyhow::ensure!(future_group.0 == fixture.source_group_id);
+
+            let context = group_issue_context(
+                &pool,
+                fixture.workspace_id,
+                &fixture.source_group_key,
+                "https://app.epode.test/?view=feedback&group=source".to_owned(),
+            )
+            .await
+            .map_err(test_error)?
+            .ok_or_else(|| anyhow::anyhow!("source group should remain addressable"))?;
+            anyhow::ensure!(
+                context.merged_into_group_key.as_deref() == Some(fixture.target_group_key.as_str())
+            );
+            anyhow::ensure!(context.repo_full_name.is_none());
+            anyhow::ensure!(context.template.report_count == 2);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn report_group_merge_rejects_invalid_relationships() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let fixture = merge_groups_fixture(&pool, "Merge relationship validation").await?;
+
+        let result = async {
+            let self_merge = merge_report_groups(
+                &pool,
+                fixture.workspace_id,
+                &fixture.source_group_key,
+                &fixture.source_group_key,
+                "usr_merge_actor",
+            )
+            .await
+            .expect_err("a group cannot merge into itself");
+            anyhow::ensure!(self_merge.status == StatusCode::BAD_REQUEST);
+
+            let third_capability =
+                test_capability(&fixture.write_secret, fixture.write_key_id, Uuid::new_v4());
+            let (_, third_report) = submit_product_feedback(
+                &pool,
+                &third_capability,
+                feedback_input_with_finding(
+                    "A third group remains available for lineage validation.",
+                    "third_failure",
+                ),
+            )
+            .await
+            .map_err(test_error)?;
+            let (_, third_group_key) = report_group_for_report(&pool, third_report.id).await?;
+
+            let (other_product, other_environment) = create_product(
+                &pool,
+                fixture.workspace_id,
+                CreateProductInput {
+                    name: "Other merge product".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let (other_key, other_secret) = create_api_key(
+                &pool,
+                fixture.workspace_id,
+                other_environment.id,
+                Some("Other merge writer".into()),
+                Some("write".into()),
+                None,
+            )
+            .await
+            .map_err(test_error)?;
+            let other_capability = test_capability(&other_secret, other_key.id, Uuid::new_v4());
+            let (_, other_report) = submit_product_feedback(
+                &pool,
+                &other_capability,
+                feedback_input_with_finding(
+                    "A different product cannot share report group lineage.",
+                    "other_failure",
+                ),
+            )
+            .await
+            .map_err(test_error)?;
+            let (_, other_group_key) = report_group_for_report(&pool, other_report.id).await?;
+            anyhow::ensure!(other_product.id != fixture.product_id);
+
+            let cross_product = merge_report_groups(
+                &pool,
+                fixture.workspace_id,
+                &fixture.source_group_key,
+                &other_group_key,
+                "usr_merge_actor",
+            )
+            .await
+            .expect_err("cross-product merges must be rejected");
+            anyhow::ensure!(cross_product.status == StatusCode::CONFLICT);
+            anyhow::ensure!(cross_product.message.contains("different products"));
+
+            merge_report_groups(
+                &pool,
+                fixture.workspace_id,
+                &fixture.source_group_key,
+                &fixture.target_group_key,
+                "usr_merge_actor",
+            )
+            .await
+            .map_err(test_error)?;
+
+            let merged_source = merge_report_groups(
+                &pool,
+                fixture.workspace_id,
+                &fixture.source_group_key,
+                &third_group_key,
+                "usr_merge_actor",
+            )
+            .await
+            .expect_err("an already-merged source must be rejected");
+            anyhow::ensure!(merged_source.status == StatusCode::CONFLICT);
+            anyhow::ensure!(merged_source.message.contains("Source feedback group"));
+
+            let merged_target = merge_report_groups(
+                &pool,
+                fixture.workspace_id,
+                &third_group_key,
+                &fixture.source_group_key,
+                "usr_merge_actor",
+            )
+            .await
+            .expect_err("an already-merged target must be rejected");
+            anyhow::ensure!(merged_target.status == StatusCode::CONFLICT);
+            anyhow::ensure!(merged_target.message.contains("Target feedback group"));
+
+            let final_target = merge_report_groups(
+                &pool,
+                fixture.workspace_id,
+                &fixture.target_group_key,
+                &third_group_key,
+                "usr_merge_actor",
+            )
+            .await
+            .expect_err("a final target cannot be merged away into a chain");
+            anyhow::ensure!(final_target.status == StatusCode::CONFLICT);
+            anyhow::ensure!(final_target.message.contains("final target"));
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    /// A filing that begins AFTER a merge has checked for issue rows but BEFORE
+    /// the merge commits its lineage must not slip through and open a public
+    /// issue on a group that is about to be merged away. Row locks cannot close
+    /// this: at that instant the filing has no row to lock and the merge's
+    /// lineage write is not yet visible. The shared advisory lock is what makes
+    /// the two mutually exclusive.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn filing_cannot_race_past_an_uncommitted_merge() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let fixture = merge_groups_fixture(&pool, "Merge filing race").await?;
+
+        let result = async {
+            // Stand in for a merge mid-flight: hold the advisory lock and write
+            // the lineage without committing.
+            let mut merging = pool.begin().await?;
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(&fixture.source_group_key)
+                .execute(&mut *merging)
+                .await?;
+            sqlx::query(
+                r"UPDATE report_groups
+                SET merged_into_group_key = $1, merged_at = NOW(), merged_by = 'usr_race'
+                WHERE workspace_id = $2 AND group_key = $3",
+            )
+            .bind(&fixture.target_group_key)
+            .bind(fixture.workspace_id)
+            .bind(&fixture.source_group_key)
+            .execute(&mut *merging)
+            .await?;
+
+            // Start the filing while the merge is still open. It must block on
+            // the advisory lock rather than observe the pre-merge lineage.
+            let racing_pool = pool.clone();
+            let workspace_id = fixture.workspace_id;
+            let racing_key = fixture.source_group_key.clone();
+            let filing = tokio::spawn(async move {
+                claim_group_issue_filing(
+                    &racing_pool,
+                    GroupIssueFilingRequest {
+                        workspace_id,
+                        group_key: &racing_key,
+                        installation_id: 4_433_427,
+                        repo_full_name: "open-software/merge-test",
+                        created_by: "usr_race",
+                        claim_report_count: 1,
+                    },
+                    Utc::now() - Duration::minutes(5),
+                )
+                .await
+            });
+            for _ in 0..64 {
+                tokio::task::yield_now().await;
+            }
+            anyhow::ensure!(!filing.is_finished(), "filing must wait for the merge");
+
+            merging.commit().await?;
+
+            let claim = filing.await?;
+            let error = claim.expect_err("filing must refuse a merged-away group");
+            anyhow::ensure!(error.status == StatusCode::CONFLICT, "{}", error.message);
+            anyhow::ensure!(error.message.contains("merged into"), "{}", error.message);
+
+            // Nothing may have been claimed for the merged-away group.
+            let rows: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM group_github_issues WHERE group_key = $1")
+                    .bind(&fixture.source_group_key)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(rows == 0, "a merged-away group must hold no filing claim");
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn report_group_merge_moves_one_issue_but_rejects_two() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let moving_fixture = merge_groups_fixture(&pool, "Merge source issue").await?;
+        let conflict_fixture = merge_groups_fixture(&pool, "Merge two issues").await?;
+
+        let result = async {
+            record_test_group_issue(
+                &pool,
+                moving_fixture.workspace_id,
+                &moving_fixture.source_group_key,
+                9_101,
+                1,
+            )
+            .await?;
+            merge_report_groups(
+                &pool,
+                moving_fixture.workspace_id,
+                &moving_fixture.source_group_key,
+                &moving_fixture.target_group_key,
+                "usr_merge_actor",
+            )
+            .await
+            .map_err(test_error)?;
+            let moved_issue = sqlx::query_as::<_, (String, i64, i64)>(
+                r"SELECT group_key, issue_number, last_commented_report_count
+                FROM group_github_issues WHERE workspace_id = $1",
+            )
+            .bind(moving_fixture.workspace_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(moved_issue == (moving_fixture.target_group_key.clone(), 9_101, 0,));
+
+            // A filing still in flight (issue_number NULL) must block the merge
+            // rather than fail to decode or slip through as "no issue".
+            let pending_fixture = merge_groups_fixture(&pool, "Merge pending").await?;
+            sqlx::query(
+                r"INSERT INTO group_github_issues
+                (group_key, workspace_id, installation_id, repo_full_name, created_by,
+                 filing_state, claimed_at, last_commented_report_count)
+                VALUES ($1, $2, 4_433_427, 'open-software/epode-test', 'usr_test',
+                 'pending', NOW(), 0)",
+            )
+            .bind(&pending_fixture.source_group_key)
+            .bind(pending_fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+            let pending = merge_report_groups(
+                &pool,
+                pending_fixture.workspace_id,
+                &pending_fixture.source_group_key,
+                &pending_fixture.target_group_key,
+                "usr_merge_actor",
+            )
+            .await
+            .expect_err("a merge must refuse while a filing is in flight");
+            anyhow::ensure!(pending.status == StatusCode::CONFLICT);
+            anyhow::ensure!(pending.message.contains("still in progress"));
+            sqlx::query("DELETE FROM workspaces WHERE id = $1")
+                .bind(pending_fixture.workspace_id)
+                .execute(&pool)
+                .await?;
+
+            record_test_group_issue(
+                &pool,
+                conflict_fixture.workspace_id,
+                &conflict_fixture.source_group_key,
+                9_102,
+                1,
+            )
+            .await?;
+            record_test_group_issue(
+                &pool,
+                conflict_fixture.workspace_id,
+                &conflict_fixture.target_group_key,
+                9_103,
+                1,
+            )
+            .await?;
+            let conflict = merge_report_groups(
+                &pool,
+                conflict_fixture.workspace_id,
+                &conflict_fixture.source_group_key,
+                &conflict_fixture.target_group_key,
+                "usr_merge_actor",
+            )
+            .await
+            .expect_err("two filed issues must block the merge");
+            anyhow::ensure!(conflict.status == StatusCode::CONFLICT);
+            anyhow::ensure!(conflict.message.contains("#9102"));
+            anyhow::ensure!(conflict.message.contains("#9103"));
+
+            let untouched_issues = sqlx::query_as::<_, (String, i64)>(
+                r"SELECT group_key, issue_number
+                FROM group_github_issues
+                WHERE workspace_id = $1
+                ORDER BY issue_number",
+            )
+            .bind(conflict_fixture.workspace_id)
+            .fetch_all(&pool)
+            .await?;
+            anyhow::ensure!(
+                untouched_issues
+                    == vec![
+                        (conflict_fixture.source_group_key.clone(), 9_102),
+                        (conflict_fixture.target_group_key.clone(), 9_103),
+                    ]
+            );
+            let source_report_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(conflict_fixture.source_report_id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(source_report_group == Some(conflict_fixture.source_group_id));
+            let target_report_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM feedback_reports WHERE group_id = $1")
+                    .bind(conflict_fixture.target_group_id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(target_report_count == 1);
+            let source_lineage: Option<String> =
+                sqlx::query_scalar("SELECT merged_into_group_key FROM report_groups WHERE id = $1")
+                    .bind(conflict_fixture.source_group_id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(source_lineage.is_none());
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1 OR id = $2")
+            .bind(moving_fixture.workspace_id)
+            .bind(conflict_fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn matching_report_fingerprints_share_group_row() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace_id = github_test_workspace(&pool, "Report grouping test").await?;
+
+        let result = async {
+            let (product, environment) = create_product(
+                &pool,
+                workspace_id,
+                CreateProductInput {
+                    name: "Grouped feedback".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let (write_key, write_secret) = create_api_key(
+                &pool,
+                workspace_id,
+                environment.id,
+                Some("Grouping writer".into()),
+                Some("write".into()),
+                None,
+            )
+            .await
+            .map_err(test_error)?;
+
+            let first_capability = test_capability(&write_secret, write_key.id, Uuid::new_v4());
+            let second_capability = test_capability(&write_secret, write_key.id, Uuid::new_v4());
+            let (_, first_report) = submit_product_feedback(
+                &pool,
+                &first_capability,
+                feedback_input("The first matching report groups successfully."),
+            )
+            .await
+            .map_err(test_error)?;
+            let (_, second_report) = submit_product_feedback(
+                &pool,
+                &second_capability,
+                feedback_input("The second matching report groups successfully."),
+            )
+            .await
+            .map_err(test_error)?;
+
+            let first_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(first_report.id)
+                    .fetch_one(&pool)
+                    .await?;
+            let second_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(second_report.id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(first_group.is_some());
+            anyhow::ensure!(first_group == second_group);
+            let group_identity = sqlx::query_as::<_, (String, i32)>(
+                "SELECT grouper_name, grouper_version FROM report_groups WHERE id = $1",
+            )
+            .bind(first_group)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(group_identity == ("fingerprint".to_owned(), 1));
+            let group_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM report_groups WHERE product_id = $1")
+                    .bind(product.id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(group_count == 1);
+
+            let mut tx = pool.begin().await?;
+            assign_report_group(
+                &mut tx,
+                &MetadataRefreshingGrouper,
+                workspace_id,
+                first_report.id,
+                &GroupInput {
+                    product_id: product.id,
+                    operation: "pending",
+                    surface: "unknown",
+                    status_code: None,
+                    findings: &[],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            tx.commit().await?;
+            let refreshed_identity = sqlx::query_as::<_, (String, i32, String)>(
+                r"SELECT grouper_name, grouper_version, explanation
+                FROM report_groups WHERE id = $1",
+            )
+            .bind(first_group)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                refreshed_identity
+                    == (
+                        "metadata-test".to_owned(),
+                        2,
+                        "refreshed grouper explanation".to_owned()
+                    )
+            );
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn feedback_topics_are_canonicalized_before_storage_and_grouping() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace_id = github_test_workspace(&pool, "Topic canonicalization test").await?;
+
+        let result = async {
+            let (_, environment) = create_product(
+                &pool,
+                workspace_id,
+                CreateProductInput {
+                    name: "Canonical topics".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let (write_key, write_secret) = create_api_key(
+                &pool,
+                workspace_id,
+                environment.id,
+                Some("Topic writer".into()),
+                Some("write".into()),
+                None,
+            )
+            .await
+            .map_err(test_error)?;
+
+            let capability = test_capability(&write_secret, write_key.id, Uuid::new_v4());
+            let (_, report) = submit_product_feedback(
+                &pool,
+                &capability,
+                feedback_input_with_finding(
+                    "A mixed-case topic is accepted and canonicalized.",
+                    "Auth Failure",
+                ),
+            )
+            .await
+            .map_err(test_error)?;
+            let stored_findings: serde_json::Value =
+                sqlx::query_scalar("SELECT findings FROM feedback_reports WHERE id = $1")
+                    .bind(report.id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(
+                stored_findings
+                    .pointer("/0/topic")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("auth_failure")
+            );
+            let explanation: String = sqlx::query_scalar(
+                r"SELECT g.explanation
+                FROM feedback_reports r
+                JOIN report_groups g ON g.id = r.group_id
+                WHERE r.id = $1",
+            )
+            .bind(report.id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(explanation.contains("defect/auth_failure"));
+
+            let invalid_capability = test_capability(&write_secret, write_key.id, Uuid::new_v4());
+            let invalid = submit_product_feedback(
+                &pool,
+                &invalid_capability,
+                feedback_input_with_finding(
+                    "A non-slug topic remains invalid after canonicalization.",
+                    "auth/failure",
+                ),
+            )
+            .await
+            .expect_err("slash-containing topics must remain invalid");
+            anyhow::ensure!(invalid.status == StatusCode::BAD_REQUEST);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn telemetry_late_fill_and_regroup_repair_placeholder_assignments() -> anyhow::Result<()>
+    {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace_id = github_test_workspace(&pool, "Late telemetry grouping test").await?;
+
+        let result = async {
+            let workspace =
+                sqlx::query_as::<_, Workspace>("SELECT * FROM workspaces WHERE id = $1")
+                    .bind(workspace_id)
+                    .fetch_one(&pool)
+                    .await?;
+            let (product, environment) = create_product(
+                &pool,
+                workspace_id,
+                CreateProductInput {
+                    name: "Late telemetry".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let (write_key, write_secret) = create_api_key(
+                &pool,
+                workspace_id,
+                environment.id,
+                Some("Late telemetry writer".into()),
+                Some("write".into()),
+                None,
+            )
+            .await
+            .map_err(test_error)?;
+            let auth = ProductAuth {
+                workspace,
+                environment: environment.clone(),
+                api_key_id: write_key.id,
+            };
+
+            let report_first_interaction = Uuid::new_v4();
+            let report_first_capability =
+                test_capability(&write_secret, write_key.id, report_first_interaction);
+            let (_, report_first) = submit_product_feedback(
+                &pool,
+                &report_first_capability,
+                feedback_input_with_finding(
+                    "This report arrives before its interaction telemetry.",
+                    "search_failure",
+                ),
+            )
+            .await
+            .map_err(test_error)?;
+            let placeholder_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(report_first.id)
+                    .fetch_one(&pool)
+                    .await?;
+            let placeholder_group = placeholder_group
+                .ok_or_else(|| anyhow::anyhow!("report-first fixture should have a group"))?;
+
+            let telemetry_result = ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![grouping_telemetry_event(report_first_interaction)],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(telemetry_result.accepted == 1);
+            anyhow::ensure!(telemetry_result.dropped == 0);
+            let regrouped_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(report_first.id)
+                    .fetch_one(&pool)
+                    .await?;
+            let regrouped_group = regrouped_group
+                .ok_or_else(|| anyhow::anyhow!("late-filled report should retain a group"))?;
+            anyhow::ensure!(regrouped_group != placeholder_group);
+            let regrouped_explanation: String =
+                sqlx::query_scalar("SELECT explanation FROM report_groups WHERE id = $1")
+                    .bind(regrouped_group)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(regrouped_explanation.contains("operation search_reports"));
+            anyhow::ensure!(regrouped_explanation.contains("surface mcp"));
+            anyhow::ensure!(regrouped_explanation.ends_with(" · 5xx"));
+
+            let telemetry_first_interaction = Uuid::new_v4();
+            ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![grouping_telemetry_event(telemetry_first_interaction)],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let telemetry_first_capability =
+                test_capability(&write_secret, write_key.id, telemetry_first_interaction);
+            let (_, telemetry_first_report) = submit_product_feedback(
+                &pool,
+                &telemetry_first_capability,
+                feedback_input_with_finding(
+                    "This matching report arrives after its interaction telemetry.",
+                    "search_failure",
+                ),
+            )
+            .await
+            .map_err(test_error)?;
+            let telemetry_first_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(telemetry_first_report.id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(telemetry_first_group == Some(regrouped_group));
+
+            let historical_interaction = Uuid::new_v4();
+            let historical_capability =
+                test_capability(&write_secret, write_key.id, historical_interaction);
+            let (_, historical_report) = submit_product_feedback(
+                &pool,
+                &historical_capability,
+                feedback_input_with_finding(
+                    "This historical report needs the explicit regroup repair.",
+                    "search_failure",
+                ),
+            )
+            .await
+            .map_err(test_error)?;
+            let historical_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(historical_report.id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(historical_group == Some(placeholder_group));
+            sqlx::query(
+                r"UPDATE interactions_v2
+                SET surface = 'mcp', operation = 'search_reports', status_code = 503,
+                  classification = 'confirmed', confirmation_method = 'mcp', updated_at = NOW()
+                WHERE id = $1",
+            )
+            .bind(historical_interaction)
+            .execute(&pool)
+            .await?;
+
+            let first_regroup = regroup_report_groups(&pool, &crate::grouping::FingerprintGrouper)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(first_regroup.moved >= 1);
+            anyhow::ensure!(first_regroup.unchanged >= 2);
+            let repaired_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(historical_report.id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(repaired_group == Some(regrouped_group));
+
+            let second_regroup = regroup_report_groups(&pool, &crate::grouping::FingerprintGrouper)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(second_regroup.moved == 0);
+            let group_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM report_groups WHERE product_id = $1")
+                    .bind(product.id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(group_count == 2);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn report_group_backfill_is_idempotent() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace_id = github_test_workspace(&pool, "Report backfill test").await?;
+
+        let result = async {
+            let (_, environment) = create_product(
+                &pool,
+                workspace_id,
+                CreateProductInput {
+                    name: "Backfilled feedback".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let interaction_id = Uuid::new_v4();
+            let report_id = Uuid::new_v4();
+            sqlx::query(
+                r"INSERT INTO interactions_v2
+                (id, workspace_id, environment_id, surface, operation, status_code,
+                 classification, confirmation_method, occurred_at)
+                VALUES ($1, $2, $3, 'mcp', 'search_reports', 503, 'confirmed', 'mcp', NOW())",
+            )
+            .bind(interaction_id)
+            .bind(workspace_id)
+            .bind(environment.id)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                r"INSERT INTO feedback_reports
+                (id, workspace_id, interaction_id, summary, findings)
+                VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(report_id)
+            .bind(workspace_id)
+            .bind(interaction_id)
+            .bind("This existing report should be grouped by the backfill.")
+            .bind(serde_json::json!([{
+                "kind": "defect",
+                "topic": "search_failure",
+                "severity": "major",
+                "detail": "Search failed for a valid request."
+            }]))
+            .execute(&pool)
+            .await?;
+
+            let malformed_interaction_id = Uuid::new_v4();
+            let malformed_report_id = Uuid::new_v4();
+            sqlx::query(
+                r"INSERT INTO interactions_v2
+                (id, workspace_id, environment_id, surface, operation, status_code,
+                 classification, confirmation_method, occurred_at)
+                VALUES ($1, $2, $3, 'mcp', 'search_reports', 503, 'confirmed', 'mcp', NOW())",
+            )
+            .bind(malformed_interaction_id)
+            .bind(workspace_id)
+            .bind(environment.id)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                r"INSERT INTO feedback_reports
+                (id, workspace_id, interaction_id, summary, findings)
+                VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(malformed_report_id)
+            .bind(workspace_id)
+            .bind(malformed_interaction_id)
+            .bind("This malformed report must not block later backfill rows.")
+            .bind(serde_json::json!([{
+                "kind": "defect",
+                "topic": "missing_detail"
+            }]))
+            .execute(&pool)
+            .await?;
+
+            let first = backfill_report_groups(&pool, &crate::grouping::FingerprintGrouper, None)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(first.grouped >= 1);
+            anyhow::ensure!(first.skipped >= 1);
+            anyhow::ensure!(first.skipped_findings >= 1);
+            let first_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(report_id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(first_group.is_some());
+            let malformed_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(malformed_report_id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(malformed_group.is_none());
+            let first_group_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM report_groups")
+                .fetch_one(&pool)
+                .await?;
+
+            let second = backfill_report_groups(&pool, &crate::grouping::FingerprintGrouper, None)
+                .await
+                .map_err(test_error)?;
+            let second_group: Option<Uuid> =
+                sqlx::query_scalar("SELECT group_id FROM feedback_reports WHERE id = $1")
+                    .bind(report_id)
+                    .fetch_one(&pool)
+                    .await?;
+            let second_group_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM report_groups")
+                .fetch_one(&pool)
+                .await?;
+            anyhow::ensure!(second.grouped == 0);
+            anyhow::ensure!(second.skipped_findings >= 1);
+            anyhow::ensure!(second_group == first_group);
+            anyhow::ensure!(second_group_count == first_group_count);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn github_same_workspace_reinstall_updates_metadata_and_revives() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace_id = github_test_workspace(&pool, "GitHub reinstall test").await?;
+        let installation_id = i64::from(Uuid::new_v4().as_fields().0);
+
+        let result = async {
+            anyhow::ensure!(
+                upsert_github_installation(&pool, workspace_id, installation_id, "before", "User",)
+                    .await
+                    .map_err(test_error)?
+                    == GithubInstallationUpsert::Bound
+            );
+            revoke_github_installation(&pool, installation_id)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(
+                upsert_github_installation(
+                    &pool,
+                    workspace_id,
+                    installation_id,
+                    "after",
+                    "Organization",
+                )
+                .await
+                .map_err(test_error)?
+                    == GithubInstallationUpsert::Bound
+            );
+
+            let row = sqlx::query_as::<_, (Uuid, String, String, Option<DateTime<Utc>>)>(
+                r"SELECT workspace_id, account_login, account_type, revoked_at
+                FROM github_installations WHERE installation_id = $1",
+            )
+            .bind(installation_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(row.0 == workspace_id);
+            anyhow::ensure!(row.1 == "after");
+            anyhow::ensure!(row.2 == "Organization");
+            anyhow::ensure!(row.3.is_none());
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn github_installation_cannot_move_between_workspaces() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let original_workspace = github_test_workspace(&pool, "GitHub original tenant").await?;
+        let other_workspace = github_test_workspace(&pool, "GitHub other tenant").await?;
+        let installation_id = i64::from(Uuid::new_v4().as_fields().0);
+
+        let result = async {
+            anyhow::ensure!(
+                upsert_github_installation(
+                    &pool,
+                    original_workspace,
+                    installation_id,
+                    "original",
+                    "Organization",
+                )
+                .await
+                .map_err(test_error)?
+                    == GithubInstallationUpsert::Bound
+            );
+            anyhow::ensure!(
+                upsert_github_installation(
+                    &pool,
+                    other_workspace,
+                    installation_id,
+                    "attacker",
+                    "User",
+                )
+                .await
+                .map_err(test_error)?
+                    == GithubInstallationUpsert::ConflictingWorkspace
+            );
+
+            let row = sqlx::query_as::<_, (Uuid, String, String)>(
+                r"SELECT workspace_id, account_login, account_type
+                FROM github_installations WHERE installation_id = $1",
+            )
+            .bind(installation_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(row.0 == original_workspace);
+            anyhow::ensure!(row.1 == "original");
+            anyhow::ensure!(row.2 == "Organization");
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1 OR id = $2")
+            .bind(original_workspace)
+            .bind(other_workspace)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn revoked_github_installation_disappears_from_active_list() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace_id = github_test_workspace(&pool, "GitHub revoke test").await?;
+        let installation_id = i64::from(Uuid::new_v4().as_fields().0);
+
+        let result = async {
+            anyhow::ensure!(
+                upsert_github_installation(
+                    &pool,
+                    workspace_id,
+                    installation_id,
+                    "revoked",
+                    "Organization",
+                )
+                .await
+                .map_err(test_error)?
+                    == GithubInstallationUpsert::Bound
+            );
+            anyhow::ensure!(
+                list_github_installations(&pool, workspace_id)
+                    .await
+                    .map_err(test_error)?
+                    .iter()
+                    .any(|installation| installation.installation_id == installation_id)
+            );
+
+            revoke_github_installation(&pool, installation_id)
+                .await
+                .map_err(test_error)?;
+            let revoked_at: Option<DateTime<Utc>> = sqlx::query_scalar(
+                "SELECT revoked_at FROM github_installations WHERE installation_id = $1",
+            )
+            .bind(installation_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(revoked_at.is_some());
+            anyhow::ensure!(
+                list_github_installations(&pool, workspace_id)
+                    .await
+                    .map_err(test_error)?
+                    .iter()
+                    .all(|installation| installation.installation_id != installation_id)
+            );
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
     #[test]
     fn sensitive_report_filter_allows_credential_descriptions_but_not_credentials() {
         assert!(!contains_sensitive_report_text(
@@ -2792,6 +6801,9 @@ mod product_tests {
         ));
         assert!(contains_sensitive_report_text(
             "The response exposed customer@example.com"
+        ));
+        assert!(!contains_sensitive_report_text(
+            "Request 123e4567-e89b-12d3-a456-426614174000 failed after retry"
         ));
     }
 
@@ -2854,6 +6866,809 @@ mod product_tests {
             })
             .is_err()
         );
+        assert_eq!(
+            session_evidence(Some("workflow_42".into()), None).expect("valid session evidence"),
+            Some(("workflow_42".into(), "customer".into()))
+        );
+        assert_eq!(
+            session_evidence(Some("   ".into()), Some("mcp".into()))
+                .expect("blank session refs are omitted"),
+            None
+        );
+        for invalid_ref in [
+            " workflow_42".into(),
+            "workflow 42".into(),
+            "customer@example.com".into(),
+            "workflow/42".into(),
+            "x".repeat(161),
+        ] {
+            assert_eq!(
+                session_evidence(Some(invalid_ref.clone()), Some("mcp".into()))
+                    .expect("invalid optional session refs are omitted"),
+                None
+            );
+            assert_eq!(opaque_ref(Some(invalid_ref)), None);
+        }
+        assert!(session_evidence(Some("workflow_42".into()), Some("transport".into())).is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn session_correlation_is_proof_backed_end_to_end() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Session correlation conformance").await?;
+
+        let result = async {
+            let (primary_product, primary_auth) =
+                telemetry_test_product(&pool, &workspace, "Session primary").await?;
+            let (_, isolated_auth) =
+                telemetry_test_product(&pool, &workspace, "Session isolated").await?;
+            let occurred_at = Utc::now();
+            let canonical_ref = "workflow:canonical_42";
+            let create_id = Uuid::new_v4();
+            let followup_id = Uuid::new_v4();
+            let dedup_id = Uuid::new_v4();
+            let customer_default_id = Uuid::new_v4();
+            let customer_explicit_id = Uuid::new_v4();
+            let different_ref_id = Uuid::new_v4();
+            let missing_ref_id = Uuid::new_v4();
+            let blank_ref_id = Uuid::new_v4();
+
+            let primary = ingest_telemetry_batch(
+                &pool,
+                &primary_auth,
+                TelemetryBatchInput {
+                    events: vec![
+                        mcp_telemetry_event(
+                            create_id,
+                            Some(1),
+                            "summarize",
+                            Some(canonical_ref),
+                            Some("mcp"),
+                            occurred_at,
+                        ),
+                        mcp_telemetry_event(
+                            followup_id,
+                            Some(2),
+                            "get_summary",
+                            Some(canonical_ref),
+                            Some("mcp"),
+                            occurred_at,
+                        ),
+                        mcp_telemetry_event(
+                            dedup_id,
+                            Some(3),
+                            "summarize_cached",
+                            Some(canonical_ref),
+                            Some("mcp"),
+                            occurred_at,
+                        ),
+                        mcp_telemetry_event(
+                            customer_default_id,
+                            Some(4),
+                            "customer_default",
+                            Some(canonical_ref),
+                            None,
+                            occurred_at,
+                        ),
+                        mcp_telemetry_event(
+                            customer_explicit_id,
+                            Some(5),
+                            "customer_explicit",
+                            Some(canonical_ref),
+                            Some("customer"),
+                            occurred_at,
+                        ),
+                        mcp_telemetry_event(
+                            different_ref_id,
+                            Some(6),
+                            "different_workflow",
+                            Some("workflow:different_43"),
+                            Some("mcp"),
+                            occurred_at,
+                        ),
+                        mcp_telemetry_event(
+                            missing_ref_id,
+                            Some(7),
+                            "missing_workflow",
+                            None,
+                            None,
+                            occurred_at,
+                        ),
+                        mcp_telemetry_event(
+                            blank_ref_id,
+                            Some(8),
+                            "blank_workflow",
+                            Some("   "),
+                            Some("mcp"),
+                            occurred_at,
+                        ),
+                    ],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(primary.accepted == 8 && primary.dropped == 0);
+
+            let isolated_id = Uuid::new_v4();
+            ingest_telemetry_batch(
+                &pool,
+                &isolated_auth,
+                TelemetryBatchInput {
+                    events: vec![mcp_telemetry_event(
+                        isolated_id,
+                        Some(1),
+                        "summarize",
+                        Some(canonical_ref),
+                        Some("mcp"),
+                        occurred_at,
+                    )],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+
+            let mcp_session = interaction_session(&pool, create_id)
+                .await?
+                .expect("explicit MCP proof should create a session");
+            anyhow::ensure!(interaction_session(&pool, followup_id).await? == Some(mcp_session));
+            anyhow::ensure!(interaction_session(&pool, dedup_id).await? == Some(mcp_session));
+            let customer_session = interaction_session(&pool, customer_default_id)
+                .await?
+                .expect("default source should create a customer session");
+            anyhow::ensure!(
+                interaction_session(&pool, customer_explicit_id).await? == Some(customer_session)
+            );
+            anyhow::ensure!(customer_session != mcp_session);
+            anyhow::ensure!(
+                interaction_session(&pool, different_ref_id)
+                    .await?
+                    .is_some_and(|session_id| session_id != mcp_session)
+            );
+            anyhow::ensure!(interaction_session(&pool, missing_ref_id).await?.is_none());
+            anyhow::ensure!(interaction_session(&pool, blank_ref_id).await?.is_none());
+            anyhow::ensure!(
+                interaction_session(&pool, isolated_id)
+                    .await?
+                    .is_some_and(|session_id| session_id != mcp_session)
+            );
+
+            let (ref_hash, ref_hint): (Vec<u8>, String) =
+                sqlx::query_as("SELECT ref_hash, ref_hint FROM sessions_v2 WHERE id = $1")
+                    .bind(mcp_session)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(ref_hash == sha256(canonical_ref));
+            anyhow::ensure!(!ref_hint.contains(canonical_ref));
+            let detail =
+                dashboard_session_by_id(&pool, workspace.id, primary_product.id, mcp_session)
+                    .await
+                    .map_err(test_error)?;
+            anyhow::ensure!(!serde_json::to_string(&detail)?.contains(canonical_ref));
+
+            let malformed_session_id = Uuid::new_v4();
+            let malformed_customer_id = Uuid::new_v4();
+            let mut malformed_customer = mcp_telemetry_event(
+                malformed_customer_id,
+                Some(10),
+                "malformed_customer",
+                None,
+                None,
+                occurred_at,
+            );
+            malformed_customer.customer_ref = Some("customer@example.com".into());
+            let malformed = ingest_telemetry_batch(
+                &pool,
+                &primary_auth,
+                TelemetryBatchInput {
+                    events: vec![
+                        mcp_telemetry_event(
+                            malformed_session_id,
+                            Some(9),
+                            "malformed_workflow",
+                            Some("customer@example.com"),
+                            Some("mcp"),
+                            occurred_at,
+                        ),
+                        malformed_customer,
+                    ],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(malformed.accepted == 2 && malformed.dropped == 0);
+            let malformed_rows: Vec<(Uuid, Option<Uuid>, Option<String>)> = sqlx::query_as(
+                r"SELECT id, session_id, customer_ref FROM interactions_v2
+                WHERE id = ANY($1) ORDER BY id",
+            )
+            .bind(vec![malformed_session_id, malformed_customer_id])
+            .fetch_all(&pool)
+            .await?;
+            anyhow::ensure!(malformed_rows.len() == 2);
+            anyhow::ensure!(malformed_rows.iter().all(|(_, session_id, customer_ref)| {
+                session_id.is_none() && customer_ref.is_none()
+            }));
+            let malformed_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM interactions_v2 WHERE id = ANY($1)")
+                    .bind(vec![malformed_session_id, malformed_customer_id])
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(malformed_count == 2);
+            let session_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM sessions_v2 WHERE workspace_id = $1")
+                    .bind(workspace.id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(session_count == 4);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn telemetry_idempotency_does_not_create_orphan_sessions() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Session idempotency conformance").await?;
+
+        let result = async {
+            let (_, primary_auth) =
+                telemetry_test_product(&pool, &workspace, "Idempotency primary").await?;
+            let (_, isolated_auth) =
+                telemetry_test_product(&pool, &workspace, "Idempotency isolated").await?;
+            let interaction_id = Uuid::new_v4();
+            let first_at = Utc::now();
+            ingest_telemetry_batch(
+                &pool,
+                &primary_auth,
+                TelemetryBatchInput {
+                    events: vec![mcp_telemetry_event(
+                        interaction_id,
+                        Some(1),
+                        "summarize",
+                        Some("workflow:first"),
+                        Some("mcp"),
+                        first_at,
+                    )],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let first_session = interaction_session(&pool, interaction_id)
+                .await?
+                .expect("first delivery should link a session");
+
+            let retry_at = first_at - Duration::hours(1);
+            let retry = ingest_telemetry_batch(
+                &pool,
+                &primary_auth,
+                TelemetryBatchInput {
+                    events: vec![mcp_telemetry_event(
+                        interaction_id,
+                        Some(99),
+                        "changed_operation",
+                        Some("workflow:retry_must_not_create"),
+                        Some("mcp"),
+                        retry_at,
+                    )],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(retry.accepted == 1 && retry.dropped == 0);
+            anyhow::ensure!(
+                interaction_session(&pool, interaction_id).await? == Some(first_session)
+            );
+            let (operation, occurred_at): (String, DateTime<Utc>) =
+                sqlx::query_as("SELECT operation, occurred_at FROM interactions_v2 WHERE id = $1")
+                    .bind(interaction_id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(operation == "summarize");
+            anyhow::ensure!(
+                occurred_at
+                    .signed_duration_since(retry_at)
+                    .num_microseconds()
+                    == Some(0)
+            );
+            let (started_at, last_seen_at): (DateTime<Utc>, DateTime<Utc>) =
+                sqlx::query_as("SELECT started_at, last_seen_at FROM sessions_v2 WHERE id = $1")
+                    .bind(first_session)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(
+                started_at
+                    .signed_duration_since(retry_at)
+                    .num_microseconds()
+                    == Some(0)
+            );
+            anyhow::ensure!(
+                last_seen_at
+                    .signed_duration_since(first_at)
+                    .num_microseconds()
+                    == Some(0)
+            );
+            let retry_session_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM sessions_v2 WHERE environment_id = $1")
+                    .bind(primary_auth.environment.id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(retry_session_count == 1);
+
+            let unlinked_id = Uuid::new_v4();
+            ingest_telemetry_batch(
+                &pool,
+                &primary_auth,
+                TelemetryBatchInput {
+                    events: vec![mcp_telemetry_event(
+                        unlinked_id,
+                        Some(2),
+                        "created_without_proof",
+                        None,
+                        None,
+                        first_at,
+                    )],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(interaction_session(&pool, unlinked_id).await?.is_none());
+            ingest_telemetry_batch(
+                &pool,
+                &primary_auth,
+                TelemetryBatchInput {
+                    events: vec![mcp_telemetry_event(
+                        unlinked_id,
+                        Some(2),
+                        "created_without_proof",
+                        Some("workflow:recovered"),
+                        Some("mcp"),
+                        first_at,
+                    )],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(interaction_session(&pool, unlinked_id).await?.is_some());
+
+            let coalesced_id = Uuid::new_v4();
+            let coalesced = ingest_telemetry_batch(
+                &pool,
+                &primary_auth,
+                TelemetryBatchInput {
+                    events: vec![
+                        mcp_telemetry_event(
+                            coalesced_id,
+                            Some(3),
+                            "coalesced_evidence",
+                            None,
+                            None,
+                            first_at,
+                        ),
+                        mcp_telemetry_event(
+                            coalesced_id,
+                            Some(3),
+                            "coalesced_evidence",
+                            Some("workflow:first_valid_proof"),
+                            Some("mcp"),
+                            first_at,
+                        ),
+                        mcp_telemetry_event(
+                            coalesced_id,
+                            Some(3),
+                            "coalesced_evidence",
+                            Some("workflow:later_proof"),
+                            Some("mcp"),
+                            first_at,
+                        ),
+                    ],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(coalesced.accepted == 3 && coalesced.dropped == 0);
+            let coalesced_ref_hash: Vec<u8> = sqlx::query_scalar(
+                r"SELECT s.ref_hash FROM sessions_v2 s
+                JOIN interactions_v2 i ON i.session_id = s.id
+                WHERE i.id = $1",
+            )
+            .bind(coalesced_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(coalesced_ref_hash == sha256("workflow:first_valid_proof"));
+
+            let cross_environment = ingest_telemetry_batch(
+                &pool,
+                &isolated_auth,
+                TelemetryBatchInput {
+                    events: vec![mcp_telemetry_event(
+                        interaction_id,
+                        Some(1),
+                        "cross_environment_retry",
+                        Some("workflow:cross_environment"),
+                        Some("mcp"),
+                        first_at,
+                    )],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(cross_environment.accepted == 0 && cross_environment.dropped == 1);
+            let isolated_sessions: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM sessions_v2 WHERE environment_id = $1")
+                    .bind(isolated_auth.environment.id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(isolated_sessions == 0);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn concurrent_session_retries_create_exactly_one_linked_session() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Concurrent session conformance").await?;
+
+        let result = async {
+            let (_, auth) = telemetry_test_product(&pool, &workspace, "Concurrent product").await?;
+            let interaction_id = Uuid::new_v4();
+            let occurred_at = Utc::now();
+            ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![mcp_telemetry_event(
+                        interaction_id,
+                        Some(1),
+                        "created_without_proof",
+                        None,
+                        None,
+                        occurred_at,
+                    )],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+
+            let mut blocker = pool.begin().await?;
+            sqlx::query("SELECT id FROM interactions_v2 WHERE id = $1 FOR UPDATE")
+                .bind(interaction_id)
+                .execute(&mut *blocker)
+                .await?;
+
+            let first_pool = pool.clone();
+            let first_auth = auth.clone();
+            let first = tokio::spawn(async move {
+                ingest_telemetry_batch(
+                    &first_pool,
+                    &first_auth,
+                    TelemetryBatchInput {
+                        events: vec![mcp_telemetry_event(
+                            interaction_id,
+                            Some(1),
+                            "created_without_proof",
+                            Some("workflow:concurrent_first"),
+                            Some("mcp"),
+                            occurred_at,
+                        )],
+                    },
+                )
+                .await
+            });
+            let second_pool = pool.clone();
+            let second_auth = auth.clone();
+            let second = tokio::spawn(async move {
+                ingest_telemetry_batch(
+                    &second_pool,
+                    &second_auth,
+                    TelemetryBatchInput {
+                        events: vec![mcp_telemetry_event(
+                            interaction_id,
+                            Some(1),
+                            "created_without_proof",
+                            Some("workflow:concurrent_second"),
+                            Some("mcp"),
+                            occurred_at,
+                        )],
+                    },
+                )
+                .await
+            });
+
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            anyhow::ensure!(!first.is_finished() && !second.is_finished());
+            blocker.commit().await?;
+
+            for delivery in [first, second] {
+                let result = tokio::time::timeout(std::time::Duration::from_secs(5), delivery)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("concurrent telemetry delivery timed out"))??
+                    .map_err(test_error)?;
+                anyhow::ensure!(result.accepted == 1 && result.dropped == 0);
+            }
+
+            let linked_session = interaction_session(&pool, interaction_id)
+                .await?
+                .expect("one concurrent retry should establish the session link");
+            let session_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM sessions_v2 WHERE environment_id = $1")
+                    .bind(auth.environment.id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(session_count == 1);
+            let orphan_count: i64 = sqlx::query_scalar(
+                r"SELECT COUNT(*) FROM sessions_v2 s
+                WHERE s.environment_id = $1
+                  AND NOT EXISTS (SELECT 1 FROM interactions_v2 i WHERE i.session_id = s.id)",
+            )
+            .bind(auth.environment.id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(orphan_count == 0);
+            let stored_session: Uuid =
+                sqlx::query_scalar("SELECT session_id FROM interactions_v2 WHERE id = $1")
+                    .bind(interaction_id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(stored_session == linked_session);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn batch_session_correlation_avoids_interaction_session_deadlock() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Batch lock ordering conformance").await?;
+
+        let result = async {
+            let (_, auth) = telemetry_test_product(&pool, &workspace, "Batch lock product").await?;
+            let occurred_at = Utc::now();
+            let mut interaction_ids = [Uuid::new_v4(), Uuid::new_v4()];
+            interaction_ids.sort();
+            let [first_id, blocked_id] = interaction_ids;
+            let session_ref = "workflow:batch_lock_order";
+            ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![
+                        mcp_telemetry_event(
+                            first_id,
+                            Some(1),
+                            "first_interaction",
+                            Some(session_ref),
+                            Some("mcp"),
+                            occurred_at,
+                        ),
+                        mcp_telemetry_event(
+                            blocked_id,
+                            Some(2),
+                            "blocked_interaction",
+                            Some(session_ref),
+                            Some("mcp"),
+                            occurred_at,
+                        ),
+                    ],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let session_id = interaction_session(&pool, first_id)
+                .await?
+                .expect("initial batch should link both interactions");
+            anyhow::ensure!(interaction_session(&pool, blocked_id).await? == Some(session_id));
+
+            let mut blocker = pool.begin().await?;
+            sqlx::query("SELECT id FROM interactions_v2 WHERE id = $1 FOR UPDATE")
+                .bind(blocked_id)
+                .execute(&mut *blocker)
+                .await?;
+            let delivery_application_name = format!("epode-deadlock-{}", workspace.id.simple());
+            let delivery_options = PgConnectOptions::from_str(&database_url)?
+                .application_name(&delivery_application_name);
+            let delivery_pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(delivery_options)
+                .await?;
+            let delivery_auth = auth.clone();
+            let delivery = tokio::spawn(async move {
+                ingest_telemetry_batch(
+                    &delivery_pool,
+                    &delivery_auth,
+                    TelemetryBatchInput {
+                        events: vec![
+                            mcp_telemetry_event(
+                                first_id,
+                                Some(1),
+                                "first_interaction",
+                                Some(session_ref),
+                                Some("mcp"),
+                                occurred_at,
+                            ),
+                            mcp_telemetry_event(
+                                blocked_id,
+                                Some(2),
+                                "blocked_interaction",
+                                Some(session_ref),
+                                Some("mcp"),
+                                occurred_at,
+                            ),
+                        ],
+                    },
+                )
+                .await
+            });
+
+            let mut waiting_on_interaction = false;
+            for _ in 0..100 {
+                waiting_on_interaction = sqlx::query_scalar(
+                    r"SELECT EXISTS(
+                      SELECT 1 FROM pg_stat_activity
+                      WHERE datname = current_database()
+                        AND pid <> pg_backend_pid()
+                        AND application_name = $1
+                        AND wait_event_type = 'Lock'
+                        AND query LIKE '%WITH previous AS MATERIALIZED%'
+                    )",
+                )
+                .bind(&delivery_application_name)
+                .fetch_one(&pool)
+                .await?;
+                if waiting_on_interaction {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            if !waiting_on_interaction {
+                blocker.rollback().await?;
+                delivery.abort();
+                return Err(anyhow::anyhow!(
+                    "telemetry batch did not block on the second interaction"
+                ));
+            }
+
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                sqlx::query("UPDATE sessions_v2 SET last_seen_at = last_seen_at WHERE id = $1")
+                    .bind(session_id)
+                    .execute(&mut *blocker),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("session lock acquisition timed out"))??;
+            blocker.commit().await?;
+            let delivery_result = tokio::time::timeout(std::time::Duration::from_secs(5), delivery)
+                .await
+                .map_err(|_| anyhow::anyhow!("telemetry batch timed out after lock release"))??
+                .map_err(test_error)?;
+            anyhow::ensure!(delivery_result.accepted == 2 && delivery_result.dropped == 0);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn session_timeline_uses_sequence_for_equal_timestamps() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Session timeline conformance").await?;
+
+        let result = async {
+            let (product, auth) =
+                telemetry_test_product(&pool, &workspace, "Timeline product").await?;
+            let occurred_at = Utc::now();
+            let sequence_two_id = Uuid::new_v4();
+            let no_sequence_id = Uuid::new_v4();
+            let sequence_one_id = Uuid::new_v4();
+            ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![
+                        mcp_telemetry_event(
+                            sequence_two_id,
+                            Some(2),
+                            "sequence_two",
+                            Some("workflow:timeline"),
+                            Some("mcp"),
+                            occurred_at,
+                        ),
+                        mcp_telemetry_event(
+                            no_sequence_id,
+                            None,
+                            "no_sequence",
+                            Some("workflow:timeline"),
+                            Some("mcp"),
+                            occurred_at,
+                        ),
+                        mcp_telemetry_event(
+                            sequence_one_id,
+                            Some(1),
+                            "sequence_one",
+                            Some("workflow:timeline"),
+                            Some("mcp"),
+                            occurred_at,
+                        ),
+                    ],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let session_id = interaction_session(&pool, sequence_one_id)
+                .await?
+                .expect("timeline interactions should be linked");
+            let detail = dashboard_session_by_id(&pool, workspace.id, product.id, session_id)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(
+                detail
+                    .interactions
+                    .iter()
+                    .map(|interaction| interaction.operation.as_str())
+                    .collect::<Vec<_>>()
+                    == vec!["sequence_one", "sequence_two", "no_sequence"]
+            );
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
+            .execute(&pool)
+            .await?;
+        result
     }
 
     #[tokio::test]
@@ -2942,6 +7757,13 @@ mod product_tests {
             )
             .await
             .map_err(test_error)?;
+            let uuid_capability = test_capability(&write_secret, write_key.id, Uuid::new_v4());
+            let uuid_summary = "Request 123e4567-e89b-12d3-a456-426614174000 failed after retry";
+            let (_, uuid_report) =
+                submit_product_feedback(&pool, &uuid_capability, feedback_input(uuid_summary))
+                    .await
+                    .map_err(test_error)?;
+            anyhow::ensure!(uuid_report.summary == uuid_summary);
 
             update_policy(
                 &pool,

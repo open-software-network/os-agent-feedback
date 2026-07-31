@@ -35,3 +35,7 @@ npm-debug.log*
 web/.next/
 web/out/
 /.artifacts/
+
+# agent coordination (shared via symlink from main checkout)
+.briefs
+.reviews

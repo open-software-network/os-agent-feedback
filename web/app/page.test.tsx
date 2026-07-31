@@ -13,7 +13,7 @@ describe("dashboard data flow", () => {
   });
 
   it("loads the dashboard with parity limits and navigates to real query data", async () => {
-    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(json(dashboardFixture())));
+    const fetchMock = vi.fn().mockImplementation(dashboardFetch(dashboardFixture()));
     vi.stubGlobal("fetch", fetchMock);
 
     render(
@@ -23,6 +23,7 @@ describe("dashboard data flow", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Connectors" })).toBeVisible();
     expect(screen.getByText("Search results omitted the newest document")).toBeVisible();
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining("interactionLimit=250"),
@@ -45,14 +46,11 @@ describe("dashboard data flow", () => {
   });
 
   it("does not expose editor-only views or product actions to members", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi
-        .fn()
-        .mockImplementation(() =>
-          Promise.resolve(json(dashboardFixture({ currentRole: "member" }))),
-        ),
-    );
+    window.history.replaceState({}, "", "/?view=connectors");
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() => Promise.resolve(json(dashboardFixture({ currentRole: "member" }))));
+    vi.stubGlobal("fetch", fetchMock);
 
     render(
       <Providers>
@@ -63,14 +61,44 @@ describe("dashboard data flow", () => {
     expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Setup" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Policy" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Connectors" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "New product" })).not.toBeInTheDocument();
+    await waitFor(() => expect(window.location.search).not.toContain("view=connectors"));
+    expect(
+      fetchMock.mock.calls.some(([input]) => String(input) === "/api/github/installations"),
+    ).toBe(false);
+  });
+
+  it.each([
+    ["connected", "GitHub connected successfully.", "status"],
+    ["conflict", "That GitHub installation is already connected to another workspace.", "alert"],
+    ["error", "Could not connect GitHub. Try again.", "alert"],
+    ["unexpected", "Could not connect GitHub. Try again.", "alert"],
+  ])("consumes the GitHub %s callback result", async (result, message, role) => {
+    window.history.replaceState({}, "", `/?view=connectors&github=${result}`);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        if (String(input) === "/api/github/installations") {
+          return Promise.resolve(json({ configured: true, installations: [] }));
+        }
+        return Promise.resolve(json(dashboardFixture()));
+      }),
+    );
+
+    render(
+      <Providers>
+        <Home />
+      </Providers>,
+    );
+
+    expect(await screen.findByRole("heading", { name: "Connectors" })).toBeVisible();
+    expect(await screen.findByText(message)).toHaveAttribute("role", role);
+    expect(window.location.search).not.toContain("github=");
   });
 
   it("restores dashboard state when the browser goes Back", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(() => Promise.resolve(json(dashboardFixture()))),
-    );
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(dashboardFetch(dashboardFixture())));
 
     render(
       <Providers>
@@ -129,7 +157,9 @@ describe("dashboard data flow", () => {
     const data = dashboardFixture();
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockImplementation((_input: RequestInfo | URL, init?: RequestInit) => {
+      vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        const supplemental = feedbackApiResponse(String(input));
+        if (supplemental) return Promise.resolve(supplemental);
         if (init?.method === "PATCH")
           return Promise.resolve(json({ product: data.currentProduct }));
         return Promise.resolve(json(data));
@@ -153,6 +183,19 @@ describe("dashboard data flow", () => {
     expect(screen.queryByText("Product renamed.")).not.toBeInTheDocument();
   });
 });
+
+function dashboardFetch(data: ReturnType<typeof dashboardFixture>) {
+  return (input: RequestInfo | URL) =>
+    Promise.resolve(feedbackApiResponse(String(input)) ?? json(data));
+}
+
+function feedbackApiResponse(path: string): Response | null {
+  if (path.includes("/groups?")) {
+    return json({ groups: [], hasMore: false, limit: 50, offset: 0 });
+  }
+  if (path.endsWith("/github-repo")) return json(null);
+  return null;
+}
 
 function json(body: unknown): Response {
   return new Response(JSON.stringify(body), {

@@ -1,5 +1,8 @@
 mod api_types;
 mod error;
+mod github;
+mod grouping;
+mod issue_template;
 mod models;
 mod os_accounts;
 mod security;
@@ -9,7 +12,7 @@ use std::{env, net::SocketAddr, sync::Arc};
 
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     middleware::{Next, from_fn},
@@ -17,7 +20,7 @@ use axum::{
     routing::get,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -31,19 +34,32 @@ use utoipa::{
     Modify, OpenApi,
     openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, SecurityScheme},
 };
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::{
+    router::{OpenApiRouter, UtoipaMethodRouterExt},
+    routes,
+};
 use uuid::Uuid;
 
 use crate::{
     api_types::{
         ApiKeyCreatedResponse, ApiKeyRotatedResponse, AuthenticationStateResponse,
         ConsentDecisionResponse, DashboardInteractionResponse, DashboardReportResponse,
-        EnvironmentResponse, McpInfoResponse, OpaqueJsonObject, ProductCreatedResponse,
-        ProductDeletedResponse, ProductResponse, RemovedResponse, RevokedResponse,
-        TeamInvitationCreatedResponse, TeamMemberResponse, TransferredResponse, UpdatedResponse,
-        WorkspaceResponse,
+        EnvironmentResponse, GithubInstallationResponse, GithubInstallationsResponse,
+        GithubRepositoriesResponse, GithubRepositoryResponse, McpInfoResponse, OpaqueJsonObject,
+        ProductCreatedResponse, ProductDeletedResponse, ProductResponse, RemovedResponse,
+        RevokedResponse, TeamInvitationCreatedResponse, TeamMemberResponse, TransferredResponse,
+        UpdatedResponse, WorkspaceResponse,
     },
     error::{ApiError, ApiErrorEnvelope},
+    github::{
+        GithubAppClient, GithubAppConfig, GithubIssue, GithubIssueCreationOutcome,
+        GithubIssueListError, GithubIssueListFailureKind, validate_repo_full_name,
+    },
+    grouping::FingerprintGrouper,
+    issue_template::{
+        group_backlink, group_marker_comment, render_evidence_comment, render_issue_body,
+        render_issue_title,
+    },
     models::{
         CapabilityInspectionResponse, ClassificationDiscovery, ConsentDecisionInput,
         ConsentStateInput, ConsentStateResponse, CreateApiKeyInput, CreateProductInput,
@@ -51,26 +67,41 @@ use crate::{
         DashboardSessionDetail, DeleteProductInput, FeedbackConsentDiscovery,
         FeedbackDiscoveryResponse, FeedbackFindingShapeDiscovery, FeedbackListInteractionsInput,
         FeedbackListReportsInput, FeedbackModesDiscovery, FeedbackRequiredFieldsDiscovery,
-        FeedbackSubmissionDiscovery, FeedbackWorkaroundShapeDiscovery, HealthResponse,
-        IntegrationsDiscovery, McpDiscovery, PolicyInput, ProductAuth,
-        ProductFeedbackAcceptedResponse, ProductFeedbackReportInput, ReliabilityDiscovery,
-        TelemetryBatchInput, TelemetryBatchResult, TelemetryDiscovery, UpdateFeedbackWorkflowInput,
-        UpdateNameInput, UpdateTeamMemberInput,
+        FeedbackSubmissionDiscovery, FeedbackWorkaroundShapeDiscovery, GithubIssueLink,
+        HealthResponse, IntegrationsDiscovery, McpDiscovery, MergeReportGroupsInput,
+        MergeReportGroupsResponse, PolicyInput, ProductAuth, ProductFeedbackAcceptedResponse,
+        ProductFeedbackReportInput, ProductGithubRepo, ProductGithubRepoInput,
+        ProductGroupsResponse, ReliabilityDiscovery, TelemetryBatchInput, TelemetryBatchResult,
+        TelemetryDiscovery, UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput,
     },
     os_accounts::{
         ACCESS_COOKIE, OsAccountsClient, PKCE_COOKIE, REFRESH_COOKIE, STATE_COOKIE, TokenPair,
     },
-    security::{bearer_token, clear_cookie, cookie, http_only_cookie, reject_sensitive_fields},
+    security::{
+        bearer_token, clear_cookie, cookie, http_only_cookie, random_token, reject_sensitive_fields,
+    },
     store::{
-        accept_team_invitation, agent_product_auth, create_api_key,
-        create_product_with_default_key, create_team_invitation, dashboard_interaction_by_id,
-        dashboard_report_by_id, dashboard_session_by_id, dashboard_with_limits, delete_product,
-        feedback_consent_state, feedback_list_interactions, feedback_list_reports,
-        get_or_create_workspace, ingest_telemetry_batch, inspect_feedback_capability,
+        GithubInstallationUpsert, GroupIssueFilingClaim, GroupIssueFilingRequest,
+        GroupIssueSyncContext, accept_team_invitation, agent_product_auth, backfill_report_groups,
+        bump_last_commented_report_count, claim_group_issue_filing,
+        claim_group_issue_reconciliation, claim_group_issue_state_refresh,
+        clear_product_github_repo, complete_group_issue_filing,
+        complete_group_issue_reconciliation, create_api_key, create_product_with_default_key,
+        create_team_invitation, dashboard_interaction_by_id, dashboard_report_by_id,
+        dashboard_session_by_id, dashboard_with_limits, delete_product, feedback_consent_state,
+        feedback_list_interactions, feedback_list_reports, get_group_github_issue,
+        get_or_create_workspace, get_product_github_repo, github_installation_workspace,
+        group_issue_context, group_issue_sync_context, ingest_telemetry_batch,
+        inspect_feedback_capability, list_github_installations, list_product_groups,
+        mark_group_issue_filing_for_reconciliation, merge_report_groups,
         purge_expired_product_data, read_product_auth, record_feedback_consent_decision,
-        remove_team_member, rename_product, rename_workspace, resolve_workspace_access,
-        revoke_api_key, revoke_team_invitation, rotate_api_key, submit_product_feedback,
-        transfer_team_ownership, update_feedback_workflow, update_policy, update_team_member_role,
+        regroup_report_groups, release_group_issue_filing_claim,
+        release_group_issue_reconciliation_claim, remove_team_member, rename_product,
+        rename_workspace, resolve_workspace_access, revert_last_commented_report_count,
+        revoke_api_key, revoke_github_installation, revoke_team_invitation, rotate_api_key,
+        set_product_github_repo, submit_product_feedback, transfer_team_ownership,
+        update_feedback_workflow, update_group_issue_state, update_policy, update_team_member_role,
+        upsert_github_installation,
     },
 };
 
@@ -78,12 +109,25 @@ use crate::{
 struct AppState {
     pool: PgPool,
     public_base_url: String,
+    web_app_url: String,
     secure_cookies: bool,
     accounts: OsAccountsClient,
+    github: Option<GithubAppClient>,
     mcp_allowed_origins: Vec<String>,
 }
 
 const TEAM_INVITE_COOKIE: &str = "af_team_invite";
+const GITHUB_STATE_COOKIE: &str = "af_gh_state";
+const GITHUB_WORKSPACE_COOKIE: &str = "af_gh_ws";
+const MAX_GROUP_ISSUE_SYNCS_PER_REQUEST: usize = 5;
+const GROUP_ISSUE_STATE_REFRESH_INTERVAL_MINUTES: i64 = 15;
+const GROUP_ISSUE_RECONCILIATION_RETRY_MINUTES: i64 = 1;
+const GROUP_ISSUE_RECONCILIATION_CLOCK_SKEW_MINUTES: i64 = 5;
+
+/// How long a `pending` filing claim is respected before a crashed filer is
+/// moved into reconciliation. Comfortably above the GitHub client's 15s
+/// request timeout, so a live filer is never displaced.
+const GROUP_ISSUE_FILING_CLAIM_STALE_MINUTES: i64 = 5;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -155,6 +199,19 @@ fn build_app_router() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(feedback_discovery_v2))
         .routes(routes!(auth_start))
         .routes(routes!(auth_callback))
+        .routes(routes!(github_install_handler))
+        .routes(routes!(github_callback_handler))
+        .routes(routes!(github_webhook_handler).layer(DefaultBodyLimit::max(2 * 1024 * 1024)))
+        .routes(routes!(github_installations_handler))
+        .routes(routes!(github_repositories_handler))
+        .routes(routes!(
+            product_github_repo_handler,
+            set_product_github_repo_handler,
+            clear_product_github_repo_handler
+        ))
+        .routes(routes!(product_groups_handler))
+        .routes(routes!(merge_report_groups_handler))
+        .routes(routes!(file_group_github_issue_handler))
         .routes(routes!(join_team_handler))
         .routes(routes!(logout_handler))
         .routes(routes!(dashboard_handler))
@@ -207,7 +264,8 @@ fn print_openapi() -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    if env::args().nth(1).as_deref() == Some("--print-openapi") {
+    let command = env::args().nth(1);
+    if command.as_deref() == Some("--print-openapi") {
         print_openapi()?;
         return Ok(());
     }
@@ -226,29 +284,6 @@ async fn main() -> anyhow::Result<()> {
         tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
-    let port = env::var("PORT")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(8080);
-    let public_base_url =
-        env::var("PUBLIC_BASE_URL").unwrap_or_else(|_| format!("http://localhost:{port}"));
-    if production {
-        let accounts_url = env::var("OS_ACCOUNTS_URL")?;
-        let accounts_api_url = env::var("OS_ACCOUNTS_API_URL")?;
-        for (name, value) in [
-            ("PUBLIC_BASE_URL", public_base_url.as_str()),
-            ("OS_ACCOUNTS_URL", accounts_url.as_str()),
-            ("OS_ACCOUNTS_API_URL", accounts_api_url.as_str()),
-        ] {
-            let parsed = reqwest::Url::parse(value)
-                .map_err(|error| anyhow::anyhow!("{name} is invalid: {error}"))?;
-            anyhow::ensure!(
-                parsed.scheme() == "https",
-                "{name} must use HTTPS in production"
-            );
-        }
-    }
-    let accounts = OsAccountsClient::from_env(&public_base_url)?;
     let database_url =
         env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL is required"))?;
     let database_max_connections = match env::var("DATABASE_MAX_CONNECTIONS") {
@@ -269,6 +304,110 @@ async fn main() -> anyhow::Result<()> {
         .connect(&database_url)
         .await?;
     sqlx::migrate!().run(&pool).await?;
+    if command.as_deref() == Some("--backfill-report-groups") {
+        let summary = backfill_report_groups(&pool, &FingerprintGrouper, None)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        tracing::info!(
+            scanned = summary.scanned,
+            grouped = summary.grouped,
+            skipped = summary.skipped,
+            skipped_findings = summary.skipped_findings,
+            exhausted = summary.exhausted,
+            "report group backfill completed"
+        );
+        return Ok(());
+    }
+    if command.as_deref() == Some("--regroup-report-groups") {
+        let summary = regroup_report_groups(&pool, &FingerprintGrouper)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        tracing::info!(
+            scanned = summary.scanned,
+            moved = summary.moved,
+            unchanged = summary.unchanged,
+            skipped = summary.skipped,
+            skipped_findings = summary.skipped_findings,
+            "report group regroup completed"
+        );
+        return Ok(());
+    }
+
+    // Group any reports that predate grouping, so a normal deploy converges
+    // without an operator remembering to run the CLI. This runs to completion
+    // rather than under a total cap, because a deployment with more history
+    // than any cap would otherwise never finish grouping on its own.
+    //
+    // It is deliberately detached: boot and readiness never await it, so a
+    // large historical table cannot delay the listener or trip a healthcheck.
+    // Work stays bounded per step by the batch size and by a short yield
+    // between batches, so it cannot monopolise the connection pool. Reports
+    // already grouped are excluded by the `group_id IS NULL` filter, which is
+    // what makes running this on every boot cheap and idempotent.
+    let backfill_pool = pool.clone();
+    tokio::spawn(async move {
+        // Transient database errors must not strand ungrouped reports until
+        // the next boot: retry with capped exponential backoff. The work is
+        // idempotent (`group_id IS NULL`), so re-running after a partial
+        // failure is always safe.
+        let max_backoff = std::time::Duration::from_mins(5);
+        let mut backoff = std::time::Duration::from_secs(1);
+        loop {
+            match backfill_report_groups(&backfill_pool, &FingerprintGrouper, None).await {
+                Ok(summary) => {
+                    if summary.scanned > 0 {
+                        tracing::info!(
+                            scanned = summary.scanned,
+                            grouped = summary.grouped,
+                            skipped = summary.skipped,
+                            skipped_findings = summary.skipped_findings,
+                            "startup report group backfill completed"
+                        );
+                    }
+                    break;
+                }
+                // Never escalate to the process: the API is useful without
+                // grouping. Retry from wherever this run stopped.
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error.message,
+                        retry_in_secs = backoff.as_secs(),
+                        "startup report group backfill failed; retrying"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(max_backoff);
+                }
+            }
+        }
+    });
+
+    let port = env::var("PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(8080);
+    let public_base_url =
+        env::var("PUBLIC_BASE_URL").unwrap_or_else(|_| format!("http://localhost:{port}"));
+    let configured_web_app_url = env::var("WEB_APP_URL").ok();
+    let web_app_url = resolve_web_app_url(&public_base_url, configured_web_app_url.as_deref());
+    if production {
+        let accounts_url = env::var("OS_ACCOUNTS_URL")?;
+        let accounts_api_url = env::var("OS_ACCOUNTS_API_URL")?;
+        for (name, value) in [
+            ("PUBLIC_BASE_URL", public_base_url.as_str()),
+            ("WEB_APP_URL", web_app_url.as_str()),
+            ("OS_ACCOUNTS_URL", accounts_url.as_str()),
+            ("OS_ACCOUNTS_API_URL", accounts_api_url.as_str()),
+        ] {
+            let parsed = reqwest::Url::parse(value)
+                .map_err(|error| anyhow::anyhow!("{name} is invalid: {error}"))?;
+            anyhow::ensure!(
+                parsed.scheme() == "https",
+                "{name} must use HTTPS in production"
+            );
+        }
+    }
+    let accounts = OsAccountsClient::from_env(&public_base_url)?;
+    let github = GithubAppConfig::from_env()?.map(GithubAppClient::new);
     let mcp_allowed_origins = env::var("MCP_ALLOWED_ORIGINS")
         .unwrap_or_default()
         .split(',')
@@ -282,8 +421,10 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         secure_cookies: public_base_url.starts_with("https://"),
         public_base_url,
+        web_app_url,
         pool,
         accounts,
+        github,
         mcp_allowed_origins,
     });
     spawn_retention_worker(state.pool.clone());
@@ -659,6 +800,1413 @@ async fn auth_callback(
         &clear_cookie(TEAM_INVITE_COOKIE, state.secure_cookies),
     )?;
     Ok(response)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/github/install",
+    tag = "github",
+    params(
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    responses(
+        (
+            status = 303,
+            description = "Redirect to GitHub to install the Epode GitHub App",
+            body = String,
+            content_type = "text/plain",
+            headers(
+                ("Location" = String, description = "GitHub App installation URL"),
+                ("Set-Cookie" = String, description = "Short-lived GitHub installation state and team cookies")
+            )
+        ),
+        (status = 400, description = "Invalid team header", body = ApiErrorEnvelope),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "GitHub installation flow could not be started", body = ApiErrorEnvelope),
+        (status = 503, description = "GitHub App integration is not configured", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn github_install_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let github = require_github(&state)?;
+    let github_state = random_token("");
+    let mut response = dashboard_response(
+        &state,
+        Redirect::to(&github.install_url(&github_state)),
+        tokens,
+    )?;
+    append_cookie(
+        &mut response,
+        &http_only_cookie(
+            GITHUB_STATE_COOKIE,
+            &github_state,
+            600,
+            state.secure_cookies,
+        ),
+    )?;
+    append_cookie(
+        &mut response,
+        &http_only_cookie(
+            GITHUB_WORKSPACE_COOKIE,
+            &context.workspace.id.to_string(),
+            600,
+            state.secure_cookies,
+        ),
+    )?;
+    Ok(response)
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+struct GithubCallbackQuery {
+    /// GitHub installation identifier created or updated by the setup flow.
+    installation_id: Option<i64>,
+    /// GitHub's setup action, such as `install` or `update`.
+    setup_action: Option<String>,
+    /// Opaque state nonce supplied when the setup flow began.
+    state: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/github/callback",
+    tag = "github",
+    params(GithubCallbackQuery),
+    responses(
+        (
+            status = 303,
+            description = "Redirect to the connectors dashboard with github=connected, github=conflict, or github=error",
+            body = String,
+            content_type = "text/plain",
+            headers(
+                ("Location" = String, description = "Connectors dashboard result URL"),
+                ("Set-Cookie" = String, description = "Cleared GitHub installation flow cookies")
+            )
+        ),
+        (status = 400, description = "Malformed GitHub callback query", body = String, content_type = "text/plain"),
+        (status = 503, description = "GitHub App integration is not configured", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn github_callback_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<GithubCallbackQuery>,
+) -> Response {
+    let Some(github) = state.github.as_ref() else {
+        let mut response = ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GitHub App integration is not configured",
+        )
+        .into_response();
+        clear_github_flow_cookies(&mut response, &state);
+        return response;
+    };
+    let GithubCallbackQuery {
+        installation_id,
+        setup_action,
+        state: returned_state,
+    } = query;
+    let _setup_action = setup_action.as_deref();
+    let expected_state = cookie(&headers, GITHUB_STATE_COOKIE);
+    let Some(cookie_workspace_id) =
+        cookie(&headers, GITHUB_WORKSPACE_COOKIE).and_then(|value| Uuid::parse_str(&value).ok())
+    else {
+        return github_callback_redirect(&state, "error");
+    };
+    let Ok((context, tokens)) = dashboard_auth(&state, &headers, Some(cookie_workspace_id)).await
+    else {
+        return github_callback_redirect(&state, "error");
+    };
+    if require_workspace_editor(&context).is_err() {
+        return github_callback_redirect_with_tokens(&state, "error", tokens);
+    }
+
+    let valid_state = expected_state
+        .as_deref()
+        .is_some_and(|expected| returned_state.as_deref() == Some(expected));
+    let Some(installation_id) = installation_id else {
+        return github_callback_redirect_with_tokens(&state, "error", tokens);
+    };
+    if !valid_state {
+        return github_callback_redirect_with_tokens(&state, "error", tokens);
+    }
+
+    let Ok(account) = github.installation(installation_id).await else {
+        tracing::warn!(
+            installation_id,
+            "GitHub installation lookup failed during callback"
+        );
+        return github_callback_redirect_with_tokens(&state, "error", tokens);
+    };
+    let result = upsert_github_installation(
+        &state.pool,
+        context.workspace.id,
+        installation_id,
+        &account.login,
+        &account.account_type,
+    )
+    .await;
+    let outcome = match result {
+        Ok(GithubInstallationUpsert::Bound) => "connected",
+        Ok(GithubInstallationUpsert::ConflictingWorkspace) => "conflict",
+        Err(_) => {
+            tracing::warn!(
+                installation_id,
+                workspace_id = %context.workspace.id,
+                "GitHub installation binding failed during callback"
+            );
+            "error"
+        }
+    };
+    github_callback_redirect_with_tokens(&state, outcome, tokens)
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubWebhookPayload {
+    action: Option<String>,
+    installation: Option<GithubWebhookInstallation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubWebhookInstallation {
+    id: i64,
+    account: Option<GithubWebhookAccount>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubWebhookAccount {
+    login: String,
+    #[serde(rename = "type")]
+    account_type: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/github/webhook",
+    tag = "github",
+    params(
+        ("X-Hub-Signature-256" = String, Header, description = "HMAC-SHA256 signature of the raw request body"),
+        ("X-GitHub-Event" = String, Header, description = "GitHub webhook event name")
+    ),
+    request_body(content = String, content_type = "application/json", description = "Raw GitHub webhook event payload"),
+    responses(
+        (status = 200, description = "Signed webhook accepted", body = String, content_type = "text/plain"),
+        (status = 400, description = "Signed webhook payload could not be parsed", body = ApiErrorEnvelope),
+        (status = 401, description = "Webhook signature is missing or invalid", body = ApiErrorEnvelope),
+        (status = 413, description = "Webhook body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 500, description = "Webhook could not be persisted; GitHub should redeliver", body = ApiErrorEnvelope),
+        (status = 503, description = "GitHub App integration is not configured", body = ApiErrorEnvelope)
+    ),
+    description = "Receives signed GitHub App events. Persistence failures answer \
+        500 so GitHub redelivers; an unparseable payload answers 400; unhandled \
+        or non-actionable events answer 200."
+)]
+async fn github_webhook_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<(StatusCode, &'static str), ApiError> {
+    let github = require_github(&state)?;
+    let signature = headers
+        .get("x-hub-signature-256")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !github.verify_webhook_signature(&body, signature) {
+        tracing::warn!("rejected GitHub webhook with invalid signature");
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "Invalid GitHub webhook signature",
+        ));
+    }
+
+    if headers
+        .get("x-github-event")
+        .and_then(|value| value.to_str().ok())
+        == Some("installation")
+    {
+        // The signature already passed, so a body that will not deserialize is
+        // upstream schema drift or a garbled delivery rather than an attack.
+        // Answer 400 so it shows up in GitHub's delivery log instead of being
+        // silently accepted; a retry of the same bytes fails identically, so
+        // this stays 4xx rather than joining the retryable 5xx path.
+        let Ok(payload) = serde_json::from_slice::<GithubWebhookPayload>(&body) else {
+            tracing::warn!("rejected malformed signed GitHub installation webhook");
+            return Err(ApiError::bad_request(
+                "Malformed GitHub installation webhook payload",
+            ));
+        };
+        handle_github_installation_webhook(&state, payload).await?;
+    }
+    Ok((StatusCode::OK, "ok"))
+}
+
+/// Applies an `installation` event.
+///
+/// Persistence failures propagate so the webhook answers 5xx and GitHub
+/// redelivers. Everything else — an unknown installation, a missing account, a
+/// conflicting workspace, an action we do not act on — is a terminal no-op that
+/// returns `Ok`, because redelivering those would fail identically forever.
+async fn handle_github_installation_webhook(
+    state: &AppState,
+    payload: GithubWebhookPayload,
+) -> Result<(), ApiError> {
+    let Some(installation) = payload.installation else {
+        return Ok(());
+    };
+    match payload.action.as_deref() {
+        Some("deleted" | "suspend") => {
+            revoke_github_installation(&state.pool, installation.id)
+                .await
+                .inspect_err(|_| {
+                    tracing::warn!(
+                        installation_id = installation.id,
+                        "failed to revoke GitHub installation from webhook"
+                    );
+                })?;
+        }
+        Some("created" | "unsuspend") => {
+            let workspace_id = github_installation_workspace(&state.pool, installation.id)
+                .await
+                .inspect_err(|_| {
+                    tracing::warn!(
+                        installation_id = installation.id,
+                        "failed to look up GitHub installation workspace from webhook"
+                    );
+                })?;
+            let (Some(workspace_id), Some(account)) = (workspace_id, installation.account) else {
+                return Ok(());
+            };
+            match upsert_github_installation(
+                &state.pool,
+                workspace_id,
+                installation.id,
+                &account.login,
+                &account.account_type,
+            )
+            .await
+            {
+                Ok(GithubInstallationUpsert::Bound) => {}
+                Ok(GithubInstallationUpsert::ConflictingWorkspace) => tracing::warn!(
+                    installation_id = installation.id,
+                    "ignored conflicting GitHub installation restore from webhook"
+                ),
+                Err(error) => {
+                    tracing::warn!(
+                        installation_id = installation.id,
+                        "failed to restore GitHub installation from webhook"
+                    );
+                    return Err(error);
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/github/installations",
+    tag = "github",
+    params(
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "GitHub App configuration and active installations", body = GithubInstallationsResponse),
+        (status = 400, description = "Invalid team header", body = ApiErrorEnvelope),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "GitHub installations could not be listed", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn github_installations_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let configured = state.github.is_some();
+    let installations = if configured {
+        list_github_installations(&state.pool, context.workspace.id)
+            .await?
+            .into_iter()
+            .map(|installation| GithubInstallationResponse {
+                id: installation.id,
+                installation_id: installation.installation_id,
+                account_login: installation.account_login,
+                account_type: installation.account_type,
+                created_at: installation.created_at,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    dashboard_response(
+        &state,
+        Json(GithubInstallationsResponse {
+            configured,
+            installations,
+        }),
+        tokens,
+    )
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/github/installations/{installation_id}/repositories",
+    tag = "github",
+    params(
+        ("installation_id" = i64, Path, description = "GitHub installation identifier"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Repositories visible to the GitHub installation", body = GithubRepositoriesResponse),
+        (
+            status = 400,
+            description = "Invalid path or team header",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Active GitHub installation not found for this team", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "GitHub repositories could not be listed", body = ApiErrorEnvelope),
+        (status = 503, description = "GitHub App integration is not configured", body = ApiErrorEnvelope)
+    ),
+    description = "Lists repositories reachable by the installation. The listing \
+        is capped at 1000 repositories; when the cap is reached `truncated` is \
+        true and the response is a partial view.",
+    security(("session_cookie" = []))
+)]
+async fn github_repositories_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(installation_id): Path<i64>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let github = require_github(&state)?;
+    let active_installations = list_github_installations(&state.pool, context.workspace.id).await?;
+    if !active_installations
+        .iter()
+        .any(|installation| installation.installation_id == installation_id)
+    {
+        return Err(ApiError::not_found(
+            "GitHub installation not found for this team",
+        ));
+    }
+    let page = github
+        .installation_repositories(installation_id)
+        .await
+        .map_err(ApiError::internal)?;
+    let truncated = page.truncated;
+    let repositories = page
+        .repositories
+        .into_iter()
+        .map(|repository| GithubRepositoryResponse {
+            full_name: repository.full_name,
+            default_branch: repository.default_branch,
+            private: repository.private,
+        })
+        .collect();
+    dashboard_response(
+        &state,
+        Json(GithubRepositoriesResponse {
+            installation_id,
+            repositories,
+            truncated,
+        }),
+        tokens,
+    )
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/products/{product_id}/github-repo",
+    tag = "github",
+    params(
+        ("product_id" = Uuid, Path, description = "Product whose GitHub repository mapping is requested"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Current product repository mapping, or null when unconfigured", body = Option<ProductGithubRepo>),
+        (
+            status = 400,
+            description = "Invalid product path or team header",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Product not found for this team", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "Repository mapping could not be loaded", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn product_github_repo_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(product_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let mapping = get_product_github_repo(&state.pool, context.workspace.id, product_id).await?;
+    dashboard_response(&state, Json(mapping), tokens)
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/products/{product_id}/github-repo",
+    tag = "github",
+    params(
+        ("product_id" = Uuid, Path, description = "Product whose GitHub repository mapping is configured"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    request_body = ProductGithubRepoInput,
+    responses(
+        (status = 200, description = "Product repository mapping saved", body = ProductGithubRepo),
+        (
+            status = 400,
+            description = "Invalid product path, team header, repository mapping, or malformed JSON body",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Product or active GitHub installation not found for this team", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 413, description = "Request body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "Request body is not JSON", body = String, content_type = "text/plain"),
+        (status = 422, description = "JSON body does not match the repository mapping schema", body = String, content_type = "text/plain"),
+        (status = 500, description = "Repository mapping could not be saved", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn set_product_github_repo_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(product_id): Path<Uuid>,
+    Json(input): Json<ProductGithubRepoInput>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    validate_repo_full_name(&input.repo_full_name)
+        .map_err(|_| ApiError::bad_request("Repository name must use the owner/name form"))?;
+    let mapping =
+        set_product_github_repo(&state.pool, context.workspace.id, product_id, &input).await?;
+    dashboard_response(&state, Json(mapping), tokens)
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/products/{product_id}/github-repo",
+    tag = "github",
+    params(
+        ("product_id" = Uuid, Path, description = "Product whose GitHub repository mapping is removed"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Product repository mapping removed when present", body = RemovedResponse),
+        (
+            status = 400,
+            description = "Invalid product path or team header",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Product not found for this team", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "Repository mapping could not be removed", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn clear_product_github_repo_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(product_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let removed = clear_product_github_repo(&state.pool, context.workspace.id, product_id).await?;
+    dashboard_response(&state, Json(RemovedResponse { removed }), tokens)
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
+struct ProductGroupsQuery {
+    /// Maximum groups returned, from 1 to 100.
+    #[param(default = 50, minimum = 1, maximum = 100)]
+    limit: Option<i64>,
+    /// Number of groups to skip.
+    #[param(default = 0, minimum = 0)]
+    offset: Option<i64>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/products/{product_id}/groups",
+    tag = "github",
+    params(
+        ("product_id" = Uuid, Path, description = "Product whose report groups are listed"),
+        ProductGroupsQuery,
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Paginated report groups with linked GitHub issues", body = ProductGroupsResponse),
+        (
+            status = 400,
+            description = "Invalid product path, pagination, or team header",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Product not found for this team", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "Report groups could not be listed", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn product_groups_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(product_id): Path<Uuid>,
+    Query(query): Query<ProductGroupsQuery>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let limit = query.limit.unwrap_or(50);
+    let offset = query.offset.unwrap_or(0);
+    if !(1..=100).contains(&limit) || offset < 0 {
+        return Err(ApiError::bad_request(
+            "Group pagination must use a limit from 1 to 100 and a non-negative offset",
+        ));
+    }
+    let page =
+        list_product_groups(&state.pool, context.workspace.id, product_id, limit, offset).await?;
+    let mut spawned_syncs = 0_usize;
+    let mut dropped_syncs = 0_usize;
+    let sync_checked_at = Utc::now();
+    for listed in &page.groups {
+        if group_issue_sync_needed(
+            listed.group.github_issue.is_some(),
+            listed.needs_reconciliation,
+            listed.group.report_count,
+            listed.last_commented_report_count,
+            listed.state_refreshed_at,
+            sync_checked_at,
+        ) {
+            if spawned_syncs >= MAX_GROUP_ISSUE_SYNCS_PER_REQUEST {
+                dropped_syncs += 1;
+                continue;
+            }
+            spawn_group_issue_sync(
+                Arc::clone(&state),
+                context.workspace.id,
+                listed.group.group_key.clone(),
+            );
+            spawned_syncs += 1;
+        }
+    }
+    if dropped_syncs > 0 {
+        tracing::warn!(
+            workspace_id = %context.workspace.id,
+            %product_id,
+            dropped_syncs,
+            cap = MAX_GROUP_ISSUE_SYNCS_PER_REQUEST,
+            "GitHub issue sync fan-out capped; deferred groups will retry on a later listing"
+        );
+    }
+    let groups = page.groups.into_iter().map(|listed| listed.group).collect();
+    dashboard_response(
+        &state,
+        Json(ProductGroupsResponse {
+            groups,
+            limit,
+            offset,
+            has_more: page.has_more,
+        }),
+        tokens,
+    )
+}
+
+fn valid_report_group_key(group_key: &str) -> bool {
+    group_key.len() == 32
+        && group_key
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/groups/{group_key}/merge",
+    tag = "github",
+    params(
+        ("group_key" = String, Path, description = "Source report group that will be merged away"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    request_body = MergeReportGroupsInput,
+    responses(
+        (status = 200, description = "Reports moved and durable merge lineage recorded", body = MergeReportGroupsResponse),
+        (
+            status = 400,
+            description = "Invalid group key, self-merge, team header, or malformed JSON body",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot edit the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Source or target group not found for this team", body = ApiErrorEnvelope),
+        (status = 409, description = "Groups belong to different products, merge lineage would chain, or both groups have filed GitHub issues", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 413, description = "Request body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "Request body is not JSON", body = String, content_type = "text/plain"),
+        (status = 422, description = "JSON body does not match the merge schema", body = String, content_type = "text/plain"),
+        (status = 500, description = "Report groups could not be merged", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn merge_report_groups_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(source_group_key): Path<String>,
+    Json(input): Json<MergeReportGroupsInput>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    if !valid_report_group_key(&source_group_key) || !valid_report_group_key(&input.into_group_key)
+    {
+        return Err(ApiError::bad_request(
+            "Report group keys must be 32 lowercase hexadecimal characters",
+        ));
+    }
+    let summary = merge_report_groups(
+        &state.pool,
+        context.workspace.id,
+        &source_group_key,
+        &input.into_group_key,
+        &context.user.id,
+    )
+    .await?;
+    dashboard_response(&state, Json(summary), tokens)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/groups/{group_key}/github-issue",
+    tag = "github",
+    params(
+        ("group_key" = String, Path, description = "Stable report group key"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Existing GitHub issue link for the group", body = GithubIssueLink),
+        (status = 201, description = "GitHub issue created and linked to the group", body = GithubIssueLink),
+        (status = 400, description = "Invalid team header", body = ApiErrorEnvelope),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Feedback group not found for this team", body = ApiErrorEnvelope),
+        (status = 409, description = "The group was merged away, its mapping is unusable, or a filing is being reconciled", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "GitHub issue linkage could not be persisted", body = ApiErrorEnvelope),
+        (status = 502, description = "GitHub issue creation failed or has an ambiguous outcome being reconciled", body = ApiErrorEnvelope),
+        (status = 503, description = "GitHub App integration is not configured", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn file_group_github_issue_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(group_key): Path<String>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let workspace_id = context.workspace.id;
+    let backlink = group_backlink(&state.web_app_url, &group_key);
+    let initial_context =
+        group_issue_context(&state.pool, workspace_id, &group_key, backlink.clone())
+            .await?
+            .ok_or_else(|| ApiError::not_found("Feedback group not found for this team"))?;
+    if let Some(target_group_key) = initial_context.merged_into_group_key.as_deref() {
+        return Err(ApiError::conflict(format!(
+            "This feedback group was merged into {target_group_key}; file the issue on that group instead"
+        )));
+    }
+    if let Some(existing) = get_group_github_issue(&state.pool, workspace_id, &group_key).await? {
+        spawn_group_issue_sync(Arc::clone(&state), workspace_id, group_key);
+        return dashboard_response(&state, Json(existing.link()), tokens);
+    }
+    let (installation_id, repo_full_name) = validate_group_repo_mapping(&initial_context)?;
+    let github = require_github(&state)?;
+
+    // Claim the group BEFORE calling GitHub. The primary key on `group_key`
+    // makes concurrent filers mutually exclusive without any database
+    // connection being held across the network call.
+    let stale_cutoff = Utc::now() - Duration::minutes(GROUP_ISSUE_FILING_CLAIM_STALE_MINUTES);
+    match claim_group_issue_filing(
+        &state.pool,
+        GroupIssueFilingRequest {
+            workspace_id,
+            group_key: &group_key,
+            installation_id,
+            repo_full_name,
+            created_by: &context.user.id,
+            claim_report_count: initial_context.template.report_count,
+        },
+        stale_cutoff,
+    )
+    .await?
+    {
+        GroupIssueFilingClaim::AlreadyFiled(existing) => {
+            spawn_group_issue_sync(Arc::clone(&state), workspace_id, group_key);
+            return dashboard_response(&state, Json(existing.link()), tokens);
+        }
+        GroupIssueFilingClaim::InProgress => {
+            return Err(ApiError::conflict(
+                "A GitHub issue is already being filed for this feedback group",
+            ));
+        }
+        GroupIssueFilingClaim::NeedsReconciliation => {
+            spawn_group_issue_sync(Arc::clone(&state), workspace_id, group_key);
+            return Err(ApiError::conflict(
+                "GitHub issue reconciliation is in progress for this feedback group",
+            ));
+        }
+        GroupIssueFilingClaim::Claimed => {}
+    }
+
+    let title = render_issue_title(&initial_context.template);
+    let body = render_issue_body(&initial_context.template);
+    let issue = match github
+        .create_issue(installation_id, repo_full_name, &title, &body)
+        .await
+    {
+        Ok(issue) => issue,
+        Err(error) => {
+            let outcome = error.outcome();
+            tracing::warn!(
+                %error,
+                ?outcome,
+                %workspace_id,
+                %group_key,
+                repo_full_name,
+                "GitHub issue creation failed"
+            );
+            if outcome == GithubIssueCreationOutcome::DefiniteFailure {
+                if let Err(release_error) =
+                    release_group_issue_filing_claim(&state.pool, workspace_id, &group_key).await
+                {
+                    tracing::warn!(
+                        status = %release_error.status,
+                        %workspace_id,
+                        %group_key,
+                        "failed to release definite GitHub issue filing failure"
+                    );
+                }
+                return Err(ApiError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "GitHub did not accept the issue creation request",
+                ));
+            }
+
+            match mark_group_issue_filing_for_reconciliation(&state.pool, workspace_id, &group_key)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
+                    %workspace_id,
+                    %group_key,
+                    "ambiguous GitHub issue filing claim was no longer pending"
+                ),
+                Err(mark_error) => tracing::warn!(
+                    status = %mark_error.status,
+                    %workspace_id,
+                    %group_key,
+                    "failed to mark ambiguous GitHub issue filing for reconciliation"
+                ),
+            }
+            spawn_group_issue_sync(Arc::clone(&state), workspace_id, group_key);
+            return Err(ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "GitHub issue filing is being reconciled; retry shortly",
+            ));
+        }
+    };
+    let link = GithubIssueLink {
+        repo_full_name: repo_full_name.to_owned(),
+        issue_number: issue.number,
+        url: issue.html_url,
+        state: issue.state,
+    };
+    let stored = complete_group_issue_filing(
+        &state.pool,
+        workspace_id,
+        &group_key,
+        &link,
+        initial_context.template.report_count,
+    )
+    .await?;
+    dashboard_response(&state, (StatusCode::CREATED, Json(stored.link())), tokens)
+}
+
+fn validate_group_repo_mapping(
+    context: &crate::store::GroupIssueContext,
+) -> Result<(i64, &str), ApiError> {
+    let Some(installation_id) = context.installation_id else {
+        return Err(ApiError::conflict(
+            "The product has no GitHub repository mapping",
+        ));
+    };
+    let Some(repo_full_name) = context.repo_full_name.as_deref() else {
+        return Err(ApiError::conflict(
+            "The product has no GitHub repository mapping",
+        ));
+    };
+    if !context.installation_active {
+        return Err(ApiError::conflict(
+            "The product GitHub repository mapping has no active installation for this team",
+        ));
+    }
+    Ok((installation_id, repo_full_name))
+}
+
+fn spawn_group_issue_sync(state: Arc<AppState>, workspace_id: Uuid, group_key: String) {
+    if state.github.is_none() {
+        return;
+    }
+    tokio::spawn(async move {
+        if let Err(error) = sync_group_github_issue(&state, workspace_id, &group_key).await {
+            tracing::warn!(
+                status = %error.status,
+                %workspace_id,
+                %group_key,
+                "best-effort GitHub issue synchronization failed"
+            );
+        }
+    });
+}
+
+/// A sync is worth spawning for a due reconciliation, new evidence to comment
+/// on, or a cached issue state stale enough to re-read.
+///
+/// The state refresh is deliberately NOT conditioned on new reports arriving: a
+/// group that has gone quiet is exactly the one whose issue is most likely to
+/// have been closed or reopened on GitHub, and gating on new evidence would pin
+/// its badge to whatever it was when the last report landed. Call volume stays
+/// bounded by the `state_refreshed_at` throttle and the per-request fan-out cap
+/// rather than by the presence of new reports.
+fn group_issue_sync_needed(
+    has_github_issue: bool,
+    needs_reconciliation: bool,
+    current_report_count: i64,
+    last_commented_report_count: Option<i64>,
+    state_refreshed_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> bool {
+    if needs_reconciliation {
+        return group_issue_reconciliation_retry_due(state_refreshed_at, now);
+    }
+    if !has_github_issue {
+        return false;
+    }
+    let new_evidence = last_commented_report_count
+        .is_some_and(|last_commented| current_report_count > last_commented);
+    new_evidence || group_issue_state_refresh_due(state_refreshed_at, now)
+}
+
+fn group_issue_reconciliation_retry_due(
+    state_refreshed_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> bool {
+    state_refreshed_at.is_none_or(|last_attempt| {
+        last_attempt <= now - Duration::minutes(GROUP_ISSUE_RECONCILIATION_RETRY_MINUTES)
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupIssueReconciliationDecision {
+    Adopt,
+    KeepWaiting,
+    Release,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupIssueReconciliationInconclusive {
+    RateLimit,
+    Timeout,
+    NotFound,
+    PaginationCap,
+    IncompletePagination,
+    Server,
+    InstallationAccess,
+    InvalidResponse,
+    Transport,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum GroupIssueReconciliationEvidence<'a> {
+    Complete(&'a [GithubIssue]),
+    Inconclusive(GroupIssueReconciliationInconclusive),
+}
+
+#[derive(Debug)]
+struct GroupIssueReconciliationResolution<'a> {
+    decision: GroupIssueReconciliationDecision,
+    issue: Option<&'a GithubIssue>,
+    matching_issue_count: usize,
+}
+
+fn group_issue_reconciliation_resolution<'a>(
+    evidence: GroupIssueReconciliationEvidence<'a>,
+    group_key: &str,
+) -> GroupIssueReconciliationResolution<'a> {
+    let issues = match evidence {
+        GroupIssueReconciliationEvidence::Complete(issues) => issues,
+        GroupIssueReconciliationEvidence::Inconclusive(reason) => {
+            let decision = match reason {
+                GroupIssueReconciliationInconclusive::RateLimit
+                | GroupIssueReconciliationInconclusive::Timeout
+                | GroupIssueReconciliationInconclusive::NotFound
+                | GroupIssueReconciliationInconclusive::PaginationCap
+                | GroupIssueReconciliationInconclusive::IncompletePagination
+                | GroupIssueReconciliationInconclusive::Server
+                | GroupIssueReconciliationInconclusive::InstallationAccess
+                | GroupIssueReconciliationInconclusive::InvalidResponse
+                | GroupIssueReconciliationInconclusive::Transport => {
+                    GroupIssueReconciliationDecision::KeepWaiting
+                }
+            };
+            return GroupIssueReconciliationResolution {
+                decision,
+                issue: None,
+                matching_issue_count: 0,
+            };
+        }
+    };
+    let marker = group_marker_comment(group_key);
+    let mut oldest = None;
+    let mut matching_issue_count = 0;
+    for issue in issues.iter().filter(|issue| {
+        issue.pull_request.is_none()
+            && issue
+                .body
+                .as_deref()
+                .is_some_and(|body| body.contains(&marker))
+    }) {
+        matching_issue_count += 1;
+        if oldest.is_none_or(|current: &GithubIssue| {
+            (issue.created_at, issue.number) < (current.created_at, current.number)
+        }) {
+            oldest = Some(issue);
+        }
+    }
+    GroupIssueReconciliationResolution {
+        decision: if oldest.is_some() {
+            GroupIssueReconciliationDecision::Adopt
+        } else {
+            // A complete REST listing is positive evidence that the canonical
+            // marker is absent. No fuzzy candidate or time delay can replace
+            // that exact-marker check.
+            GroupIssueReconciliationDecision::Release
+        },
+        issue: oldest,
+        matching_issue_count,
+    }
+}
+
+fn reconciliation_inconclusive_reason(
+    error: &GithubIssueListError,
+) -> GroupIssueReconciliationInconclusive {
+    if error.kind() == GithubIssueListFailureKind::PaginationCap {
+        return GroupIssueReconciliationInconclusive::PaginationCap;
+    }
+    if error.page() > 1 {
+        return GroupIssueReconciliationInconclusive::IncompletePagination;
+    }
+    match error.kind() {
+        GithubIssueListFailureKind::RateLimit => GroupIssueReconciliationInconclusive::RateLimit,
+        GithubIssueListFailureKind::Timeout => GroupIssueReconciliationInconclusive::Timeout,
+        GithubIssueListFailureKind::NotFound => GroupIssueReconciliationInconclusive::NotFound,
+        GithubIssueListFailureKind::PaginationCap => {
+            GroupIssueReconciliationInconclusive::PaginationCap
+        }
+        GithubIssueListFailureKind::Installation | GithubIssueListFailureKind::Access => {
+            GroupIssueReconciliationInconclusive::InstallationAccess
+        }
+        GithubIssueListFailureKind::Server => GroupIssueReconciliationInconclusive::Server,
+        GithubIssueListFailureKind::InvalidResponse => {
+            GroupIssueReconciliationInconclusive::InvalidResponse
+        }
+        GithubIssueListFailureKind::Transport => GroupIssueReconciliationInconclusive::Transport,
+    }
+}
+
+fn group_issue_state_refresh_due(
+    state_refreshed_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> bool {
+    state_refreshed_at.is_none_or(|last_refreshed| {
+        last_refreshed <= now - Duration::minutes(GROUP_ISSUE_STATE_REFRESH_INTERVAL_MINUTES)
+    })
+}
+
+async fn sync_group_github_issue(
+    state: &AppState,
+    workspace_id: Uuid,
+    group_key: &str,
+) -> Result<(), ApiError> {
+    let Some(github) = state.github.as_ref() else {
+        return Ok(());
+    };
+    if reconcile_group_github_issue(state, github, workspace_id, group_key).await? {
+        return Ok(());
+    }
+    let mut tx = state.pool.begin().await?;
+    let Some(context) = group_issue_sync_context(&mut tx, workspace_id, group_key).await? else {
+        tx.commit().await?;
+        return Ok(());
+    };
+    // Claim the comment only when there is genuinely new evidence. Whether or
+    // not there is, the state refresh below still gets its chance — a quiet
+    // group is the one most likely to have been closed or reopened on GitHub.
+    let claimed = if context.current_report_count > context.observed_report_count {
+        bump_last_commented_report_count(
+            &mut tx,
+            workspace_id,
+            group_key,
+            context.observed_report_count,
+            context.current_report_count,
+        )
+        .await?
+    } else {
+        false
+    };
+    tx.commit().await?;
+
+    if claimed {
+        post_group_evidence_comment(state, github, workspace_id, group_key, &context).await;
+    }
+
+    let refresh_checked_at = Utc::now();
+    let refresh_cutoff =
+        refresh_checked_at - Duration::minutes(GROUP_ISSUE_STATE_REFRESH_INTERVAL_MINUTES);
+    if group_issue_state_refresh_due(context.state_refreshed_at, refresh_checked_at)
+        && claim_group_issue_state_refresh(&state.pool, workspace_id, group_key, refresh_cutoff)
+            .await?
+    {
+        refresh_group_issue_state(state, github, workspace_id, group_key, &context).await;
+    }
+    Ok(())
+}
+
+async fn reconcile_group_github_issue(
+    state: &AppState,
+    github: &GithubAppClient,
+    workspace_id: Uuid,
+    group_key: &str,
+) -> Result<bool, ApiError> {
+    // External-consistency invariant: only a fully exhausted REST issue listing
+    // may release a quarantined claim. Rate limits, timeouts, 404s (including a
+    // stale renamed/transferred repo), revoked installation access, invalid
+    // responses, and any partial/capped pagination all remain inconclusive.
+    //
+    // ACCEPTED LIMITATIONS: GitHub cannot list a human-deleted issue or one
+    // transferred out of the repository, so a complete listing may look absent
+    // after either action. The five-minute lower-bound skew covers ordinary
+    // clock disagreement, but not larger clock faults. Repository identity is
+    // pinned as owner/name because the current schema does not retain GitHub's
+    // immutable repository id; redirects are followed, while a 404 is retained
+    // for retry rather than treated as absence.
+    let checked_at = Utc::now();
+    let refresh_cutoff = checked_at - Duration::minutes(GROUP_ISSUE_RECONCILIATION_RETRY_MINUTES);
+    let Some(context) =
+        claim_group_issue_reconciliation(&state.pool, workspace_id, group_key, refresh_cutoff)
+            .await?
+    else {
+        return Ok(false);
+    };
+
+    let since = context.needs_reconciliation_since
+        - Duration::minutes(GROUP_ISSUE_RECONCILIATION_CLOCK_SKEW_MINUTES);
+    let read = github
+        .reconciliation_issues(context.installation_id, &context.repo_full_name, since)
+        .await;
+    let evidence = match &read {
+        Ok(issues) => GroupIssueReconciliationEvidence::Complete(issues),
+        Err(error) => GroupIssueReconciliationEvidence::Inconclusive(
+            reconciliation_inconclusive_reason(error),
+        ),
+    };
+    let resolution = group_issue_reconciliation_resolution(evidence, group_key);
+    if let Err(error) = &read {
+        tracing::warn!(
+            %error,
+            ?resolution.decision,
+            reason = ?reconciliation_inconclusive_reason(error),
+            page = error.page(),
+            %workspace_id,
+            %group_key,
+            repo_full_name = %context.repo_full_name,
+            "GitHub issue reconciliation listing was inconclusive; claim remains quarantined"
+        );
+    }
+    if resolution.matching_issue_count > 1 {
+        tracing::warn!(
+            %workspace_id,
+            %group_key,
+            repo_full_name = %context.repo_full_name,
+            matches = resolution.matching_issue_count,
+            "multiple GitHub issues carry the exact group marker; adopting the oldest"
+        );
+    }
+
+    match resolution.decision {
+        GroupIssueReconciliationDecision::Adopt => {
+            let Some(issue) = resolution.issue else {
+                tracing::warn!(
+                    %workspace_id,
+                    %group_key,
+                    "GitHub issue reconciliation adopt decision had no issue"
+                );
+                return Ok(true);
+            };
+            let link = GithubIssueLink {
+                repo_full_name: context.repo_full_name,
+                issue_number: issue.number,
+                url: issue.html_url.clone(),
+                state: issue.state.clone(),
+            };
+            if !complete_group_issue_reconciliation(
+                &state.pool,
+                workspace_id,
+                group_key,
+                context.reconciliation_claimed_at,
+                &link,
+                context.claim_report_count,
+            )
+            .await?
+            {
+                tracing::warn!(
+                    %workspace_id,
+                    %group_key,
+                    "GitHub issue reconciliation adoption lost its conditional claim"
+                );
+            }
+        }
+        GroupIssueReconciliationDecision::KeepWaiting => {}
+        GroupIssueReconciliationDecision::Release => {
+            // This branch is reachable only from a complete, exhausted REST
+            // listing with no exact canonical marker. Every inconclusive read
+            // resolves to KeepWaiting above and therefore retains the claim.
+            if !release_group_issue_reconciliation_claim(
+                &state.pool,
+                workspace_id,
+                group_key,
+                context.reconciliation_claimed_at,
+            )
+            .await?
+            {
+                tracing::warn!(
+                    %workspace_id,
+                    %group_key,
+                    "GitHub issue reconciliation release lost its conditional claim"
+                );
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// Posts the evidence comment for an already-claimed counter bump.
+///
+/// Never returns an error: a GitHub failure reverts the claim so a later sync
+/// retries, and must not abort the caller's state refresh.
+async fn post_group_evidence_comment(
+    state: &AppState,
+    github: &GithubAppClient,
+    workspace_id: Uuid,
+    group_key: &str,
+    context: &GroupIssueSyncContext,
+) {
+    let body = render_evidence_comment(
+        context.current_report_count - context.observed_report_count,
+        context.earliest_new_occurred_at,
+        context.latest_new_occurred_at,
+    );
+    if let Err(error) = github
+        .create_issue_comment(
+            context.installation_id,
+            &context.repo_full_name,
+            context.issue_number,
+            &body,
+        )
+        .await
+    {
+        match revert_last_commented_report_count(
+            &state.pool,
+            workspace_id,
+            group_key,
+            context.observed_report_count,
+            context.current_report_count,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(
+                %workspace_id,
+                %group_key,
+                observed_report_count = context.observed_report_count,
+                claimed_report_count = context.current_report_count,
+                "GitHub evidence comment counter revert lost its conditional race"
+            ),
+            Err(revert_error) => tracing::warn!(
+                status = %revert_error.status,
+                %workspace_id,
+                %group_key,
+                observed_report_count = context.observed_report_count,
+                claimed_report_count = context.current_report_count,
+                "GitHub evidence comment counter revert failed"
+            ),
+        }
+        tracing::warn!(
+            %error,
+            %workspace_id,
+            %group_key,
+            repo_full_name = %context.repo_full_name,
+            issue_number = context.issue_number,
+            "GitHub evidence comment failed; report counter will be retried when safely reverted"
+        );
+    }
+}
+
+/// Re-reads the issue state for an already-claimed refresh slot.
+///
+/// Never returns an error: a stale badge is not worth failing a background sync.
+async fn refresh_group_issue_state(
+    state: &AppState,
+    github: &GithubAppClient,
+    workspace_id: Uuid,
+    group_key: &str,
+    context: &GroupIssueSyncContext,
+) {
+    match github
+        .issue(
+            context.installation_id,
+            &context.repo_full_name,
+            context.issue_number,
+        )
+        .await
+    {
+        Ok(issue) => {
+            if let Err(error) =
+                update_group_issue_state(&state.pool, workspace_id, group_key, &issue.state).await
+            {
+                tracing::warn!(
+                    status = %error.status,
+                    %workspace_id,
+                    %group_key,
+                    "GitHub issue state update failed"
+                );
+            }
+        }
+        Err(error) => tracing::warn!(
+            %error,
+            %workspace_id,
+            %group_key,
+            repo_full_name = %context.repo_full_name,
+            issue_number = context.issue_number,
+            "GitHub issue state refresh failed"
+        ),
+    }
+}
+
+fn require_github(state: &AppState) -> Result<&GithubAppClient, ApiError> {
+    state.github.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GitHub App integration is not configured",
+        )
+    })
+}
+
+fn github_callback_redirect_target(public_base_url: &str, result: &str) -> String {
+    format!(
+        "{}/?view=connectors&github={result}",
+        public_base_url.trim_end_matches('/')
+    )
+}
+
+fn resolve_web_app_url(public_base_url: &str, configured: Option<&str>) -> String {
+    configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(public_base_url)
+        .trim_end_matches('/')
+        .to_owned()
+}
+
+fn github_callback_redirect(state: &AppState, result: &str) -> Response {
+    let location = github_callback_redirect_target(&state.public_base_url, result);
+    let mut response = Redirect::to(&location).into_response();
+    clear_github_flow_cookies(&mut response, state);
+    response
+}
+
+fn github_callback_redirect_with_tokens(
+    state: &AppState,
+    result: &str,
+    tokens: Option<TokenPair>,
+) -> Response {
+    dashboard_response(state, github_callback_redirect(state, result), tokens).map_or_else(
+        |_| github_callback_redirect(state, "error"),
+        std::convert::identity,
+    )
+}
+
+fn clear_github_flow_cookies(response: &mut Response, state: &AppState) {
+    for value in [
+        clear_cookie(GITHUB_STATE_COOKIE, state.secure_cookies),
+        clear_cookie(GITHUB_WORKSPACE_COOKIE, state.secure_cookies),
+    ] {
+        if let Ok(value) = HeaderValue::from_str(&value) {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+    }
 }
 
 #[utoipa::path(
@@ -2410,9 +3958,14 @@ mod page_tests {
     use axum::{body::to_bytes, http::StatusCode};
 
     use super::{
-        ApiError, build_app_router, feedback_discovery, mcp_auth_error, mcp_tool_allowed,
-        mcp_tools, reveal_auth_error,
+        ApiError, GithubIssue, GroupIssueReconciliationDecision, GroupIssueReconciliationEvidence,
+        GroupIssueReconciliationInconclusive, build_app_router, feedback_discovery,
+        github_callback_redirect_target, group_issue_reconciliation_resolution,
+        group_issue_state_refresh_due, group_issue_sync_needed, group_marker_comment,
+        mcp_auth_error, mcp_tool_allowed, mcp_tools, resolve_web_app_url, reveal_auth_error,
+        valid_report_group_key,
     };
+    use chrono::{Duration, TimeZone as _, Utc};
     use serde_json::{Value, json};
 
     const NON_API_ROUTES: &[&str] = &["GET /"];
@@ -2424,6 +3977,174 @@ mod page_tests {
         let revealed = reveal_auth_error(html);
         assert!(revealed.contains(r#"id="auth-error" class="auth-error">Try again"#));
         assert!(!revealed.contains("auth-error\" hidden"));
+    }
+
+    #[test]
+    fn github_conflict_redirect_targets_connectors_view() {
+        assert_eq!(
+            github_callback_redirect_target("https://epode.test/", "conflict"),
+            "https://epode.test/?view=connectors&github=conflict"
+        );
+    }
+
+    #[test]
+    fn web_app_url_uses_explicit_value_or_public_base_fallback() {
+        assert_eq!(
+            resolve_web_app_url("https://api.epode.test/", Some("https://app.epode.test/")),
+            "https://app.epode.test"
+        );
+        assert_eq!(
+            resolve_web_app_url("http://localhost:8080/", None),
+            "http://localhost:8080"
+        );
+    }
+
+    #[test]
+    fn group_issue_sync_requires_new_evidence_and_throttles_state_refresh() {
+        let now = Utc::now();
+        let fresh = Some(now - Duration::minutes(1));
+        let reconciliation_fresh = Some(now - Duration::seconds(30));
+        let stale = Some(now - Duration::minutes(30));
+
+        // No issue: never sync, however stale.
+        assert!(!group_issue_sync_needed(false, false, 2, None, stale, now));
+        // Recently refreshed and no new evidence: steady state costs nothing.
+        assert!(!group_issue_sync_needed(
+            true,
+            false,
+            2,
+            Some(2),
+            fresh,
+            now
+        ));
+        assert!(!group_issue_sync_needed(
+            true,
+            false,
+            1,
+            Some(2),
+            fresh,
+            now
+        ));
+        // New evidence always syncs, even just-refreshed.
+        assert!(group_issue_sync_needed(true, false, 3, Some(2), fresh, now));
+        // A quiet group whose state has gone stale must still refresh, or a
+        // closed/reopened issue would keep a stale badge forever.
+        assert!(group_issue_sync_needed(true, false, 2, Some(2), stale, now));
+        assert!(group_issue_sync_needed(true, false, 2, Some(2), None, now));
+        // A quarantined claim self-heals even though it has no filed link yet.
+        assert!(group_issue_sync_needed(false, true, 2, Some(0), None, now));
+        assert!(!group_issue_sync_needed(
+            false,
+            true,
+            2,
+            Some(0),
+            reconciliation_fresh,
+            now
+        ));
+
+        assert!(group_issue_state_refresh_due(None, now));
+        assert!(group_issue_state_refresh_due(
+            Some(now - Duration::minutes(16)),
+            now
+        ));
+        assert!(!group_issue_state_refresh_due(
+            Some(now - Duration::minutes(14)),
+            now
+        ));
+    }
+
+    #[test]
+    fn reconciliation_release_rule_requires_complete_consistent_evidence() {
+        let absent = group_issue_reconciliation_resolution(
+            GroupIssueReconciliationEvidence::Complete(&[]),
+            "group-a",
+        );
+        assert_eq!(absent.decision, GroupIssueReconciliationDecision::Release);
+
+        for reason in [
+            GroupIssueReconciliationInconclusive::RateLimit,
+            GroupIssueReconciliationInconclusive::Timeout,
+            GroupIssueReconciliationInconclusive::NotFound,
+            GroupIssueReconciliationInconclusive::PaginationCap,
+            GroupIssueReconciliationInconclusive::IncompletePagination,
+            GroupIssueReconciliationInconclusive::Server,
+            GroupIssueReconciliationInconclusive::InstallationAccess,
+            GroupIssueReconciliationInconclusive::InvalidResponse,
+            GroupIssueReconciliationInconclusive::Transport,
+        ] {
+            let resolution = group_issue_reconciliation_resolution(
+                GroupIssueReconciliationEvidence::Inconclusive(reason),
+                "group-a",
+            );
+            assert_eq!(
+                resolution.decision,
+                GroupIssueReconciliationDecision::KeepWaiting,
+                "{reason:?} must retain the claim"
+            );
+        }
+    }
+
+    #[test]
+    fn report_group_keys_are_lowercase_fingerprints() {
+        assert!(valid_report_group_key("6910e1b05a001949e02f04db6d67d013"));
+        for invalid in [
+            "",
+            "6910e1b05a001949e02f04db6d67d01",
+            "6910E1B05A001949E02F04DB6D67D013",
+            "6910e1b05a001949e02f04db6d67d01g",
+            "../6910e1b05a001949e02f04db6d67d013",
+        ] {
+            assert!(!valid_report_group_key(invalid), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn reconciliation_adopts_only_exact_markers_and_chooses_the_oldest_issue() {
+        let created_at = |hour| {
+            Utc.with_ymd_and_hms(2026, 7, 31, hour, 0, 0)
+                .single()
+                .expect("fixed reconciliation timestamp should exist")
+        };
+        let issue = |number, body: String, hour, pull_request| GithubIssue {
+            number,
+            html_url: format!("https://github.test/issues/{number}"),
+            state: "open".to_owned(),
+            body: Some(body),
+            created_at: created_at(hour),
+            pull_request,
+        };
+        let exact = group_marker_comment("group-a");
+        let issues = vec![
+            issue(
+                30,
+                format!("copied {}", group_marker_comment("group-b")),
+                1,
+                None,
+            ),
+            issue(20, format!("body {exact}"), 3, None),
+            issue(10, format!("body {exact}"), 2, None),
+            issue(
+                5,
+                format!("pull request {exact}"),
+                0,
+                Some(serde_json::json!({})),
+            ),
+        ];
+        let resolution = group_issue_reconciliation_resolution(
+            GroupIssueReconciliationEvidence::Complete(&issues),
+            "group-a",
+        );
+        assert_eq!(resolution.decision, GroupIssueReconciliationDecision::Adopt);
+        assert_eq!(resolution.matching_issue_count, 2);
+        assert_eq!(resolution.issue.map(|issue| issue.number), Some(10));
+
+        let mismatch_only = &issues[..1];
+        let mismatch = group_issue_reconciliation_resolution(
+            GroupIssueReconciliationEvidence::Complete(mismatch_only),
+            "group-a",
+        );
+        assert_ne!(mismatch.decision, GroupIssueReconciliationDecision::Adopt);
+        assert!(mismatch.issue.is_none());
     }
 
     #[test]

@@ -34,6 +34,7 @@ import {
   titleCase,
 } from "@/lib/dashboard/format";
 import { reportFindings } from "@/lib/dashboard/reports";
+import { FeedbackGroups } from "./feedback-groups";
 import { WorkflowForm } from "./workflow-form";
 
 export function FeedbackView({
@@ -141,6 +142,10 @@ export function FeedbackView({
             Refresh
           </Button>
         }
+      />
+      <FeedbackGroups
+        key={`${data.workspace.id}:${data.currentProduct?.id ?? "none"}`}
+        data={data}
       />
       <Panel>
         <div className="grid gap-2 md:grid-cols-4">
