@@ -540,15 +540,22 @@ function SignalsView({
       ) : null}
       {pendingMessage ? (
         <StatusMessage>
-          {pendingMessage}{" "}
+          GitHub issue filing for{" "}
+          <span className="font-mono">{mutationGroupKey ?? "unknown group"}</span>: {pendingMessage}{" "}
           <Button type="button" variant="outline" size="sm" onClick={() => void onCheckAgain()}>
             Check again
           </Button>
         </StatusMessage>
       ) : null}
-      {failureMessage ? <StatusMessage tone="error">{failureMessage}</StatusMessage> : null}
+      {failureMessage ? (
+        <StatusMessage tone="error">
+          GitHub issue filing for{" "}
+          <span className="font-mono">{mutationGroupKey ?? "unknown group"}</span>: {failureMessage}
+        </StatusMessage>
+      ) : null}
       {mergeConflictMessage ? (
         <StatusMessage>
+          Merge source <span className="font-mono">{mergePendingSource ?? "unknown group"}</span>:{" "}
           {mergeConflictMessage}{" "}
           <Button
             type="button"
@@ -561,13 +568,16 @@ function SignalsView({
         </StatusMessage>
       ) : null}
       {mergeFailureMessage ? (
-        <StatusMessage tone="error">{mergeFailureMessage}</StatusMessage>
+        <StatusMessage tone="error">
+          Merge source <span className="font-mono">{mergePendingSource ?? "unknown group"}</span>:{" "}
+          {mergeFailureMessage}
+        </StatusMessage>
       ) : null}
       {mergeResult ? (
         <StatusMessage>
-          Merged away the source signal and moved {mergeResult.reportsMoved.toLocaleString()}{" "}
-          reports into <span className="font-mono">{mergeResult.targetGroupKey}</span>, which
-          survives.
+          Merged away <span className="font-mono">{mergePendingSource ?? "unknown group"}</span> and
+          moved {mergeResult.reportsMoved.toLocaleString()} reports into{" "}
+          <span className="font-mono">{mergeResult.targetGroupKey}</span>, which survives.
         </StatusMessage>
       ) : null}
       {groups.groups.length ? (
