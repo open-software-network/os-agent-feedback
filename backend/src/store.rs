@@ -7,12 +7,16 @@ use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{Acquire, PgPool, Postgres, Transaction};
+use sqlx::{Acquire, Executor, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
     error::ApiError,
+    github::validate_repo_full_name,
     grouping::{GroupInput, ReportGrouper},
+    issue_template::{
+        IssueCount, IssueFindingRollup, IssueTemplateData, contains_sensitive_report_text,
+    },
     models::{
         ApiKeyPublic, ConsentDecisionInput, ConsentStateInput, ConsentStateResponse,
         CreateProductInput, CreateTeamInvitationInput, DashboardContext, DashboardData,
@@ -20,11 +24,13 @@ use crate::{
         FeedbackInteractionItem, FeedbackInteractionsPage, FeedbackListInteractionsInput,
         FeedbackListReportsInput, FeedbackOperationSummary, FeedbackReportItem,
         FeedbackReportsPage, FeedbackReportsResponse, FeedbackSummary, FeedbackSurfaceSummary,
-        FeedbackWindow, InsightCount, Insights, InteractionTelemetryInput, PolicyInput, Product,
-        ProductAuth, ProductEnvironment, ProductFeedbackReport, ProductFeedbackReportInput,
-        ProductFeedbackReportWithInteraction, ProductInteraction, ProductSession, TeamInvitation,
-        TeamMember, TelemetryBatchInput, TelemetryBatchResult, UpdateFeedbackWorkflowInput,
-        UpdateNameInput, UpdateTeamMemberInput, Workspace, WorkspaceMembership,
+        FeedbackWindow, GithubIssueLink, InsightCount, Insights, InteractionTelemetryInput,
+        PolicyInput, Product, ProductAuth, ProductEnvironment, ProductFeedbackReport,
+        ProductFeedbackReportInput, ProductFeedbackReportWithInteraction, ProductGithubRepo,
+        ProductGithubRepoInput, ProductInteraction, ProductReportGroup, ProductSession,
+        TeamInvitation, TeamMember, TelemetryBatchInput, TelemetryBatchResult,
+        UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput, Workspace,
+        WorkspaceMembership,
     },
     os_accounts::OsUser,
     security::{
@@ -40,6 +46,55 @@ pub(crate) struct GithubInstallationRow {
     pub(crate) account_login: String,
     pub(crate) account_type: String,
     pub(crate) created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct GroupGithubIssueRow {
+    pub(crate) repo_full_name: String,
+    pub(crate) issue_number: i64,
+    pub(crate) url: String,
+    pub(crate) state: String,
+}
+
+impl GroupGithubIssueRow {
+    pub(crate) fn link(&self) -> GithubIssueLink {
+        GithubIssueLink {
+            repo_full_name: self.repo_full_name.clone(),
+            issue_number: self.issue_number,
+            url: self.url.clone(),
+            state: self.state.clone(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct GroupIssueContext {
+    pub(crate) installation_id: Option<i64>,
+    pub(crate) repo_full_name: Option<String>,
+    pub(crate) installation_active: bool,
+    pub(crate) template: IssueTemplateData,
+}
+
+#[derive(Debug)]
+pub(crate) struct ListedProductGroup {
+    pub(crate) group: ProductReportGroup,
+}
+
+#[derive(Debug)]
+pub(crate) struct ProductGroupPage {
+    pub(crate) groups: Vec<ListedProductGroup>,
+    pub(crate) has_more: bool,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub(crate) struct GroupIssueSyncContext {
+    pub(crate) installation_id: i64,
+    pub(crate) repo_full_name: String,
+    pub(crate) issue_number: i64,
+    pub(crate) observed_report_count: i64,
+    pub(crate) current_report_count: i64,
+    pub(crate) earliest_new_occurred_at: Option<DateTime<Utc>>,
+    pub(crate) latest_new_occurred_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +230,657 @@ pub(crate) async fn github_installation_workspace(
     .bind(installation_id)
     .fetch_optional(pool)
     .await?)
+}
+
+pub(crate) async fn ensure_product_in_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+) -> Result<(), ApiError> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM products WHERE id = $1 AND workspace_id = $2)",
+    )
+    .bind(product_id)
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
+    if exists {
+        Ok(())
+    } else {
+        Err(ApiError::not_found("Product not found for this team"))
+    }
+}
+
+pub(crate) async fn set_product_github_repo(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    input: &ProductGithubRepoInput,
+) -> Result<ProductGithubRepo, ApiError> {
+    validate_repo_full_name(&input.repo_full_name)
+        .map_err(|_| ApiError::bad_request("Repository name must use the owner/name form"))?;
+    ensure_product_in_workspace(pool, workspace_id, product_id).await?;
+    let installation_exists: bool = sqlx::query_scalar(
+        r"SELECT EXISTS(
+          SELECT 1 FROM github_installations
+          WHERE installation_id = $1 AND workspace_id = $2 AND revoked_at IS NULL
+        )",
+    )
+    .bind(input.installation_id)
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
+    if !installation_exists {
+        return Err(ApiError::not_found(
+            "Active GitHub installation not found for this team",
+        ));
+    }
+    let default_branch = input.default_branch.trim();
+    if default_branch.is_empty()
+        || default_branch.len() > 255
+        || default_branch.chars().any(char::is_control)
+    {
+        return Err(ApiError::bad_request("Default branch is invalid"));
+    }
+    let path_prefix = input
+        .path_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if path_prefix.is_some_and(|value| value.len() > 500 || value.chars().any(char::is_control)) {
+        return Err(ApiError::bad_request("Path prefix is invalid"));
+    }
+
+    sqlx::query_as::<_, ProductGithubRepo>(
+        r"INSERT INTO product_github_repos
+        (product_id, workspace_id, installation_id, repo_full_name, default_branch, path_prefix)
+        SELECT p.id, p.workspace_id, $3, $4, $5, $6
+        FROM products p
+        JOIN github_installations installation
+          ON installation.installation_id = $3
+         AND installation.workspace_id = p.workspace_id
+         AND installation.revoked_at IS NULL
+        WHERE p.id = $2 AND p.workspace_id = $1
+        ON CONFLICT (product_id) DO UPDATE SET
+          workspace_id = EXCLUDED.workspace_id,
+          installation_id = EXCLUDED.installation_id,
+          repo_full_name = EXCLUDED.repo_full_name,
+          default_branch = EXCLUDED.default_branch,
+          path_prefix = EXCLUDED.path_prefix,
+          updated_at = NOW()
+        RETURNING product_id, installation_id, repo_full_name, default_branch, path_prefix,
+          created_at, updated_at",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(input.installation_id)
+    .bind(&input.repo_full_name)
+    .bind(default_branch)
+    .bind(path_prefix)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| {
+        ApiError::not_found("Product or active GitHub installation not found for this team")
+    })
+}
+
+pub(crate) async fn get_product_github_repo(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+) -> Result<Option<ProductGithubRepo>, ApiError> {
+    ensure_product_in_workspace(pool, workspace_id, product_id).await?;
+    Ok(sqlx::query_as::<_, ProductGithubRepo>(
+        r"SELECT product_id, installation_id, repo_full_name, default_branch, path_prefix,
+          created_at, updated_at
+        FROM product_github_repos
+        WHERE product_id = $1 AND workspace_id = $2",
+    )
+    .bind(product_id)
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+pub(crate) async fn clear_product_github_repo(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+) -> Result<bool, ApiError> {
+    ensure_product_in_workspace(pool, workspace_id, product_id).await?;
+    let result =
+        sqlx::query("DELETE FROM product_github_repos WHERE product_id = $1 AND workspace_id = $2")
+            .bind(product_id)
+            .bind(workspace_id)
+            .execute(pool)
+            .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct GroupIssueContextRow {
+    explanation: String,
+    installation_id: Option<i64>,
+    repo_full_name: Option<String>,
+    installation_active: bool,
+    report_count: i64,
+    earliest_occurred_at: Option<DateTime<Utc>>,
+    latest_occurred_at: Option<DateTime<Utc>>,
+    primary_kind: Option<String>,
+    primary_topic: Option<String>,
+    primary_operation: Option<String>,
+    impacts: serde_json::Value,
+    findings: serde_json::Value,
+    workarounds: serde_json::Value,
+    operations: Vec<String>,
+    surfaces: Vec<String>,
+    status_codes: Vec<i32>,
+}
+
+pub(crate) async fn group_issue_context(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    backlink: String,
+) -> Result<Option<GroupIssueContext>, ApiError> {
+    group_issue_context_with_executor(pool, workspace_id, group_key, backlink).await
+}
+
+pub(crate) async fn group_issue_context_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    group_key: &str,
+    backlink: String,
+) -> Result<Option<GroupIssueContext>, ApiError> {
+    group_issue_context_with_executor(&mut **tx, workspace_id, group_key, backlink).await
+}
+
+async fn group_issue_context_with_executor<'executor>(
+    executor: impl Executor<'executor, Database = Postgres>,
+    workspace_id: Uuid,
+    group_key: &str,
+    backlink: String,
+) -> Result<Option<GroupIssueContext>, ApiError> {
+    let row = sqlx::query_as::<_, GroupIssueContextRow>(
+        r"WITH scoped_group AS (
+          SELECT g.id, g.workspace_id, g.product_id, g.group_key, g.explanation,
+            mapping.installation_id, mapping.repo_full_name,
+            (installation.installation_id IS NOT NULL) AS installation_active
+          FROM report_groups g
+          JOIN products p
+            ON p.id = g.product_id AND p.workspace_id = g.workspace_id
+          LEFT JOIN product_github_repos mapping
+            ON mapping.product_id = g.product_id
+           AND mapping.workspace_id = g.workspace_id
+          LEFT JOIN github_installations installation
+            ON installation.installation_id = mapping.installation_id
+           AND installation.workspace_id = g.workspace_id
+           AND installation.revoked_at IS NULL
+          WHERE g.workspace_id = $1 AND g.group_key = $2
+        ),
+        scoped_reports AS (
+          SELECT r.id AS report_id, r.impact, r.findings, r.workaround, r.created_at,
+            i.operation, i.surface, i.status_code, i.occurred_at
+          FROM scoped_group g
+          JOIN feedback_reports r
+            ON r.group_id = g.id AND r.workspace_id = g.workspace_id
+          JOIN interactions_v2 i
+            ON i.id = r.interaction_id AND i.workspace_id = g.workspace_id
+          JOIN product_environments environment
+            ON environment.id = i.environment_id
+           AND environment.workspace_id = g.workspace_id
+           AND environment.product_id = g.product_id
+        ),
+        expanded_findings AS (
+          SELECT reports.report_id, reports.operation, reports.occurred_at,
+            finding.ordinality,
+            finding.value ->> 'kind' AS kind,
+            finding.value ->> 'topic' AS topic,
+            finding.value ->> 'severity' AS severity,
+            finding.value ->> 'detail' AS detail
+          FROM scoped_reports reports
+          CROSS JOIN LATERAL
+            jsonb_array_elements(reports.findings) WITH ORDINALITY AS finding(value, ordinality)
+          WHERE COALESCE(finding.value ->> 'kind', '') <> ''
+            AND COALESCE(finding.value ->> 'topic', '') <> ''
+        ),
+        finding_rollups AS (
+          SELECT kind, topic, COUNT(*)::BIGINT AS count,
+            COUNT(*) FILTER (WHERE COALESCE(detail, '') <> '')::BIGINT AS detail_count,
+            COALESCE(
+              (ARRAY_AGG(detail ORDER BY occurred_at, report_id, ordinality)
+                FILTER (WHERE COALESCE(detail, '') <> ''))[1:10],
+              ARRAY[]::TEXT[]
+            ) AS details
+          FROM expanded_findings
+          GROUP BY kind, topic
+        ),
+        primary_finding AS (
+          SELECT kind, topic, operation
+          FROM expanded_findings
+          ORDER BY
+            CASE severity
+              WHEN 'blocking' THEN 3 WHEN 'major' THEN 2 WHEN 'minor' THEN 1 ELSE 0
+            END DESC,
+            CASE kind
+              WHEN 'defect' THEN 7 WHEN 'friction' THEN 6 WHEN 'gap' THEN 5
+              WHEN 'uncertainty' THEN 4 WHEN 'suggestion' THEN 3 WHEN 'other' THEN 2
+              WHEN 'strength' THEN 1 ELSE 0
+            END DESC,
+            occurred_at, report_id, ordinality
+          LIMIT 1
+        )
+        SELECT g.explanation, g.installation_id, g.repo_full_name,
+          g.installation_active,
+          (SELECT COUNT(*)::BIGINT FROM scoped_reports) AS report_count,
+          (SELECT MIN(occurred_at) FROM scoped_reports) AS earliest_occurred_at,
+          (SELECT MAX(occurred_at) FROM scoped_reports) AS latest_occurred_at,
+          (SELECT kind FROM primary_finding) AS primary_kind,
+          (SELECT topic FROM primary_finding) AS primary_topic,
+          COALESCE(
+            (SELECT operation FROM primary_finding),
+            (SELECT MIN(operation) FROM scoped_reports),
+            'unknown'
+          ) AS primary_operation,
+          COALESCE((
+            SELECT JSONB_AGG(
+              JSONB_BUILD_OBJECT('value', impact, 'count', count)
+              ORDER BY impact
+            )
+            FROM (
+              SELECT impact, COUNT(*)::BIGINT AS count
+              FROM scoped_reports
+              WHERE impact IS NOT NULL
+              GROUP BY impact
+            ) impact_counts
+          ), '[]'::JSONB) AS impacts,
+          COALESCE((
+            SELECT JSONB_AGG(
+              JSONB_BUILD_OBJECT(
+                'kind', kind,
+                'topic', topic,
+                'count', count,
+                'detailCount', detail_count,
+                'details', details
+              )
+              ORDER BY count DESC, kind, topic
+            )
+            FROM finding_rollups
+          ), '[]'::JSONB) AS findings,
+          COALESCE((
+            SELECT JSONB_AGG(workaround ORDER BY workaround::TEXT)
+            FROM (
+              SELECT DISTINCT workaround
+              FROM scoped_reports
+              WHERE workaround IS NOT NULL
+            ) distinct_workarounds
+          ), '[]'::JSONB) AS workarounds,
+          ARRAY(
+            SELECT DISTINCT operation FROM scoped_reports ORDER BY operation
+          ) AS operations,
+          ARRAY(
+            SELECT DISTINCT surface FROM scoped_reports ORDER BY surface
+          ) AS surfaces,
+          ARRAY(
+            SELECT DISTINCT status_code
+            FROM scoped_reports
+            WHERE status_code IS NOT NULL
+            ORDER BY status_code
+          ) AS status_codes
+        FROM scoped_group g",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .fetch_optional(executor)
+    .await?;
+
+    row.map(|row| {
+        let impacts =
+            serde_json::from_value::<Vec<IssueCount>>(row.impacts).map_err(ApiError::internal)?;
+        let findings = serde_json::from_value::<Vec<IssueFindingRollup>>(row.findings)
+            .map_err(ApiError::internal)?;
+        let workarounds = serde_json::from_value::<Vec<serde_json::Value>>(row.workarounds)
+            .map_err(ApiError::internal)?;
+        Ok(GroupIssueContext {
+            installation_id: row.installation_id,
+            repo_full_name: row.repo_full_name,
+            installation_active: row.installation_active,
+            template: IssueTemplateData {
+                explanation: row.explanation,
+                primary_kind: row.primary_kind.unwrap_or_else(|| "none".to_owned()),
+                primary_topic: row.primary_topic.unwrap_or_else(|| "none".to_owned()),
+                primary_operation: row
+                    .primary_operation
+                    .unwrap_or_else(|| "unknown".to_owned()),
+                impacts,
+                findings,
+                workarounds,
+                operations: row.operations,
+                surfaces: row.surfaces,
+                status_codes: row.status_codes,
+                earliest_occurred_at: row.earliest_occurred_at,
+                latest_occurred_at: row.latest_occurred_at,
+                report_count: row.report_count,
+                backlink,
+            },
+        })
+    })
+    .transpose()
+}
+
+pub(crate) async fn lock_group_issue_filing(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    group_key: &str,
+) -> Result<(), ApiError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(group_key)
+        .execute(&mut **tx)
+        .await?;
+    let group_exists = sqlx::query_scalar::<_, Uuid>(
+        r"SELECT report_group.id
+        FROM report_groups report_group
+        JOIN products product
+          ON product.id = report_group.product_id
+         AND product.workspace_id = report_group.workspace_id
+        WHERE report_group.workspace_id = $1 AND report_group.group_key = $2
+        FOR KEY SHARE OF report_group, product",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .fetch_optional(&mut **tx)
+    .await?
+    .is_some();
+    if !group_exists {
+        return Err(ApiError::not_found(
+            "Feedback group not found for this team",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn get_group_github_issue(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+) -> Result<Option<GroupGithubIssueRow>, ApiError> {
+    Ok(sqlx::query_as::<_, GroupGithubIssueRow>(
+        r"SELECT issue.repo_full_name, issue.issue_number, issue.url, issue.state
+        FROM group_github_issues issue
+        JOIN report_groups report_group
+          ON report_group.group_key = issue.group_key
+         AND report_group.workspace_id = issue.workspace_id
+        WHERE issue.workspace_id = $1 AND issue.group_key = $2",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .fetch_optional(pool)
+    .await?)
+}
+
+pub(crate) async fn get_group_github_issue_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    group_key: &str,
+) -> Result<Option<GroupGithubIssueRow>, ApiError> {
+    Ok(sqlx::query_as::<_, GroupGithubIssueRow>(
+        r"SELECT issue.repo_full_name, issue.issue_number, issue.url, issue.state
+        FROM group_github_issues issue
+        JOIN report_groups report_group
+          ON report_group.group_key = issue.group_key
+         AND report_group.workspace_id = issue.workspace_id
+        WHERE issue.workspace_id = $1 AND issue.group_key = $2",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+pub(crate) async fn record_group_github_issue(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    group_key: &str,
+    link: &GithubIssueLink,
+    created_by: &str,
+    report_count: i64,
+) -> Result<(GroupGithubIssueRow, bool), ApiError> {
+    let inserted = sqlx::query_as::<_, GroupGithubIssueRow>(
+        r"INSERT INTO group_github_issues
+        (group_key, workspace_id, repo_full_name, issue_number, url, state, created_by,
+         last_commented_report_count)
+        SELECT report_group.group_key, report_group.workspace_id, $3, $4, $5, $6, $7, $8
+        FROM report_groups report_group
+        JOIN products product
+          ON product.id = report_group.product_id
+         AND product.workspace_id = report_group.workspace_id
+        WHERE report_group.workspace_id = $1 AND report_group.group_key = $2
+        ON CONFLICT (group_key) DO NOTHING
+        RETURNING repo_full_name, issue_number, url, state",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(&link.repo_full_name)
+    .bind(link.issue_number)
+    .bind(&link.url)
+    .bind(&link.state)
+    .bind(created_by)
+    .bind(report_count)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(inserted) = inserted {
+        return Ok((inserted, true));
+    }
+    get_group_github_issue_in_transaction(tx, workspace_id, group_key)
+        .await?
+        .map(|existing| (existing, false))
+        .ok_or_else(|| ApiError::not_found("Feedback group not found for this team"))
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ProductGroupListRow {
+    group_key: String,
+    explanation: String,
+    report_count: i64,
+    latest_occurred_at: Option<DateTime<Utc>>,
+    issue_repo_full_name: Option<String>,
+    issue_number: Option<i64>,
+    issue_url: Option<String>,
+    issue_state: Option<String>,
+}
+
+pub(crate) async fn list_product_groups(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<ProductGroupPage, ApiError> {
+    ensure_product_in_workspace(pool, workspace_id, product_id).await?;
+    let limit = limit.clamp(1, 100);
+    let offset = offset.max(0);
+    let rows = sqlx::query_as::<_, ProductGroupListRow>(
+        r"SELECT report_group.group_key, report_group.explanation,
+          COUNT(environment.id)::BIGINT AS report_count,
+          MAX(interaction.occurred_at) FILTER (
+            WHERE environment.id IS NOT NULL
+          ) AS latest_occurred_at,
+          issue.repo_full_name AS issue_repo_full_name,
+          issue.issue_number,
+          issue.url AS issue_url,
+          issue.state AS issue_state
+        FROM report_groups report_group
+        JOIN products product
+          ON product.id = report_group.product_id
+         AND product.workspace_id = report_group.workspace_id
+        LEFT JOIN feedback_reports report
+          ON report.group_id = report_group.id
+         AND report.workspace_id = report_group.workspace_id
+        LEFT JOIN interactions_v2 interaction
+          ON interaction.id = report.interaction_id
+         AND interaction.workspace_id = report_group.workspace_id
+        LEFT JOIN product_environments environment
+          ON environment.id = interaction.environment_id
+         AND environment.workspace_id = report_group.workspace_id
+         AND environment.product_id = report_group.product_id
+        LEFT JOIN group_github_issues issue
+          ON issue.group_key = report_group.group_key
+         AND issue.workspace_id = report_group.workspace_id
+        WHERE report_group.workspace_id = $1 AND report_group.product_id = $2
+        GROUP BY report_group.id, report_group.group_key, report_group.explanation,
+          issue.repo_full_name, issue.issue_number, issue.url, issue.state
+        ORDER BY MAX(interaction.occurred_at) DESC NULLS LAST,
+          report_group.updated_at DESC, report_group.group_key
+        LIMIT $3 OFFSET $4",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(limit + 1)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+    let has_more = i64::try_from(rows.len()).is_ok_and(|count| count > limit);
+    let groups = rows
+        .into_iter()
+        .take(usize::try_from(limit).map_err(ApiError::internal)?)
+        .map(|row| {
+            let github_issue = match (
+                row.issue_repo_full_name,
+                row.issue_number,
+                row.issue_url,
+                row.issue_state,
+            ) {
+                (Some(repo_full_name), Some(issue_number), Some(url), Some(state)) => {
+                    Some(GithubIssueLink {
+                        repo_full_name,
+                        issue_number,
+                        url,
+                        state,
+                    })
+                }
+                _ => None,
+            };
+            ListedProductGroup {
+                group: ProductReportGroup {
+                    group_key: row.group_key,
+                    explanation: row.explanation,
+                    report_count: row.report_count,
+                    latest_occurred_at: row.latest_occurred_at,
+                    github_issue,
+                },
+            }
+        })
+        .collect();
+    Ok(ProductGroupPage { groups, has_more })
+}
+
+pub(crate) async fn group_issue_sync_context(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    group_key: &str,
+) -> Result<Option<GroupIssueSyncContext>, ApiError> {
+    Ok(sqlx::query_as::<_, GroupIssueSyncContext>(
+        r"WITH scoped_issue AS (
+          SELECT issue.group_key, issue.repo_full_name, issue.issue_number,
+            issue.last_commented_report_count, report_group.id AS group_id,
+            report_group.product_id, mapping.installation_id
+          FROM group_github_issues issue
+          JOIN report_groups report_group
+            ON report_group.group_key = issue.group_key
+           AND report_group.workspace_id = issue.workspace_id
+          JOIN products product
+            ON product.id = report_group.product_id
+           AND product.workspace_id = report_group.workspace_id
+          JOIN product_github_repos mapping
+            ON mapping.product_id = report_group.product_id
+           AND mapping.workspace_id = report_group.workspace_id
+          JOIN github_installations installation
+            ON installation.installation_id = mapping.installation_id
+           AND installation.workspace_id = report_group.workspace_id
+           AND installation.revoked_at IS NULL
+          WHERE issue.workspace_id = $1 AND issue.group_key = $2
+        ),
+        ordered_reports AS (
+          SELECT interaction.occurred_at,
+            ROW_NUMBER() OVER (ORDER BY report.created_at, report.id) AS report_number
+          FROM scoped_issue issue
+          JOIN feedback_reports report
+            ON report.group_id = issue.group_id AND report.workspace_id = $1
+          JOIN interactions_v2 interaction
+            ON interaction.id = report.interaction_id AND interaction.workspace_id = $1
+          JOIN product_environments environment
+            ON environment.id = interaction.environment_id
+           AND environment.workspace_id = $1
+           AND environment.product_id = issue.product_id
+        )
+        SELECT issue.installation_id, issue.repo_full_name, issue.issue_number,
+          issue.last_commented_report_count AS observed_report_count,
+          COUNT(report.report_number)::BIGINT AS current_report_count,
+          MIN(report.occurred_at) FILTER (
+            WHERE report.report_number > issue.last_commented_report_count
+          ) AS earliest_new_occurred_at,
+          MAX(report.occurred_at) FILTER (
+            WHERE report.report_number > issue.last_commented_report_count
+          ) AS latest_new_occurred_at
+        FROM scoped_issue issue
+        LEFT JOIN ordered_reports report ON TRUE
+        GROUP BY issue.installation_id, issue.repo_full_name, issue.issue_number,
+          issue.last_commented_report_count",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+pub(crate) async fn bump_last_commented_report_count(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    group_key: &str,
+    observed_report_count: i64,
+    current_report_count: i64,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE group_github_issues issue
+        SET last_commented_report_count = $4, updated_at = NOW()
+        FROM report_groups report_group
+        WHERE issue.group_key = report_group.group_key
+          AND issue.workspace_id = report_group.workspace_id
+          AND issue.workspace_id = $1
+          AND issue.group_key = $2
+          AND issue.last_commented_report_count = $3
+          AND $4 > $3",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(observed_report_count)
+    .bind(current_report_count)
+    .execute(&mut **tx)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+pub(crate) async fn update_group_issue_state(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    group_key: &str,
+    state: &str,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE group_github_issues issue
+        SET state = $3, updated_at = NOW()
+        FROM report_groups report_group
+        WHERE issue.group_key = report_group.group_key
+          AND issue.workspace_id = report_group.workspace_id
+          AND issue.workspace_id = $1
+          AND issue.group_key = $2",
+    )
+    .bind(workspace_id)
+    .bind(group_key)
+    .bind(state)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
 }
 
 pub(crate) async fn get_or_create_workspace(
@@ -2365,49 +3071,6 @@ async fn regroup_changed_interaction_reports(
     Ok(())
 }
 
-fn contains_sensitive_report_text(value: &str) -> bool {
-    let value = value.to_ascii_lowercase();
-    let forbidden_pattern = [
-        "af_live_",
-        "af_read_",
-        "github_pat_",
-        "-----begin ",
-        "xoxb-",
-        "xoxp-",
-        "sk-proj-",
-        "api key",
-        "password",
-        "transcript:",
-        "prompt:",
-        "raw input:",
-        "raw output:",
-    ]
-    .iter()
-    .any(|pattern| value.contains(pattern));
-    let email_like = value.split_whitespace().any(|word| {
-        let trimmed = word.trim_matches(|character: char| {
-            !character.is_ascii_alphanumeric() && !"@._+-".contains(character)
-        });
-        trimmed
-            .split_once('@')
-            .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.'))
-    });
-    let bearer_credential = value.match_indices("bearer ").any(|(index, _)| {
-        let candidate = value[index + "bearer ".len()..]
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .trim_matches(|character: char| {
-                !character.is_ascii_alphanumeric() && !"-._~+/=".contains(character)
-            });
-        candidate.len() >= 20
-            && candidate
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || "-._~+/=".contains(character))
-    });
-    forbidden_pattern || bearer_credential || email_like
-}
-
 pub(crate) async fn feedback_consent_state(
     pool: &PgPool,
     auth: &ProductAuth,
@@ -3232,6 +3895,298 @@ mod product_tests {
         .execute(pool)
         .await?;
         Ok(workspace_id)
+    }
+
+    #[derive(Debug)]
+    struct GithubIssueGroupFixture {
+        workspace_id: Uuid,
+        product_id: Uuid,
+        group_key: String,
+        installation_id: i64,
+    }
+
+    async fn github_issue_group_fixture(
+        pool: &PgPool,
+        label: &str,
+        report_count: usize,
+    ) -> anyhow::Result<GithubIssueGroupFixture> {
+        let workspace_id = github_test_workspace(pool, label).await?;
+        let (product, environment) = create_product(
+            pool,
+            workspace_id,
+            CreateProductInput {
+                name: label.to_owned(),
+            },
+        )
+        .await
+        .map_err(test_error)?;
+        let installation_id = i64::from(Uuid::new_v4().as_fields().0);
+        upsert_github_installation(
+            pool,
+            workspace_id,
+            installation_id,
+            "epode-test",
+            "Organization",
+        )
+        .await
+        .map_err(test_error)?;
+        set_product_github_repo(
+            pool,
+            workspace_id,
+            product.id,
+            &ProductGithubRepoInput {
+                installation_id,
+                repo_full_name: "open-software/epode-test".to_owned(),
+                default_branch: "main".to_owned(),
+                path_prefix: None,
+            },
+        )
+        .await
+        .map_err(test_error)?;
+        let group_id = Uuid::new_v4();
+        let group_key = Uuid::new_v4().simple().to_string();
+        sqlx::query(
+            r"INSERT INTO report_groups
+            (id, workspace_id, product_id, group_key, grouper_name, grouper_version, explanation)
+            VALUES ($1, $2, $3, $4, 'fingerprint', 1, 'test issue filing group')",
+        )
+        .bind(group_id)
+        .bind(workspace_id)
+        .bind(product.id)
+        .bind(&group_key)
+        .execute(pool)
+        .await?;
+        for index in 0..report_count {
+            let interaction_id = Uuid::new_v4();
+            let occurred_at = Utc::now() + Duration::seconds(i64::try_from(index)?);
+            sqlx::query(
+                r"INSERT INTO interactions_v2
+                (id, workspace_id, environment_id, surface, operation, status_code,
+                 classification, confirmation_method, occurred_at)
+                VALUES ($1, $2, $3, 'mcp', 'search_reports', 503, 'confirmed', 'mcp', $4)",
+            )
+            .bind(interaction_id)
+            .bind(workspace_id)
+            .bind(environment.id)
+            .bind(occurred_at)
+            .execute(pool)
+            .await?;
+            sqlx::query(
+                r"INSERT INTO feedback_reports
+                (id, workspace_id, interaction_id, summary, impact, findings, workaround, group_id)
+                VALUES ($1, $2, $3, $4, 'blocked', $5, $6, $7)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(workspace_id)
+            .bind(interaction_id)
+            .bind(format!("GitHub issue fixture report number {index}."))
+            .bind(serde_json::json!([{
+                "kind": "defect",
+                "topic": "search_failure",
+                "severity": "major",
+                "detail": "Search failed for a valid request."
+            }]))
+            .bind(serde_json::json!({
+                "used": true,
+                "detail": "Retried the request once."
+            }))
+            .bind(group_id)
+            .execute(pool)
+            .await?;
+        }
+        Ok(GithubIssueGroupFixture {
+            workspace_id,
+            product_id: product.id,
+            group_key,
+            installation_id,
+        })
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn recording_one_group_issue_twice_returns_the_existing_link() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let fixture = github_issue_group_fixture(&pool, "Issue idempotency test", 2).await?;
+
+        let result = async {
+            let link = GithubIssueLink {
+                repo_full_name: "open-software/epode-test".to_owned(),
+                issue_number: 42,
+                url: "https://github.com/open-software/epode-test/issues/42".to_owned(),
+                state: "open".to_owned(),
+            };
+            let mut tx = pool.begin().await?;
+            let (first, first_inserted) = record_group_github_issue(
+                &mut tx,
+                fixture.workspace_id,
+                &fixture.group_key,
+                &link,
+                "usr_test",
+                2,
+            )
+            .await
+            .map_err(test_error)?;
+            let (second, second_inserted) = record_group_github_issue(
+                &mut tx,
+                fixture.workspace_id,
+                &fixture.group_key,
+                &link,
+                "usr_other",
+                2,
+            )
+            .await
+            .map_err(test_error)?;
+            tx.commit().await?;
+
+            anyhow::ensure!(first_inserted);
+            anyhow::ensure!(!second_inserted);
+            anyhow::ensure!(first.link() == link);
+            anyhow::ensure!(second.link() == link);
+            let count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM group_github_issues WHERE group_key = $1")
+                    .bind(&fixture.group_key)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(count == 1);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn product_mapping_rejects_another_workspaces_installation() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let original_workspace = github_test_workspace(&pool, "Mapping owner").await?;
+        let other_workspace = github_test_workspace(&pool, "Mapping attacker").await?;
+        let (other_product, _) = create_product(
+            &pool,
+            other_workspace,
+            CreateProductInput {
+                name: "Other workspace product".to_owned(),
+            },
+        )
+        .await
+        .map_err(test_error)?;
+        let installation_id = i64::from(Uuid::new_v4().as_fields().0);
+        upsert_github_installation(
+            &pool,
+            original_workspace,
+            installation_id,
+            "mapping-owner",
+            "Organization",
+        )
+        .await
+        .map_err(test_error)?;
+
+        let error = set_product_github_repo(
+            &pool,
+            other_workspace,
+            other_product.id,
+            &ProductGithubRepoInput {
+                installation_id,
+                repo_full_name: "open-software/private".to_owned(),
+                default_branch: "main".to_owned(),
+                path_prefix: None,
+            },
+        )
+        .await
+        .expect_err("a foreign installation must not be accepted");
+        anyhow::ensure!(error.status == StatusCode::NOT_FOUND);
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM product_github_repos WHERE product_id = $1")
+                .bind(other_product.id)
+                .fetch_one(&pool)
+                .await?;
+        anyhow::ensure!(count == 0);
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1 OR id = $2")
+            .bind(original_workspace)
+            .bind(other_workspace)
+            .execute(&pool)
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn product_group_listing_includes_counts_and_linked_issue() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let fixture = github_issue_group_fixture(&pool, "Group listing test", 2).await?;
+
+        let result = async {
+            let context = group_issue_context(
+                &pool,
+                fixture.workspace_id,
+                &fixture.group_key,
+                "https://app.epode.test/?view=feedback&group=test".to_owned(),
+            )
+            .await
+            .map_err(test_error)?
+            .ok_or_else(|| anyhow::anyhow!("fixture group should be found"))?;
+            anyhow::ensure!(context.installation_id == Some(fixture.installation_id));
+            anyhow::ensure!(context.installation_active);
+            anyhow::ensure!(context.template.report_count == 2);
+            anyhow::ensure!(context.template.findings[0].count == 2);
+
+            let link = GithubIssueLink {
+                repo_full_name: "open-software/epode-test".to_owned(),
+                issue_number: 84,
+                url: "https://github.com/open-software/epode-test/issues/84".to_owned(),
+                state: "open".to_owned(),
+            };
+            let mut tx = pool.begin().await?;
+            record_group_github_issue(
+                &mut tx,
+                fixture.workspace_id,
+                &fixture.group_key,
+                &link,
+                "usr_test",
+                2,
+            )
+            .await
+            .map_err(test_error)?;
+            tx.commit().await?;
+
+            let page = list_product_groups(&pool, fixture.workspace_id, fixture.product_id, 50, 0)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(!page.has_more);
+            anyhow::ensure!(page.groups.len() == 1);
+            let group = &page.groups[0].group;
+            anyhow::ensure!(group.report_count == 2);
+            anyhow::ensure!(group.latest_occurred_at.is_some());
+            anyhow::ensure!(group.github_issue.as_ref() == Some(&link));
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
     }
 
     #[tokio::test]

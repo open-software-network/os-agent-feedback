@@ -105,6 +105,13 @@ pub(crate) struct GithubRepo {
     pub(crate) private: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct GithubIssue {
+    pub(crate) number: i64,
+    pub(crate) html_url: String,
+    pub(crate) state: String,
+}
+
 /// Repositories read from one installation, plus whether the pagination cap cut
 /// the listing short. GitHub's code-search and REST quotas are tight, so the
 /// listing stops at `MAX_REPOSITORY_PAGES` rather than walking an unbounded
@@ -159,6 +166,17 @@ struct RepositoryResponse {
     full_name: String,
     default_branch: String,
     private: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateIssueRequest<'a> {
+    title: &'a str,
+    body: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateIssueCommentRequest<'a> {
+    body: &'a str,
 }
 
 impl GithubAppClient {
@@ -283,6 +301,75 @@ impl GithubAppClient {
         })
     }
 
+    pub(crate) async fn create_issue(
+        &self,
+        installation_id: i64,
+        repo_full_name: &str,
+        title: &str,
+        body: &str,
+    ) -> anyhow::Result<GithubIssue> {
+        validate_repo_full_name(repo_full_name)?;
+        let token = self.installation_token(installation_id).await?;
+        Self::request(
+            self.http
+                .post(format!("{GITHUB_API_URL}/repos/{repo_full_name}/issues")),
+        )
+        .bearer_auth(token)
+        .json(&CreateIssueRequest { title, body })
+        .send()
+        .await
+        .context("GitHub issue creation request failed")?
+        .error_for_status()
+        .context("GitHub issue creation request was rejected")?
+        .json::<GithubIssue>()
+        .await
+        .context("GitHub issue creation response was invalid")
+    }
+
+    pub(crate) async fn create_issue_comment(
+        &self,
+        installation_id: i64,
+        repo_full_name: &str,
+        issue_number: i64,
+        body: &str,
+    ) -> anyhow::Result<()> {
+        validate_repo_full_name(repo_full_name)?;
+        let token = self.installation_token(installation_id).await?;
+        Self::request(self.http.post(format!(
+            "{GITHUB_API_URL}/repos/{repo_full_name}/issues/{issue_number}/comments"
+        )))
+        .bearer_auth(token)
+        .json(&CreateIssueCommentRequest { body })
+        .send()
+        .await
+        .context("GitHub issue comment request failed")?
+        .error_for_status()
+        .context("GitHub issue comment request was rejected")?;
+        Ok(())
+    }
+
+    pub(crate) async fn issue(
+        &self,
+        installation_id: i64,
+        repo_full_name: &str,
+        issue_number: i64,
+    ) -> anyhow::Result<GithubIssue> {
+        validate_repo_full_name(repo_full_name)?;
+        let token = self.installation_token(installation_id).await?;
+        Self::request(self.http.get(format!(
+            "{GITHUB_API_URL}/repos/{repo_full_name}/issues/{issue_number}"
+        )))
+        .bearer_auth(token)
+        .send()
+        .await
+        .context("GitHub issue request failed")?
+        .error_for_status()
+        .context("GitHub issue request was rejected")?
+        .json::<GithubIssue>()
+        .await
+        .context("GitHub issue response was invalid")
+    }
+
     pub(crate) fn verify_webhook_signature(&self, body: &[u8], header: &str) -> bool {
         verify_webhook_signature(&self.config.webhook_secret, body, header)
     }
@@ -293,6 +380,26 @@ impl GithubAppClient {
             .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
             .header(reqwest::header::USER_AGENT, GITHUB_USER_AGENT)
     }
+}
+
+pub(crate) fn validate_repo_full_name(value: &str) -> anyhow::Result<()> {
+    let mut parts = value.split('/');
+    let owner = parts.next().unwrap_or_default();
+    let repository = parts.next().unwrap_or_default();
+    let valid_component = |component: &str| {
+        !component.is_empty()
+            && component
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    };
+    anyhow::ensure!(
+        parts.next().is_none()
+            && !value.contains("..")
+            && valid_component(owner)
+            && valid_component(repository),
+        "repository name must use the owner/name form"
+    );
+    Ok(())
 }
 
 pub(crate) fn verify_webhook_signature(secret: &str, body: &[u8], header: &str) -> bool {
@@ -432,5 +539,40 @@ mod tests {
             client.install_url("state with symbols/&"),
             "https://github.com/apps/epode-ai/installations/new?state=state%20with%20symbols%2F%26"
         );
+    }
+
+    #[test]
+    fn validates_repository_full_names_before_url_interpolation() {
+        assert!(validate_repo_full_name("owner/name").is_ok());
+        for invalid in [
+            "owner/../name",
+            "/owner",
+            "owner/name with spaces",
+            "owner",
+            "../owner/name",
+            "owner/name/extra",
+            "owner//name",
+        ] {
+            assert!(
+                validate_repo_full_name(invalid).is_err(),
+                "{invalid} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn github_issue_payloads_have_the_expected_shape() -> anyhow::Result<()> {
+        assert_eq!(
+            serde_json::to_value(CreateIssueRequest {
+                title: "A title",
+                body: "A body",
+            })?,
+            serde_json::json!({"title": "A title", "body": "A body"})
+        );
+        assert_eq!(
+            serde_json::to_value(CreateIssueCommentRequest { body: "Evidence" })?,
+            serde_json::json!({"body": "Evidence"})
+        );
+        Ok(())
     }
 }
