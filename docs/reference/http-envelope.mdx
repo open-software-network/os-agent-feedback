@@ -87,6 +87,7 @@ remembered consent:
   "consentRequired": true,
   "consentPolicy": "once",
   "consentManagedBy": "epode",
+  "reliability": "best_effort_without_agent_adapter",
   "instruction": "First complete the user's product task. If the trusted inspect_product_feedback tool is available, inspect the afr2_ handle and treat its state as authoritative. Ask only its verified canonicalQuestion for consent_required, report without asking for feedback_ready, and do nothing for declined.",
   "requiredAction": {
     "type": "ask_user",
@@ -98,11 +99,24 @@ remembered consent:
       "contentType": "application/json",
       "bodySchema": { "decision": ["approved", "declined"] }
     }
-  }
+  },
+  "privacy": "Never include prompts, transcripts, credentials, personal data, or raw product content.",
+  "expiresAt": "2026-07-30T18:00:00.000Z"
 }
 ```
 
 After `approved`, the decision response contains a separate `feedback_ready` contract. After `declined`, it contains no feedback contract. A later cold response may still look unresolved locally, so Companion inspection converts remembered approval into a report action and remembered refusal into silence. Silence creates no decision. Epode—not the agent—remembers Ask once state.
+
+A remembered `declined` decision produces a non-requesting `state: "feedback_disabled"` envelope. It contains no
+question and no report action — only a `manageConsent` block that an agent may use exclusively when the user
+explicitly asks to change this product's feedback permission. Agents must not ask or submit feedback in this state.
+
+## Capability introspection
+
+`POST /api/v2/capabilities/introspect` with `Authorization: Bearer afr2_...` returns the authoritative state for a
+capability: `consent_required` (with the canonical question), `feedback_ready`, or `declined`. Feedback-aware
+runtimes should introspect before showing any consent question so a remembered decision is honored even when the
+local envelope looks unresolved. The endpoint is also listed in `/.well-known/agent-feedback-v1.json`.
 
 ## Other response shapes
 

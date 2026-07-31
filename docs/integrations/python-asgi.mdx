@@ -26,11 +26,17 @@ app = FastAPI()
 async def search_endpoint(q: str):
     return {"results": await search(q)}
 
+def customer_ref(scope):
+    # Derive a stable, opaque account or tenant ID from your product's own
+    # authentication. A raw ASGI scope has no such key by default; populate
+    # scope["state"] (or read your session/auth header) in your auth middleware.
+    return scope.get("state", {}).get("account_id")
+
 app = AgentFeedbackASGI(
     app,
     api_key=os.environ["AGENT_FEEDBACK_KEY"],
     include=("/search", "/docs/*"),
-    customer_ref=lambda scope: scope.get("account_id"),  # required for durable Ask once; optional otherwise
+    customer_ref=customer_ref,  # required for durable Ask once; optional otherwise
 )
 ```
 
@@ -39,12 +45,27 @@ app = AgentFeedbackASGI(
 The same wrapper injects the machine-readable contract into finite HTML responses on included routes.
 JSON objects retain their existing shape and add `_agentFeedback`.
 
+## Route patterns and caching
+
+In `include`/`exclude` patterns, `*` matches one path segment and `**` matches any depth. `cache_mode`
+mirrors the Node SDK: the default `"safe"` skips responses that declare a shared cache policy, `"private"`
+replaces shared caching with `private, no-store` deliberately, and `"request"` instruments only requests
+that opt in with the `Agent-Feedback-Request: 1` header.
+
 ## Verify
 
 Send a real request to an included route and inspect the response:
 
 ```bash
 curl -sS 'https://your-product.example/search?q=epode-test' | jq '._agentFeedback'
+```
+
+For the full automated check, run the integration doctor. It ships inside the Node SDK tarball (it is not on
+the npm registry), so any stack can run it with a throwaway install:
+
+```bash
+npm install https://app.epode.ai/static/agent-feedback-node-0.1.0.tgz
+npx agent-feedback-doctor --url https://your-product.example/search?q=epode-test
 ```
 
 Then confirm **Setup** shows telemetry. A generic HTTP client does not automatically prove agent use;

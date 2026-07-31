@@ -37,7 +37,10 @@ authentication. Never use a name, email address, prompt, or agent-supplied value
   </Step>
   <Step title="Resolve Ask once state">
     For `ask_once` with a stable customer reference, derive
-    `afsub1_ + base64url(HMAC-SHA256(SHA256(product_key), "customer-ref:" + trimmed_customer_ref))`.
+    `afsub1_ + base64url(HMAC-SHA256(SHA256("epode-consent-scope:" + consent_scope), "customer-ref:" + trimmed_customer_ref))`,
+    where `consent_scope` is the key's scope segment as defined in the protocol README. This keeps subjects
+    stable across product-key rotation. The bundled `protocol/v1/README.md` and `conformance.json` are canonical;
+    verify your derivation against the conformance vector before shipping.
     POST that subject to `/api/v2/consent/state` with the product key and a bounded timeout (750 ms by
     default). Cache known decisions briefly. If the lookup is unavailable, omit feedback instructions and
     return the normal product response.
@@ -52,7 +55,9 @@ authentication. Never use a name, email address, prompt, or agent-supplied value
     scalars, or immutable shapes. Add `Cache-Control: private, no-store`. `never_ask` and previously approved
     Ask once interactions use `state: "feedback_ready"`. Unknown Ask once and every Ask always interaction use
     `state: "consent_required"` with only `requiredAction.submitDecision`; do not expose `submit` or a report
-    schema before approval. A declined or unavailable Ask once decision emits no handoff.
+    schema before approval. A declined Ask once decision emits a non-requesting `state: "feedback_disabled"`
+    envelope with only a `manageConsent` block so an explicit user request can later change the decision.
+    An unavailable Ask once lookup emits no handoff at all.
   </Step>
   <Step title="Queue telemetry">
     Send opportunity telemetry in bounded background batches. Telemetry delivery never delays the response;

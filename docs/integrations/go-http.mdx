@@ -52,6 +52,16 @@ limit, streams detected through `Flush`, and unsafe bodies pass through byte-for
 
 The default capture limit is 1 MiB. Set `MaxResponseBodyBytes` to another positive value when needed.
 
+## Route patterns and caching
+
+In `Include`/`Exclude` patterns, `*` matches exactly one path segment and `**` matches any depth
+(`/docs/*` matches `/docs/guide` but not `/docs/deep/nested/page`; use `/docs/**` for the latter).
+
+`CacheMode` controls how instrumentation interacts with HTTP caching. The default `CacheSafe` skips
+responses that declare a shared cache policy (`public`, `max-age`, `s-maxage`, `immutable`). Use
+`CachePrivate` only when replacing shared caching with `private, no-store` is intentional, or
+`CacheRequest` to instrument only requests that opt in with the `Agent-Feedback-Request: 1` header.
+
 ## Verify
 
 Send one API and one HTML request, then confirm the response contract and the Setup telemetry status.
