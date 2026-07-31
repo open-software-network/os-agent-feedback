@@ -222,8 +222,10 @@ function ProductRepoMapping({
       return queryClient.invalidateQueries({ queryKey: mappingKey });
     },
   });
+  const firstRepositoryQuerySettled = repositoryQueries.some((query) => !query.isPending);
+  const waitingForFirstRepository = repositoryQueries.length > 0 && !firstRepositoryQuerySettled;
 
-  if (mappingQuery.isPending || repositoryQueries.some((query) => query.isPending)) {
+  if (mappingQuery.isPending || waitingForFirstRepository) {
     return <p className="text-sm text-muted-foreground">Loading repository settings…</p>;
   }
   if (mappingQuery.isError) {
@@ -234,6 +236,9 @@ function ProductRepoMapping({
   );
   const failedInstallations = repositoryQueries.flatMap((query, index) =>
     query.isError ? [installations[index].accountLogin] : [],
+  );
+  const loadingInstallations = repositoryQueries.flatMap((query, index) =>
+    query.isPending ? [installations[index].accountLogin] : [],
   );
   const options = repositoryOptions(repositoryResponses, mappingQuery.data);
   const mutationError = saveMutation.error ?? clearMutation.error;
@@ -270,6 +275,7 @@ function ProductRepoMapping({
       options={options}
       truncated={repositoryResponses.some((response) => response.truncated)}
       failedInstallations={failedInstallations}
+      loadingInstallations={loadingInstallations}
       editable={editable}
       busy={busy}
       error={mutationError}
@@ -292,6 +298,7 @@ function ProductRepoMappingForm({
   options,
   truncated,
   failedInstallations,
+  loadingInstallations,
   editable,
   busy,
   error,
@@ -304,6 +311,7 @@ function ProductRepoMappingForm({
   options: RepositoryOption[];
   truncated: boolean;
   failedInstallations: string[];
+  loadingInstallations: string[];
   editable: boolean;
   busy: boolean;
   error: Error | null;
@@ -387,6 +395,12 @@ function ProductRepoMappingForm({
             </option>
           ))}
         </NativeSelect>
+        {loadingInstallations.length ? (
+          <StatusMessage>
+            Still loading repositories for {loadingInstallations.join(", ")}. More repositories may
+            appear in this list.
+          </StatusMessage>
+        ) : null}
         {truncated ? (
           <p className="text-sm text-muted-foreground">
             This repository list is partial because at least one installation reached GitHub&apos;s
@@ -402,7 +416,7 @@ function ProductRepoMappingForm({
             </Button>
           </StatusMessage>
         ) : null}
-        {!options.length ? (
+        {!options.length && !loadingInstallations.length ? (
           <p className="text-sm text-muted-foreground">
             No repositories are available from the connected GitHub installations.
           </p>
