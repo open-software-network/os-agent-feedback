@@ -425,7 +425,11 @@ export function DashboardApp() {
           />
         );
       case "connectors":
-        return <ConnectorsView data={currentData} />;
+        return isEditor(currentData.currentRole) ? (
+          <ConnectorsView data={currentData} />
+        ) : (
+          <HomeView data={currentData} openFeedback={openFeedback} refresh={refresh} />
+        );
       case "setup":
         return (
           <SetupView

@@ -47,15 +47,10 @@ describe("dashboard data flow", () => {
 
   it("does not expose editor-only views or product actions to members", async () => {
     window.history.replaceState({}, "", "/?view=connectors");
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation((input: RequestInfo | URL) => {
-        if (String(input) === "/api/github/installations") {
-          return Promise.resolve(json({ configured: true, installations: [] }));
-        }
-        return Promise.resolve(json(dashboardFixture({ currentRole: "member" })));
-      }),
-    );
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() => Promise.resolve(json(dashboardFixture({ currentRole: "member" }))));
+    vi.stubGlobal("fetch", fetchMock);
 
     render(
       <Providers>
@@ -69,6 +64,9 @@ describe("dashboard data flow", () => {
     expect(screen.queryByRole("button", { name: "Connectors" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "New product" })).not.toBeInTheDocument();
     await waitFor(() => expect(window.location.search).not.toContain("view=connectors"));
+    expect(
+      fetchMock.mock.calls.some(([input]) => String(input) === "/api/github/installations"),
+    ).toBe(false);
   });
 
   it.each([

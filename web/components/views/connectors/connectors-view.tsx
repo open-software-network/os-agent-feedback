@@ -1,35 +1,47 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type FormEvent, useEffect, useState } from "react";
 
 import type { ViewBaseProps } from "@/components/dashboard/types";
 import {
   EmptyState,
   ErrorState,
+  NativeSelect,
   PageHeader,
   Panel,
   StatusMessage,
 } from "@/components/dashboard/view-primitives";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
+  clearProductGithubRepo,
   fetchGithubInstallations,
   fetchGithubRepositories,
+  fetchProductGithubRepo,
   type GithubInstallation,
   type GithubInstallationsResponse,
   type GithubRepositoriesResponse,
+  type GithubRepository,
+  type ProductGithubRepo,
+  type ProductGithubRepoInput,
+  setProductGithubRepo,
 } from "@/lib/api/connectors";
-import { formatDate } from "@/lib/dashboard/format";
+import type { Product } from "@/lib/api/dashboard";
+import { formatDate, isEditor } from "@/lib/dashboard/format";
 
 const PLANNED_CONNECTORS = ["Slack", "Linear", "OS Platform"] as const;
 
 export function ConnectorsView({ data }: Pick<ViewBaseProps, "data">) {
   const [githubExpanded, setGithubExpanded] = useState(true);
+  const [mappingExpanded, setMappingExpanded] = useState(false);
   const installationsQuery = useQuery({
     queryKey: ["github-installations", data.workspace.id],
     queryFn: () => fetchGithubInstallations(data.workspace.id),
-    enabled: githubExpanded,
+    enabled: githubExpanded || mappingExpanded,
   });
+  const editable = isEditor(data.currentRole);
 
   return (
     <div className="space-y-6">
@@ -83,8 +95,345 @@ export function ConnectorsView({ data }: Pick<ViewBaseProps, "data">) {
           </Panel>
         ))}
       </div>
+
+      <ProductMappingPanel
+        workspaceId={data.workspace.id}
+        product={data.currentProduct}
+        editable={editable}
+        expanded={mappingExpanded}
+        setExpanded={setMappingExpanded}
+        installations={installationsQuery.data}
+        installationsPending={installationsQuery.isPending}
+        installationsError={installationsQuery.error}
+        retryInstallations={() => installationsQuery.refetch()}
+      />
     </div>
   );
+}
+
+function ProductMappingPanel({
+  workspaceId,
+  product,
+  editable,
+  expanded,
+  setExpanded,
+  installations,
+  installationsPending,
+  installationsError,
+  retryInstallations,
+}: {
+  workspaceId: string;
+  product: Product | null;
+  editable: boolean;
+  expanded: boolean;
+  setExpanded: (expanded: boolean) => void;
+  installations: GithubInstallationsResponse | undefined;
+  installationsPending: boolean;
+  installationsError: Error | null;
+  retryInstallations: () => void;
+}) {
+  const title = product ? `GitHub repository for ${product.name}` : "Product repository";
+
+  return (
+    <Panel title={title}>
+      <p className="text-sm text-muted-foreground">
+        Choose the repository where feedback groups from this product can become GitHub issues.
+      </p>
+      {!product ? <p className="text-sm">Select a product to configure its repository.</p> : null}
+      {!editable ? (
+        <p className="text-sm">Only a team owner or admin can configure this mapping.</p>
+      ) : null}
+      <Button
+        type="button"
+        variant="outline"
+        aria-expanded={expanded}
+        aria-disabled={!editable || !product}
+        disabled={!editable || !product}
+        onClick={() => setExpanded(!expanded)}
+      >
+        {expanded ? "Hide repository settings" : "Configure repository"}
+      </Button>
+
+      {expanded && editable && product ? (
+        installationsPending ? (
+          <p className="text-sm text-muted-foreground">Loading GitHub installations…</p>
+        ) : installationsError ? (
+          <ErrorState error={installationsError} onRetry={retryInstallations} />
+        ) : !installations ? null : !installations.configured ? (
+          <StatusMessage tone="error">GitHub App is not configured on this server.</StatusMessage>
+        ) : (
+          <ProductRepoMapping
+            workspaceId={workspaceId}
+            product={product}
+            installations={installations.installations}
+            editable={editable}
+          />
+        )
+      ) : null}
+    </Panel>
+  );
+}
+
+function ProductRepoMapping({
+  workspaceId,
+  product,
+  installations,
+  editable,
+}: {
+  workspaceId: string;
+  product: Product;
+  installations: GithubInstallation[];
+  editable: boolean;
+}) {
+  const queryClient = useQueryClient();
+  const mappingKey = ["product-github-repo", workspaceId, product.id] as const;
+  const [actionStatus, setActionStatus] = useState("");
+  const mappingQuery = useQuery({
+    queryKey: mappingKey,
+    queryFn: () => fetchProductGithubRepo(workspaceId, product.id),
+  });
+  const repositoryQueries = useQueries({
+    queries: installations.map((installation) => ({
+      queryKey: ["github-repos", workspaceId, installation.installationId],
+      queryFn: () => fetchGithubRepositories(workspaceId, installation.installationId),
+    })),
+  });
+  const saveMutation = useMutation({
+    mutationFn: (input: ProductGithubRepoInput) =>
+      setProductGithubRepo(workspaceId, product.id, input),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: mappingKey }),
+  });
+  const clearMutation = useMutation({
+    mutationFn: () => clearProductGithubRepo(workspaceId, product.id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: mappingKey }),
+  });
+
+  if (mappingQuery.isPending || repositoryQueries.some((query) => query.isPending)) {
+    return <p className="text-sm text-muted-foreground">Loading repository settings…</p>;
+  }
+  if (mappingQuery.isError) {
+    return <ErrorState error={mappingQuery.error} onRetry={() => mappingQuery.refetch()} />;
+  }
+  const repositoryError = repositoryQueries.find((query) => query.isError)?.error;
+  if (repositoryError) {
+    return (
+      <ErrorState
+        error={repositoryError}
+        onRetry={() => {
+          void Promise.all(repositoryQueries.map((query) => query.refetch()));
+        }}
+      />
+    );
+  }
+
+  const repositoryResponses = repositoryQueries.flatMap((query) =>
+    query.data ? [query.data] : [],
+  );
+  const options = repositoryOptions(repositoryResponses, mappingQuery.data);
+  const mutationError = saveMutation.error ?? clearMutation.error;
+  const busy = saveMutation.isPending || clearMutation.isPending;
+
+  async function save(input: ProductGithubRepoInput) {
+    if (!editable) return;
+    setActionStatus("");
+    clearMutation.reset();
+    try {
+      await saveMutation.mutateAsync(input);
+      setActionStatus("Repository mapping saved.");
+    } catch {
+      // The mutation error is rendered below the form.
+    }
+  }
+
+  async function clear() {
+    if (!editable) return;
+    setActionStatus("");
+    saveMutation.reset();
+    try {
+      await clearMutation.mutateAsync();
+      setActionStatus("Repository mapping cleared.");
+    } catch {
+      // The mutation error is rendered below the form.
+    }
+  }
+
+  return (
+    <ProductRepoMappingForm
+      key={product.id}
+      mapping={mappingQuery.data}
+      options={options}
+      truncated={repositoryResponses.some((response) => response.truncated)}
+      editable={editable}
+      busy={busy}
+      error={mutationError}
+      status={actionStatus}
+      save={save}
+      clear={clear}
+    />
+  );
+}
+
+type RepositoryOption = GithubRepository & { installationId: number };
+
+function ProductRepoMappingForm({
+  mapping,
+  options,
+  truncated,
+  editable,
+  busy,
+  error,
+  status,
+  save,
+  clear,
+}: {
+  mapping: ProductGithubRepo | null;
+  options: RepositoryOption[];
+  truncated: boolean;
+  editable: boolean;
+  busy: boolean;
+  error: Error | null;
+  status: string;
+  save: (input: ProductGithubRepoInput) => Promise<void>;
+  clear: () => Promise<void>;
+}) {
+  const mappedOption = mapping
+    ? options.find((option) => option.fullName === mapping.repoFullName)
+    : undefined;
+  const initialRepo = mappedOption?.fullName ?? "";
+  const [repoFullName, setRepoFullName] = useState(initialRepo);
+  const [defaultBranch, setDefaultBranch] = useState(mapping?.defaultBranch ?? "");
+  const [pathPrefix, setPathPrefix] = useState(mapping?.pathPrefix ?? "");
+
+  useEffect(() => {
+    setRepoFullName(initialRepo);
+    setDefaultBranch(mapping?.defaultBranch ?? "");
+    setPathPrefix(mapping?.pathPrefix ?? "");
+  }, [initialRepo, mapping?.defaultBranch, mapping?.pathPrefix]);
+
+  function selectRepository(fullName: string) {
+    setRepoFullName(fullName);
+    const selected = options.find((option) => option.fullName === fullName);
+    setDefaultBranch(selected?.defaultBranch ?? "");
+  }
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editable) return;
+    const selected = options.find((option) => option.fullName === repoFullName);
+    const branch = defaultBranch.trim();
+    if (!selected || !branch) return;
+    void save({
+      installationId: selected.installationId,
+      repoFullName: selected.fullName,
+      defaultBranch: branch,
+      pathPrefix: pathPrefix.trim() || null,
+    });
+  }
+
+  return (
+    <form className="space-y-4" onSubmit={submit}>
+      {mapping ? (
+        <StatusMessage>
+          Currently mapped to {mapping.repoFullName} on {mapping.defaultBranch}.
+        </StatusMessage>
+      ) : (
+        <p className="text-sm text-muted-foreground">This product has no repository mapping.</p>
+      )}
+
+      <div className="space-y-1">
+        <Label htmlFor="github-repository">Repository</Label>
+        <NativeSelect
+          id="github-repository"
+          className="w-full max-w-xl"
+          value={repoFullName}
+          disabled={!editable || busy || !options.length}
+          onChange={(event) => selectRepository(event.target.value)}
+        >
+          <option value="">Select a repository</option>
+          {options.map((option) => (
+            <option key={option.fullName} value={option.fullName}>
+              {option.fullName}
+            </option>
+          ))}
+        </NativeSelect>
+        {truncated ? (
+          <p className="text-sm text-muted-foreground">
+            This repository list is partial because at least one installation reached GitHub&apos;s
+            1,000-repository limit. The repository you need may not be listed.
+          </p>
+        ) : null}
+        {!options.length ? (
+          <p className="text-sm text-muted-foreground">
+            No repositories are available from the connected GitHub installations.
+          </p>
+        ) : null}
+      </div>
+
+      <div className="space-y-1">
+        <Label htmlFor="github-default-branch">Default branch</Label>
+        <Input
+          id="github-default-branch"
+          className="max-w-xl"
+          value={defaultBranch}
+          required
+          disabled={!editable || busy}
+          onChange={(event) => setDefaultBranch(event.target.value)}
+        />
+      </div>
+
+      <div className="space-y-1">
+        <Label htmlFor="github-path-prefix">Path prefix (optional)</Label>
+        <Input
+          id="github-path-prefix"
+          className="max-w-xl"
+          value={pathPrefix}
+          placeholder="packages/api"
+          disabled={!editable || busy}
+          onChange={(event) => setPathPrefix(event.target.value)}
+        />
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <Button
+          type="submit"
+          disabled={!editable || busy || !repoFullName || !defaultBranch.trim()}
+        >
+          Save mapping
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={!editable || busy || !mapping}
+          onClick={() => void clear()}
+        >
+          Clear mapping
+        </Button>
+      </div>
+      {error ? <StatusMessage tone="error">{error.message}</StatusMessage> : null}
+      {status ? <StatusMessage>{status}</StatusMessage> : null}
+    </form>
+  );
+}
+
+function repositoryOptions(
+  responses: GithubRepositoriesResponse[],
+  mapping: ProductGithubRepo | null,
+): RepositoryOption[] {
+  const options = new Map<string, RepositoryOption>();
+  for (const response of responses) {
+    for (const repository of response.repositories) {
+      const preferred =
+        mapping?.repoFullName === repository.fullName &&
+        mapping.installationId === response.installationId;
+      if (!options.has(repository.fullName) || preferred) {
+        options.set(repository.fullName, {
+          ...repository,
+          installationId: response.installationId,
+        });
+      }
+    }
+  }
+  return [...options.values()].sort((left, right) => left.fullName.localeCompare(right.fullName));
 }
 
 function GithubConnector({
