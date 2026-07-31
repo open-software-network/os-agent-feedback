@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -270,10 +270,138 @@ describe("dashboard view behavior", () => {
     expect(screen.queryByText(/has no repository mapping/i)).not.toBeInTheDocument();
   });
 
-  it("keeps loaded repository options when one installation fails", async () => {
+  it("keeps a mapped repository editable when a truncated listing omits it", async () => {
     const data = dashboardFixture();
-    const mappingPath = `/api/products/${data.currentProduct?.id ?? ""}/github-repo`;
-    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+    const productId = data.currentProduct?.id ?? "";
+    const mappingPath = `/api/products/${productId}/github-repo`;
+    const mappedRepoFullName = "truncated-org/private-service";
+    let mappedRepositoryVisible = false;
+    let mapping = {
+      productId,
+      installationId: 101,
+      repoFullName: mappedRepoFullName,
+      defaultBranch: "stable",
+      pathPrefix: "packages/api",
+      createdAt: "2026-07-30T12:00:00Z",
+      updatedAt: "2026-07-30T12:00:00Z",
+    };
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/github/installations") {
+        return Promise.resolve(
+          json({
+            configured: true,
+            installations: [
+              {
+                id: "88888888-8888-4888-8888-888888888888",
+                installationId: 101,
+                accountLogin: "truncated-org",
+                accountType: "Organization",
+                createdAt: "2026-07-30T12:00:00Z",
+              },
+            ],
+          }),
+        );
+      }
+      if (path === "/api/github/installations/101/repositories") {
+        return Promise.resolve(
+          json({
+            installationId: 101,
+            truncated: true,
+            repositories: [
+              ...(mappedRepositoryVisible
+                ? [{ fullName: mappedRepoFullName, defaultBranch: "main", private: true }]
+                : []),
+              { fullName: "truncated-org/visible", defaultBranch: "main", private: false },
+            ],
+          }),
+        );
+      }
+      if (path === mappingPath && init?.method === "PUT") {
+        mapping = {
+          ...mapping,
+          ...JSON.parse(String(init.body)),
+          updatedAt: "2026-07-30T14:00:00Z",
+        };
+        return Promise.resolve(json(mapping));
+      }
+      if (path === mappingPath) return Promise.resolve(json(mapping));
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { client } = renderWithQuery(<ConnectorsView data={data} />);
+
+    expect(await screen.findByText("truncated-org")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Configure repository" }));
+
+    const repository = await screen.findByLabelText("Repository");
+    const branch = screen.getByLabelText("Default branch");
+    expect(repository).toHaveValue(mappedRepoFullName);
+    expect(
+      screen.getByRole("option", {
+        name: `${mappedRepoFullName} (not in the current listing)`,
+      }),
+    ).toBeVisible();
+    expect(branch).toHaveValue("stable");
+    expect(branch).toBeEnabled();
+    expect(screen.getByText(/repository list is partial/i)).toBeVisible();
+
+    fireEvent.change(branch, { target: { value: "release" } });
+    fireEvent.change(screen.getByLabelText("Path prefix (optional)"), {
+      target: { value: "packages/core" },
+    });
+    mappedRepositoryVisible = true;
+    await act(async () => {
+      await client.invalidateQueries({
+        queryKey: ["github-repos", data.workspace.id, 101],
+      });
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("option", {
+          name: `${mappedRepoFullName} (not in the current listing)`,
+        }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getAllByRole("option", { name: mappedRepoFullName })).toHaveLength(1);
+    expect(repository).toHaveValue(mappedRepoFullName);
+    expect(branch).toHaveValue("release");
+
+    fireEvent.click(screen.getByRole("button", { name: "Save mapping" }));
+
+    expect(await screen.findByText("Repository mapping saved.")).toBeVisible();
+    expect(fetchMock).toHaveBeenCalledWith(
+      mappingPath,
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({
+          installationId: 101,
+          repoFullName: mappedRepoFullName,
+          defaultBranch: "release",
+          pathPrefix: "packages/core",
+        }),
+      }),
+    );
+  });
+
+  it("keeps a failed installation's mapped repository editable through retry", async () => {
+    const data = dashboardFixture();
+    const productId = data.currentProduct?.id ?? "";
+    const mappingPath = `/api/products/${productId}/github-repo`;
+    const mappedRepoFullName = "failed-org/private-app";
+    let failedListing = true;
+    let mapping = {
+      productId,
+      installationId: 202,
+      repoFullName: mappedRepoFullName,
+      defaultBranch: "stable",
+      pathPrefix: null as string | null,
+      createdAt: "2026-07-30T12:00:00Z",
+      updatedAt: "2026-07-30T12:00:00Z",
+    };
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path === "/api/github/installations") {
         return Promise.resolve(
@@ -308,9 +436,27 @@ describe("dashboard view behavior", () => {
         );
       }
       if (path === "/api/github/installations/202/repositories") {
-        return Promise.resolve(json({ error: "GitHub repository listing failed" }, 502));
+        return failedListing
+          ? Promise.resolve(json({ error: "GitHub repository listing failed" }, 502))
+          : Promise.resolve(
+              json({
+                installationId: 202,
+                truncated: false,
+                repositories: [
+                  { fullName: mappedRepoFullName, defaultBranch: "main", private: true },
+                ],
+              }),
+            );
       }
-      if (path === mappingPath) return Promise.resolve(json(null));
+      if (path === mappingPath && init?.method === "PUT") {
+        mapping = {
+          ...mapping,
+          ...JSON.parse(String(init.body)),
+          updatedAt: "2026-07-30T14:00:00Z",
+        };
+        return Promise.resolve(json(mapping));
+      }
+      if (path === mappingPath) return Promise.resolve(json(mapping));
       throw new Error(`Unexpected request: ${path}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -320,11 +466,55 @@ describe("dashboard view behavior", () => {
     expect(await screen.findByText("loaded-org")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Configure repository" }));
 
+    const repository = await screen.findByLabelText("Repository");
+    const branch = screen.getByLabelText("Default branch");
     expect(await screen.findByRole("option", { name: "loaded-org/app" })).toBeVisible();
+    expect(repository).toHaveValue(mappedRepoFullName);
+    expect(
+      screen.getByRole("option", {
+        name: `${mappedRepoFullName} (not in the current listing)`,
+      }),
+    ).toBeVisible();
+    expect(branch).toHaveValue("stable");
+    expect(branch).toBeEnabled();
     expect(screen.getByRole("alert")).toHaveTextContent(
       /could not load repositories for failed-org/i,
     );
-    expect(screen.getByRole("button", { name: "Retry failed installations" })).toBeVisible();
+
+    fireEvent.change(branch, { target: { value: "release" } });
+    fireEvent.change(screen.getByLabelText("Path prefix (optional)"), {
+      target: { value: "packages/web" },
+    });
+    failedListing = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry failed installations" }));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("option", {
+          name: `${mappedRepoFullName} (not in the current listing)`,
+        }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getAllByRole("option", { name: mappedRepoFullName })).toHaveLength(1);
+    expect(repository).toHaveValue(mappedRepoFullName);
+    expect(branch).toHaveValue("release");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save mapping" }));
+
+    expect(await screen.findByText("Repository mapping saved.")).toBeVisible();
+    expect(fetchMock).toHaveBeenCalledWith(
+      mappingPath,
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({
+          installationId: 202,
+          repoFullName: mappedRepoFullName,
+          defaultBranch: "release",
+          pathPrefix: "packages/web",
+        }),
+      }),
+    );
   });
 
   it("keeps the product mapping mutation unreachable for members", async () => {

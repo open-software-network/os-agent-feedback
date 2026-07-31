@@ -307,8 +307,22 @@ function ProductRepoMappingForm({
   clear: () => Promise<void>;
   retryFailedInstallations: () => void;
 }) {
-  const mappedOption = mapping
+  const listedMappedOption = mapping
     ? options.find((option) => option.fullName === mapping.repoFullName)
+    : undefined;
+  const syntheticOption: RepositoryOption | undefined =
+    mapping && !listedMappedOption
+      ? {
+          fullName: mapping.repoFullName,
+          installationId: mapping.installationId,
+          defaultBranch: mapping.defaultBranch,
+          // Visibility is unknown here; use the conservative value without displaying it.
+          private: true,
+        }
+      : undefined;
+  const effectiveOptions = syntheticOption ? [syntheticOption, ...options] : options;
+  const mappedOption = mapping
+    ? effectiveOptions.find((option) => option.fullName === mapping.repoFullName)
     : undefined;
   const initialRepo = mappedOption?.fullName ?? "";
   const [repoFullName, setRepoFullName] = useState(initialRepo);
@@ -323,14 +337,14 @@ function ProductRepoMappingForm({
 
   function selectRepository(fullName: string) {
     setRepoFullName(fullName);
-    const selected = options.find((option) => option.fullName === fullName);
+    const selected = effectiveOptions.find((option) => option.fullName === fullName);
     setDefaultBranch(selected?.defaultBranch ?? "");
   }
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!editable) return;
-    const selected = options.find((option) => option.fullName === repoFullName);
+    const selected = effectiveOptions.find((option) => option.fullName === repoFullName);
     const branch = defaultBranch.trim();
     if (!selected || !branch) return;
     void save({
@@ -357,13 +371,14 @@ function ProductRepoMappingForm({
           id="github-repository"
           className="w-full max-w-xl"
           value={repoFullName}
-          disabled={!editable || busy || !options.length}
+          disabled={!editable || busy || !effectiveOptions.length}
           onChange={(event) => selectRepository(event.target.value)}
         >
           <option value="">Select a repository</option>
-          {options.map((option) => (
+          {effectiveOptions.map((option) => (
             <option key={option.fullName} value={option.fullName}>
               {option.fullName}
+              {option === syntheticOption ? " (not in the current listing)" : ""}
             </option>
           ))}
         </NativeSelect>
