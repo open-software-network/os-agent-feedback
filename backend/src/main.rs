@@ -1555,6 +1555,11 @@ async fn file_group_github_issue_handler(
         group_issue_context(&state.pool, workspace_id, &group_key, backlink.clone())
             .await?
             .ok_or_else(|| ApiError::not_found("Feedback group not found for this team"))?;
+    if let Some(target_group_key) = initial_context.merged_into_group_key.as_deref() {
+        return Err(ApiError::conflict(format!(
+            "This feedback group was merged into {target_group_key}; file the issue on that group instead"
+        )));
+    }
     if let Some(existing) = get_group_github_issue(&state.pool, workspace_id, &group_key).await? {
         spawn_group_issue_sync(Arc::clone(&state), workspace_id, group_key);
         return dashboard_response(&state, Json(existing.link()), tokens);

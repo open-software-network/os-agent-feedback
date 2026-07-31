@@ -71,6 +71,7 @@ impl GroupGithubIssueRow {
 
 #[derive(Debug)]
 pub(crate) struct GroupIssueContext {
+    pub(crate) merged_into_group_key: Option<String>,
     pub(crate) installation_id: Option<i64>,
     pub(crate) repo_full_name: Option<String>,
     pub(crate) installation_active: bool,
@@ -376,6 +377,7 @@ pub(crate) async fn clear_product_github_repo(
 struct GroupIssueContextRow {
     group_key: String,
     explanation: String,
+    merged_into_group_key: Option<String>,
     installation_id: Option<i64>,
     repo_full_name: Option<String>,
     installation_active: bool,
@@ -411,6 +413,7 @@ async fn group_issue_context_with_executor<'executor>(
     let row = sqlx::query_as::<_, GroupIssueContextRow>(
         r"WITH scoped_group AS (
           SELECT g.id, g.workspace_id, g.product_id, g.group_key, g.explanation,
+            g.merged_into_group_key,
             mapping.installation_id, mapping.repo_full_name,
             (installation.installation_id IS NOT NULL) AS installation_active
           FROM report_groups g
@@ -477,7 +480,8 @@ async fn group_issue_context_with_executor<'executor>(
             occurred_at, report_id, ordinality
           LIMIT 1
         )
-        SELECT g.group_key, g.explanation, g.installation_id, g.repo_full_name,
+        SELECT g.group_key, g.explanation, g.merged_into_group_key,
+          g.installation_id, g.repo_full_name,
           g.installation_active,
           (SELECT COUNT(*)::BIGINT FROM scoped_reports) AS report_count,
           (SELECT MIN(occurred_at) FROM scoped_reports) AS earliest_occurred_at,
@@ -549,6 +553,7 @@ async fn group_issue_context_with_executor<'executor>(
         let workarounds = serde_json::from_value::<Vec<serde_json::Value>>(row.workarounds)
             .map_err(ApiError::internal)?;
         Ok(GroupIssueContext {
+            merged_into_group_key: row.merged_into_group_key,
             installation_id: row.installation_id,
             repo_full_name: row.repo_full_name,
             installation_active: row.installation_active,
@@ -1018,12 +1023,12 @@ pub(crate) async fn merge_report_groups(
     }
     let source_issue_number = issue_rows.iter().find_map(|(group_key, issue_number, _)| {
         (group_key == source_group_key)
-            .then(|| *issue_number)
+            .then_some(*issue_number)
             .flatten()
     });
     let target_issue_number = issue_rows.iter().find_map(|(group_key, issue_number, _)| {
         (group_key == target_group_key)
-            .then(|| *issue_number)
+            .then_some(*issue_number)
             .flatten()
     });
     if let (Some(source_issue), Some(target_issue)) = (source_issue_number, target_issue_number) {
@@ -3868,7 +3873,7 @@ pub(crate) async fn assign_report_group(
     input: &GroupInput<'_>,
 ) -> Result<Uuid, ApiError> {
     let assignment = grouper.assign(input);
-    let group_id = sqlx::query_scalar::<_, Uuid>(
+    let (group_id, unresolved_lineage_group_key) = sqlx::query_as::<_, (Uuid, Option<String>)>(
         r"WITH assigned_group AS (
           INSERT INTO report_groups
           (id, workspace_id, product_id, group_key, grouper_name, grouper_version, explanation)
@@ -3878,19 +3883,20 @@ pub(crate) async fn assign_report_group(
             grouper_version = EXCLUDED.grouper_version,
             explanation = EXCLUDED.explanation,
             updated_at = NOW()
-          RETURNING id, workspace_id, product_id, merged_into_group_key
+          RETURNING id, workspace_id, product_id, group_key, merged_into_group_key
         )
-        SELECT CASE
-          WHEN assigned_group.merged_into_group_key IS NULL THEN assigned_group.id
-          ELSE merge_target.id
-        END
+        SELECT COALESCE(merge_target.id, assigned_group.id),
+          CASE
+            WHEN assigned_group.merged_into_group_key IS NOT NULL
+              AND merge_target.id IS NULL
+            THEN assigned_group.group_key
+          END
         FROM assigned_group
         LEFT JOIN report_groups merge_target
-          ON merge_target.group_key = assigned_group.merged_into_group_key
+         ON merge_target.group_key = assigned_group.merged_into_group_key
          AND merge_target.workspace_id = assigned_group.workspace_id
          AND merge_target.product_id = assigned_group.product_id
-         AND merge_target.merged_into_group_key IS NULL
-        WHERE assigned_group.merged_into_group_key IS NULL OR merge_target.id IS NOT NULL",
+         AND merge_target.merged_into_group_key IS NULL",
     )
     .bind(Uuid::new_v4())
     .bind(workspace_id)
@@ -3899,9 +3905,14 @@ pub(crate) async fn assign_report_group(
     .bind(grouper.name())
     .bind(grouper.version())
     .bind(assignment.explanation)
-    .fetch_optional(&mut **tx)
-    .await?
-    .ok_or_else(|| ApiError::internal("report group merge lineage did not resolve in one hop"))?;
+    .fetch_one(&mut **tx)
+    .await?;
+    if let Some(group_key) = unresolved_lineage_group_key {
+        tracing::warn!(
+            %group_key,
+            "report group merge lineage did not resolve in one hop; using computed group"
+        );
+    }
     let updated = sqlx::query(
         "UPDATE feedback_reports SET group_id = $1 WHERE id = $2 AND workspace_id = $3",
     )
@@ -5472,6 +5483,94 @@ mod product_tests {
             anyhow::ensure!(page.groups.len() == 1);
             anyhow::ensure!(page.groups[0].group.group_key == fixture.target_group_key);
             anyhow::ensure!(page.groups[0].group.report_count == 3);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn unresolvable_report_group_lineage_preserves_future_report() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let fixture = merge_groups_fixture(&pool, "Broken report group lineage").await?;
+
+        let result = async {
+            let terminal_capability =
+                test_capability(&fixture.write_secret, fixture.write_key_id, Uuid::new_v4());
+            let (_, terminal_report) = submit_product_feedback(
+                &pool,
+                &terminal_capability,
+                feedback_input_with_finding(
+                    "A terminal group makes the malformed lineage two hops long.",
+                    "terminal_failure",
+                ),
+            )
+            .await
+            .map_err(test_error)?;
+            let (_, terminal_group_key) =
+                report_group_for_report(&pool, terminal_report.id).await?;
+
+            // Product code prevents chains, so construct one directly to
+            // exercise ingestion's last-resort preservation behavior.
+            sqlx::query(
+                r"UPDATE report_groups
+                SET merged_into_group_key = $1, merged_at = NOW(), merged_by = 'test_corruption'
+                WHERE id = $2",
+            )
+            .bind(&terminal_group_key)
+            .bind(fixture.target_group_id)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                r"UPDATE report_groups
+                SET merged_into_group_key = $1, merged_at = NOW(), merged_by = 'test_corruption'
+                WHERE id = $2",
+            )
+            .bind(&fixture.target_group_key)
+            .bind(fixture.source_group_id)
+            .execute(&pool)
+            .await?;
+
+            let future_capability =
+                test_capability(&fixture.write_secret, fixture.write_key_id, Uuid::new_v4());
+            let (_, future_report) = submit_product_feedback(
+                &pool,
+                &future_capability,
+                feedback_input_with_finding(
+                    "A matching report remains available despite malformed lineage.",
+                    "source_failure",
+                ),
+            )
+            .await
+            .map_err(test_error)?;
+            let future_group = report_group_for_report(&pool, future_report.id).await?;
+            anyhow::ensure!(future_group.0 == fixture.source_group_id);
+
+            let context = group_issue_context(
+                &pool,
+                fixture.workspace_id,
+                &fixture.source_group_key,
+                "https://app.epode.test/?view=feedback&group=source".to_owned(),
+            )
+            .await
+            .map_err(test_error)?
+            .ok_or_else(|| anyhow::anyhow!("source group should remain addressable"))?;
+            anyhow::ensure!(
+                context.merged_into_group_key.as_deref() == Some(fixture.target_group_key.as_str())
+            );
+            anyhow::ensure!(context.repo_full_name.is_none());
+            anyhow::ensure!(context.template.report_count == 2);
             Ok::<(), anyhow::Error>(())
         }
         .await;
