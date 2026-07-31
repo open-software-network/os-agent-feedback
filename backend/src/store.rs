@@ -5357,6 +5357,9 @@ mod product_tests {
         assert!(contains_sensitive_report_text(
             "The response exposed customer@example.com"
         ));
+        assert!(!contains_sensitive_report_text(
+            "Request 123e4567-e89b-12d3-a456-426614174000 failed after retry"
+        ));
     }
 
     #[test]
@@ -5506,6 +5509,13 @@ mod product_tests {
             )
             .await
             .map_err(test_error)?;
+            let uuid_capability = test_capability(&write_secret, write_key.id, Uuid::new_v4());
+            let uuid_summary = "Request 123e4567-e89b-12d3-a456-426614174000 failed after retry";
+            let (_, uuid_report) =
+                submit_product_feedback(&pool, &uuid_capability, feedback_input(uuid_summary))
+                    .await
+                    .map_err(test_error)?;
+            anyhow::ensure!(uuid_report.summary == uuid_summary);
 
             update_policy(
                 &pool,

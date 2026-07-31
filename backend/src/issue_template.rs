@@ -3,8 +3,12 @@
     reason = "crate-restricted visibility satisfies unreachable_pub in this binary-only crate"
 )]
 
-use std::fmt::Write as _;
+use std::{collections::HashSet, fmt::Write as _};
 
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD},
+};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
@@ -52,21 +56,23 @@ pub(crate) struct IssueTemplateData {
 }
 
 pub(crate) fn render_issue_title(data: &IssueTemplateData) -> String {
+    let policy = PublicationRedactions::for_issue(data);
     let title = format!(
         "[epode] {}: {} in {}",
-        safe_customer_title_text(&data.primary_kind, 40),
-        safe_customer_title_text(&data.primary_topic, 48),
-        safe_customer_title_text(&data.primary_operation, 48)
+        safe_customer_title_text(&data.primary_kind, 40, &policy),
+        safe_customer_title_text(&data.primary_topic, 48, &policy),
+        safe_customer_title_text(&data.primary_operation, 48, &policy)
     );
     truncate_chars(&title, 120)
 }
 
 pub(crate) fn render_issue_body(data: &IssueTemplateData) -> String {
+    let policy = PublicationRedactions::for_issue(data);
     let mut body = String::new();
     let _ = writeln!(
         body,
         "{}",
-        safe_customer_inline_text(&data.explanation, 1_000)
+        safe_customer_inline_text(&data.explanation, 1_000, &policy)
     );
 
     body.push_str("\n## Impact\n");
@@ -77,7 +83,7 @@ pub(crate) fn render_issue_body(data: &IssueTemplateData) -> String {
             let _ = writeln!(
                 body,
                 "- {}: {}",
-                safe_customer_inline_text(&impact.value, 100),
+                safe_customer_inline_text(&impact.value, 100, &policy),
                 impact.count
             );
         }
@@ -92,8 +98,8 @@ pub(crate) fn render_issue_body(data: &IssueTemplateData) -> String {
             let _ = writeln!(
                 body,
                 "- `{}/{}`: {} report(s)",
-                clean_code_text(&finding.kind, 100),
-                clean_code_text(&finding.topic, 100),
+                clean_code_text(&finding.kind, 100, &policy),
+                clean_code_text(&finding.topic, 100, &policy),
                 finding.count
             );
             let mut emitted = 0_i64;
@@ -104,7 +110,7 @@ pub(crate) fn render_issue_body(data: &IssueTemplateData) -> String {
                     continue;
                 }
                 seen_details.push(detail.as_str());
-                if contains_sensitive_report_text(detail) {
+                if policy.must_redact(detail) {
                     sensitive += 1;
                     continue;
                 }
@@ -138,7 +144,7 @@ pub(crate) fn render_issue_body(data: &IssueTemplateData) -> String {
         body.push_str("- No workaround reported.\n");
     } else {
         for workaround in data.workarounds.iter().take(MAX_WORKAROUNDS) {
-            render_workaround(&mut body, workaround);
+            render_workaround(&mut body, workaround, &policy);
         }
         append_more_line(
             &mut body,
@@ -152,12 +158,12 @@ pub(crate) fn render_issue_body(data: &IssueTemplateData) -> String {
     let _ = writeln!(
         body,
         "- Operation: {}",
-        render_values(&data.operations, MAX_WHERE_VALUES)
+        render_values(&data.operations, MAX_WHERE_VALUES, &policy)
     );
     let _ = writeln!(
         body,
         "- Surface: {}",
-        render_values(&data.surfaces, MAX_WHERE_VALUES)
+        render_values(&data.surfaces, MAX_WHERE_VALUES, &policy)
     );
     let statuses = if data.status_codes.is_empty() {
         "none".to_owned()
@@ -232,34 +238,22 @@ pub(crate) fn group_marker(group_key: &str) -> String {
 }
 
 pub(crate) fn contains_sensitive_report_text(value: &str) -> bool {
-    // Shape detection needs the original casing — lowercasing first would erase
-    // the mixed-case signal that distinguishes a credential from an identifier.
-    let original = value;
+    // INGEST POLICY: rejecting here discards the entire customer report, which
+    // is irreversible. Admission therefore blocks only credential forms with a
+    // strong semantic signal and deliberately does not use entropy or shape.
+    // Publication has the separate, aggressive `must_redact_before_publishing`
+    // policy below, where a hit costs only one public field.
     let value = value.to_ascii_lowercase();
     let forbidden_pattern = [
         "af_live_",
         "af_read_",
         "github_pat_",
-        "ghp_",
-        "gho_",
-        "ghs_",
-        "ghr_",
-        "akia",
-        "asia",
         "-----begin ",
         "xoxb-",
         "xoxp-",
-        "xoxa-",
-        "xapp-",
         "sk-proj-",
-        "sk-ant-",
         "api key",
-        "apikey",
-        "api_key",
-        "secret",
         "password",
-        "passwd",
-        "authorization:",
         "transcript:",
         "prompt:",
         "raw input:",
@@ -288,19 +282,361 @@ pub(crate) fn contains_sensitive_report_text(value: &str) -> bool {
                 .chars()
                 .all(|character| character.is_ascii_alphanumeric() || "-._~+/=".contains(character))
     });
-    let secret_shaped = original.split_whitespace().any(looks_like_secret_token);
-    forbidden_pattern || bearer_credential || email_like || secret_shaped
+    forbidden_pattern || bearer_credential || email_like
 }
 
-/// Fails closed on credential-shaped tokens the prefix list does not know.
+#[derive(Debug, Default)]
+struct PublicationRedactions {
+    adjacent_split_values: HashSet<String>,
+}
+
+impl PublicationRedactions {
+    fn for_issue(data: &IssueTemplateData) -> Self {
+        let mut fields = vec![
+            data.primary_kind.as_str(),
+            data.primary_topic.as_str(),
+            data.primary_operation.as_str(),
+            data.explanation.as_str(),
+        ];
+        fields.extend(data.impacts.iter().map(|impact| impact.value.as_str()));
+        for finding in &data.findings {
+            fields.push(finding.kind.as_str());
+            fields.push(finding.topic.as_str());
+            fields.extend(finding.details.iter().map(String::as_str));
+        }
+        fields.extend(
+            data.workarounds
+                .iter()
+                .filter_map(|workaround| workaround.get("detail").and_then(Value::as_str)),
+        );
+        fields.extend(data.operations.iter().map(String::as_str));
+        fields.extend(data.surfaces.iter().map(String::as_str));
+
+        let mut adjacent_split_values = HashSet::new();
+        // Cross-field scanning is intentionally bounded to one boundary: any
+        // credential split over two adjacent rendered customer fields is
+        // omitted in full. Arbitrary reordering or a split over three or more
+        // fields is outside this renderer's adjacency contract.
+        for pair in fields.windows(2) {
+            mark_sensitive_adjacent_pair(&mut adjacent_split_values, pair[0], pair[1]);
+        }
+        let finding_details = data
+            .findings
+            .iter()
+            .flat_map(|finding| finding.details.iter().map(String::as_str))
+            .collect::<Vec<_>>();
+        for pair in finding_details.windows(2) {
+            mark_sensitive_adjacent_pair(&mut adjacent_split_values, pair[0], pair[1]);
+        }
+        Self {
+            adjacent_split_values,
+        }
+    }
+
+    fn must_redact(&self, value: &str) -> bool {
+        self.adjacent_split_values.contains(value) || must_redact_before_publishing(value)
+    }
+}
+
+fn mark_sensitive_adjacent_pair(redactions: &mut HashSet<String>, first: &str, second: &str) {
+    if must_redact_before_publishing(&format!("{first}{second}")) {
+        redactions.insert(first.to_owned());
+        redactions.insert(second.to_owned());
+    }
+}
+
+/// PUBLICATION POLICY: a hit here omits one public field instead of discarding
+/// the stored report, so this boundary deliberately fails closed on plausible
+/// credential shapes as well as known credential semantics.
 ///
-/// Matching only known prefixes lets any unrecognised or future credential
-/// format through into a public issue body, so shape is checked too. The
-/// signal is deliberately narrow to avoid redacting ordinary text: an opaque
-/// run of at least 32 characters with letters, digits and high per-character
-/// entropy. Pure alphanumeric tokens are case-independent; identifier-shaped
-/// strings containing `_`, `-`, or `.` retain the stricter mixed-case/hex rule
-/// so ordinary long log identifiers remain useful.
+/// Detection covers ASCII credentials of at least 32 characters, known secret
+/// prefixes, credential-bearing URLs and assignments, JSON string values,
+/// percent encoding, one layer of base64 text, up to eight adjacent opaque
+/// segments inside a field, and one boundary between adjacent rendered fields.
+///
+/// ACCEPTED LIMITATIONS: Unicode homoglyph substitution is not normalized
+/// because it changes provider credentials rather than encoding them; base64
+/// decoding is bounded to two nested detector passes; cross-field detection is
+/// bounded to two adjacent fields; and opaque values shorter than 32 characters
+/// require a known prefix, bearer syntax, email shape, or credential key.
+fn must_redact_before_publishing(value: &str) -> bool {
+    publication_text_is_sensitive(value, 0)
+}
+
+fn publication_text_is_sensitive(value: &str, decode_depth: usize) -> bool {
+    if contains_sensitive_report_text(value) || contains_publish_only_pattern(value) {
+        return true;
+    }
+    if contains_sensitive_url(value) || contains_sensitive_assignment(value) {
+        return true;
+    }
+    if contains_sensitive_json(value, decode_depth) || contains_secret_shape(value) {
+        return true;
+    }
+
+    if decode_depth >= 2 {
+        return false;
+    }
+    if let Some(decoded) = percent_decode_text(value)
+        && publication_text_is_sensitive(&decoded, decode_depth + 1)
+    {
+        return true;
+    }
+    decoded_base64_texts(value)
+        .any(|decoded| publication_text_is_sensitive(&decoded, decode_depth + 1))
+}
+
+fn contains_publish_only_pattern(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    [
+        "ghp_",
+        "gho_",
+        "ghs_",
+        "ghr_",
+        "akia",
+        "asia",
+        "xoxa-",
+        "xapp-",
+        "sk-ant-",
+        "apikey",
+        "api_key",
+        "secret",
+        "passwd",
+        "authorization:",
+    ]
+    .iter()
+    .any(|pattern| value.contains(pattern))
+}
+
+const CREDENTIAL_KEYS: &[&str] = &[
+    "token",
+    "access_token",
+    "api_key",
+    "apikey",
+    "key",
+    "secret",
+    "password",
+    "signature",
+    "sig",
+    "auth",
+    "code",
+    "session",
+    "id_token",
+    "refresh_token",
+];
+
+fn is_credential_key(value: &str) -> bool {
+    CREDENTIAL_KEYS
+        .iter()
+        .any(|candidate| value.eq_ignore_ascii_case(candidate))
+}
+
+fn contains_sensitive_assignment(value: &str) -> bool {
+    value
+        .split(|character: char| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    '&' | ';' | ',' | '(' | ')' | '[' | ']' | '{' | '}'
+                )
+        })
+        .any(|part| {
+            part.split_once('=').is_some_and(|(key, assigned)| {
+                let key = key.trim_matches(|character: char| {
+                    matches!(character, '\'' | '"' | '`' | '<' | '>')
+                });
+                is_credential_key(key) && !assigned.is_empty()
+            })
+        })
+}
+
+fn contains_sensitive_json(value: &str, decode_depth: usize) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(value) else {
+        return false;
+    };
+    json_value_is_sensitive(&value, decode_depth)
+}
+
+fn json_value_is_sensitive(value: &Value, decode_depth: usize) -> bool {
+    match value {
+        Value::Object(values) => values.iter().any(|(key, value)| {
+            (is_credential_key(key) && !value.is_null())
+                || json_value_is_sensitive(value, decode_depth)
+        }),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| json_value_is_sensitive(value, decode_depth)),
+        Value::String(value) => publication_text_is_sensitive(value, decode_depth + 1),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn contains_sensitive_url(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let http = lower[cursor..].find("http://");
+        let https = lower[cursor..].find("https://");
+        let Some(relative_start) = [http, https].into_iter().flatten().min() else {
+            break;
+        };
+        let start = cursor + relative_start;
+        let end = value[start..]
+            .char_indices()
+            .find_map(|(offset, character)| {
+                (character.is_whitespace() || matches!(character, '\'' | '"' | '<' | '>' | '`'))
+                    .then_some(start + offset)
+            })
+            .unwrap_or(value.len());
+        let candidate = value[start..end].trim_end_matches(|character: char| {
+            matches!(character, ',' | ';' | '!' | '?' | ')' | ']' | '}')
+        });
+        if let Ok(url) = reqwest::Url::parse(candidate) {
+            if !url.username().is_empty() || url.password().is_some() {
+                return true;
+            }
+            if url
+                .query_pairs()
+                .any(|(key, _)| is_credential_key(key.as_ref()))
+            {
+                return true;
+            }
+            if url.path_segments().is_some_and(|segments| {
+                segments.into_iter().any(|segment| {
+                    let decoded =
+                        percent_decode_text(segment).unwrap_or_else(|| segment.to_owned());
+                    contains_secret_shape(&decoded)
+                })
+            }) {
+                return true;
+            }
+        }
+        cursor = end.max(start + 1);
+    }
+    false
+}
+
+fn percent_decode_text(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    let mut changed = false;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+        {
+            decoded.push((high << 4) | low);
+            index += 3;
+            changed = true;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    changed.then(|| String::from_utf8(decoded).ok()).flatten()
+}
+
+const fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn decoded_base64_texts(value: &str) -> impl Iterator<Item = String> + '_ {
+    opaque_segments(value).into_iter().filter_map(|segment| {
+        if segment.value.len() < 16 {
+            return None;
+        }
+        let unpadded = segment.value.trim_end_matches('=');
+        [segment.value, unpadded]
+            .into_iter()
+            .flat_map(|candidate| {
+                [STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD]
+                    .into_iter()
+                    .filter_map(move |engine| {
+                        engine
+                            .decode(candidate.as_bytes())
+                            .ok()
+                            .and_then(|bytes| String::from_utf8(bytes).ok())
+                    })
+            })
+            .next()
+            .filter(|decoded| {
+                !decoded.is_empty()
+                    && decoded
+                        .chars()
+                        .all(|character| !character.is_control() || character.is_whitespace())
+            })
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OpaqueSegment<'a> {
+    value: &'a str,
+    start: usize,
+    end: usize,
+}
+
+fn opaque_segments(value: &str) -> Vec<OpaqueSegment<'_>> {
+    let mut segments = Vec::new();
+    let mut start = None;
+    for (index, character) in value.char_indices() {
+        if character.is_ascii_alphanumeric() || "-._~+/=".contains(character) {
+            start.get_or_insert(index);
+        } else if let Some(start) = start.take() {
+            segments.push(OpaqueSegment {
+                value: &value[start..index],
+                start,
+                end: index,
+            });
+        }
+    }
+    if let Some(start) = start {
+        segments.push(OpaqueSegment {
+            value: &value[start..],
+            start,
+            end: value.len(),
+        });
+    }
+    segments
+}
+
+fn contains_secret_shape(value: &str) -> bool {
+    let segments = opaque_segments(value);
+    if segments
+        .iter()
+        .any(|segment| looks_like_secret_token(segment.value))
+    {
+        return true;
+    }
+
+    // Join up to eight adjacent opaque chunks separated by at most three bytes.
+    // This catches line-wrapped and punctuation-split credentials without
+    // concatenating arbitrary prose across a whole field.
+    for start in 0..segments.len() {
+        let mut joined = String::new();
+        for end in start..segments.len().min(start + 8) {
+            let segment = segments[end];
+            if segment.value.len() < 4 {
+                break;
+            }
+            if end > start && segment.start.saturating_sub(segments[end - 1].end) > 3 {
+                break;
+            }
+            joined.push_str(segment.value);
+            if end > start && looks_like_secret_token(&joined) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn looks_like_secret_token(word: &str) -> bool {
     const MIN_TOKEN_LEN: usize = 32;
     const MIN_ENTROPY_BITS: f64 = 3.0;
@@ -323,23 +659,61 @@ fn looks_like_secret_token(word: &str) -> bool {
         return false;
     }
 
-    let hex_like = token
-        .chars()
-        .all(|character| character.is_ascii_hexdigit() || character == '-');
     let has_letter = token.chars().any(|c| c.is_ascii_alphabetic());
     let has_digit = token.chars().any(|c| c.is_ascii_digit());
-    let mixed_case_with_digits = token.chars().any(|c| c.is_ascii_lowercase())
-        && token.chars().any(|c| c.is_ascii_uppercase())
-        && has_digit;
-    let has_identifier_separator = token.bytes().any(|byte| matches!(byte, b'_' | b'-' | b'.'));
-    let pure_alphanumeric =
-        !has_identifier_separator && token.bytes().all(|byte| byte.is_ascii_alphanumeric());
-    let case_independent_alphanumeric = pure_alphanumeric && has_letter && has_digit;
-    if !hex_like && !mixed_case_with_digits && !case_independent_alphanumeric {
+    if !has_letter || !has_digit || looks_like_word_identifier(token) {
         return false;
     }
 
     shannon_entropy_bits_per_char(token) >= MIN_ENTROPY_BITS
+}
+
+fn looks_like_word_identifier(token: &str) -> bool {
+    if token
+        .chars()
+        .any(|character| !character.is_ascii_alphanumeric() && !"_- .".contains(character))
+    {
+        return false;
+    }
+    let parts = token
+        .split(['_', '-', '.'])
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let alpha = parts
+        .iter()
+        .filter(|part| {
+            part.chars()
+                .all(|character| character.is_ascii_alphabetic())
+        })
+        .collect::<Vec<_>>();
+    let short_mixed = parts
+        .iter()
+        .filter(|part| {
+            part.chars()
+                .any(|character| character.is_ascii_alphabetic())
+                && part.chars().any(|character| character.is_ascii_digit())
+                && part.len() <= 4
+        })
+        .count();
+    let wordlike = alpha
+        .iter()
+        .filter(|part| {
+            part.chars()
+                .any(|character| "aeiouAEIOU".contains(character))
+        })
+        .count();
+    alpha.len() >= 3
+        && short_mixed <= 1
+        && wordlike * 2 >= alpha.len()
+        && parts.iter().all(|part| {
+            part.chars()
+                .all(|character| character.is_ascii_alphabetic())
+                || part.chars().all(|character| character.is_ascii_digit())
+                || (part.len() <= 4
+                    && part
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric()))
+        })
 }
 
 /// Shannon entropy per character, used to separate opaque credentials from
@@ -365,11 +739,11 @@ fn shannon_entropy_bits_per_char(value: &str) -> f64 {
         .sum()
 }
 
-fn render_workaround(body: &mut String, workaround: &Value) {
+fn render_workaround(body: &mut String, workaround: &Value, policy: &PublicationRedactions) {
     let used = workaround.get("used").and_then(Value::as_bool);
     let detail = workaround.get("detail").and_then(Value::as_str);
     match detail {
-        Some(detail) if contains_sensitive_report_text(detail) => {
+        Some(detail) if policy.must_redact(detail) => {
             let _ = writeln!(
                 body,
                 "- {} Sensitive detail omitted.",
@@ -407,14 +781,14 @@ fn render_workaround(body: &mut String, workaround: &Value) {
     }
 }
 
-fn render_values(values: &[String], limit: usize) -> String {
+fn render_values(values: &[String], limit: usize, policy: &PublicationRedactions) -> String {
     if values.is_empty() {
         return "unknown".to_owned();
     }
     let mut rendered = values
         .iter()
         .take(limit)
-        .map(|value| safe_customer_inline_text(value, 100))
+        .map(|value| safe_customer_inline_text(value, 100, policy))
         .collect::<Vec<_>>()
         .join(", ");
     if values.len() > limit {
@@ -436,15 +810,23 @@ fn clean_text(value: &str, max_chars: usize) -> String {
     )
 }
 
-fn safe_customer_title_text(value: &str, max_chars: usize) -> String {
-    if contains_sensitive_report_text(value) {
+fn safe_customer_title_text(
+    value: &str,
+    max_chars: usize,
+    policy: &PublicationRedactions,
+) -> String {
+    if policy.must_redact(value) {
         return "[redacted]".to_owned();
     }
     neutralize_github_references(&clean_text(value, max_chars))
 }
 
-fn safe_customer_inline_text(value: &str, max_chars: usize) -> String {
-    if contains_sensitive_report_text(value) {
+fn safe_customer_inline_text(
+    value: &str,
+    max_chars: usize,
+    policy: &PublicationRedactions,
+) -> String {
+    if policy.must_redact(value) {
         return "[redacted]".to_owned();
     }
     let value = neutralize_github_references(&clean_text(value, max_chars));
@@ -462,19 +844,36 @@ fn safe_customer_inline_text(value: &str, max_chars: usize) -> String {
     escaped
 }
 
-fn clean_code_text(value: &str, max_chars: usize) -> String {
-    if contains_sensitive_report_text(value) {
+fn clean_code_text(value: &str, max_chars: usize, policy: &PublicationRedactions) -> String {
+    if policy.must_redact(value) {
         return "redacted".to_owned();
     }
     neutralize_github_references(&clean_text(value, max_chars)).replace('`', "'")
 }
 
 fn neutralize_github_references(value: &str) -> String {
-    value
-        .replace('@', "@\u{200b}")
-        .replace('#', "#\u{200b}")
-        .replace("://", ":\u{200b}//")
-        .replace("www.", "www\u{200b}.")
+    neutralize_www(
+        &value
+            .replace('@', "@\u{200b}")
+            .replace('#', "#\u{200b}")
+            .replace("://", ":\u{200b}//"),
+    )
+}
+
+fn neutralize_www(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    let mut rendered = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while let Some(relative) = lower[cursor..].find("www.") {
+        let start = cursor + relative;
+        let dot = start + 3;
+        rendered.push_str(&value[cursor..dot]);
+        rendered.push('\u{200b}');
+        rendered.push('.');
+        cursor = dot + 1;
+    }
+    rendered.push_str(&value[cursor..]);
+    rendered
 }
 
 fn render_fenced_detail(
@@ -691,7 +1090,7 @@ mod tests {
             "token Zx8Qp2LmVn4TbW9yRc6HdKe1JgAo5UfS",
         ] {
             assert!(
-                contains_sensitive_report_text(secret),
+                must_redact_before_publishing(secret),
                 "expected redaction for: {secret}"
             );
         }
@@ -709,10 +1108,120 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ] {
             assert!(
-                !contains_sensitive_report_text(benign),
+                !must_redact_before_publishing(benign),
                 "unexpected redaction for: {benign}"
             );
         }
+    }
+
+    #[test]
+    fn publication_shape_detection_covers_credential_charsets_without_case_bias() {
+        for secret in [
+            "mfrggzdfmztwq2lknnwg23tpobyxg43u",
+            "MFRGGZDFMZTWQ2LKNNWG23TPOBYXG43U",
+            "Zx8Qp2LmVn4TbW9yRc6HdKe1JgAo5UfS",
+            "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            "3mJr7AoUXx2Wqd9NfT6YpK8sV4cH5BzE",
+            "eyJzdWIiOiIxMjM0NTY3ODkwIiwia2V5IjoiYWJjMTIzIn0",
+            "azbycxdwevfu1gthsirjqkplom2n+/=azby3cxd",
+            "mfrggzdf_mztwq2lk-nnwg23tp.obyxg43u",
+        ] {
+            assert!(
+                must_redact_before_publishing(secret),
+                "charset or case bypassed publication redaction: {secret}"
+            );
+        }
+    }
+
+    #[test]
+    fn publication_detection_unwraps_urls_json_encoding_and_quotes() {
+        let opaque = "Zx8Qp2LmVn4TbW9yRc6HdKe1JgAo5UfS";
+        for wrapped in [
+            opaque.to_owned(),
+            "https://user:short@host.test/resource".to_owned(),
+            "https://short@host.test/resource".to_owned(),
+            "https://host.test/resource?AcCeSs_ToKeN=short".to_owned(),
+            format!("https://host.test/{opaque}"),
+            format!(r#"{{"result":"{opaque}"}}"#),
+            format!("value='{opaque}'"),
+            format!("```text\n{opaque}\n```"),
+            "af%5Flive%5Fnot%5Fa%5Freal%5Fsecret".to_owned(),
+            "token=short".to_owned(),
+            "YWZfbGl2ZV9ub3RfYV9yZWFsX3NlY3JldA==".to_owned(),
+        ] {
+            assert!(
+                must_redact_before_publishing(&wrapped),
+                "wrapper bypassed publication redaction: {wrapped}"
+            );
+        }
+    }
+
+    #[test]
+    fn publication_detection_joins_short_adjacent_segments() {
+        for split in [
+            "Zx8Qp2Lm Vn4TbW9y Rc6HdKe1 JgAo5UfS",
+            "Zx8Qp2Lm:Vn4TbW9y:Rc6HdKe1:JgAo5UfS",
+            "Zx8Qp2Lm\nVn4TbW9y\nRc6HdKe1\nJgAo5UfS",
+        ] {
+            assert!(
+                must_redact_before_publishing(split),
+                "separator bypassed publication redaction: {split:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_publication_joins_splits_across_fields_and_findings() {
+        let first = "Zx8Qp2LmVn4TbW9y";
+        let second = "Rc6HdKe1JgAo5UfS";
+        let mut data = template();
+        data.findings = vec![
+            IssueFindingRollup {
+                kind: "defect".to_owned(),
+                topic: "first".to_owned(),
+                count: 1,
+                detail_count: 1,
+                details: vec![first.to_owned()],
+            },
+            IssueFindingRollup {
+                kind: "defect".to_owned(),
+                topic: "second".to_owned(),
+                count: 1,
+                detail_count: 1,
+                details: vec![second.to_owned()],
+            },
+        ];
+
+        let body = render_issue_body(&data);
+        assert!(!body.contains(first));
+        assert!(!body.contains(second));
+        assert!(body.contains("sensitive detail(s) omitted"));
+    }
+
+    #[test]
+    fn publication_shape_threshold_is_explicit_and_homoglyph_labels_do_not_bypass_it() {
+        let at_threshold = "Zx8Qp2LmVn4TbW9yRc6HdKe1JgAo5UfS";
+        assert_eq!(at_threshold.len(), 32);
+        assert!(!must_redact_before_publishing(&at_threshold[..31]));
+        assert!(must_redact_before_publishing(at_threshold));
+        assert!(must_redact_before_publishing(&format!(
+            "tоken {at_threshold}"
+        )));
+    }
+
+    #[test]
+    fn ingest_admits_uuid_while_issue_publication_redacts_it() {
+        let uuid = "123e4567-e89b-12d3-a456-426614174000";
+        assert!(
+            !contains_sensitive_report_text(uuid),
+            "an opaque identifier is not enough to reject a whole report"
+        );
+
+        let mut data = template();
+        data.explanation = format!("Request {uuid} failed after retry");
+        let body = render_issue_body(&data);
+        assert!(!body.contains(uuid));
+        assert!(body.contains("[redacted]"));
     }
 
     #[test]
@@ -809,6 +1318,10 @@ mod tests {
         assert!(!summary.contains("https://"));
         assert_eq!(body.matches("```").count(), 4);
         assert!(body.contains("```text"));
+        assert_eq!(
+            neutralize_github_references("WWW.example.test WwW.example.test"),
+            "WWW\u{200b}.example.test WwW\u{200b}.example.test"
+        );
     }
 
     #[test]
