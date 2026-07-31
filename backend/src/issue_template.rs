@@ -405,12 +405,21 @@ fn cap_body(mut body: String, backlink: &str) -> String {
     let suffix = format!(
         "\n\n… and additional content was omitted.\n\n[View this feedback group in Epode]({backlink})"
     );
-    let prefix_limit = GITHUB_BODY_LIMIT.saturating_sub(suffix.len());
+    // Reserve room for a closing fence as well: customer text is rendered
+    // inside ```text blocks, so a cut can land inside an open one.
+    let fence_close = "\n```";
+    let prefix_limit = GITHUB_BODY_LIMIT.saturating_sub(suffix.len() + fence_close.len());
     let mut boundary = prefix_limit.min(body.len());
     while !body.is_char_boundary(boundary) {
         boundary = boundary.saturating_sub(1);
     }
     body.truncate(boundary);
+    // An odd number of fences means the truncation landed inside a block; close
+    // it so the omission notice and the backlink render as text and a clickable
+    // link rather than as more code.
+    if body.matches("```").count() % 2 == 1 {
+        body.push_str(fence_close);
+    }
     body.push_str(&suffix);
     body
 }
@@ -518,6 +527,28 @@ mod tests {
         assert!(body.len() <= GITHUB_BODY_LIMIT);
         assert!(body.contains("… and 1975 more finding groups."));
         assert!(body.contains("… and 3 more detail(s)."));
+    }
+
+    #[test]
+    fn capped_body_closes_open_fences_so_the_backlink_stays_clickable() {
+        // A cut inside a ```text block would otherwise render the omission
+        // notice and the backlink as code instead of a link.
+        let open_fence_body = format!("intro\n\n```text\n{}\n", "x".repeat(GITHUB_BODY_LIMIT));
+        let capped = cap_body(
+            open_fence_body,
+            "https://app.example/?view=feedback&group=abc",
+        );
+
+        assert!(capped.len() <= GITHUB_BODY_LIMIT);
+        assert_eq!(
+            capped.matches("```").count() % 2,
+            0,
+            "every fence opened in the capped body must also be closed"
+        );
+        assert!(capped.ends_with(
+            "[View this feedback group in Epode](https://app.example/?view=feedback&group=abc)"
+        ));
+        assert!(capped.contains("… and additional content was omitted."));
     }
 
     #[test]
