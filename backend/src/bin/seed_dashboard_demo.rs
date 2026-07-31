@@ -6,6 +6,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
+    str::FromStr,
     time::Duration as StdDuration,
 };
 
@@ -13,7 +14,7 @@ use anyhow::{Context, ensure};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
+use sqlx::{PgPool, Postgres, Transaction, postgres::PgConnectOptions, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 const SCENARIO_JSON: &str = include_str!("../../seed/dashboard-demo.json");
@@ -226,12 +227,32 @@ fn ensure_local_database(database_url: &str) -> anyhow::Result<()> {
         "dashboard demo seeding is disabled in production"
     );
     ensure!(
-        database_url.contains("@localhost")
-            || database_url.contains("@127.0.0.1")
-            || database_url.contains("@[::1]"),
+        is_loopback_database_url(database_url),
         "dashboard demo seeding requires a loopback DATABASE_URL"
     );
     Ok(())
+}
+
+fn is_loopback_database_url(database_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(database_url) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "postgres" | "postgresql") {
+        return false;
+    }
+
+    let Some(authority_host) = url.host_str() else {
+        return false;
+    };
+    let Ok(options) = PgConnectOptions::from_str(database_url) else {
+        return false;
+    };
+
+    is_loopback_host(authority_host) && is_loopback_host(options.get_host())
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1")
 }
 
 fn parse_scenario() -> anyhow::Result<Scenario> {
@@ -1125,9 +1146,34 @@ mod tests {
 
     #[test]
     fn seeding_guard_accepts_only_loopback_database_urls() {
-        assert!(ensure_local_database("postgres://user:pass@localhost:5432/db").is_ok());
-        assert!(ensure_local_database("postgres://user:pass@127.0.0.1:5432/db").is_ok());
-        assert!(ensure_local_database("postgres://user:pass@db.internal:5432/db").is_err());
+        for database_url in [
+            "postgres://user:pass@localhost:5432/db",
+            "postgresql://localhost/db",
+            "postgres://user:pass@127.0.0.1:5432/db",
+            "postgres://user:pass@[::1]:5432/db",
+        ] {
+            assert!(
+                is_loopback_database_url(database_url),
+                "expected {database_url:?} to be accepted"
+            );
+        }
+
+        for database_url in [
+            "postgres://user:pass@localhost.example.com:5432/db",
+            "postgres://user:pass@127.0.0.1.example.com:5432/db",
+            "postgres://user:pass@db.internal:5432/path/@localhost",
+            "postgres://user:pass@db.internal:5432/db?host=@127.0.0.1",
+            "postgres:///db?host=@localhost",
+            "postgres://user:pass@localhost:5432/db?host=db.internal",
+            "postgres://user:pass@localhost:5432/db?hostaddr=203.0.113.10",
+            "https://user:pass@localhost:5432/db",
+            "not a database URL @localhost",
+        ] {
+            assert!(
+                !is_loopback_database_url(database_url),
+                "expected {database_url:?} to be rejected"
+            );
+        }
     }
 
     #[test]
