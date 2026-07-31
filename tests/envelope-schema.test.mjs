@@ -20,6 +20,8 @@ const submit = {
   reportSchema: {
     required: ["summary"],
     optional: ["impact", "confidence", "findings", "workaround"],
+    summaryMinLength: 8,
+    summaryMaxLength: 700,
     impacts: ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"],
     findingKinds: ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"],
     findingSeverities: ["minor", "major", "blocking"],
@@ -27,8 +29,12 @@ const submit = {
     findingRequired: ["kind", "topic", "detail"],
     findingOptional: ["severity"],
     findingTopicFormat: "lowercase_slug",
+    findingDetailMinLength: 3,
+    findingDetailMaxLength: 350,
     workaroundRequired: ["used"],
     workaroundOptional: ["detail"],
+    workaroundDetailMinLength: 3,
+    workaroundDetailMaxLength: 350,
     maxFindings: 8,
   },
 };
@@ -159,6 +165,16 @@ test("v1 schema accepts every envelope stage emitted by current SDKs", () => {
   const readyWithoutManagementHandle = structuredClone(validEnvelopes.readyAfterAskOnce);
   delete readyWithoutManagementHandle.manageConsent;
   assertValid(readyWithoutManagementHandle, "ready after Ask once without management handle");
+
+  const readyViaProtocolTool = {
+    ...validEnvelopes.readyAfterAskOnce,
+    reliability: "protocol_tool",
+  };
+  assertValid(readyViaProtocolTool, "ready after Ask once via the MCP protocol tool");
+  assertInvalid(
+    { ...validEnvelopes.neverAsk, reliability: "deterministic" },
+    "unknown reliability value",
+  );
 });
 
 test("v1 schema makes submit and requiredAction mutually exclusive by stage", () => {

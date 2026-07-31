@@ -14,7 +14,7 @@
     "consentRequired": { "type": "boolean" },
     "consentPolicy": { "enum": ["none", "once", "always"] },
     "consentManagedBy": { "const": "epode" },
-    "reliability": { "const": "best_effort_without_agent_adapter" },
+    "reliability": { "enum": ["best_effort_without_agent_adapter", "protocol_tool"] },
     "when": { "enum": ["after_experience_known_before_final_response", "after_experience_known_and_consent_resolved", "after_experience_known_and_explicit_user_approval", "only_after_explicit_user_request"] },
     "instruction": { "type": "string", "minLength": 1, "maxLength": 2400 },
     "requiredAction": {
@@ -77,6 +77,8 @@
           "properties": {
             "required": { "const": ["summary"] },
             "optional": { "const": ["impact", "confidence", "findings", "workaround"] },
+            "summaryMinLength": { "const": 8 },
+            "summaryMaxLength": { "const": 700 },
             "impacts": { "const": ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"] },
             "findingKinds": { "const": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"] },
             "findingSeverities": { "const": ["minor", "major", "blocking"] },
@@ -84,8 +86,12 @@
             "findingRequired": { "const": ["kind", "topic", "detail"] },
             "findingOptional": { "const": ["severity"] },
             "findingTopicFormat": { "const": "lowercase_slug" },
+            "findingDetailMinLength": { "const": 3 },
+            "findingDetailMaxLength": { "const": 350 },
             "workaroundRequired": { "const": ["used"] },
             "workaroundOptional": { "const": ["detail"] },
+            "workaroundDetailMinLength": { "const": 3 },
+            "workaroundDetailMaxLength": { "const": 350 },
             "maxFindings": { "const": 8 }
           }
         }

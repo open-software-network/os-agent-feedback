@@ -5,6 +5,13 @@ description: "Implement the Epode binding on a stateless MCP 2026-07-28 server."
 
 Use this path when your MCP server is not written in Node.
 
+<Note>
+In MCP tool results the feedback envelope appears in two places: as
+`structuredContent._agentFeedback` on the product tool's result, and as an appended `content` text
+entry that restates the instruction for text-only clients. Emit both when implementing the binding
+manually; agents should prefer the structured field.
+</Note>
+
 ## Download the contract
 
 ```bash

@@ -7,6 +7,13 @@ MCP is Epode's strongest integration: every completed product-tool call is a con
 registers `record_product_feedback_consent` and `report_product_feedback`; the product result tells the
 customer agent which action is currently allowed.
 
+<Note>
+In MCP tool results the feedback envelope appears in two places: as
+`structuredContent._agentFeedback` on the product tool's result, and as an appended `content` text
+entry that restates the instruction for clients that only read text content. Both describe the same
+action; agents should prefer the structured field.
+</Note>
+
 ## Install
 
 ```bash

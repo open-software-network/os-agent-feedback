@@ -3855,11 +3855,32 @@ pub(crate) async fn inspect_feedback_capability(
     })
 }
 
+#[derive(Debug)]
+pub(crate) struct ConsentDecisionOutcome {
+    /// The standing decision after this call, which may be a prior decision.
+    pub(crate) decision: String,
+    pub(crate) configured_mode: String,
+    pub(crate) expires_at: i64,
+    /// When the standing decision was made.
+    pub(crate) decided_at: DateTime<Utc>,
+    /// True when this call recorded the standing decision, false when a prior
+    /// decision already stood.
+    pub(crate) changed: bool,
+    /// True when the capability's interaction verifiably came through the MCP
+    /// protocol-tool path (server-side telemetry confirmed the interaction
+    /// with `surface = 'mcp'` and `confirmationMethod = 'mcp'`).
+    pub(crate) protocol_tool: bool,
+    /// The prior durable decision when this call flipped it (for example
+    /// "declined" when a declined subject was flipped to approved through a
+    /// manageConsent handle). None when nothing flipped.
+    pub(crate) flipped_from: Option<String>,
+}
+
 pub(crate) async fn record_feedback_consent_decision(
     pool: &PgPool,
     capability: &str,
     input: ConsentDecisionInput,
-) -> Result<(String, String, i64), ApiError> {
+) -> Result<ConsentDecisionOutcome, ApiError> {
     if !["approved", "declined"].contains(&input.decision.as_str()) {
         return Err(ApiError::bad_request(
             "decision must be approved or declined",
@@ -3893,12 +3914,12 @@ pub(crate) async fn record_feedback_consent_decision(
     }
 
     let mut tx = pool.begin().await?;
-    let inserted_decision = sqlx::query_scalar::<_, String>(
+    let inserted = sqlx::query_as::<_, (String, DateTime<Utc>)>(
         r"INSERT INTO feedback_consent_interactions
         (interaction_id, environment_id, subject, decision)
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (interaction_id) DO NOTHING
-        RETURNING decision",
+        RETURNING decision, decided_at",
     )
     .bind(claims.i)
     .bind(key.2)
@@ -3906,19 +3927,27 @@ pub(crate) async fn record_feedback_consent_decision(
     .bind(&input.decision)
     .fetch_optional(&mut *tx)
     .await?;
-    let decision = if inserted_decision.is_some() {
+    let (decision, decided_at, changed, flipped_from) = if let Some((_, interaction_decided_at)) =
+        inserted
+    {
         if key.1 == "ask_once"
             && let Some(subject) = claims.s.as_deref()
         {
-            let applied_decision = sqlx::query_scalar::<_, String>(
+            let applied = sqlx::query_as::<_, (String, DateTime<Utc>, Option<String>)>(
                 r"INSERT INTO feedback_consent_subjects (environment_id, subject, decision, decided_at)
                 VALUES ($1, $2, $3, TO_TIMESTAMP($4))
                 ON CONFLICT (environment_id, subject) DO UPDATE SET
                   decision = EXCLUDED.decision,
                   decided_at = EXCLUDED.decided_at,
+                  flipped_from = CASE
+                    WHEN feedback_consent_subjects.decision IS DISTINCT FROM EXCLUDED.decision
+                      THEN feedback_consent_subjects.decision
+                    ELSE feedback_consent_subjects.flipped_from
+                  END,
                   updated_at = NOW()
                 WHERE feedback_consent_subjects.decided_at < EXCLUDED.decided_at
-                RETURNING decision",
+                RETURNING decision, decided_at,
+                  CASE WHEN xmax <> 0 THEN flipped_from END AS flip_recorded",
             )
             .bind(key.2)
             .bind(subject)
@@ -3926,16 +3955,26 @@ pub(crate) async fn record_feedback_consent_decision(
             .bind(claims.iat)
             .fetch_optional(&mut *tx)
             .await?;
-            let durable_decision = if let Some(decision) = applied_decision {
-                decision
+            let changed = applied.is_some();
+            let (durable_decision, durable_decided_at, flipped_from) = if let Some((
+                decision,
+                decided_at,
+                flip,
+            )) = applied
+            {
+                // A flip is only reported when this call updated an
+                // existing row and left a different prior decision behind.
+                let flip = flip.filter(|prior| prior != &decision);
+                (decision, decided_at, flip)
             } else {
-                sqlx::query_scalar::<_, String>(
-                    "SELECT decision FROM feedback_consent_subjects WHERE environment_id = $1 AND subject = $2",
-                )
-                .bind(key.2)
-                .bind(subject)
-                .fetch_one(&mut *tx)
-                .await?
+                let (decision, decided_at) = sqlx::query_as::<_, (String, DateTime<Utc>)>(
+                        "SELECT decision, decided_at FROM feedback_consent_subjects WHERE environment_id = $1 AND subject = $2",
+                    )
+                    .bind(key.2)
+                    .bind(subject)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                (decision, decided_at, None)
             };
             sqlx::query(
                 "UPDATE feedback_consent_interactions SET decision = $3 WHERE interaction_id = $1 AND environment_id = $2",
@@ -3945,22 +3984,48 @@ pub(crate) async fn record_feedback_consent_decision(
             .bind(&durable_decision)
             .execute(&mut *tx)
             .await?;
-            durable_decision
+            (durable_decision, durable_decided_at, changed, flipped_from)
         } else {
-            input.decision.clone()
+            (input.decision.clone(), interaction_decided_at, true, None)
         }
     } else {
-        sqlx::query_scalar::<_, String>(
-            "SELECT decision FROM feedback_consent_interactions WHERE interaction_id = $1 AND environment_id = $2",
+        let (decision, decided_at) = sqlx::query_as::<_, (String, DateTime<Utc>)>(
+            "SELECT decision, decided_at FROM feedback_consent_interactions WHERE interaction_id = $1 AND environment_id = $2",
         )
         .bind(claims.i)
         .bind(key.2)
         .fetch_optional(&mut *tx)
         .await?
-        .ok_or_else(|| ApiError::conflict("interactionId belongs to another product environment"))?
+        .ok_or_else(|| {
+            ApiError::conflict("interactionId belongs to another product environment")
+        })?;
+        (decision, decided_at, false, None)
     };
+    // The protocol-tool path is only claimed when server-side telemetry
+    // confirmed this interaction as an MCP tool call. Absence of telemetry is
+    // indistinguishable from a plain HTTP interaction, so this stays false for
+    // MCP interactions whose telemetry has not arrived yet.
+    let protocol_tool = sqlx::query_scalar::<_, bool>(
+        r"SELECT EXISTS (
+          SELECT 1 FROM interactions_v2
+          WHERE id = $1 AND environment_id = $2
+            AND surface = 'mcp' AND confirmation_method = 'mcp'
+        )",
+    )
+    .bind(claims.i)
+    .bind(key.2)
+    .fetch_one(&mut *tx)
+    .await?;
     tx.commit().await?;
-    Ok((decision, key.1, claims.exp))
+    Ok(ConsentDecisionOutcome {
+        decision,
+        configured_mode: key.1,
+        expires_at: claims.exp,
+        decided_at,
+        changed,
+        protocol_tool,
+        flipped_from,
+    })
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -7795,7 +7860,7 @@ mod product_tests {
                 .status
                     == StatusCode::FORBIDDEN
             );
-            let (decision, mode, _) = record_feedback_consent_decision(
+            let once_outcome = record_feedback_consent_decision(
                 &pool,
                 &once_capability,
                 ConsentDecisionInput {
@@ -7804,7 +7869,12 @@ mod product_tests {
             )
             .await
             .map_err(test_error)?;
-            anyhow::ensure!(decision == "approved" && mode == "ask_once");
+            anyhow::ensure!(
+                once_outcome.decision == "approved"
+                    && once_outcome.configured_mode == "ask_once"
+                    && once_outcome.changed
+                    && !once_outcome.protocol_tool
+            );
             submit_product_feedback(
                 &pool,
                 &once_capability,

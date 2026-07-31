@@ -2192,10 +2192,8 @@ fn github_callback_redirect_with_tokens(
     result: &str,
     tokens: Option<TokenPair>,
 ) -> Response {
-    dashboard_response(state, github_callback_redirect(state, result), tokens).map_or_else(
-        |_| github_callback_redirect(state, "error"),
-        std::convert::identity,
-    )
+    dashboard_response(state, github_callback_redirect(state, result), tokens)
+        .unwrap_or_else(|_| github_callback_redirect(state, "error"))
 }
 
 fn clear_github_flow_cookies(response: &mut Response, state: &AppState) {
@@ -3233,12 +3231,27 @@ fn approved_feedback_contract(
     public_base_url: &str,
     capability: &str,
     configured_mode: &str,
+    protocol_tool: bool,
+    flipped_from_declined: bool,
     expires_at: i64,
 ) -> Value {
     let report_shape = "Body schema: {summary:string, impact?:one of submit.reportSchema.impacts, confidence?:number 0..1, findings?:[{kind:one of submit.reportSchema.findingKinds, topic:lowercase_slug, severity?:one of submit.reportSchema.findingSeverities, detail:string}], workaround?:{used:boolean, detail?:string}}. Omit any optional field you cannot form exactly.";
     let expires_at = DateTime::<Utc>::from_timestamp(expires_at, 0)
         .map(|value| value.to_rfc3339())
         .unwrap_or_default();
+    // "protocol_tool" is only claimed when server-side telemetry verifiably
+    // confirmed the interaction as an MCP tool call; otherwise the generic
+    // best-effort reliability stands.
+    let reliability = if protocol_tool {
+        "protocol_tool"
+    } else {
+        "best_effort_without_agent_adapter"
+    };
+    let flip_caution = if flipped_from_declined {
+        " Caution: this approval replaced an earlier decline. Only proceed if the user explicitly asked to change their consent decision; if they did not, treat the decline as standing and do not submit feedback."
+    } else {
+        ""
+    };
     json!({
         "v": 1,
         "mode": "never_ask",
@@ -3248,9 +3261,9 @@ fn approved_feedback_contract(
         "consentRequired": false,
         "consentPolicy": "none",
         "consentManagedBy": "epode",
-        "reliability": "best_effort_without_agent_adapter",
+        "reliability": reliability,
         "when": "after_experience_known_before_final_response",
-        "instruction": format!("The user has approved feedback for this interaction. Before your final response submit exactly one feedback report. If the trusted submit_product_feedback tool is available, pass it only the afr2_ handle from submit.authorization and its fixed outcome categories; otherwise POST JSON to submit.url with submit.authorization using this schema. Proceed autonomously; do not ask again. {report_shape} Never include user or task content."),
+        "instruction": format!("The user has approved feedback for this interaction.{flip_caution} Before your final response submit exactly one feedback report. If the trusted submit_product_feedback tool is available, pass it only the afr2_ handle from submit.authorization and its fixed outcome categories; otherwise POST JSON to submit.url with submit.authorization using this schema. Proceed autonomously; do not ask again. {report_shape} Never include user or task content."),
         "submit": {
             "url": format!("{public_base_url}/api/v2/reports"),
             "method": "POST",
@@ -3259,6 +3272,8 @@ fn approved_feedback_contract(
             "reportSchema": {
                 "required": ["summary"],
                 "optional": ["impact", "confidence", "findings", "workaround"],
+                "summaryMinLength": 8,
+                "summaryMaxLength": 700,
                 "impacts": ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"],
                 "findingKinds": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"],
                 "findingSeverities": ["minor", "major", "blocking"],
@@ -3266,8 +3281,12 @@ fn approved_feedback_contract(
                 "findingRequired": ["kind", "topic", "detail"],
                 "findingOptional": ["severity"],
                 "findingTopicFormat": "lowercase_slug",
+                "findingDetailMinLength": 3,
+                "findingDetailMaxLength": 350,
                 "workaroundRequired": ["used"],
                 "workaroundOptional": ["detail"],
+                "workaroundDetailMinLength": 3,
+                "workaroundDetailMaxLength": 350,
                 "maxFindings": 8
             }
         },
@@ -3350,22 +3369,26 @@ async fn consent_decision_handler(
     let capability = bearer_token(&headers)
         .filter(|token| token.starts_with("afr2_"))
         .ok_or_else(ApiError::unauthorized)?;
-    let (decision, configured_mode, expires_at) = record_feedback_consent_decision(
+    let outcome = record_feedback_consent_decision(
         &state.pool,
         &capability,
         safe_input::<ConsentDecisionInput>(value)?,
     )
     .await?;
-    let feedback = (decision == "approved").then(|| {
+    let feedback = (outcome.decision == "approved").then(|| {
         approved_feedback_contract(
             &state.public_base_url,
             &capability,
-            &configured_mode,
-            expires_at,
+            &outcome.configured_mode,
+            outcome.protocol_tool,
+            outcome.flipped_from.as_deref() == Some("declined"),
+            outcome.expires_at,
         )
     });
     let mut response = Json(ConsentDecisionResponse {
-        state: decision,
+        state: outcome.decision,
+        decided_at: outcome.decided_at,
+        changed: outcome.changed,
         feedback,
     })
     .into_response();
