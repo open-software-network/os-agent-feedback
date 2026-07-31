@@ -4,6 +4,7 @@ export const DASHBOARD_NAV_VIEWS = [
   "home",
   "feedback",
   "sessions",
+  "connectors",
   "setup",
   "policy",
   "team",

@@ -13,6 +13,7 @@ import {
 } from "@/components/dashboard/view-primitives";
 import { DashboardHeader } from "@/components/dashboard-header";
 import { Button } from "@/components/ui/button";
+import { ConnectorsView } from "@/components/views/connectors/connectors-view";
 import { FeedbackView } from "@/components/views/feedback/feedback-view";
 import { HomeView } from "@/components/views/home/home-view";
 import { InteractionDetail } from "@/components/views/interactions/interaction-detail";
@@ -65,6 +66,24 @@ export function DashboardApp() {
     const url = new URL(window.location.href);
     historyMode.current = "replace";
     setNotice(null);
+    const githubResult = url.searchParams.get("github");
+    if (githubResult) {
+      url.searchParams.delete("github");
+      window.history.replaceState({}, "", url);
+      if (githubResult === "connected") {
+        showNotice("GitHub connected successfully.");
+      } else if (githubResult === "conflict") {
+        showNotice(
+          "That GitHub installation is already connected to another workspace.",
+          6_000,
+          "error",
+        );
+      } else if (githubResult === "error") {
+        showNotice("Could not connect GitHub. Try again.", 6_000, "error");
+      } else {
+        showNotice("Could not connect GitHub. Try again.", 6_000, "error");
+      }
+    }
     if (url.searchParams.get("invite") === "invalid") {
       url.searchParams.delete("invite");
       window.history.replaceState({}, "", url);
@@ -123,7 +142,10 @@ export function DashboardApp() {
     } catch {
       // Storage is optional; the query string still retains the active team.
     }
-    if (!isEditor(data.currentRole) && (view === "setup" || view === "policy")) {
+    if (
+      !isEditor(data.currentRole) &&
+      (view === "connectors" || view === "setup" || view === "policy")
+    ) {
       setView("home");
     }
     if (data.currentEnvironment && secrets?.environmentId !== data.currentEnvironment.id) {
@@ -322,7 +344,7 @@ export function DashboardApp() {
         <aside className="border-b p-4 md:min-h-[calc(100vh-3.5rem)] md:border-r md:border-b-0">
           <nav aria-label="Dashboard" className="flex flex-wrap gap-1 md:flex-col">
             {DASHBOARD_NAV_VIEWS.filter(
-              (item) => editor || (item !== "setup" && item !== "policy"),
+              (item) => editor || (item !== "connectors" && item !== "setup" && item !== "policy"),
             ).map((item) => (
               <Button
                 key={item}
@@ -403,6 +425,12 @@ export function DashboardApp() {
               }))
             }
           />
+        );
+      case "connectors":
+        return isEditor(currentData.currentRole) ? (
+          <ConnectorsView data={currentData} />
+        ) : (
+          <HomeView data={currentData} openFeedback={openFeedback} refresh={refresh} />
         );
       case "setup":
         return (
