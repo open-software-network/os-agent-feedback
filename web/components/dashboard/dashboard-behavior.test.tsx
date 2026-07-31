@@ -12,6 +12,7 @@ import { PolicyView } from "@/components/views/policy/policy-view";
 import { SessionsView } from "@/components/views/sessions/sessions-view";
 import { SetupView } from "@/components/views/setup/setup-view";
 import { TeamView } from "@/components/views/team/team-view";
+import type { ProductReportGroup } from "@/lib/api/groups";
 
 describe("dashboard view behavior", () => {
   beforeEach(() => {
@@ -106,8 +107,9 @@ describe("dashboard view behavior", () => {
     renderWithQuery(<ConnectorsView data={dashboardFixture()} />);
 
     expect(await screen.findByText("No GitHub installations")).toBeVisible();
-    expect(screen.getAllByRole("button", { name: "Planned", hidden: true })).toHaveLength(3);
-    for (const button of screen.getAllByRole("button", { name: "Planned", hidden: true })) {
+    for (const connector of ["Slack", "Linear", "OS Platform"]) {
+      const button = screen.getByRole("button", { name: `${connector} planned` });
+      expect(button).toBeDisabled();
       expect(button).toHaveAttribute("aria-disabled", "true");
     }
   });
@@ -332,7 +334,7 @@ describe("dashboard view behavior", () => {
     renderWithQuery(<ConnectorsView data={dashboardFixture({ currentRole: "member" })} />);
 
     expect(await screen.findByText("No GitHub installations")).toBeVisible();
-    const configure = screen.getByRole("button", { name: "Configure repository", hidden: true });
+    const configure = screen.getByRole("button", { name: "Configure repository" });
     expect(configure).toBeDisabled();
     expect(configure).toHaveAttribute("aria-disabled", "true");
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/github-repo"))).toBe(
@@ -667,14 +669,43 @@ describe("dashboard view behavior", () => {
     );
   });
 
-  it("keeps the Feedback list usable when one report has malformed findings", () => {
-    const data = dashboardFixture({ currentRole: "member" });
+  it("renders editor feedback groups alongside the existing report list", async () => {
+    const data = dashboardFixture();
+    const group = reportGroup();
+    const fetchMock = feedbackGroupFetch(data, [group]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWithQuery(
+      <FeedbackView
+        data={data}
+        selectedReportId={null}
+        selectReport={vi.fn()}
+        openInteraction={vi.fn()}
+        openSession={vi.fn()}
+        loadMore={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        setNotice={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText(group.groupKey)).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Feedback groups" })).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Search results omitted the newest document" }),
+    ).toBeVisible();
+    expect(screen.getByLabelText("Search feedback")).toBeVisible();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the Feedback list usable when one report has malformed findings", async () => {
+    const data = dashboardFixture();
     const malformedReport = {
       ...data.reports[0],
       id: "88888888-8888-4888-8888-888888888888",
       summary: "Legacy report with malformed findings",
       findings: null as never,
     };
+    vi.stubGlobal("fetch", feedbackGroupFetch(data));
 
     renderWithQuery(
       <FeedbackView
@@ -695,15 +726,19 @@ describe("dashboard view behavior", () => {
     expect(
       screen.getByRole("button", { name: "Search results omitted the newest document" }),
     ).toBeVisible();
+    expect(
+      await screen.findByText("No feedback groups are available for this product."),
+    ).toBeVisible();
   });
 
-  it("filters feedback by the displayed received time", () => {
-    const data = dashboardFixture({ currentRole: "member" });
+  it("filters feedback by the displayed received time", async () => {
+    const data = dashboardFixture();
     const report = {
       ...data.reports[0],
       createdAt: new Date().toISOString(),
       occurredAt: "2020-01-01T00:00:00Z",
     };
+    vi.stubGlobal("fetch", feedbackGroupFetch(data));
 
     renderWithQuery(
       <FeedbackView
@@ -718,6 +753,9 @@ describe("dashboard view behavior", () => {
       />,
     );
 
+    expect(
+      await screen.findByText("No feedback groups are available for this product."),
+    ).toBeVisible();
     fireEvent.change(screen.getByLabelText("Time range"), { target: { value: "7d" } });
     expect(
       screen.getByRole("button", { name: "Search results omitted the newest document" }),
@@ -806,6 +844,33 @@ function renderWithQuery(element: ReactElement) {
   });
   const rendered = render(<QueryClientProvider client={client}>{element}</QueryClientProvider>);
   return { ...rendered, client };
+}
+
+function feedbackGroupFetch(
+  data: ReturnType<typeof dashboardFixture>,
+  groups: ProductReportGroup[] = [],
+) {
+  const productId = data.currentProduct?.id ?? "";
+  return vi.fn().mockImplementation((input: RequestInfo | URL) => {
+    const path = String(input);
+    if (path === `/api/products/${productId}/github-repo`) {
+      return Promise.resolve(json(null));
+    }
+    if (path === `/api/products/${productId}/groups?limit=50&offset=0`) {
+      return Promise.resolve(json({ groups, hasMore: false, limit: 50, offset: 0 }));
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  });
+}
+
+function reportGroup(): ProductReportGroup {
+  return {
+    groupKey: "search:http:bug:freshness:2xx",
+    explanation: "Grouped by operation, surface, finding, and status class.",
+    reportCount: 3,
+    latestOccurredAt: "2026-07-30T12:00:00Z",
+    githubIssue: null,
+  };
 }
 
 function json(body: unknown, status = 200): Response {

@@ -88,7 +88,13 @@ export function ConnectorsView({ data }: Pick<ViewBaseProps, "data">) {
                 <h2 className="font-medium">{connector}</h2>
                 <p className="text-sm text-muted-foreground">Planned</p>
               </div>
-              <Button type="button" variant="outline" disabled aria-disabled="true">
+              <Button
+                type="button"
+                variant="outline"
+                disabled
+                aria-disabled="true"
+                aria-label={`${connector} planned`}
+              >
                 Planned
               </Button>
             </div>
