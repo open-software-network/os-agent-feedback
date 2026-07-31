@@ -3870,6 +3870,10 @@ pub(crate) struct ConsentDecisionOutcome {
     /// protocol-tool path (server-side telemetry confirmed the interaction
     /// with `surface = 'mcp'` and `confirmationMethod = 'mcp'`).
     pub(crate) protocol_tool: bool,
+    /// The prior durable decision when this call flipped it (for example
+    /// "declined" when a declined subject was flipped to approved through a
+    /// manageConsent handle). None when nothing flipped.
+    pub(crate) flipped_from: Option<String>,
 }
 
 pub(crate) async fn record_feedback_consent_decision(
@@ -3923,19 +3927,27 @@ pub(crate) async fn record_feedback_consent_decision(
     .bind(&input.decision)
     .fetch_optional(&mut *tx)
     .await?;
-    let (decision, decided_at, changed) = if let Some((_, interaction_decided_at)) = inserted {
+    let (decision, decided_at, changed, flipped_from) = if let Some((_, interaction_decided_at)) =
+        inserted
+    {
         if key.1 == "ask_once"
             && let Some(subject) = claims.s.as_deref()
         {
-            let applied = sqlx::query_as::<_, (String, DateTime<Utc>)>(
+            let applied = sqlx::query_as::<_, (String, DateTime<Utc>, Option<String>)>(
                 r"INSERT INTO feedback_consent_subjects (environment_id, subject, decision, decided_at)
                 VALUES ($1, $2, $3, TO_TIMESTAMP($4))
                 ON CONFLICT (environment_id, subject) DO UPDATE SET
                   decision = EXCLUDED.decision,
                   decided_at = EXCLUDED.decided_at,
+                  flipped_from = CASE
+                    WHEN feedback_consent_subjects.decision IS DISTINCT FROM EXCLUDED.decision
+                      THEN feedback_consent_subjects.decision
+                    ELSE feedback_consent_subjects.flipped_from
+                  END,
                   updated_at = NOW()
                 WHERE feedback_consent_subjects.decided_at < EXCLUDED.decided_at
-                RETURNING decision, decided_at",
+                RETURNING decision, decided_at,
+                  CASE WHEN xmax <> 0 THEN flipped_from END AS flip_recorded",
             )
             .bind(key.2)
             .bind(subject)
@@ -3944,16 +3956,25 @@ pub(crate) async fn record_feedback_consent_decision(
             .fetch_optional(&mut *tx)
             .await?;
             let changed = applied.is_some();
-            let (durable_decision, durable_decided_at) = if let Some(applied) = applied {
-                applied
+            let (durable_decision, durable_decided_at, flipped_from) = if let Some((
+                decision,
+                decided_at,
+                flip,
+            )) = applied
+            {
+                // A flip is only reported when this call updated an
+                // existing row and left a different prior decision behind.
+                let flip = flip.filter(|prior| prior != &decision);
+                (decision, decided_at, flip)
             } else {
-                sqlx::query_as::<_, (String, DateTime<Utc>)>(
-                    "SELECT decision, decided_at FROM feedback_consent_subjects WHERE environment_id = $1 AND subject = $2",
-                )
-                .bind(key.2)
-                .bind(subject)
-                .fetch_one(&mut *tx)
-                .await?
+                let (decision, decided_at) = sqlx::query_as::<_, (String, DateTime<Utc>)>(
+                        "SELECT decision, decided_at FROM feedback_consent_subjects WHERE environment_id = $1 AND subject = $2",
+                    )
+                    .bind(key.2)
+                    .bind(subject)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                (decision, decided_at, None)
             };
             sqlx::query(
                 "UPDATE feedback_consent_interactions SET decision = $3 WHERE interaction_id = $1 AND environment_id = $2",
@@ -3963,9 +3984,9 @@ pub(crate) async fn record_feedback_consent_decision(
             .bind(&durable_decision)
             .execute(&mut *tx)
             .await?;
-            (durable_decision, durable_decided_at, changed)
+            (durable_decision, durable_decided_at, changed, flipped_from)
         } else {
-            (input.decision.clone(), interaction_decided_at, true)
+            (input.decision.clone(), interaction_decided_at, true, None)
         }
     } else {
         let (decision, decided_at) = sqlx::query_as::<_, (String, DateTime<Utc>)>(
@@ -3978,7 +3999,7 @@ pub(crate) async fn record_feedback_consent_decision(
         .ok_or_else(|| {
             ApiError::conflict("interactionId belongs to another product environment")
         })?;
-        (decision, decided_at, false)
+        (decision, decided_at, false, None)
     };
     // The protocol-tool path is only claimed when server-side telemetry
     // confirmed this interaction as an MCP tool call. Absence of telemetry is
@@ -4003,6 +4024,7 @@ pub(crate) async fn record_feedback_consent_decision(
         decided_at,
         changed,
         protocol_tool,
+        flipped_from,
     })
 }
 

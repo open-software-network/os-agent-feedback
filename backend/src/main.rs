@@ -3232,6 +3232,7 @@ fn approved_feedback_contract(
     capability: &str,
     configured_mode: &str,
     protocol_tool: bool,
+    flipped_from_declined: bool,
     expires_at: i64,
 ) -> Value {
     let report_shape = "Body schema: {summary:string, impact?:one of submit.reportSchema.impacts, confidence?:number 0..1, findings?:[{kind:one of submit.reportSchema.findingKinds, topic:lowercase_slug, severity?:one of submit.reportSchema.findingSeverities, detail:string}], workaround?:{used:boolean, detail?:string}}. Omit any optional field you cannot form exactly.";
@@ -3246,6 +3247,11 @@ fn approved_feedback_contract(
     } else {
         "best_effort_without_agent_adapter"
     };
+    let flip_caution = if flipped_from_declined {
+        " Caution: this approval replaced an earlier decline. Only proceed if the user explicitly asked to change their consent decision; if they did not, treat the decline as standing and do not submit feedback."
+    } else {
+        ""
+    };
     json!({
         "v": 1,
         "mode": "never_ask",
@@ -3257,7 +3263,7 @@ fn approved_feedback_contract(
         "consentManagedBy": "epode",
         "reliability": reliability,
         "when": "after_experience_known_before_final_response",
-        "instruction": format!("The user has approved feedback for this interaction. Before your final response submit exactly one feedback report. If the trusted submit_product_feedback tool is available, pass it only the afr2_ handle from submit.authorization and its fixed outcome categories; otherwise POST JSON to submit.url with submit.authorization using this schema. Proceed autonomously; do not ask again. {report_shape} Never include user or task content."),
+        "instruction": format!("The user has approved feedback for this interaction.{flip_caution} Before your final response submit exactly one feedback report. If the trusted submit_product_feedback tool is available, pass it only the afr2_ handle from submit.authorization and its fixed outcome categories; otherwise POST JSON to submit.url with submit.authorization using this schema. Proceed autonomously; do not ask again. {report_shape} Never include user or task content."),
         "submit": {
             "url": format!("{public_base_url}/api/v2/reports"),
             "method": "POST",
@@ -3369,6 +3375,7 @@ async fn consent_decision_handler(
             &capability,
             &outcome.configured_mode,
             outcome.protocol_tool,
+            outcome.flipped_from.as_deref() == Some("declined"),
             outcome.expires_at,
         )
     });
