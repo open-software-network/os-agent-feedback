@@ -2614,17 +2614,23 @@ pub(crate) async fn assign_report_group(
 
 /// Groups every report that has no group yet.
 ///
-/// `max_batches` bounds the run: `None` walks the table to completion (the
-/// manual CLI path), while `Some(n)` stops after `n` batches and reports
-/// `exhausted = false`. Startup uses the bounded form so a large table cannot
-/// wedge boot — the next boot, or a manual rerun, continues from where it
-/// stopped, because the scan filters on `group_id IS NULL`.
+/// `max_batches` bounds the run: `None` walks the table to completion (both the
+/// manual CLI path and the detached startup task), while `Some(n)` stops after
+/// `n` batches and reports `exhausted = false` for callers that want a partial
+/// pass. Either way the scan filters on `group_id IS NULL`, so a run always
+/// resumes from wherever the last one stopped.
+///
+/// Between batches the task yields, so a long backfill running in the
+/// background cannot monopolise the connection pool ahead of request traffic.
 pub(crate) async fn backfill_report_groups(
     pool: &PgPool,
     grouper: &dyn ReportGrouper,
     max_batches: Option<u32>,
 ) -> Result<BackfillSummary, ApiError> {
     const BATCH_SIZE: i64 = 500;
+    /// Emit a progress line periodically so a long background run is
+    /// observable rather than silent until it finishes.
+    const PROGRESS_LOG_EVERY_BATCHES: u32 = 10;
 
     let mut summary = BackfillSummary::default();
     let mut cursor_created_at = None;
@@ -2713,6 +2719,18 @@ pub(crate) async fn backfill_report_groups(
         tx.commit().await?;
         cursor_created_at = Some(next_cursor.0);
         cursor_id = Some(next_cursor.1);
+
+        if batches_run.is_multiple_of(PROGRESS_LOG_EVERY_BATCHES) {
+            tracing::info!(
+                scanned = summary.scanned,
+                grouped = summary.grouped,
+                skipped = summary.skipped,
+                "report group backfill in progress"
+            );
+        }
+        // Hand the connection pool back to request traffic before the next
+        // batch: this loop can run for a long time on a large history.
+        tokio::task::yield_now().await;
     }
 
     Ok(summary)

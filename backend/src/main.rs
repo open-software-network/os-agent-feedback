@@ -97,12 +97,6 @@ struct AppState {
 }
 
 const TEAM_INVITE_COOKIE: &str = "af_team_invite";
-
-/// Batches the automatic startup backfill will run before deferring the rest to
-/// the next boot or a manual `--backfill-report-groups`. At 500 reports per
-/// batch this covers 10k reports, which keeps a cold deploy from stalling
-/// behind a large historical table.
-const STARTUP_BACKFILL_MAX_BATCHES: u32 = 20;
 const GITHUB_STATE_COOKIE: &str = "af_gh_state";
 const GITHUB_WORKSPACE_COOKIE: &str = "af_gh_ws";
 
@@ -302,44 +296,38 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Group any reports that predate grouping, so a normal deploy converges
-    // without an operator remembering to run the CLI. Bounded: a large table
-    // stops at the batch cap and resumes on the next boot (or via the
-    // unbounded `--backfill-report-groups`), so boot cannot wedge behind it.
-    // Already-grouped reports are excluded by the `group_id IS NULL` filter,
-    // which is what makes running this every boot cheap and idempotent.
-    match backfill_report_groups(
-        &pool,
-        &FingerprintGrouper,
-        Some(STARTUP_BACKFILL_MAX_BATCHES),
-    )
-    .await
-    {
-        Ok(summary) => {
-            if summary.scanned > 0 || !summary.exhausted {
-                tracing::info!(
-                    scanned = summary.scanned,
-                    grouped = summary.grouped,
-                    skipped = summary.skipped,
-                    skipped_findings = summary.skipped_findings,
-                    exhausted = summary.exhausted,
-                    "startup report group backfill completed"
-                );
+    // without an operator remembering to run the CLI. This runs to completion
+    // rather than under a total cap, because a deployment with more history
+    // than any cap would otherwise never finish grouping on its own.
+    //
+    // It is deliberately detached: boot and readiness never await it, so a
+    // large historical table cannot delay the listener or trip a healthcheck.
+    // Work stays bounded per step by the batch size and by a short yield
+    // between batches, so it cannot monopolise the connection pool. Reports
+    // already grouped are excluded by the `group_id IS NULL` filter, which is
+    // what makes running this on every boot cheap and idempotent.
+    let backfill_pool = pool.clone();
+    tokio::spawn(async move {
+        match backfill_report_groups(&backfill_pool, &FingerprintGrouper, None).await {
+            Ok(summary) => {
+                if summary.scanned > 0 {
+                    tracing::info!(
+                        scanned = summary.scanned,
+                        grouped = summary.grouped,
+                        skipped = summary.skipped,
+                        skipped_findings = summary.skipped_findings,
+                        "startup report group backfill completed"
+                    );
+                }
             }
-            if !summary.exhausted {
-                tracing::warn!(
-                    max_batches = STARTUP_BACKFILL_MAX_BATCHES,
-                    "startup report group backfill hit its batch cap; \
-                     rerun `--backfill-report-groups` to finish the remainder"
-                );
-            }
+            // Never escalate: the API is useful without grouping and the next
+            // boot retries from wherever this run stopped.
+            Err(error) => tracing::error!(
+                error = %error.message,
+                "startup report group backfill failed; continuing without it"
+            ),
         }
-        // Never block startup on grouping: the API is useful without it and the
-        // next boot retries.
-        Err(error) => tracing::error!(
-            error = %error.message,
-            "startup report group backfill failed; continuing without it"
-        ),
-    }
+    });
 
     let port = env::var("PORT")
         .ok()
