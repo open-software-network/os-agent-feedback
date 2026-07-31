@@ -253,25 +253,29 @@ test("every public docs page has a title and actionable description", async () =
 test("the downloadable protocol bundle contains only the current report contract", async () => {
   const bundle = new URL("../backend/public/agent-feedback-protocol-v1.zip", import.meta.url)
     .pathname;
-  const listing = execFileSync("unzip", ["-Z1", bundle], { encoding: "utf8" });
-  assert.doesNotMatch(listing, /outcome\.schema\.json/);
-  for (const required of [
+  const protocolFiles = [
     "README.md",
     "conformance.json",
+    "consent-decision.schema.json",
     "envelope.schema.json",
     "feedback-report.schema.json",
     "telemetry-batch.schema.json",
-  ]) {
-    assert.match(listing, new RegExp(`protocol/v1/${required.replaceAll(".", "\\.")}$`, "m"));
-  }
+  ];
+  const listing = execFileSync("unzip", ["-Z1", bundle], { encoding: "utf8" })
+    .trim()
+    .split("\n")
+    .sort();
   assert.deepEqual(
-    JSON.parse(
-      execFileSync("unzip", ["-p", bundle, "protocol/v1/telemetry-batch.schema.json"], {
-        encoding: "utf8",
-      }),
-    ),
-    JSON.parse(await read("protocol/v1/telemetry-batch.schema.json")),
+    listing,
+    ["protocol/v1/", ...protocolFiles.map((file) => `protocol/v1/${file}`)].sort(),
   );
+  for (const file of protocolFiles) {
+    assert.equal(
+      execFileSync("unzip", ["-p", bundle, `protocol/v1/${file}`], { encoding: "utf8" }),
+      await read(`protocol/v1/${file}`),
+      `${file} in the downloadable protocol bundle is stale`,
+    );
+  }
 });
 
 test("the telemetry schema accepts only bounded opaque correlation evidence", async () => {
