@@ -193,6 +193,16 @@ describe("BFF request header policy", () => {
     expect(lastRequest().headers.authorization).toBe("Bearer af_live_product-secret");
 
     await proxyApiPost(
+      new NextRequest("https://app.epode.ai/api/v2/capabilities/introspect", {
+        method: "POST",
+        headers: { authorization: "Bearer afr2_capability.payload.signature" },
+        body: "{}",
+      }),
+      { params: Promise.resolve({ path: ["v2", "capabilities", "introspect"] }) },
+    );
+    expect(lastRequest().headers.authorization).toBe("Bearer afr2_capability.payload.signature");
+
+    await proxyApiPost(
       new NextRequest("https://app.epode.ai/api/v2/consent/decisions", {
         method: "POST",
         headers: { authorization: "Bearer afr2_capability.payload.signature" },
