@@ -2,8 +2,11 @@ package agentfeedback
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -15,6 +18,35 @@ import (
 
 const conformanceKey = "af_live_0123456789abcdef0123456789abcdef_conformance_secret_0123456789abcdef"
 const conformanceToken = "afr2_0123456789abcdef0123456789abcdef.eyJ2IjoxLCJpIjoiMDE4ZjFmMmUtN2I0YS03YzEyLTljOGQtMTIzNDU2Nzg5YWJjIiwiaWF0IjoxNzE1MDAwMDAwLCJleHAiOjE3MTUwMDcyMDAsIm4iOiJBUUlEQkFVR0J3Z0pDZ3NNRFE0UEVCRVMifQ.wxJ0YGS21x9eW-Cn33t9V1INhyGNj1_U3qoQns3vdWA"
+
+type blockingConsentTransport struct {
+	calls   atomic.Int32
+	active  atomic.Int32
+	maximum atomic.Int32
+	started chan struct{}
+	release chan struct{}
+}
+
+func (transport *blockingConsentTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if !strings.HasSuffix(request.URL.Path, "/api/v2/consent/state") {
+		return &http.Response{StatusCode: http.StatusAccepted, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+	}
+	transport.calls.Add(1)
+	active := transport.active.Add(1)
+	defer transport.active.Add(-1)
+	for maximum := transport.maximum.Load(); active > maximum && !transport.maximum.CompareAndSwap(maximum, active); maximum = transport.maximum.Load() {
+	}
+	select {
+	case transport.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-transport.release:
+		return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+	case <-request.Context().Done():
+		return nil, request.Context().Err()
+	}
+}
 
 func TestAskOnceConsentKeySurvivesRotation(t *testing.T) {
 	scope := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -110,6 +142,199 @@ func TestMiddlewareCacheModesPreservePublicResponsesUnlessExplicit(t *testing.T)
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestAskOnceMiddlewareDoesNotAwaitConsentAndKeepsSubjectBoundEnvelope(t *testing.T) {
+	transport := &blockingConsentTransport{started: make(chan struct{}, 1), release: make(chan struct{})}
+	runtime, err := New(Options{
+		APIKey: conformanceKey, Endpoint: "https://feedback.test", FeedbackMode: FeedbackAskOnce,
+		Include: []string{"/search"}, CustomerRef: func(*http.Request) string { return "acct_blocked" },
+		HTTPClient: &http.Client{Transport: transport}, FlushInterval: time.Hour,
+		Sender: func(context.Context, string, http.Header, []byte) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Shutdown(context.Background())
+	handler := runtime.Middleware(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{"answer":"found"}`))
+	}))
+
+	request := func() map[string]any {
+		result := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/search", nil))
+			result <- response
+		}()
+		select {
+		case response := <-result:
+			var body map[string]any
+			if unmarshalErr := json.Unmarshal(response.Body.Bytes(), &body); unmarshalErr != nil {
+				t.Fatal(unmarshalErr)
+			}
+			return body
+		case <-time.After(250 * time.Millisecond):
+			t.Fatal("product response awaited the consent-state lookup")
+			return nil
+		}
+	}
+
+	first := request()
+	envelope := first["_agentFeedback"].(map[string]any)
+	if envelope["state"] != "consent_required" || envelope["consentPolicy"] != "once" {
+		t.Fatalf("outage response did not retain Ask-once consent: %#v", envelope)
+	}
+	authorization := envelope["requiredAction"].(map[string]any)["submitDecision"].(map[string]any)["authorization"].(string)
+	token := strings.TrimPrefix(authorization, "Bearer ")
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("malformed capability: %q", token)
+	}
+	payload, decodeErr := base64.RawURLEncoding.DecodeString(parts[1])
+	if decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	var claims map[string]any
+	if json.Unmarshal(payload, &claims) != nil || !strings.HasPrefix(claims["s"].(string), "afsub1_") {
+		t.Fatalf("Ask-once capability was not subject-bound: %s", payload)
+	}
+	select {
+	case <-transport.started:
+	case <-time.After(time.Second):
+		t.Fatal("eligible response did not start a background consent refresh")
+	}
+	second := request()
+	if second["_agentFeedback"].(map[string]any)["state"] != "consent_required" {
+		t.Fatal("pending consent refresh suppressed the Ask-once envelope")
+	}
+	if transport.calls.Load() != 1 {
+		t.Fatalf("concurrent consent lookups = %d, want 1", transport.calls.Load())
+	}
+	close(transport.release)
+}
+
+func TestAskOnceMiddlewareBoundsHighCardinalityConsentWarming(t *testing.T) {
+	transport := &blockingConsentTransport{
+		started: make(chan struct{}, maxConcurrentConsentLookups),
+		release: make(chan struct{}),
+	}
+	runtime, err := New(Options{
+		APIKey: conformanceKey, Endpoint: "https://feedback.test", FeedbackMode: FeedbackAskOnce,
+		Include:     []string{"/search"},
+		CustomerRef: func(request *http.Request) string { return request.Header.Get("X-Customer-Ref") },
+		HTTPClient:  &http.Client{Transport: transport}, FlushInterval: time.Hour,
+		Sender: func(context.Context, string, http.Header, []byte) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Shutdown(context.Background())
+	handler := runtime.Middleware(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{"answer":"found"}`))
+	}))
+
+	const requestCount = maxConcurrentConsentLookups * 8
+	start := make(chan struct{})
+	responses := make(chan *httptest.ResponseRecorder, requestCount)
+	for index := 0; index < requestCount; index++ {
+		go func(index int) {
+			<-start
+			request := httptest.NewRequest(http.MethodGet, "/search", nil)
+			request.Header.Set("X-Customer-Ref", fmt.Sprintf("acct_%d", index))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			responses <- response
+		}(index)
+	}
+	close(start)
+	for index := 0; index < requestCount; index++ {
+		select {
+		case response := <-responses:
+			if response.Code != http.StatusOK {
+				t.Fatalf("response status = %d, want 200", response.Code)
+			}
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("product response waited for saturated consent warming")
+		}
+	}
+
+	deadline := time.After(time.Second)
+	for transport.calls.Load() < maxConcurrentConsentLookups {
+		select {
+		case <-deadline:
+			t.Fatalf("started %d consent lookups, want %d", transport.calls.Load(), maxConcurrentConsentLookups)
+		case <-time.After(time.Millisecond):
+		}
+	}
+	time.Sleep(20 * time.Millisecond)
+	if got := transport.maximum.Load(); got > maxConcurrentConsentLookups {
+		t.Fatalf("maximum concurrent consent lookups = %d, want <= %d", got, maxConcurrentConsentLookups)
+	}
+	if got := transport.calls.Load(); got != maxConcurrentConsentLookups {
+		t.Fatalf("consent lookups = %d, want %d with saturated work skipped", got, maxConcurrentConsentLookups)
+	}
+	close(transport.release)
+}
+
+func TestAskOnceMiddlewareSkipsLookupsAndPreservesIneligibleBytes(t *testing.T) {
+	transport := &blockingConsentTransport{started: make(chan struct{}, 1), release: make(chan struct{})}
+	runtime, err := New(Options{
+		APIKey: conformanceKey, Endpoint: "https://feedback.test", FeedbackMode: FeedbackAskOnce,
+		CustomerRef: func(*http.Request) string { return "acct_ineligible" }, MaxResponseBodyBytes: 32,
+		HTTPClient: &http.Client{Transport: transport}, FlushInterval: time.Hour,
+		Sender: func(context.Context, string, http.Header, []byte) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Shutdown(context.Background())
+	handler := runtime.Middleware(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/error":
+			response.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = response.Write([]byte("  {\n  \"error\": true\n}\n"))
+		case "/shared":
+			response.Header().Set("Cache-Control", "public, max-age=60")
+			_, _ = response.Write([]byte(" { \"answer\" : \"cached\" } "))
+		case "/existing":
+			_, _ = response.Write([]byte(" { \"_agentFeedback\" : {\"state\":\"owned\"}, \"answer\": 1 } "))
+		case "/large":
+			_, _ = response.Write([]byte(`{"payload":"` + strings.Repeat("x", 64) + `"}`))
+		case "/stream":
+			_, _ = response.Write([]byte("first\n"))
+			response.(http.Flusher).Flush()
+			_, _ = response.Write([]byte("second\n"))
+		default:
+			_, _ = response.Write([]byte(" { \"answer\" : \"head\" } "))
+		}
+	}))
+
+	for _, test := range []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodGet, "/error", "  {\n  \"error\": true\n}\n"},
+		{http.MethodHead, "/head", " { \"answer\" : \"head\" } "},
+		{http.MethodGet, "/shared", " { \"answer\" : \"cached\" } "},
+		{http.MethodGet, "/existing", " { \"_agentFeedback\" : {\"state\":\"owned\"}, \"answer\": 1 } "},
+		{http.MethodGet, "/large", `{"payload":"` + strings.Repeat("x", 64) + `"}`},
+		{http.MethodGet, "/stream", "first\nsecond\n"},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(test.method, test.path, nil))
+		if response.Body.String() != test.body {
+			t.Fatalf("%s %s bytes changed: %q", test.method, test.path, response.Body.String())
+		}
+	}
+	time.Sleep(20 * time.Millisecond)
+	if transport.calls.Load() != 0 {
+		t.Fatalf("ineligible responses made %d consent-state lookups", transport.calls.Load())
 	}
 }
 

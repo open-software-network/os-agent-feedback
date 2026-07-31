@@ -165,6 +165,196 @@ test("Express Ask-once emits an answer-first decision action for an unknown cust
   await server.close();
 });
 
+test("Express Ask-once never awaits Epode and keeps consent_required through an outage", async () => {
+  let rejectLookup;
+  let consentLookups = 0;
+  const pendingLookup = new Promise((_resolve, reject) => {
+    rejectLookup = reject;
+  });
+  const middleware = agentFeedback({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    feedbackMode: "ask_once",
+    customerRef: () => "acct_unavailable",
+    include: ["/search"],
+    flushIntervalMs: 1,
+    logger: { debug() {}, warn() {} },
+    fetch: async (url) => {
+      if (!String(url).endsWith("/api/v2/consent/state")) {
+        return new Response("{}", { status: 202 });
+      }
+      consentLookups += 1;
+      if (consentLookups === 1) return pendingLookup;
+      throw new Error("Epode unavailable");
+    },
+  });
+  const app = express();
+  app.use(middleware);
+  app.get("/search", (_request, response) => response.json({ answer: "found" }));
+  const server = await serve(app);
+
+  const firstRequest = fetch(`${server.url}/search`).then((response) => response.json());
+  const firstResult = await Promise.race([
+    firstRequest,
+    new Promise((resolve) => setTimeout(() => resolve("timed_out"), 250)),
+  ]);
+  assert.notEqual(firstResult, "timed_out", "the product response joined the consent lookup");
+  assert.equal(firstResult._agentFeedback.state, "consent_required");
+  rejectLookup(new Error("Epode unavailable"));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const second = await (await fetch(`${server.url}/search`)).json();
+  assert.equal(second._agentFeedback.state, "consent_required");
+  assert.equal(consentLookups, 2);
+  await middleware.shutdown();
+  await server.close();
+});
+
+test("Express Ask-once does no consent work for ineligible responses", async () => {
+  let consentLookups = 0;
+  const middleware = agentFeedback({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    feedbackMode: "ask_once",
+    customerRef: () => "acct_ineligible",
+    include: ["/error", "/shared", "/existing"],
+    flushIntervalMs: 1,
+    fetch: async (url) => {
+      if (String(url).endsWith("/api/v2/consent/state")) consentLookups += 1;
+      return new Response("{}", { status: 202 });
+    },
+  });
+  const app = express();
+  app.use(middleware);
+  app.get("/error", (_request, response) => response.status(503).json({ error: true }));
+  app.get("/shared", (_request, response) => {
+    response.set("cache-control", "public, max-age=60");
+    response.json({ answer: "cached" });
+  });
+  app.get("/existing", (_request, response) =>
+    response.json({ answer: "owned", _agentFeedback: { state: "owned" } }),
+  );
+  app.get("/excluded", (_request, response) => response.json({ answer: "excluded" }));
+  const server = await serve(app);
+
+  for (const path of ["/error", "/shared", "/existing", "/excluded"]) {
+    await fetch(`${server.url}${path}`);
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(consentLookups, 0);
+  await middleware.shutdown();
+  await server.close();
+});
+
+test("Express Ask-once can use a decision warmed into the local cache", async () => {
+  let resolveLookup;
+  let consentLookups = 0;
+  const pendingLookup = new Promise((resolve) => {
+    resolveLookup = resolve;
+  });
+  const middleware = agentFeedback({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    feedbackMode: "ask_once",
+    customerRef: () => "acct_cached",
+    include: ["/search"],
+    flushIntervalMs: 1,
+    fetch: async (url) => {
+      if (!String(url).endsWith("/api/v2/consent/state")) {
+        return new Response("{}", { status: 202 });
+      }
+      consentLookups += 1;
+      return pendingLookup;
+    },
+  });
+  const app = express();
+  app.use(middleware);
+  app.get("/search", (_request, response) => response.json({ answer: "found" }));
+  const server = await serve(app);
+
+  const first = await (await fetch(`${server.url}/search`)).json();
+  assert.equal(first._agentFeedback.state, "consent_required");
+  resolveLookup(
+    new Response('{"state":"approved"}', {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const second = await (await fetch(`${server.url}/search`)).json();
+  assert.equal(second._agentFeedback.state, "feedback_ready");
+  assert.equal(second._agentFeedback.configuredMode, "ask_once");
+  assert.equal(consentLookups, 1);
+  await middleware.shutdown();
+  await server.close();
+});
+
+test("Ask-once background warming has a strict per-runtime bound with no queue", async () => {
+  const pendingLookups = [];
+  const runtime = new AgentFeedbackRuntime({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    feedbackMode: "ask_once",
+    fetch: async (url) => {
+      assert.match(String(url), /\/api\/v2\/consent\/state$/);
+      return new Promise((resolve) => pendingLookups.push(resolve));
+    },
+  });
+
+  for (let index = 0; index < 100; index += 1) {
+    runtime.warmConsent(`acct_${index}`);
+  }
+
+  assert.equal(pendingLookups.length, 8);
+  for (const resolve of pendingLookups) {
+    resolve(
+      new Response('{"state":"unknown"}', {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(pendingLookups.length, 8);
+  await runtime.shutdown();
+});
+
+test("Express omits feedback and background work when JSON serialization ends as a 500", async () => {
+  const requests = [];
+  const middleware = agentFeedback({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    feedbackMode: "ask_once",
+    customerRef: () => "acct_circular",
+    include: ["/circular"],
+    flushIntervalMs: 1,
+    fetch: async (url, init) => {
+      requests.push({ url: String(url), body: init?.body });
+      return new Response("{}", { status: 202 });
+    },
+  });
+  const app = express();
+  app.use(middleware);
+  app.get("/circular", (_request, response) => {
+    const body = { answer: "found" };
+    body.self = body;
+    response.json(body);
+  });
+  app.use((_error, _request, response, _next) => {
+    response.status(500).json({ error: "serialization failed" });
+  });
+  const server = await serve(app);
+
+  const response = await fetch(`${server.url}/circular`);
+  assert.equal(response.status, 500);
+  assert.deepEqual(await response.json(), { error: "serialization failed" });
+  assert.equal(response.headers.get("agent-feedback"), null);
+  await middleware.shutdown();
+  assert.deepEqual(requests, []);
+  await server.close();
+});
+
 test("Express Ask-always mode requires fresh permission for every report", async () => {
   const middleware = agentFeedback({
     apiKey: key,

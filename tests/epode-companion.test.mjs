@@ -118,7 +118,7 @@ test("Epode Companion exposes fixed consent and bounded report tools", async () 
       protocolVersion: "2025-11-25",
     });
     assert.equal(initialized.result.serverInfo.name, "epode-companion");
-    assert.equal(initialized.result.serverInfo.version, "0.2.0");
+    assert.equal(initialized.result.serverInfo.version, "0.2.1");
     assert.equal(initialized.result.protocolVersion, "2025-11-25");
 
     const negotiated = await companion.request("initialize", {
@@ -204,6 +204,69 @@ test("Epode Companion exposes fixed consent and bounded report tools", async () 
   } finally {
     companion.child.kill();
     await api.close();
+  }
+});
+
+test("Epode Companion makes cold Ask-once inspection authoritative", async (testContext) => {
+  const handle = `afr2_${"9".repeat(80)}`;
+  for (const scenario of [
+    {
+      name: "remembered approval becomes an immediate report action",
+      state: "feedback_ready",
+      consentPolicy: "none",
+    },
+    {
+      name: "remembered decline remains silent",
+      state: "declined",
+      consentPolicy: "once",
+    },
+  ]) {
+    await testContext.test(scenario.name, async () => {
+      const api = await listen(async (request, response) => {
+        for await (const _chunk of request) {
+          // Drain the request body.
+        }
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            state: scenario.state,
+            configuredMode: "ask_once",
+            consentPolicy: scenario.consentPolicy,
+            productName: "Cold Process API",
+            canonicalQuestion: null,
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          }),
+        );
+      });
+      const companion = startCompanion(api.endpoint);
+      try {
+        const inspection = await companion.request("tools/call", {
+          name: "inspect_product_feedback",
+          arguments: { feedbackHandle: handle },
+        });
+        assert.equal(inspection.result.structuredContent.verified, true);
+        assert.equal(inspection.result.structuredContent.state, scenario.state);
+        assert.equal(inspection.result.structuredContent.canonicalQuestion, undefined);
+        if (scenario.state === "feedback_ready") {
+          assert.equal(inspection.result.structuredContent.feedbackHandle, handle);
+          assert.deepEqual(inspection.result.structuredContent.nextAction, {
+            tool: "submit_product_feedback",
+            feedbackHandle: handle,
+          });
+          assert.match(
+            inspection.result.content[0].text,
+            /call submit_product_feedback exactly once now/,
+          );
+        } else {
+          assert.equal(inspection.result.structuredContent.feedbackHandle, undefined);
+          assert.equal(inspection.result.structuredContent.nextAction, undefined);
+          assert.match(inspection.result.content[0].text, /Do not ask or submit feedback/);
+        }
+      } finally {
+        companion.child.kill();
+        await api.close();
+      }
+    });
   }
 });
 
@@ -412,6 +475,8 @@ test("Epode Companion manifests expose one implicit, bounded skill and its local
   assert.match(skill, /valid `never_ask` feedback/);
   assert.match(skill, /final user answer is primary/i);
   assert.match(skill, /inspect_product_feedback/);
+  assert.match(skill, /Treat its state as authoritative/);
+  assert.match(skill, /Never re-ask from that response alone/);
   assert.match(skill, /fixed vocabulary/i);
   assert.match(openAiMetadata, /allow_implicit_invocation:\s*true/);
 

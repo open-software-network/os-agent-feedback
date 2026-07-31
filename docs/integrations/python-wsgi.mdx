@@ -26,7 +26,7 @@ app.wsgi_app = AgentFeedbackWSGI(
     app.wsgi_app,
     api_key=os.environ["AGENT_FEEDBACK_KEY"],
     include=("/search", "/docs/*"),
-    customer_ref=lambda environ: environ.get("account_id"),  # optional opaque ID
+    customer_ref=lambda environ: environ.get("account_id"),  # required for durable Ask once; optional otherwise
 )
 ```
 

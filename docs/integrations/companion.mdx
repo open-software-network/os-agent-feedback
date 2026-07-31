@@ -47,6 +47,8 @@ Start a fresh Claude Code session after installation.
 
 Installing the Companion opts the user into its bounded handling rules. It does not convert an Ask-once or Ask-every-time decision into approval. Silence and ambiguous replies are never approval.
 
+For HTTP products, the company SDK creates the receipt locally and never waits for Epode. The Companion must inspect that receipt before acting: Epode returns the current remembered state and the canonical product-specific question. This is what turns later Ask-once uses into silent reporting without putting a network dependency on the company's response.
+
 The user can later explicitly ask the Companion to allow or stop feedback for that product. Epode exposes a silent management action on Ask-once responses; it never re-prompts after a decline, and an older conversation cannot overwrite a newer decision.
 
 ## Trust boundary

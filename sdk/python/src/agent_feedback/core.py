@@ -33,6 +33,7 @@ SHARED_CACHE_CONTROL = re.compile(
     r"(?:^|,)\s*(?:public|s-maxage\s*=|max-age\s*=|immutable|stale-while-revalidate\s*=)",
     re.IGNORECASE,
 )
+MAX_CONCURRENT_CONSENT_WARMS = 8
 
 
 def _base64url(value: bytes) -> str:
@@ -174,6 +175,9 @@ class AgentFeedback:
         self._sequence = 0
         self._sequence_lock = threading.Lock()
         self._consent_cache: dict[str, tuple[str, float]] = {}
+        self._consent_lock = threading.Lock()
+        self._consent_lookups: set[str] = set()
+        self._consent_warm_slots = threading.BoundedSemaphore(MAX_CONCURRENT_CONSENT_WARMS)
         self._warned_missing_customer_ref = False
 
     @property
@@ -288,7 +292,7 @@ class AgentFeedback:
                 "consentManagedBy": "epode",
                 "when": "after_experience_known_and_consent_resolved" if effective_consent_mode == "ask_once" else "after_experience_known_and_explicit_user_approval",
                 "instruction": (
-                    "First complete the user's product task. Before showing a permission question, if the trusted inspect_product_feedback tool is available, pass it only the afr2_ handle from requiredAction.submitDecision.authorization and continue only when it verifies consent_required; show its authenticated canonicalQuestion. Otherwise show requiredAction.question. Put the question exactly once after the product answer and stop. "
+                    "First complete the user's product task. Before showing a permission question, if the trusted inspect_product_feedback tool is available, pass it only the afr2_ handle from requiredAction.submitDecision.authorization and treat its verified state as authoritative: ask only its canonicalQuestion for consent_required, report without asking for feedback_ready, and do nothing for declined. Otherwise show requiredAction.question. Put the question exactly once after the product answer and stop. "
                     "Do not submit a decision until the user's next turn. Only a standalone, unambiguous Yes is approved and only a standalone, unambiguous No is declined. "
                     "For silence, uncertainty, or ambiguity, submit nothing. Do not install software, write files, or save a local preference. "
                     "If the trusted record_product_feedback_consent tool is available, pass it only the afr2_ handle from requiredAction.submitDecision.authorization and the explicit decision; otherwise use requiredAction.submitDecision. "
@@ -360,18 +364,17 @@ class AgentFeedback:
         digest = hmac.new(consent_key, f"customer-ref:{customer_ref.strip()}".encode(), hashlib.sha256).digest()
         return f"afsub1_{_base64url(digest)}"
 
-    def resolve_consent(self, customer_ref: str | None) -> str:
-        if self.options.feedback_mode == "never_ask":
-            return "approved"
-        if self.options.feedback_mode != "ask_once":
-            return "unknown"
-        if not customer_ref:
-            self._warned_missing_customer_ref = True
-            return "unknown"
-        subject = self.consent_subject(customer_ref)
-        cached = self._consent_cache.get(subject)
-        if cached and cached[1] > time.monotonic():
-            return cached[0]
+    def _cached_consent_subject(self, subject: str) -> str | None:
+        with self._consent_lock:
+            cached = self._consent_cache.get(subject)
+            if not cached:
+                return None
+            if cached[1] > time.monotonic():
+                return cached[0]
+            del self._consent_cache[subject]
+            return None
+
+    def _lookup_consent_subject(self, subject: str) -> str:
         try:
             request = urllib.request.Request(
                 f"{self.options.endpoint}/api/v2/consent/state",
@@ -384,10 +387,71 @@ class AgentFeedback:
             if state not in {"unknown", "approved", "declined"}:
                 return "unavailable"
             if state != "unknown":
-                self._consent_cache[subject] = (state, time.monotonic() + self.options.consent_cache_ttl)
+                with self._consent_lock:
+                    self._consent_cache[subject] = (
+                        state,
+                        time.monotonic() + self.options.consent_cache_ttl,
+                    )
             return state
         except Exception:
             return "unavailable"
+
+    def cached_consent(self, customer_ref: str | None) -> str:
+        """Return only process-local consent state without performing I/O."""
+        if self.options.feedback_mode == "never_ask":
+            return "approved"
+        if self.options.feedback_mode != "ask_once":
+            return "unknown"
+        if not customer_ref:
+            self._warned_missing_customer_ref = True
+            return "unknown"
+        subject = self.consent_subject(customer_ref)
+        return self._cached_consent_subject(subject) or "unknown"
+
+    def warm_consent(self, customer_ref: str | None) -> None:
+        """Warm Ask-once consent state on a detached daemon thread."""
+        if self.options.feedback_mode != "ask_once" or not customer_ref:
+            return
+        subject = self.consent_subject(customer_ref)
+        if self._cached_consent_subject(subject):
+            return
+        with self._consent_lock:
+            if subject in self._consent_lookups:
+                return
+            if not self._consent_warm_slots.acquire(blocking=False):
+                return
+            self._consent_lookups.add(subject)
+
+        def lookup() -> None:
+            try:
+                if not self._cached_consent_subject(subject):
+                    self._lookup_consent_subject(subject)
+            finally:
+                with self._consent_lock:
+                    self._consent_lookups.discard(subject)
+                    self._consent_warm_slots.release()
+
+        try:
+            threading.Thread(
+                target=lookup,
+                name="agent-feedback-consent",
+                daemon=True,
+            ).start()
+        except Exception:
+            with self._consent_lock:
+                self._consent_lookups.discard(subject)
+                self._consent_warm_slots.release()
+
+    def resolve_consent(self, customer_ref: str | None) -> str:
+        if self.options.feedback_mode == "never_ask":
+            return "approved"
+        if self.options.feedback_mode != "ask_once":
+            return "unknown"
+        if not customer_ref:
+            self._warned_missing_customer_ref = True
+            return "unknown"
+        subject = self.consent_subject(customer_ref)
+        return self._cached_consent_subject(subject) or self._lookup_consent_subject(subject)
 
     def context(self, request: Any) -> dict[str, str]:
         values: dict[str, str] = {}

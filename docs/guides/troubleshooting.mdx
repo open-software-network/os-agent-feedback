@@ -21,6 +21,8 @@ description: "Diagnose missing telemetry, missing feedback, consent errors, and 
   <Accordion title="Ask once keeps asking">
     Configure `customerRef` from a stable opaque account or tenant ID supplied by your product authentication.
     Do not use a name or email. Without `customerRef`, Ask once safely becomes per-interaction permission and the SDK logs a warning.
+    For HTTP products, install Epode Companion so the agent verifies each capability and checks Epode's remembered
+    state before asking. The company's product response never waits on that check.
   </Accordion>
   <Accordion title="My response was not modified">
     Errors, redirects, streams, binaries, assets, health routes, excluded routes, and unsafe bodies are intentionally

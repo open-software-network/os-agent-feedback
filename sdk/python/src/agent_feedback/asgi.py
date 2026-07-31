@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from typing import Any, Awaitable, Callable
@@ -30,9 +29,6 @@ class AgentFeedbackASGI:
             return
         started = time.perf_counter()
         context = self.runtime.context(scope)
-        consent_state = await asyncio.to_thread(
-            self.runtime.resolve_consent, context.get("customerRef")
-        )
         start_message: dict[str, Any] | None = None
         streamed = False
 
@@ -81,12 +77,9 @@ class AgentFeedbackASGI:
                 await send(start_message)
                 await send(message)
                 return
-            prepared = self.runtime.prepare(
-                customer_ref=context.get("customerRef"), consent_state=consent_state
-            )
-            envelope = prepared["envelope"]
             surface: str | None = None
-            output = body
+            payload: Any = None
+            html: str | None = None
 
             if "application/json" in content_type:
                 try:
@@ -94,17 +87,12 @@ class AgentFeedbackASGI:
                 except Exception:
                     payload = None
                 if isinstance(payload, dict) and "_agentFeedback" not in payload:
-                    if envelope:
-                        payload["_agentFeedback"] = envelope
-                        output = json.dumps(payload, separators=(",", ":")).encode()
-                    else:
-                        output = body
                     surface = "http_json"
                 elif payload is not None and not isinstance(payload, dict):
                     surface = "http_headers"
             elif "text/html" in content_type:
                 try:
-                    output = inject_html(body.decode(), envelope).encode() if envelope else body
+                    html = body.decode()
                     surface = "http_html"
                 except UnicodeDecodeError:
                     surface = None
@@ -113,6 +101,19 @@ class AgentFeedbackASGI:
                 await send(start_message)
                 await send(message)
                 return
+
+            customer_ref = context.get("customerRef")
+            prepared = self.runtime.prepare(
+                customer_ref=customer_ref,
+                consent_state=self.runtime.cached_consent(customer_ref),
+            )
+            envelope = prepared["envelope"]
+            output = body
+            if surface == "http_json" and envelope:
+                payload["_agentFeedback"] = envelope
+                output = json.dumps(payload, separators=(",", ":")).encode()
+            elif surface == "http_html" and envelope and html is not None:
+                output = inject_html(html, envelope).encode()
 
             if envelope:
                 headers = [
@@ -141,6 +142,7 @@ class AgentFeedbackASGI:
                 duration_ms=round((time.perf_counter() - started) * 1000),
                 context=context,
             )
+            self.runtime.warm_consent(customer_ref)
 
         await self.app(scope, receive, wrapped_send)
 

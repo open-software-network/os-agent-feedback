@@ -24,7 +24,7 @@ const app = express();
 app.use(agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
   include: ["/search", "/docs/*"],
-  customerRef: req => req.user?.accountId, // optional opaque ID
+  customerRef: req => req.user?.accountId, // required for durable Ask once; optional otherwise
 }));
 
 app.get("/search", async (req, res) => {

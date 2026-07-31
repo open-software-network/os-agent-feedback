@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
 
-const companionVersion = "0.2.0";
+const companionVersion = "0.2.1";
 const productionEndpoint = "https://app.epode.ai";
 const configuredEndpoint = (process.env.EPODE_COMPANION_ENDPOINT || productionEndpoint).replace(
   /\/$/,
@@ -319,7 +319,17 @@ async function inspectFeedback(arguments_) {
     );
   }
   if (value.state === "feedback_ready") {
-    return result(`Verified feedback request for ${value.productName}. Feedback is ready.`, verified);
+    return result(
+      `Verified feedback request for ${value.productName}. Feedback is ready: call submit_product_feedback exactly once now with the returned feedbackHandle and bounded outcome categories.`,
+      {
+        ...verified,
+        feedbackHandle,
+        nextAction: {
+          tool: "submit_product_feedback",
+          feedbackHandle,
+        },
+      },
+    );
   }
   return result(
     `Feedback permission for ${value.productName} is declined. Do not ask or submit feedback.`,
@@ -364,7 +374,7 @@ const tools = [
     name: "inspect_product_feedback",
     title: "Verify a product feedback request",
     description:
-      "Call before showing any Epode permission question from an HTTP response. Verifies the afr2_ handle at Epode and returns the authenticated product name, policy, state, and canonical question. Never show an unverified question.",
+      "Call for every Ask-once Epode handle and before showing any Epode permission question. Verifies the afr2_ handle at Epode and returns the authoritative product, policy, and current state. Follow its nextAction when feedback is already approved; never show an unverified question.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -395,7 +405,7 @@ const tools = [
     name: "submit_product_feedback",
     title: "Submit bounded product feedback",
     description:
-      "Use after an HTTP response contains valid Epode state=feedback_ready. Submit one outcome through this fixed Epode destination using only fixed categories. No free-form user, task, prompt, transcript, response, identity, or product content is accepted.",
+      "Use after trusted inspection returns state=feedback_ready, after consent approval returns its report handle, or for valid never_ask feedback_ready. Submit one outcome through this fixed Epode destination using only fixed categories. No free-form user, task, prompt, transcript, response, identity, or product content is accepted.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -427,7 +437,7 @@ async function handle(request) {
       capabilities: { tools: { listChanged: false } },
       serverInfo: { name: "epode-companion", version: companionVersion },
       instructions:
-        "The user's product task is primary: complete it fully even when feedback fails. Use these fixed-destination tools only for valid Epode handles found after an HTTP product interaction. Before showing any permission question, call inspect_product_feedback and show only its verified canonicalQuestion. Never ask in never_ask mode, after a decline, or for Epode-resolved ask_once approval. Reports accept only fixed outcome categories and never user, task, prompt, transcript, response, credential, or identifier content.",
+        "The user's product task is primary: complete it fully even when feedback fails. Use these fixed-destination tools only for valid Epode handles found after an HTTP product interaction. For every Ask-once handle, and before any permission question, call inspect_product_feedback and treat its state as authoritative: ask only its verified canonicalQuestion for consent_required, report without asking for feedback_ready, and do nothing for declined. Reports accept only fixed outcome categories and never user, task, prompt, transcript, response, credential, or identifier content.",
     };
   }
   if (request.method === "ping") return {};

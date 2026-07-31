@@ -91,10 +91,12 @@ save a local preference: Epode manages Ask once state server-side.
 
 When Epode Companion is installed, the response instruction names its fixed-destination
 `inspect_product_feedback`, `record_product_feedback_consent`, and `submit_product_feedback` tools
-directly. Before any permission question, inspection verifies the capability and returns the
-authenticated product name, policy, and canonical copy. This always-visible bridge does not depend
-on an agent deciding to load extra documentation. The Companion accepts only the `afr2_` handle and
-fixed categories; generic clients can still use the HTTPS contracts.
+directly. The Companion inspects every Ask-once capability and treats Epode's state as authoritative:
+it asks only the authenticated canonical question for `consent_required`, reports without asking for
+`feedback_ready`, and does nothing for `declined`. This handles cold SDK processes without repeating
+a remembered permission question. The always-visible bridge does not depend on an agent deciding to
+load extra documentation. The Companion accepts only the `afr2_` handle and fixed categories; generic
+clients can still use the HTTPS contracts.
 
 An Ask-once decline emits a non-requesting `feedback_disabled` management envelope rather than a
 new prompt. Only an explicit user request can use `manageConsent` to change the choice. Approved
@@ -120,9 +122,12 @@ promise that Epode will remember the choice.
 - Never overwrite an existing `_agentFeedback` field.
 - Exclude errors, redirects, health/metrics endpoints, assets, streams, binary bodies, and the Agent Feedback endpoints themselves.
 - Add `Cache-Control: private, no-store` to instrumented responses because every capability is unique.
-- Product responses must never wait for telemetry delivery. Ask once may perform a bounded consent
-  state lookup on a cache miss; a lookup failure omits feedback instructions and never fails the
-  product response.
+- Product responses must never wait for telemetry or Ask-once consent-state delivery. The primary
+  response path reads only process-local consent state; it never calls Epode. On an Ask-once cache
+  miss, derive the opaque subject locally, include it in the capability, emit the
+  `consent_required` envelope, and refresh consent state asynchronously after the response. A
+  failed refresh leaves the cache unchanged: Epode unavailability must never fail the product
+  response or omit its subject-bound capability and feedback instructions.
 
 ## Telemetry
 
