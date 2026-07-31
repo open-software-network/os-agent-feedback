@@ -18,6 +18,7 @@ const MAX_FINDING_GROUPS: usize = 25;
 const MAX_DETAILS_PER_FINDING: usize = 3;
 const MAX_WORKAROUNDS: usize = 20;
 const MAX_WHERE_VALUES: usize = 20;
+const MAX_ADJACENT_PUBLICATION_FIELDS: usize = 4;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -316,21 +317,13 @@ impl PublicationRedactions {
         fields.extend(data.surfaces.iter().map(String::as_str));
 
         let mut adjacent_split_values = HashSet::new();
-        // Cross-field scanning is intentionally bounded to one boundary: any
-        // credential split over two adjacent rendered customer fields is
-        // omitted in full. Arbitrary reordering or a split over three or more
-        // fields is outside this renderer's adjacency contract.
-        for pair in fields.windows(2) {
-            mark_sensitive_adjacent_pair(&mut adjacent_split_values, pair[0], pair[1]);
-        }
+        mark_sensitive_adjacent_windows(&mut adjacent_split_values, &fields);
         let finding_details = data
             .findings
             .iter()
             .flat_map(|finding| finding.details.iter().map(String::as_str))
             .collect::<Vec<_>>();
-        for pair in finding_details.windows(2) {
-            mark_sensitive_adjacent_pair(&mut adjacent_split_values, pair[0], pair[1]);
-        }
+        mark_sensitive_adjacent_windows(&mut adjacent_split_values, &finding_details);
         Self {
             adjacent_split_values,
         }
@@ -341,11 +334,30 @@ impl PublicationRedactions {
     }
 }
 
-fn mark_sensitive_adjacent_pair(redactions: &mut HashSet<String>, first: &str, second: &str) {
-    if must_redact_before_publishing(&format!("{first}{second}")) {
-        redactions.insert(first.to_owned());
-        redactions.insert(second.to_owned());
+fn mark_sensitive_adjacent_windows(redactions: &mut HashSet<String>, fields: &[&str]) {
+    // Contiguous windows are O(fields × N), not combinatorial. N=4 closes the
+    // observed three-field bypass and the next boundary without making issue
+    // rendering meaningfully more expensive. Only credential-alphabet fields
+    // participate, so widening the window does not fuse ordinary sentences
+    // into one artificial opaque token.
+    for window_size in 2..=MAX_ADJACENT_PUBLICATION_FIELDS.min(fields.len()) {
+        for window in fields.windows(window_size) {
+            if window
+                .iter()
+                .all(|value| is_credential_field_fragment(value))
+                && must_redact_before_publishing(&window.concat())
+            {
+                redactions.extend(window.iter().map(|value| (*value).to_owned()));
+            }
+        }
     }
+}
+
+fn is_credential_field_fragment(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-._~+/=".contains(character))
 }
 
 /// PUBLICATION POLICY: a hit here omits one public field instead of discarding
@@ -355,13 +367,17 @@ fn mark_sensitive_adjacent_pair(redactions: &mut HashSet<String>, first: &str, s
 /// Detection covers ASCII credentials of at least 32 characters, known secret
 /// prefixes, credential-bearing URLs and assignments, JSON string values,
 /// percent encoding, one layer of base64 text, up to eight adjacent opaque
-/// segments inside a field, and one boundary between adjacent rendered fields.
+/// segments inside a field, and up to four contiguous rendered fields.
 ///
 /// ACCEPTED LIMITATIONS: Unicode homoglyph substitution is not normalized
 /// because it changes provider credentials rather than encoding them; base64
 /// decoding is bounded to two nested detector passes; cross-field detection is
-/// bounded to two adjacent fields; and opaque values shorter than 32 characters
-/// require a known prefix, bearer syntax, email shape, or credential key.
+/// bounded to N=4 contiguous credential-character-only fields, while
+/// non-contiguous and cross-report splits remain out of scope. Ingest-side
+/// credential-prefix rejection and per-field redaction of every field in a
+/// matched window compensate for that bound. Opaque values shorter than 32
+/// characters still require a known prefix, bearer syntax, email shape, or
+/// credential key.
 fn must_redact_before_publishing(value: &str) -> bool {
     publication_text_is_sensitive(value, 0)
 }
@@ -1116,6 +1132,20 @@ mod tests {
                 "unexpected redaction for: {benign}"
             );
         }
+
+        let benign_fields = ["search task", "retry window", "status 503"];
+        let joined = benign_fields.concat();
+        assert!(joined.len() >= 32);
+        assert!(!must_redact_before_publishing(&joined));
+        let mut data = template();
+        data.operations = benign_fields.map(str::to_owned).to_vec();
+        let body = render_issue_body(&data);
+        for field in benign_fields {
+            assert!(
+                body.contains(field),
+                "benign adjacent field was redacted: {field}"
+            );
+        }
     }
 
     #[test]
@@ -1200,6 +1230,41 @@ mod tests {
         assert!(!body.contains(first));
         assert!(!body.contains(second));
         assert!(body.contains("sensitive detail(s) omitted"));
+    }
+
+    #[test]
+    fn issue_publication_joins_three_and_four_adjacent_field_splits() {
+        let three_parts = ["Zx8Qp2LmVn4", "TbW9yRc6HdK", "e1JgAo5UfS"];
+        assert!(three_parts.iter().all(|part| part.len() < 32));
+        assert!(three_parts.windows(2).all(|pair| pair.concat().len() < 32));
+        let mut three_fields = template();
+        three_fields.operations = three_parts.map(str::to_owned).to_vec();
+        let body = render_issue_body(&three_fields);
+        for part in three_parts {
+            assert!(
+                !body.contains(part),
+                "three-field credential part leaked: {part}"
+            );
+        }
+        assert!(body.contains("Operation: [redacted], [redacted], [redacted]"));
+
+        let four_parts = ["Zx8Qp2Lm", "Vn4TbW9y", "Rc6HdKe1", "JgAo5UfS"];
+        assert!(
+            four_parts
+                .windows(3)
+                .all(|window| window.concat().len() < 32)
+        );
+        let mut four_fields = template();
+        four_fields.findings[0].detail_count = 4;
+        four_fields.findings[0].details = four_parts.map(str::to_owned).to_vec();
+        let body = render_issue_body(&four_fields);
+        for part in four_parts {
+            assert!(
+                !body.contains(part),
+                "four-field credential part leaked: {part}"
+            );
+        }
+        assert!(body.contains("4 sensitive detail(s) omitted."));
     }
 
     #[test]
