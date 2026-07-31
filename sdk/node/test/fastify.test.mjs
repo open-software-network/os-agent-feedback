@@ -34,7 +34,7 @@ test("Fastify instruments JSON and agent-readable HTML", async () => {
   assert.equal(json.json()._agentFeedback.v, 1);
   const html = await app.inject({ method: "GET", url: "/docs" });
   assert.match(html.body, /id="agent-feedback"/);
-  assert.match(html.body, /POST exactly one JSON feedback report/i);
+  assert.match(html.body, /submit_product_feedback/i);
   await plugin.shutdown();
   assert.equal(telemetry.length, 1);
   assert.equal(telemetry[0].events.length, 2);

@@ -29,5 +29,8 @@ test("hosted HTTP and MCP examples support both consent modes", () => {
   assert.match(mcpSource, /record_product_feedback_consent/);
   assert.match(mcpSource, /Epode—not this client—remembers the decision/);
   assert.match(mcpSource, /Ask the exact returned question before each report/);
-  assert.match(mcpSource, /sessionRef: \(arguments_\) => arguments_\?\.experimentRef/);
+  assert.doesNotMatch(mcpSource, /customerRef: \(arguments_\) => arguments_\?\.experimentRef/);
+  assert.match(mcpSource, /EPODE_EXAMPLE_ENABLE_EXPERIMENT_REFS/);
+  assert.match(mcpSource, /sessionRef: experimentRefsEnabled/);
+  assert.match(mcpSource, /verified MCP authentication/);
 });

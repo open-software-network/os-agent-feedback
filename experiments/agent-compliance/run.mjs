@@ -180,6 +180,35 @@ function scenariosFor(suite) {
       },
     ];
   }
+  if (suite === "lazy-consent-sequence") {
+    return [
+      "consent_only_question_first",
+      "lazy_action_first",
+      "lazy_permission_receipt",
+      "lazy_required_action",
+      "lazy_future_scope",
+      "lazy_future_receipt",
+    ].map((copy) => ({
+      mode: "ask_once",
+      consentOwner: "epode",
+      placement: "response_body",
+      copy,
+      sequence: true,
+      freshSecondSession: true,
+      lazyReply: true,
+    }));
+  }
+  if (suite === "lazy-future-consent-sequence") {
+    return ["lazy_future_scope", "lazy_future_receipt"].map((copy) => ({
+      mode: "ask_once",
+      consentOwner: "epode",
+      placement: "response_body",
+      copy,
+      sequence: true,
+      freshSecondSession: true,
+      lazyReply: true,
+    }));
+  }
   if (suite === "http-negotiation-sequence") {
     return ["negotiated_two_phase", "negotiated_account_evidence"].map((copy) => ({
       mode: "ask_once",
@@ -359,7 +388,7 @@ async function resumeAgent(runtime, threadId, prompt, cwd, outputFile) {
 }
 
 function asksPermission(text) {
-  return /may i (?:send|submit)|can i (?:send|submit)|permission to (?:send|submit)|would you like me to (?:send|submit)/i.test(text);
+  return /may (?:i (?:send|submit)|this product receive)|can i (?:send|submit)|permission to (?:send|submit)|would you like me to (?:send|submit)/i.test(text);
 }
 
 function classify(runState, first, resumed) {
@@ -459,7 +488,9 @@ try {
           first.threadId,
           scenario.userDecision === "declined"
             ? "No. Do not send product feedback. Remember that I declined."
-            : "Yes. You may send the short product feedback report you just asked about.",
+            : scenario.lazyReply
+              ? "Yes."
+              : "Yes. You may send the short product feedback report you just asked about.",
           cwd,
           join(rawDir, `${run.id}-resume.txt`),
         );

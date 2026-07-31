@@ -253,11 +253,8 @@ test("MCP Ask-always uses a question-only tool before revealing report submissio
   assert.equal(contract.reportTool, undefined);
   assert.equal(contract.consentTool, "record_product_feedback_consent");
   assert.equal(contract.when, "after_experience_known_and_explicit_user_approval");
-  assert.match(
-    contract.instruction,
-    /^Ask the user exactly this question before your final answer:/,
-  );
-  assert.match(contract.instruction, /Do not assume an answer/);
+  assert.match(contract.instruction, /^First complete the user's product task\./);
+  assert.match(contract.instruction, /after the product answer/);
   assert.match(result.content.at(-1).text, /record_product_feedback_consent/);
 
   const decision = await tools.get("record_product_feedback_consent").handler({
@@ -295,8 +292,15 @@ test("MCP Ask-once lets Epode own approval and never exposes report fields early
     apiKey: key,
     endpoint: "https://feedback.test",
     feedbackMode: "ask_once",
+    customerRef: () => "acct_mcp_ask_once",
     flushIntervalMs: 60_000,
     fetch: async (url, init) => {
+      if (String(url).endsWith("/api/v2/consent/state")) {
+        return new Response('{"state":"unknown"}', {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       if (String(url).endsWith("/api/v2/consent/decisions")) {
         return new Response(
           JSON.stringify({
@@ -333,10 +337,8 @@ test("MCP Ask-once lets Epode own approval and never exposes report fields early
   assert.equal(contract.when, "after_experience_known_and_consent_resolved");
   assert.equal(contract.reportSchema, undefined);
   assert.equal(contract.reportTool, undefined);
-  assert.match(
-    contract.instruction,
-    /^Ask the user exactly this question before your final answer:/,
-  );
+  assert.match(contract.instruction, /^First complete the user's product task\./);
+  assert.match(contract.question, /future uses without asking again/);
 
   const decision = await tools.get("record_product_feedback_consent").handler({
     feedbackHandle: contract.feedbackHandle,

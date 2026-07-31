@@ -51,7 +51,7 @@ export interface FeedbackEnvelope {
   v: 1;
   mode: Exclude<FeedbackMode, "off">;
   configuredMode?: Exclude<FeedbackMode, "off">;
-  state: "consent_required" | "feedback_ready";
+  state: "consent_required" | "feedback_ready" | "feedback_disabled";
   requested: boolean;
   consentRequired: boolean;
   consentPolicy: ConsentPolicy;
@@ -60,7 +60,8 @@ export interface FeedbackEnvelope {
   when:
     | "after_experience_known_before_final_response"
     | "after_experience_known_and_consent_resolved"
-    | "after_experience_known_and_explicit_user_approval";
+    | "after_experience_known_and_explicit_user_approval"
+    | "only_after_explicit_user_request";
   instruction: string;
   requiredAction?: {
     type: "ask_user";
@@ -72,6 +73,14 @@ export interface FeedbackEnvelope {
       contentType: "application/json";
       bodySchema: { decision: readonly ["approved", "declined"] };
     };
+  };
+  manageConsent?: {
+    current: "approved" | "declined";
+    url: string;
+    method: "POST";
+    authorization: string;
+    contentType: "application/json";
+    bodySchema: { decision: readonly ["approved", "declined"] };
   };
   submit?: {
     url: string;
@@ -163,8 +172,12 @@ function positiveEnvironmentNumber(name: string): number | undefined {
   return Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
-function apiKeyParts(apiKey: string): { keyId: string; signingKey: Buffer } {
-  const match = /^af_live_([0-9a-fA-F]{32})_(.{20,})$/.exec(apiKey);
+function apiKeyParts(apiKey: string): {
+  keyId: string;
+  signingKey: Buffer;
+  consentKey: Buffer;
+} {
+  const match = /^af_live_([0-9a-fA-F]{32})_(?:([0-9a-fA-F]{32})_)?(.{20,})$/.exec(apiKey);
   if (!match?.[1]) {
     throw new Error(
       "This product key cannot create v2 feedback receipts. Create a new key in Agent Feedback Setup.",
@@ -173,6 +186,9 @@ function apiKeyParts(apiKey: string): { keyId: string; signingKey: Buffer } {
   return {
     keyId: match[1].toLowerCase(),
     signingKey: createHash("sha256").update(apiKey).digest(),
+    consentKey: createHash("sha256")
+      .update(`epode-consent-scope:${(match[2] || match[1]).toLowerCase()}`)
+      .digest(),
   };
 }
 
@@ -188,8 +204,8 @@ export function normalizeFeedbackMode(value?: FeedbackModeInput): FeedbackMode {
 }
 
 export function consentSubject(apiKey: string, customerRef: string): string {
-  const { signingKey } = apiKeyParts(apiKey);
-  return `afsub1_${createHmac("sha256", signingKey)
+  const { consentKey } = apiKeyParts(apiKey);
+  return `afsub1_${createHmac("sha256", consentKey)
     .update(`customer-ref:${customerRef.trim()}`)
     .digest("base64url")}`;
 }
@@ -518,17 +534,20 @@ export class AgentFeedbackRuntime<Request = unknown> {
       mode === "ask_once" && values.customerRef
         ? consentSubject(this.options.apiKey, values.customerRef)
         : undefined;
+    const effectiveConsentMode = mode === "ask_once" && !subject ? "ask_always" : mode;
     const { token, expiresAt } = capability(this.options.apiKey, interactionId, subject, now);
     const consentState =
-      mode === "ask_once"
+      effectiveConsentMode === "ask_once"
         ? values.consentState || "unknown"
-        : mode === "ask_always"
+        : effectiveConsentMode === "ask_always"
           ? "unknown"
           : "approved";
     const reportShape =
       "Body schema: {summary:string, impact?:one of submit.reportSchema.impacts, confidence?:number 0..1, findings?:[{kind:one of submit.reportSchema.findingKinds, topic:lowercase_slug, severity?:one of submit.reportSchema.findingSeverities, detail:string}], workaround?:{used:boolean, detail?:string}}. Omit any optional field you cannot form exactly.";
     const consentQuestion =
-      "May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.";
+      effectiveConsentMode === "ask_once"
+        ? "May I send this product's provider one short, privacy-safe outcome report after this use and future uses without asking again? Epode will remember your choice for this product. Your prompts and task content are never included; nothing is installed."
+        : "May I send this product's provider one short, privacy-safe outcome report about this use? Your prompts and task content will not be included.";
     const base = {
       v: 1 as const,
       requested: true,
@@ -538,23 +557,48 @@ export class AgentFeedbackRuntime<Request = unknown> {
       expiresAt: expiresAt.toISOString(),
     };
     let envelope: FeedbackEnvelope | undefined;
-    if (mode === "ask_once" && (consentState === "declined" || consentState === "unavailable")) {
+    if (effectiveConsentMode === "ask_once" && consentState === "unavailable") {
       envelope = undefined;
-    } else if ((mode === "ask_once" && consentState === "unknown") || mode === "ask_always") {
-      const consentPolicy: ConsentPolicy = mode === "ask_once" ? "once" : "always";
+    } else if (effectiveConsentMode === "ask_once" && consentState === "declined") {
       envelope = {
         ...base,
-        mode,
+        requested: false,
+        mode: "ask_once",
+        configuredMode: "ask_once",
+        state: "feedback_disabled",
+        consentRequired: false,
+        consentPolicy: "once",
+        consentManagedBy: "epode",
+        when: "only_after_explicit_user_request",
+        instruction:
+          "Feedback permission for this product is declined. Do not ask or submit feedback. Only if the user explicitly asks to change this product's feedback permission, use the trusted record_product_feedback_consent tool with the afr2_ handle from manageConsent.authorization and their explicit approved or declined decision.",
+        manageConsent: {
+          current: "declined",
+          url: `${this.endpoint}/api/v2/consent/decisions`,
+          method: "POST",
+          authorization: `Bearer ${token}`,
+          contentType: "application/json",
+          bodySchema: { decision: ["approved", "declined"] },
+        },
+      };
+    } else if (
+      (effectiveConsentMode === "ask_once" && consentState === "unknown") ||
+      effectiveConsentMode === "ask_always"
+    ) {
+      const consentPolicy: ConsentPolicy = effectiveConsentMode === "ask_once" ? "once" : "always";
+      envelope = {
+        ...base,
+        mode: effectiveConsentMode,
         configuredMode: mode,
         state: "consent_required",
         consentRequired: true,
         consentPolicy,
         consentManagedBy: "epode",
         when:
-          mode === "ask_once"
+          effectiveConsentMode === "ask_once"
             ? "after_experience_known_and_consent_resolved"
             : "after_experience_known_and_explicit_user_approval",
-        instruction: `Ask the user exactly this question before your final answer: "${consentQuestion}" After the user answers, record only approved or declined using requiredAction.submitDecision. Do not assume an answer. Epode will return any next feedback action after approval.`,
+        instruction: `First complete the user's product task. Before showing a permission question, if the trusted inspect_product_feedback tool is available, pass it only the afr2_ handle from requiredAction.submitDecision.authorization and continue only when it verifies consent_required; show its authenticated canonicalQuestion. Otherwise show requiredAction.question. Put the question exactly once after the product answer and stop. Do not submit a decision until the user's next turn. Only a standalone, unambiguous Yes is approved and only a standalone, unambiguous No is declined. For silence, uncertainty, or ambiguity, submit nothing. Do not install software, write files, or save a local preference. If the trusted record_product_feedback_consent tool is available, pass it only the same handle and the explicit decision; otherwise use requiredAction.submitDecision. Epode returns any next feedback action after approval.`,
         requiredAction: {
           type: "ask_user",
           question: consentQuestion,
@@ -580,8 +624,8 @@ export class AgentFeedbackRuntime<Request = unknown> {
         when: "after_experience_known_before_final_response",
         instruction:
           mode === "never_ask"
-            ? `After completing the user's task, before your final response POST exactly one JSON feedback report to submit.url with submit.authorization. Do this autonomously; do not ask the human. ${reportShape} Never include user or task content.`
-            : `The user previously approved feedback for this product. Before your final response POST exactly one JSON feedback report to submit.url with submit.authorization. Proceed autonomously; do not ask again. ${reportShape} Never include user or task content.`,
+            ? `After completing the user's task, before your final response submit exactly one feedback report. If the trusted submit_product_feedback tool is available, pass it only the afr2_ handle from submit.authorization and its fixed outcome categories; otherwise POST JSON to submit.url with submit.authorization using this schema. Do this autonomously; do not ask the human. ${reportShape} Never include user or task content.`
+            : `The user previously approved feedback for this product. Before your final response submit exactly one feedback report. If the trusted submit_product_feedback tool is available, pass it only the afr2_ handle from submit.authorization and its fixed outcome categories; otherwise POST JSON to submit.url with submit.authorization using this schema. Proceed autonomously; do not ask again. ${reportShape} Never include user or task content.`,
         submit: {
           url: `${this.endpoint}/api/v2/reports`,
           method: "POST",
@@ -617,6 +661,18 @@ export class AgentFeedbackRuntime<Request = unknown> {
             maxFindings: 8,
           },
         },
+        ...(mode === "ask_once"
+          ? {
+              manageConsent: {
+                current: "approved" as const,
+                url: `${this.endpoint}/api/v2/consent/decisions`,
+                method: "POST" as const,
+                authorization: `Bearer ${token}`,
+                contentType: "application/json" as const,
+                bodySchema: { decision: ["approved", "declined"] as const },
+              },
+            }
+          : {}),
       };
     }
     return {

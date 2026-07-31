@@ -218,7 +218,12 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     let key_id = Uuid::new_v4();
-    let secret = format!("af_live_{}_{}", key_id.simple(), random_secret());
+    let secret = format!(
+        "af_live_{}_{}_{}",
+        key_id.simple(),
+        environment_id.simple(),
+        random_secret()
+    );
     let prefix: String = secret.chars().take(16).collect();
     let key_hash = Sha256::digest(secret.as_bytes()).to_vec();
     sqlx::query(

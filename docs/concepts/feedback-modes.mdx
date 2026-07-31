@@ -26,14 +26,19 @@ Every report starts with the question-only contract. Approval reveals a report c
 <Warning>
 Ask modes require a conversational runtime that notices the instruction, pauses, receives the user's answer,
 and resumes the pending report. A response envelope cannot force an independent HTTP agent to do this.
-The question-first shape was the only tested generic-agent variant to ask, record, and continue reliably across the validation matrix. An independent agent can still ignore response metadata; no protocol can force compliance.
+The answer-first shape preserves the customer's task result. Epode Companion makes HTTP handling more reliable in Codex and Claude Code by exposing fixed MCP tools and naming those tools directly in the response contract; the installed skill adds defense-in-depth. Independent agents without a compatible runtime can still ignore response metadata, and no protocol can force compliance.
 </Warning>
 
 ## Permission copy
 
 Use the concrete question carried by the protocol:
 
-> May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.
+> May I send this product's provider one short, privacy-safe outcome report after this use and future uses without asking again? Epode will remember your choice for this product. Your prompts and task content are never included; nothing is installed.
+
+That continuing-scope question appears only when the integration supplies a stable opaque
+`customerRef`. Without one, Epode cannot remember a person or account across interactions, so the
+SDK falls back to the per-use question: “May I send this product's provider one short,
+privacy-safe outcome report about this use?”
 
 <Warning>
 Never infer approval from silence. Diagnostics validate ask-mode contracts but do not submit a report,

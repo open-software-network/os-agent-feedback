@@ -21,6 +21,13 @@ class AgentFeedbackASGI:
         if scope.get("type") != "http" or not self.runtime.matches(scope.get("path", "/")):
             await self.app(scope, receive, send)
             return
+        request_opt_in = any(
+            name.lower() == b"agent-feedback-request" and value.strip() == b"1"
+            for name, value in scope.get("headers", [])
+        )
+        if self.runtime.options.cache_mode == "request" and not request_opt_in:
+            await self.app(scope, receive, send)
+            return
         started = time.perf_counter()
         context = self.runtime.context(scope)
         consent_state = await asyncio.to_thread(
@@ -58,6 +65,17 @@ class AgentFeedbackASGI:
                 (value.decode("latin1") for name, value in headers if name.lower() == b"content-type"),
                 "",
             )
+            cache_control = ",".join(
+                value.decode("latin1")
+                for name, value in headers
+                if name.lower() == b"cache-control"
+            )
+            if not self.runtime.should_instrument_http(
+                request_opt_in=request_opt_in, cache_control=cache_control
+            ):
+                await send(start_message)
+                await send(message)
+                return
             body = bytes(message.get("body", b""))
             if len(body) > MAX_BODY_BYTES:
                 await send(start_message)

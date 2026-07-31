@@ -372,6 +372,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/capabilities/introspect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["capability_inspection_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/consent/decisions": {
         parameters: {
             query?: never;
@@ -460,6 +476,15 @@ export interface components {
         AuthenticationStateResponse: {
             authenticated: boolean;
         };
+        CapabilityInspectionResponse: {
+            canonicalQuestion: string | null;
+            configuredMode: string;
+            consentPolicy: string;
+            /** Format: date-time */
+            expiresAt: string;
+            productName: string;
+            state: string;
+        };
         ClassificationDiscovery: {
             http: string;
             mcp: string;
@@ -545,7 +570,9 @@ export interface components {
             environment: components["schemas"]["ProductEnvironment"];
         };
         FeedbackConsentDiscovery: {
+            askAlwaysPrompt: string;
             askAlwaysScope: string;
+            askOncePrompt: string;
             askOnceScope: string;
             onRefusalOrNoResponse: string;
             prompt: string;
@@ -597,6 +624,7 @@ export interface components {
         };
         FeedbackSubmissionDiscovery: {
             authentication: string;
+            capabilityInspectionUrl: string;
             confidenceRange: number[];
             consent: components["schemas"]["FeedbackConsentDiscovery"];
             consentDecisionUrl: string;
@@ -3069,6 +3097,53 @@ export interface operations {
                 };
             };
             /** @description Consent state lookup failed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    capability_inspection_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Verified capability policy and canonical product consent copy */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CapabilityInspectionResponse"];
+                };
+            };
+            /** @description Invalid or expired interaction capability */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Feedback collection is disabled */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Capability inspection failed */
             500: {
                 headers: {
                     [name: string]: unknown;

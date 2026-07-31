@@ -45,16 +45,17 @@ use crate::{
     },
     error::{ApiError, ApiErrorEnvelope},
     models::{
-        ClassificationDiscovery, ConsentDecisionInput, ConsentStateInput, ConsentStateResponse,
-        CreateApiKeyInput, CreateProductInput, CreateTeamInvitationInput, CurrentUser,
-        DashboardContext, DashboardData, DashboardSessionDetail, DeleteProductInput,
-        FeedbackConsentDiscovery, FeedbackDiscoveryResponse, FeedbackFindingShapeDiscovery,
-        FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackModesDiscovery,
-        FeedbackRequiredFieldsDiscovery, FeedbackSubmissionDiscovery,
-        FeedbackWorkaroundShapeDiscovery, HealthResponse, IntegrationsDiscovery, McpDiscovery,
-        PolicyInput, ProductAuth, ProductFeedbackAcceptedResponse, ProductFeedbackReportInput,
-        ReliabilityDiscovery, TelemetryBatchInput, TelemetryBatchResult, TelemetryDiscovery,
-        UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput,
+        CapabilityInspectionResponse, ClassificationDiscovery, ConsentDecisionInput,
+        ConsentStateInput, ConsentStateResponse, CreateApiKeyInput, CreateProductInput,
+        CreateTeamInvitationInput, CurrentUser, DashboardContext, DashboardData,
+        DashboardSessionDetail, DeleteProductInput, FeedbackConsentDiscovery,
+        FeedbackDiscoveryResponse, FeedbackFindingShapeDiscovery, FeedbackListInteractionsInput,
+        FeedbackListReportsInput, FeedbackModesDiscovery, FeedbackRequiredFieldsDiscovery,
+        FeedbackSubmissionDiscovery, FeedbackWorkaroundShapeDiscovery, HealthResponse,
+        IntegrationsDiscovery, McpDiscovery, PolicyInput, ProductAuth,
+        ProductFeedbackAcceptedResponse, ProductFeedbackReportInput, ReliabilityDiscovery,
+        TelemetryBatchInput, TelemetryBatchResult, TelemetryDiscovery, UpdateFeedbackWorkflowInput,
+        UpdateNameInput, UpdateTeamMemberInput,
     },
     os_accounts::{
         ACCESS_COOKIE, OsAccountsClient, PKCE_COOKIE, REFRESH_COOKIE, STATE_COOKIE, TokenPair,
@@ -65,11 +66,11 @@ use crate::{
         create_product_with_default_key, create_team_invitation, dashboard_interaction_by_id,
         dashboard_report_by_id, dashboard_session_by_id, dashboard_with_limits, delete_product,
         feedback_consent_state, feedback_list_interactions, feedback_list_reports,
-        get_or_create_workspace, ingest_telemetry_batch, purge_expired_product_data,
-        read_product_auth, record_feedback_consent_decision, remove_team_member, rename_product,
-        rename_workspace, resolve_workspace_access, revoke_api_key, revoke_team_invitation,
-        rotate_api_key, submit_product_feedback, transfer_team_ownership, update_feedback_workflow,
-        update_policy, update_team_member_role,
+        get_or_create_workspace, ingest_telemetry_batch, inspect_feedback_capability,
+        purge_expired_product_data, read_product_auth, record_feedback_consent_decision,
+        remove_team_member, rename_product, rename_workspace, resolve_workspace_access,
+        revoke_api_key, revoke_team_invitation, rotate_api_key, submit_product_feedback,
+        transfer_team_ownership, update_feedback_workflow, update_policy, update_team_member_role,
     },
 };
 
@@ -179,6 +180,7 @@ fn build_app_router() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(update_policy_handler))
         .routes(routes!(telemetry_batch_handler))
         .routes(routes!(consent_state_handler))
+        .routes(routes!(capability_inspection_handler))
         .routes(routes!(consent_decision_handler))
         .routes(routes!(product_feedback_handler))
         .routes(routes!(mcp_info, mcp_handler))
@@ -461,6 +463,9 @@ fn feedback_discovery(public_base_url: &str) -> FeedbackDiscoveryResponse {
         feedback_submission: FeedbackSubmissionDiscovery {
             url: format!("{public_base_url}/api/v2/reports"),
             authentication: "Bearer afr2_... short-lived interaction capability".to_owned(),
+            capability_inspection_url: format!(
+                "{public_base_url}/api/v2/capabilities/introspect"
+            ),
             consent_state_url: format!("{public_base_url}/api/v2/consent/state"),
             consent_decision_url: format!("{public_base_url}/api/v2/consent/decisions"),
             consent_owner: "Epode; agents never store Ask once decisions".to_owned(),
@@ -497,9 +502,11 @@ fn feedback_discovery(public_base_url: &str) -> FeedbackDiscoveryResponse {
                 optional: vec!["detail".to_owned()],
             },
             consent: FeedbackConsentDiscovery {
-                prompt: "May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.".to_owned(),
+                prompt: "May I send this product's provider one short, privacy-safe outcome report about this use? Your prompts and task content will not be included.".to_owned(),
+                ask_once_prompt: "May I send this product's provider one short, privacy-safe outcome report after this use and future uses without asking again? Epode will remember your choice for this product. Your prompts and task content are never included; nothing is installed.".to_owned(),
+                ask_always_prompt: "May I send this product's provider one short, privacy-safe outcome report about this use? Your prompts and task content will not be included.".to_owned(),
                 ask_once_scope:
-                    "per product and opaque customerRef-derived subject; Epode stores only approved or declined"
+                    "continuing scope only when the SDK receives a stable opaque customerRef; otherwise the per-use prompt applies"
                         .to_owned(),
                 ask_always_scope: "per feedback report".to_owned(),
                 on_refusal_or_no_response: "do not submit".to_owned(),
@@ -1695,7 +1702,7 @@ fn approved_feedback_contract(
         "consentManagedBy": "epode",
         "reliability": "best_effort_without_agent_adapter",
         "when": "after_experience_known_before_final_response",
-        "instruction": format!("The user has approved feedback for this interaction. Before your final response POST exactly one JSON feedback report to submit.url with submit.authorization. Proceed autonomously; do not ask again. {report_shape} Never include user or task content."),
+        "instruction": format!("The user has approved feedback for this interaction. Before your final response submit exactly one feedback report. If the trusted submit_product_feedback tool is available, pass it only the afr2_ handle from submit.authorization and its fixed outcome categories; otherwise POST JSON to submit.url with submit.authorization using this schema. Proceed autonomously; do not ask again. {report_shape} Never include user or task content."),
         "submit": {
             "url": format!("{public_base_url}/api/v2/reports"),
             "method": "POST",
@@ -1743,6 +1750,34 @@ async fn consent_state_handler(
     Ok(Json(
         feedback_consent_state(&state.pool, &auth, safe_input::<ConsentStateInput>(value)?).await?,
     ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/capabilities/introspect",
+    tag = "ingest",
+    responses(
+        (status = 200, description = "Verified capability policy and canonical product consent copy", body = CapabilityInspectionResponse),
+        (status = 401, description = "Invalid or expired interaction capability", body = ApiErrorEnvelope),
+        (status = 410, description = "Feedback collection is disabled", body = ApiErrorEnvelope),
+        (status = 500, description = "Capability inspection failed", body = ApiErrorEnvelope)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn capability_inspection_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let capability = bearer_token(&headers)
+        .filter(|token| token.starts_with("afr2_"))
+        .ok_or_else(ApiError::unauthorized)?;
+    let mut response =
+        Json(inspect_feedback_capability(&state.pool, &capability).await?).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
 }
 
 #[utoipa::path(
@@ -2412,6 +2447,7 @@ mod page_tests {
             "feedbackSubmission": {
                 "url": "https://epode.test/api/v2/reports",
                 "authentication": "Bearer afr2_... short-lived interaction capability",
+                "capabilityInspectionUrl": "https://epode.test/api/v2/capabilities/introspect",
                 "consentStateUrl": "https://epode.test/api/v2/consent/state",
                 "consentDecisionUrl": "https://epode.test/api/v2/consent/decisions",
                 "consentOwner": "Epode; agents never store Ask once decisions",
@@ -2440,8 +2476,10 @@ mod page_tests {
                     "optional": ["detail"]
                 },
                 "consent": {
-                    "prompt": "May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.",
-                    "askOnceScope": "per product and opaque customerRef-derived subject; Epode stores only approved or declined",
+                    "prompt": "May I send this product's provider one short, privacy-safe outcome report about this use? Your prompts and task content will not be included.",
+                    "askOncePrompt": "May I send this product's provider one short, privacy-safe outcome report after this use and future uses without asking again? Epode will remember your choice for this product. Your prompts and task content are never included; nothing is installed.",
+                    "askAlwaysPrompt": "May I send this product's provider one short, privacy-safe outcome report about this use? Your prompts and task content will not be included.",
+                    "askOnceScope": "continuing scope only when the SDK receives a stable opaque customerRef; otherwise the per-use prompt applies",
                     "askAlwaysScope": "per feedback report",
                     "onRefusalOrNoResponse": "do not submit"
                 }

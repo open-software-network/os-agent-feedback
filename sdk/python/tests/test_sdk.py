@@ -15,15 +15,28 @@ from agent_feedback import (
     submit_feedback_consent,
     submit_product_feedback,
 )
+from agent_feedback.core import _key_parts
 
 KEY = "af_live_0123456789abcdef0123456789abcdef_conformance_secret_0123456789abcdef"
 TOKEN = "afr2_0123456789abcdef0123456789abcdef.eyJ2IjoxLCJpIjoiMDE4ZjFmMmUtN2I0YS03YzEyLTljOGQtMTIzNDU2Nzg5YWJjIiwiaWF0IjoxNzE1MDAwMDAwLCJleHAiOjE3MTUwMDcyMDAsIm4iOiJBUUlEQkFVR0J3Z0pDZ3NNRFE0UEVCRVMifQ.wxJ0YGS21x9eW-Cn33t9V1INhyGNj1_U3qoQns3vdWA"
 
 
 class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
+    def test_ask_once_consent_key_survives_rotation(self) -> None:
+        scope = "a" * 32
+        first = f"af_live_{'1' * 32}_{scope}_{'x' * 32}"
+        rotated = f"af_live_{'2' * 32}_{scope}_{'y' * 32}"
+        other = f"af_live_{'3' * 32}_{'b' * 32}_{'z' * 32}"
+        self.assertEqual(_key_parts(first)[2], _key_parts(rotated)[2])
+        self.assertNotEqual(_key_parts(first)[2], _key_parts(other)[2])
+
     def test_legacy_auto_mode_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "never_ask, ask_once, ask_always, or off"):
             AgentFeedback(AgentFeedbackOptions(api_key=KEY, feedback_mode="auto"))
+
+    def test_invalid_cache_mode_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cache_mode must be safe, private, or request"):
+            AgentFeedback(AgentFeedbackOptions(api_key=KEY, cache_mode="surprise"))
 
     def test_capability_conformance(self) -> None:
         claims = {
@@ -70,8 +83,8 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
             await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(original)).encode())]})
             await send({"type": "http.response.body", "body": original})
 
-        middleware = AgentFeedbackASGI(app, api_key=KEY, endpoint="https://feedback.test", include=("/status",), feedback_mode="ask_once", customer_ref=lambda _scope: "declined-customer", sender=lambda *_: None)
-        middleware.runtime.resolve_consent = lambda _customer_ref: "declined"
+        middleware = AgentFeedbackASGI(app, api_key=KEY, endpoint="https://feedback.test", include=("/status",), feedback_mode="ask_once", customer_ref=lambda _scope: "unavailable-customer", sender=lambda *_: None)
+        middleware.runtime.resolve_consent = lambda _customer_ref: "unavailable"
         sent: list[dict] = []
 
         async def receive():
@@ -84,6 +97,52 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent[1]["body"], original)
         self.assertEqual(dict(sent[0]["headers"])[b"content-length"], str(len(original)).encode())
         middleware.shutdown()
+
+    async def test_asgi_cache_modes_preserve_public_responses_unless_explicit(self) -> None:
+        original = b'{"answer":"cached"}'
+
+        async def app(_scope, _receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(original)).encode()),
+                (b"cache-control", b"public, s-maxage=600"),
+            ]})
+            await send({"type": "http.response.body", "body": original})
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def invoke(cache_mode: str, opt_in: bool = False):
+            middleware = AgentFeedbackASGI(
+                app, api_key=KEY, include=("/status",), cache_mode=cache_mode, sender=lambda *_: None
+            )
+            sent: list[dict] = []
+            async def send(message):
+                sent.append(message)
+            headers = [(b"agent-feedback-request", b"1")] if opt_in else []
+            await middleware(
+                {"type": "http", "method": "GET", "path": "/status", "headers": headers},
+                receive,
+                send,
+            )
+            middleware.shutdown()
+            return sent
+
+        safe = await invoke("safe")
+        self.assertEqual(safe[1]["body"], original)
+        self.assertEqual(dict(safe[0]["headers"])[b"cache-control"], b"public, s-maxage=600")
+
+        ordinary = await invoke("request")
+        self.assertEqual(ordinary[1]["body"], original)
+        self.assertEqual(dict(ordinary[0]["headers"])[b"cache-control"], b"public, s-maxage=600")
+
+        requested = await invoke("request", True)
+        self.assertIn("_agentFeedback", json.loads(requested[1]["body"]))
+        self.assertEqual(dict(requested[0]["headers"])[b"cache-control"], b"private, no-store")
+
+        private = await invoke("private")
+        self.assertIn("_agentFeedback", json.loads(private[1]["body"]))
+        self.assertEqual(dict(private[0]["headers"])[b"cache-control"], b"private, no-store")
 
     def test_telemetry_retries_transient_delivery_without_changing_event(self) -> None:
         attempts = 0
@@ -172,8 +231,8 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
             start_response("200 OK", [("Content-Type", "application/json"), ("Content-Length", str(len(original)))])
             return [original]
 
-        middleware = AgentFeedbackWSGI(app, api_key=KEY, endpoint="https://feedback.test", include=("/status",), feedback_mode="ask_once", customer_ref=lambda _environ: "declined-customer", sender=lambda *_: None)
-        middleware.runtime.resolve_consent = lambda _customer_ref: "declined"
+        middleware = AgentFeedbackWSGI(app, api_key=KEY, endpoint="https://feedback.test", include=("/status",), feedback_mode="ask_once", customer_ref=lambda _environ: "unavailable-customer", sender=lambda *_: None)
+        middleware.runtime.resolve_consent = lambda _customer_ref: "unavailable"
         captured: dict = {}
         output = b"".join(middleware(
             {"PATH_INFO": "/status", "REQUEST_METHOD": "GET", "wsgi.input": BytesIO()},
@@ -182,6 +241,42 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output, original)
         self.assertEqual(int(dict(captured["headers"])["Content-Length"]), len(original))
         middleware.shutdown()
+
+    def test_wsgi_cache_modes_preserve_public_responses_unless_explicit(self) -> None:
+        original = b'{"answer":"cached"}'
+
+        def app(_environ, start_response):
+            start_response("200 OK", [
+                ("Content-Type", "application/json"),
+                ("Content-Length", str(len(original))),
+                ("Cache-Control", "public, max-age=300"),
+            ])
+            return [original]
+
+        def invoke(cache_mode: str, opt_in: bool = False):
+            middleware = AgentFeedbackWSGI(
+                app, api_key=KEY, include=("/status",), cache_mode=cache_mode, sender=lambda *_: None
+            )
+            captured: dict = {}
+            environ = {"PATH_INFO": "/status", "REQUEST_METHOD": "GET", "wsgi.input": BytesIO()}
+            if opt_in:
+                environ["HTTP_AGENT_FEEDBACK_REQUEST"] = "1"
+            output = b"".join(middleware(
+                environ,
+                lambda status, headers, _exc=None: captured.update(status=status, headers=headers),
+            ))
+            middleware.shutdown()
+            return output, dict(captured["headers"])
+
+        for cache_mode in ("safe", "request"):
+            output, headers = invoke(cache_mode)
+            self.assertEqual(output, original)
+            self.assertEqual(headers["Cache-Control"], "public, max-age=300")
+
+        for cache_mode, opt_in in (("request", True), ("private", False)):
+            output, headers = invoke(cache_mode, opt_in)
+            self.assertIn("_agentFeedback", json.loads(output))
+            self.assertEqual(headers["Cache-Control"], "private, no-store")
 
     def test_agent_helper_allowlists_destination_and_sends_compact_body(self) -> None:
         envelope = {
@@ -225,7 +320,7 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
             endpoint="https://feedback.test",
             feedback_mode="ask_once",
         ))
-        envelope = runtime.prepare()["envelope"]
+        envelope = runtime.prepare(customer_ref="acct_python_ask_once")["envelope"]
         self.assertTrue(envelope["requested"])
         self.assertTrue(envelope["consentRequired"])
         self.assertEqual(envelope["consentPolicy"], "once")
@@ -234,8 +329,18 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("submit", envelope)
         self.assertEqual(envelope["requiredAction"]["type"], "ask_user")
         self.assertEqual(envelope["when"], "after_experience_known_and_consent_resolved")
-        self.assertTrue(envelope["instruction"].startswith("Ask the user exactly this question"))
-        self.assertIn("Do not assume an answer", envelope["instruction"])
+        self.assertTrue(envelope["instruction"].startswith("First complete the user's product task."))
+        self.assertIn("after the product answer", envelope["instruction"])
+        self.assertIn("silence, uncertainty, or ambiguity, submit nothing", envelope["instruction"])
+        self.assertIn("future uses without asking again", envelope["requiredAction"]["question"])
+        self.assertIn("nothing is installed", envelope["requiredAction"]["question"])
+        per_use_envelope = runtime.prepare()["envelope"]
+        self.assertEqual(per_use_envelope["mode"], "ask_always")
+        self.assertEqual(per_use_envelope["configuredMode"], "ask_once")
+        self.assertEqual(per_use_envelope["consentPolicy"], "always")
+        self.assertEqual(feedback_consent_action(per_use_envelope), "ask")
+        self.assertNotIn("future uses", per_use_envelope["requiredAction"]["question"])
+        self.assertIn("about this use", per_use_envelope["requiredAction"]["question"])
         self.assertEqual(feedback_consent_action(envelope), "ask")
         with self.assertRaisesRegex(ValueError, "Invalid Agent Feedback submission contract"):
             submit_product_feedback(
@@ -254,6 +359,24 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(decision_body[0], {"decision": "approved"})
         self.assertEqual(feedback_consent_action(decision["feedback"]), "submit")
+
+        declined = runtime.prepare(
+            customer_ref="acct_python_ask_once", consent_state="declined"
+        )["envelope"]
+        self.assertFalse(declined["requested"])
+        self.assertEqual(declined["state"], "feedback_disabled")
+        self.assertEqual(declined["when"], "only_after_explicit_user_request")
+        self.assertEqual(declined["manageConsent"]["current"], "declined")
+        self.assertEqual(feedback_consent_action(declined), "skip")
+        self.assertIs(
+            feedback_from_response({}, {"_agentFeedback": declined}), declined
+        )
+
+        approved = runtime.prepare(
+            customer_ref="acct_python_ask_once", consent_state="approved"
+        )["envelope"]
+        self.assertEqual(approved["state"], "feedback_ready")
+        self.assertEqual(approved["manageConsent"]["current"], "approved")
         runtime.shutdown()
 
         always = AgentFeedback(AgentFeedbackOptions(
@@ -264,21 +387,55 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         always_envelope = always.prepare()["envelope"]
         self.assertEqual(always_envelope["consentPolicy"], "always")
         self.assertNotIn("submit", always_envelope)
+        self.assertNotIn("future uses", always_envelope["requiredAction"]["question"])
+        self.assertIn("after the product answer", always_envelope["instruction"])
         self.assertEqual(feedback_consent_action(always_envelope), "ask")
         always.shutdown()
 
     def test_agent_helper_rejects_malformed_consent_contracts(self) -> None:
         runtime = AgentFeedback(AgentFeedbackOptions(api_key=KEY, feedback_mode="ask_always"))
-        malformed = runtime.prepare()["envelope"]
+        valid = runtime.prepare()["envelope"]
+        malformed = json.loads(json.dumps(valid))
         malformed["consentRequired"] = False
         self.assertIsNone(
             feedback_from_response({}, {"_agentFeedback": malformed})
         )
         self.assertEqual(feedback_consent_action(malformed), "skip")
 
-        missing_action = runtime.prepare()["envelope"]
+        missing_action = json.loads(json.dumps(valid))
         missing_action.pop("requiredAction")
         self.assertEqual(feedback_consent_action(missing_action), "skip")
+
+        wrong_policy = json.loads(json.dumps(valid))
+        wrong_policy["consentPolicy"] = "once"
+        self.assertEqual(feedback_consent_action(wrong_policy), "skip")
+
+        wrong_when = json.loads(json.dumps(valid))
+        wrong_when["when"] = "after_experience_known_and_consent_resolved"
+        self.assertEqual(feedback_consent_action(wrong_when), "skip")
+
+        bad_authorization = json.loads(json.dumps(valid))
+        bad_authorization["requiredAction"]["submitDecision"]["authorization"] = "Bearer untrusted"
+        self.assertEqual(feedback_consent_action(bad_authorization), "skip")
+
+        bad_schema = json.loads(json.dumps(valid))
+        bad_schema["requiredAction"]["submitDecision"]["bodySchema"] = {
+            "decision": ["approved", "declined", "unsure"]
+        }
+        self.assertEqual(feedback_consent_action(bad_schema), "skip")
+
+        foreign_schema = json.loads(json.dumps(valid))
+        foreign_schema["requiredAction"]["submitDecision"]["bodySchema"]["foreign"] = ["unexpected"]
+        self.assertEqual(feedback_consent_action(foreign_schema), "skip")
+
+        ready = AgentFeedback(AgentFeedbackOptions(api_key=KEY)).prepare()["envelope"]
+        wrong_ready_when = json.loads(json.dumps(ready))
+        wrong_ready_when["when"] = "after_experience_known_and_consent_resolved"
+        self.assertEqual(feedback_consent_action(wrong_ready_when), "skip")
+
+        mixed_ready = json.loads(json.dumps(ready))
+        mixed_ready["requiredAction"] = valid["requiredAction"]
+        self.assertEqual(feedback_consent_action(mixed_ready), "skip")
         runtime.shutdown()
 
 

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "epode",
+  "description": "Trusted, privacy-bounded product feedback for customer agents.",
+  "owner": {
+    "name": "Open Software Network"
+  },
+  "plugins": [
+    {
+      "name": "epode-companion",
+      "description": "Report whether HTTP products worked without sending prompt or task content.",
+      "author": {
+        "name": "Open Software Network"
+      },
+      "source": "./companion/plugins/epode-companion",
+      "category": "productivity",
+      "homepage": "https://app.epode.ai"
+    }
+  ]
+}

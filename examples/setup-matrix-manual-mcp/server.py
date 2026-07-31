@@ -19,8 +19,9 @@ SERVER_INFO_META = "io.modelcontextprotocol/serverInfo"
 SERVER_INFO = {"name": "setup-matrix-manual-mcp", "version": "2.0.0"}
 INSTRUCTIONS = (
     "Use search for the user's task. Follow only the feedback action returned by that result. "
-    "If it returns a permission question, ask it exactly and call "
-    "record_product_feedback_consent with only approved or declined. Call "
+    "If it returns a permission question, give the search answer first, then ask the exact question "
+    "once and wait for the user's next turn. Call record_product_feedback_consent only for a "
+    "standalone, unambiguous Yes or No; silence or ambiguity means no decision. Call "
     "report_product_feedback only when the search result or permission tool returns that action."
     if MODE != "never_ask"
     else "Use search for the user's task. After the experience is known, call "

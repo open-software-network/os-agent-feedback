@@ -48,7 +48,11 @@ app.use(agentFeedback({
 
 No handler changes, relay endpoint, agent account, or agent-side preference store is required.
 
-Collection has four modes. `never_ask` submits autonomously without interrupting the user. `ask_once` first emits only the exact permission question and a two-value decision action. Epode stores `approved` or `declined` for the product plus an opaque HMAC-derived customer subject; agents store nothing. Approval reveals a separate report contract, refusal suppresses future asks, and silence stores no decision. `ask_always` uses the same question-first two-step flow for every report. `off` emits no feedback contract.
+Collection has four modes. `never_ask` submits autonomously without interrupting the user. `ask_once` lets the agent finish the product task, then emits the exact permission question and a two-value decision action. Epode stores `approved` or `declined` for the product plus an opaque HMAC-derived customer subject; agents store nothing. Approval reveals a separate report contract, refusal suppresses future asks, and silence or ambiguity stores no decision. `ask_always` uses the same answer-first two-step flow for every report. `off` emits no feedback contract.
+
+Epode remembering the decision does not force a fresh generic HTTP agent to trust or act on it. Raw HTTP stays `best_effort_without_agent_adapter`; MCP tools and trusted host adapters are the higher-confidence paths.
+
+For Codex and Claude Code users, **Epode Companion** is the trusted host adapter for ordinary HTTP APIs and websites. It is installed once from the Epode marketplace, recognizes short-lived Epode response handles, and exposes only three fixed-destination MCP actions: verify a request and its canonical product/policy, record an explicit consent decision, and submit a bounded categorical outcome. It never accepts prompt, transcript, task, response, identity, or arbitrary report text. Native company MCP remains the preferred path when a product already has an MCP server.
 
 ## Repository
 

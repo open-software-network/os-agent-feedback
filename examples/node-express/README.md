@@ -22,4 +22,4 @@ curl -H 'x-agent-session: evaluation-123' 'https://example-status-agent-producti
 
 Generic agents may ignore side-effect instructions contained in HTTP data. Use `../customer-agent-http` to demonstrate deterministic submission by a feedback-aware agent runtime.
 
-Set `AGENT_FEEDBACK_MODE=never_ask` to submit autonomously, `ask_once` to let Epode remember approval or refusal by the configured opaque `customerRef`, or `ask_always` to run the question-first decision flow for every report.
+Set `AGENT_FEEDBACK_MODE=never_ask` to submit autonomously, `ask_once` to let Epode remember approval or refusal by the configured opaque `customerRef`, or `ask_always` to run the answer-first decision flow for every report.
