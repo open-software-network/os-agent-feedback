@@ -68,10 +68,11 @@ use crate::{
         FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackModesDiscovery,
         FeedbackRequiredFieldsDiscovery, FeedbackSubmissionDiscovery,
         FeedbackWorkaroundShapeDiscovery, GithubIssueLink, HealthResponse, IntegrationsDiscovery,
-        McpDiscovery, PolicyInput, ProductAuth, ProductFeedbackAcceptedResponse,
-        ProductFeedbackReportInput, ProductGithubRepo, ProductGithubRepoInput,
-        ProductGroupsResponse, ReliabilityDiscovery, TelemetryBatchInput, TelemetryBatchResult,
-        TelemetryDiscovery, UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput,
+        McpDiscovery, MergeReportGroupsInput, MergeReportGroupsResponse, PolicyInput, ProductAuth,
+        ProductFeedbackAcceptedResponse, ProductFeedbackReportInput, ProductGithubRepo,
+        ProductGithubRepoInput, ProductGroupsResponse, ReliabilityDiscovery, TelemetryBatchInput,
+        TelemetryBatchResult, TelemetryDiscovery, UpdateFeedbackWorkflowInput, UpdateNameInput,
+        UpdateTeamMemberInput,
     },
     os_accounts::{
         ACCESS_COOKIE, OsAccountsClient, PKCE_COOKIE, REFRESH_COOKIE, STATE_COOKIE, TokenPair,
@@ -92,8 +93,8 @@ use crate::{
         get_or_create_workspace, get_product_github_repo, github_installation_workspace,
         group_issue_context, group_issue_sync_context, ingest_telemetry_batch,
         list_github_installations, list_product_groups, mark_group_issue_filing_for_reconciliation,
-        purge_expired_product_data, read_product_auth, record_feedback_consent_decision,
-        regroup_report_groups, release_group_issue_filing_claim,
+        merge_report_groups, purge_expired_product_data, read_product_auth,
+        record_feedback_consent_decision, regroup_report_groups, release_group_issue_filing_claim,
         release_group_issue_reconciliation_claim, remove_team_member, rename_product,
         rename_workspace, resolve_workspace_access, revert_last_commented_report_count,
         revoke_api_key, revoke_github_installation, revoke_team_invitation, rotate_api_key,
@@ -208,6 +209,7 @@ fn build_app_router() -> OpenApiRouter<Arc<AppState>> {
             clear_product_github_repo_handler
         ))
         .routes(routes!(product_groups_handler))
+        .routes(routes!(merge_report_groups_handler))
         .routes(routes!(file_group_github_issue_handler))
         .routes(routes!(join_team_handler))
         .routes(routes!(logout_handler))
@@ -1452,6 +1454,70 @@ async fn product_groups_handler(
     )
 }
 
+fn valid_report_group_key(group_key: &str) -> bool {
+    group_key.len() == 32
+        && group_key
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/groups/{group_key}/merge",
+    tag = "github",
+    params(
+        ("group_key" = String, Path, description = "Source report group that will be merged away"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    request_body = MergeReportGroupsInput,
+    responses(
+        (status = 200, description = "Reports moved and durable merge lineage recorded", body = MergeReportGroupsResponse),
+        (
+            status = 400,
+            description = "Invalid group key, self-merge, team header, or malformed JSON body",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot edit the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Source or target group not found for this team", body = ApiErrorEnvelope),
+        (status = 409, description = "Groups belong to different products, merge lineage would chain, or both groups have filed GitHub issues", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 413, description = "Request body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "Request body is not JSON", body = String, content_type = "text/plain"),
+        (status = 422, description = "JSON body does not match the merge schema", body = String, content_type = "text/plain"),
+        (status = 500, description = "Report groups could not be merged", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn merge_report_groups_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(source_group_key): Path<String>,
+    Json(input): Json<MergeReportGroupsInput>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    if !valid_report_group_key(&source_group_key) || !valid_report_group_key(&input.into_group_key)
+    {
+        return Err(ApiError::bad_request(
+            "Report group keys must be 32 lowercase hexadecimal characters",
+        ));
+    }
+    let summary = merge_report_groups(
+        &state.pool,
+        context.workspace.id,
+        &source_group_key,
+        &input.into_group_key,
+        &context.user.id,
+    )
+    .await?;
+    dashboard_response(&state, Json(summary), tokens)
+}
+
 #[utoipa::path(
     post,
     path = "/api/groups/{group_key}/github-issue",
@@ -1467,7 +1533,7 @@ async fn product_groups_handler(
         (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
         (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
         (status = 404, description = "Feedback group not found for this team", body = ApiErrorEnvelope),
-        (status = 409, description = "The group cannot be filed yet because its mapping is unusable or reconciliation is in progress", body = ApiErrorEnvelope),
+        (status = 409, description = "The group was merged away, its mapping is unusable, or a filing is being reconciled", body = ApiErrorEnvelope),
         (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
         (status = 500, description = "GitHub issue linkage could not be persisted", body = ApiErrorEnvelope),
         (status = 502, description = "GitHub issue creation failed or has an ambiguous outcome being reconciled", body = ApiErrorEnvelope),
@@ -1489,6 +1555,11 @@ async fn file_group_github_issue_handler(
         group_issue_context(&state.pool, workspace_id, &group_key, backlink.clone())
             .await?
             .ok_or_else(|| ApiError::not_found("Feedback group not found for this team"))?;
+    if let Some(target_group_key) = initial_context.merged_into_group_key.as_deref() {
+        return Err(ApiError::conflict(format!(
+            "This feedback group was merged into {target_group_key}; file the issue on that group instead"
+        )));
+    }
     if let Some(existing) = get_group_github_issue(&state.pool, workspace_id, &group_key).await? {
         spawn_group_issue_sync(Arc::clone(&state), workspace_id, group_key);
         return dashboard_response(&state, Json(existing.link()), tokens);
@@ -3857,6 +3928,7 @@ mod page_tests {
         github_callback_redirect_target, group_issue_reconciliation_resolution,
         group_issue_state_refresh_due, group_issue_sync_needed, group_marker_comment,
         mcp_auth_error, mcp_tool_allowed, mcp_tools, resolve_web_app_url, reveal_auth_error,
+        valid_report_group_key,
     };
     use chrono::{Duration, TimeZone as _, Utc};
     use serde_json::{Value, json};
@@ -3974,6 +4046,20 @@ mod page_tests {
                 GroupIssueReconciliationDecision::KeepWaiting,
                 "{reason:?} must retain the claim"
             );
+        }
+    }
+
+    #[test]
+    fn report_group_keys_are_lowercase_fingerprints() {
+        assert!(valid_report_group_key("6910e1b05a001949e02f04db6d67d013"));
+        for invalid in [
+            "",
+            "6910e1b05a001949e02f04db6d67d01",
+            "6910E1B05A001949E02F04DB6D67D013",
+            "6910e1b05a001949e02f04db6d67d01g",
+            "../6910e1b05a001949e02f04db6d67d013",
+        ] {
+            assert!(!valid_report_group_key(invalid), "{invalid}");
         }
     }
 

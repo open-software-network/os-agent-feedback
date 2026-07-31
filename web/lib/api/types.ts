@@ -182,6 +182,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/groups/{group_key}/merge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["merge_report_groups_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/groups/{group_key}/github-issue": {
         parameters: {
             query?: never;
@@ -906,6 +922,14 @@ export interface components {
             name: string;
             privacy: string;
             transport: string;
+        };
+        MergeReportGroupsInput: {
+            intoGroupKey: string;
+        };
+        MergeReportGroupsResponse: {
+            /** Format: int64 */
+            reportsMoved: number;
+            targetGroupKey: string;
         };
         /** @description Opaque JSON object whose fields depend on the MCP JSON-RPC method. */
         OpaqueJsonObject: Record<string, never>;
@@ -2059,6 +2083,127 @@ export interface operations {
             };
         };
     };
+    merge_report_groups_handler: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Team to configure; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path: {
+                /** @description Source report group that will be merged away */
+                group_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MergeReportGroupsInput"];
+            };
+        };
+        responses: {
+            /** @description Reports moved and durable merge lineage recorded */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MergeReportGroupsResponse"];
+                };
+            };
+            /** @description Invalid group key, self-merge, team header, or malformed JSON body */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                    "text/plain": string;
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot edit the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Source or target group not found for this team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Groups belong to different products, merge lineage would chain, or both groups have filed GitHub issues */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description A pending team invitation changed while team membership was refreshed */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Request body exceeds the configured limit */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description Request body is not JSON */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description JSON body does not match the merge schema */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description Report groups could not be merged */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
     file_group_github_issue_handler: {
         parameters: {
             query?: never;
@@ -2128,7 +2273,7 @@ export interface operations {
                     "application/json": components["schemas"]["ApiErrorEnvelope"];
                 };
             };
-            /** @description The group cannot be filed yet because its mapping is unusable or reconciliation is in progress */
+            /** @description The group was merged away, its mapping is unusable, or a filing is being reconciled */
             409: {
                 headers: {
                     [name: string]: unknown;

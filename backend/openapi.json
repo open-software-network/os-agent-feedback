@@ -1199,6 +1199,170 @@
         ]
       }
     },
+    "/api/groups/{group_key}/merge": {
+      "post": {
+        "tags": [
+          "github"
+        ],
+        "operationId": "merge_report_groups_handler",
+        "parameters": [
+          {
+            "name": "group_key",
+            "in": "path",
+            "description": "Source report group that will be merged away",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to configure; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MergeReportGroupsInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Reports moved and durable merge lineage recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergeReportGroupsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid group key, self-merge, team header, or malformed JSON body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot edit the requested team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Source or target group not found for this team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Groups belong to different products, merge lineage would chain, or both groups have filed GitHub issues",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "A pending team invitation changed while team membership was refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the configured limit",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Request body is not JSON",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "JSON body does not match the merge schema",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Report groups could not be merged",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
     "/api/groups/{group_key}/github-issue": {
       "post": {
         "tags": [
@@ -1291,7 +1455,7 @@
             }
           },
           "409": {
-            "description": "The group cannot be filed yet because its mapping is unusable or reconciliation is in progress",
+            "description": "The group was merged away, its mapping is unusable, or a filing is being reconciled",
             "content": {
               "application/json": {
                 "schema": {
@@ -5757,6 +5921,34 @@
             "type": "string"
           },
           "transport": {
+            "type": "string"
+          }
+        }
+      },
+      "MergeReportGroupsInput": {
+        "type": "object",
+        "required": [
+          "intoGroupKey"
+        ],
+        "properties": {
+          "intoGroupKey": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MergeReportGroupsResponse": {
+        "type": "object",
+        "required": [
+          "reportsMoved",
+          "targetGroupKey"
+        ],
+        "properties": {
+          "reportsMoved": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "targetGroupKey": {
             "type": "string"
           }
         }
