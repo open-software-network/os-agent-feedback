@@ -20,6 +20,7 @@ jobs:
       backend: ${{ steps.filter.outputs.backend }}
       node: ${{ steps.filter.outputs.node }}
       sdk-node: ${{ steps.filter.outputs.sdk-node }}
+      examples: ${{ steps.filter.outputs.examples }}
       web: ${{ steps.filter.outputs.web }}
       docs: ${{ steps.filter.outputs.docs }}
       workflows: ${{ steps.filter.outputs.workflows }}
@@ -52,6 +53,14 @@ jobs:
               - "biome.json"
               - "Makefile"
               - "sdk/node/**"
+              - ".github/workflows/ci.yml"
+            examples:
+              - "backend/public/agent-feedback-node-0.1.0.tgz"
+              - "sdk/node/**"
+              - "examples/node-express/**"
+              - "examples/node-mcp/**"
+              - ".dockerignore"
+              - ".github/workflows/build-node-examples.yml"
               - ".github/workflows/ci.yml"
             web:
               - "web/**"
@@ -142,6 +151,55 @@ jobs:
       - name: Test Node SDK
         run: make sdk-node-test
 
+  examples:
+    name: Node examples
+    needs: changes
+    if: needs.changes.outputs.examples == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            examples/node-express/package-lock.json
+            examples/node-mcp/package-lock.json
+      - name: Install locked production dependencies
+        run: |
+          npm ci --prefix examples/node-express --omit=dev --ignore-scripts
+          npm ci --prefix examples/node-mcp --omit=dev --ignore-scripts
+      - name: Check entry points
+        run: |
+          node --check examples/node-express/src/index.js
+          node --check examples/node-mcp/src/index.js
+      - name: Smoke-test health endpoints
+        env:
+          AGENT_FEEDBACK_KEY: af_live_11111111111111111111111111111111_22222222222222222222222222222222_abcdefghijklmnopqrstuvwxyz
+          AGENT_FEEDBACK_URL: http://127.0.0.1:9
+        run: |
+          set -euo pipefail
+          PORT=3100 node examples/node-express/src/index.js > /tmp/epode-example-http.log 2>&1 &
+          http_pid=$!
+          PORT=3102 node examples/node-mcp/src/index.js > /tmp/epode-example-mcp.log 2>&1 &
+          mcp_pid=$!
+          cleanup() { kill "$http_pid" "$mcp_pid" 2>/dev/null || true; }
+          trap cleanup EXIT
+          for port in 3100 3102; do
+            ready=false
+            for _ in $(seq 1 30); do
+              if curl --fail --silent "http://127.0.0.1:${port}/health" > /dev/null; then
+                ready=true
+                break
+              fi
+              sleep 1
+            done
+            if [[ "$ready" != true ]]; then
+              cat /tmp/epode-example-http.log /tmp/epode-example-mcp.log
+              exit 1
+            fi
+          done
+
   web:
     name: Web
     needs: changes
@@ -215,7 +273,7 @@ jobs:
 
   ci-ok:
     name: CI
-    needs: [backend, node, sdk-node, web, docs, workflows]
+    needs: [backend, node, sdk-node, examples, web, docs, workflows]
     if: always()
     runs-on: ubuntu-latest
     steps:
