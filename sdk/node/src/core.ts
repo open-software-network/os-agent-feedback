@@ -109,11 +109,17 @@ export interface FeedbackEnvelope {
       ];
       findingSeverities: readonly ["minor", "major", "blocking"];
       confidenceRange: readonly [0, 1];
+      summaryMinLength: 8;
+      summaryMaxLength: 700;
       findingRequired: readonly ["kind", "topic", "detail"];
       findingOptional: readonly ["severity"];
       findingTopicFormat: "lowercase_slug";
+      findingDetailMinLength: 3;
+      findingDetailMaxLength: 350;
       workaroundRequired: readonly ["used"];
       workaroundOptional: readonly ["detail"];
+      workaroundDetailMinLength: 3;
+      workaroundDetailMaxLength: 350;
       maxFindings: 8;
     };
   };
@@ -707,11 +713,17 @@ export class AgentFeedbackRuntime<Request = unknown> {
             ],
             findingSeverities: ["minor", "major", "blocking"],
             confidenceRange: [0, 1],
+            summaryMinLength: 8,
+            summaryMaxLength: 700,
             findingRequired: ["kind", "topic", "detail"],
             findingOptional: ["severity"],
             findingTopicFormat: "lowercase_slug",
+            findingDetailMinLength: 3,
+            findingDetailMaxLength: 350,
             workaroundRequired: ["used"],
             workaroundOptional: ["detail"],
+            workaroundDetailMinLength: 3,
+            workaroundDetailMaxLength: 350,
             maxFindings: 8,
           },
         },
