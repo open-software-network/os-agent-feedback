@@ -2,6 +2,8 @@ import { apiRequest } from "@/lib/api/client";
 import type { components } from "@/lib/api/types";
 
 export type GithubIssueLink = components["schemas"]["GithubIssueLink"];
+export type MergeReportGroupsInput = components["schemas"]["MergeReportGroupsInput"];
+export type MergeReportGroupsResponse = components["schemas"]["MergeReportGroupsResponse"];
 export type ProductGroupsResponse = components["schemas"]["ProductGroupsResponse"];
 export type ProductReportGroup = components["schemas"]["ProductReportGroup"];
 
@@ -58,4 +60,19 @@ export function fileGroupGithubIssue(
     method: "POST",
     workspaceId,
   });
+}
+
+export function mergeReportGroups(
+  workspaceId: string,
+  sourceGroupKey: string,
+  input: MergeReportGroupsInput,
+): Promise<MergeReportGroupsResponse> {
+  return apiRequest<MergeReportGroupsResponse>(
+    `/api/groups/${encodeURIComponent(sourceGroupKey)}/merge`,
+    {
+      method: "POST",
+      workspaceId,
+      body: JSON.stringify(input),
+    },
+  );
 }
