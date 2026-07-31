@@ -14,6 +14,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
+use crate::issue_template::group_marker;
+
 type HmacSha256 = Hmac<Sha256>;
 
 const GITHUB_API_URL: &str = "https://api.github.com";
@@ -456,7 +458,7 @@ impl GithubAppClient {
         // GitHub's issue-search endpoint has its own tighter rate limit.
         // Reconciliation is rare, so one marker search per throttled attempt
         // is preferable to ever filing a possible duplicate public issue.
-        let query = format!("repo:{repo_full_name} in:body {group_key}");
+        let query = issue_search_query(repo_full_name, group_key);
         let response = Self::request(
             self.http
                 .get(format!("{GITHUB_API_URL}/search/issues"))
@@ -528,6 +530,10 @@ impl GithubAppClient {
             .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
             .header(reqwest::header::USER_AGENT, GITHUB_USER_AGENT)
     }
+}
+
+pub(crate) fn issue_search_query(repo_full_name: &str, group_key: &str) -> String {
+    format!("repo:{repo_full_name} in:body {}", group_marker(group_key))
 }
 
 pub(crate) fn validate_repo_full_name(value: &str) -> anyhow::Result<()> {

@@ -184,12 +184,7 @@ pub(crate) fn render_issue_body(data: &IssueTemplateData) -> String {
     body.push_str("\n## Volume\n");
     let _ = writeln!(body, "{} report(s)", data.report_count);
 
-    let group_key = data
-        .group_key
-        .chars()
-        .filter(char::is_ascii_hexdigit)
-        .take(64)
-        .collect::<String>();
+    let group_key = group_marker(&data.group_key);
     let backlink = clean_link(&data.backlink);
     let footer = issue_footer(&group_key, &backlink);
     body.push_str(&footer);
@@ -218,6 +213,22 @@ pub(crate) fn group_backlink(web_app_url: &str, group_key: &str) -> String {
         web_app_url.trim_end_matches('/'),
         group_key
     )
+}
+
+/// Encodes every UTF-8 byte into one alphanumeric GitHub-search token.
+///
+/// This is reversible rather than lossy or hashed: distinct group keys cannot
+/// collide, while the `g` prefix plus lowercase hex is safe in both an HTML
+/// comment and an unquoted GitHub search qualifier.
+pub(crate) fn group_marker(group_key: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut marker = String::with_capacity(1 + group_key.len() * 2);
+    marker.push('g');
+    for byte in group_key.bytes() {
+        marker.push(char::from(HEX[usize::from(byte >> 4)]));
+        marker.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    marker
 }
 
 pub(crate) fn contains_sensitive_report_text(value: &str) -> bool {
@@ -286,10 +297,10 @@ pub(crate) fn contains_sensitive_report_text(value: &str) -> bool {
 /// Matching only known prefixes lets any unrecognised or future credential
 /// format through into a public issue body, so shape is checked too. The
 /// signal is deliberately narrow to avoid redacting ordinary text: an opaque
-/// run of at least 32 characters that mixes upper case, lower case and digits
-/// (or is long hex) and carries high per-character entropy. Log identifiers are
-/// normally `snake_case` or `camelCase` without digits, so they do not qualify;
-/// real API keys, JWT segments and hashes do.
+/// run of at least 32 characters with letters, digits and high per-character
+/// entropy. Pure alphanumeric tokens are case-independent; identifier-shaped
+/// strings containing `_`, `-`, or `.` retain the stricter mixed-case/hex rule
+/// so ordinary long log identifiers remain useful.
 fn looks_like_secret_token(word: &str) -> bool {
     const MIN_TOKEN_LEN: usize = 32;
     const MIN_ENTROPY_BITS: f64 = 3.0;
@@ -315,10 +326,16 @@ fn looks_like_secret_token(word: &str) -> bool {
     let hex_like = token
         .chars()
         .all(|character| character.is_ascii_hexdigit() || character == '-');
+    let has_letter = token.chars().any(|c| c.is_ascii_alphabetic());
+    let has_digit = token.chars().any(|c| c.is_ascii_digit());
     let mixed_case_with_digits = token.chars().any(|c| c.is_ascii_lowercase())
         && token.chars().any(|c| c.is_ascii_uppercase())
-        && token.chars().any(|c| c.is_ascii_digit());
-    if !hex_like && !mixed_case_with_digits {
+        && has_digit;
+    let has_identifier_separator = token.bytes().any(|byte| matches!(byte, b'_' | b'-' | b'.'));
+    let pure_alphanumeric =
+        !has_identifier_separator && token.bytes().all(|byte| byte.is_ascii_alphanumeric());
+    let case_independent_alphanumeric = pure_alphanumeric && has_letter && has_digit;
+    if !hex_like && !mixed_case_with_digits && !case_independent_alphanumeric {
         return false;
     }
 
@@ -593,7 +610,10 @@ mod tests {
         assert!(body.contains("Status codes: 401, 503"));
         assert!(body.contains("2026-07-31 01:02:03 UTC → 2026-07-31 04:02:03 UTC"));
         assert!(body.contains(&data.backlink));
-        assert!(body.contains("<!-- epode-group: 0123456789abcdef0123456789abcdef -->"));
+        assert!(body.contains(&format!(
+            "<!-- epode-group: {} -->",
+            group_marker(&data.group_key)
+        )));
         assert_eq!(
             render_issue_title(&data),
             "[epode] defect: authentication in create_session"
@@ -636,7 +656,7 @@ mod tests {
         let capped = cap_body(
             open_fence_body,
             &issue_footer(
-                "0123456789abcdef0123456789abcdef",
+                &group_marker("0123456789abcdef0123456789abcdef"),
                 "https://app.example/?view=feedback&group=abc",
             ),
         );
@@ -650,7 +670,10 @@ mod tests {
         assert!(capped.ends_with(
             "[View this feedback group in Epode](https://app.example/?view=feedback&group=abc)"
         ));
-        assert!(capped.contains("<!-- epode-group: 0123456789abcdef0123456789abcdef -->"));
+        assert!(capped.contains(&format!(
+            "<!-- epode-group: {} -->",
+            group_marker("0123456789abcdef0123456789abcdef")
+        )));
         assert!(capped.contains("… and additional content was omitted."));
     }
 
@@ -662,6 +685,10 @@ mod tests {
             "Token was Zx8Qp2LmVn4TbW9yRc6HdKe1JgAo5UfS",
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r",
             "digest 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            "digest 9F86D081884C7D659A2FEAA0C55AD015A3BF4F1B2B0B822CD15D6C15B0F00A08",
+            "token mfrggzdfmztwq2lknnwg23tpobyxg43u",
+            "token MFRGGZDFMZTWQ2LKNNWG23TPOBYXG43U",
+            "token Zx8Qp2LmVn4TbW9yRc6HdKe1JgAo5UfS",
         ] {
             assert!(
                 contains_sensitive_report_text(secret),
@@ -678,6 +705,7 @@ mod tests {
             "The search_reports operation returned a 503 after retrying three times",
             "Handler com.example.service.internal.SearchReportsController failed",
             "error_code_5xx_timeout_exceeded_during_retry_backoff_window",
+            "lowercase_identifier_1234_with_underscores_5678",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ] {
             assert!(
@@ -688,12 +716,53 @@ mod tests {
     }
 
     #[test]
+    fn issue_marker_writer_and_searcher_use_identical_separator_safe_tokens() {
+        for group_key in [
+            "abc-def-012",
+            "123e4567-e89b-12d3-a456-426614174000",
+            "v2:abcdef0123",
+            "abc_def_012",
+        ] {
+            let mut data = template();
+            data.group_key = group_key.to_owned();
+            let body = render_issue_body(&data);
+            let body_marker = body
+                .split_once("<!-- epode-group: ")
+                .and_then(|(_, suffix)| suffix.split_once(" -->"))
+                .map(|(marker, _)| marker)
+                .expect("rendered issue body should carry a group marker");
+            let query = crate::github::issue_search_query("owner/repository", group_key);
+            let query_marker = query
+                .rsplit_once(" in:body ")
+                .map(|(_, marker)| marker)
+                .expect("reconciliation query should search one body marker");
+            let expected = group_marker(group_key);
+
+            assert_eq!(
+                body_marker.as_bytes(),
+                query_marker.as_bytes(),
+                "{group_key}"
+            );
+            assert_eq!(body_marker, expected);
+            assert!(body_marker.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+        }
+
+        assert_ne!(group_marker("abc-def"), group_marker("abcdef"));
+        assert_ne!(group_marker("abc_def"), group_marker("abcdef"));
+    }
+
+    #[test]
     fn issue_template_omits_sensitive_details() {
         let mut data = template();
-        data.findings[0].details = vec!["The response exposed customer@example.com".to_owned()];
+        data.findings[0].detail_count = 2;
+        data.findings[0].details = vec![
+            "The response exposed customer@example.com".to_owned(),
+            "The token was mfrggzdfmztwq2lknnwg23tpobyxg43u".to_owned(),
+        ];
         data.workarounds = vec![json!({"used": true, "detail": "Use github_pat_not_a_real_token"})];
         let body = render_issue_body(&data);
         assert!(!body.contains("customer@example.com"));
+        assert!(!body.contains("mfrggzdfmztwq2lknnwg23tpobyxg43u"));
         assert!(!body.contains("github_pat_"));
         assert!(body.contains("sensitive detail(s) omitted"));
         assert!(body.contains("Sensitive detail omitted"));
