@@ -13,7 +13,7 @@ describe("dashboard data flow", () => {
   });
 
   it("loads the dashboard with parity limits and navigates to real query data", async () => {
-    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(json(dashboardFixture())));
+    const fetchMock = vi.fn().mockImplementation(dashboardFetch(dashboardFixture()));
     vi.stubGlobal("fetch", fetchMock);
 
     render(
@@ -97,10 +97,7 @@ describe("dashboard data flow", () => {
   });
 
   it("restores dashboard state when the browser goes Back", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(() => Promise.resolve(json(dashboardFixture()))),
-    );
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(dashboardFetch(dashboardFixture())));
 
     render(
       <Providers>
@@ -159,7 +156,9 @@ describe("dashboard data flow", () => {
     const data = dashboardFixture();
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockImplementation((_input: RequestInfo | URL, init?: RequestInit) => {
+      vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        const supplemental = feedbackApiResponse(String(input));
+        if (supplemental) return Promise.resolve(supplemental);
         if (init?.method === "PATCH")
           return Promise.resolve(json({ product: data.currentProduct }));
         return Promise.resolve(json(data));
@@ -183,6 +182,19 @@ describe("dashboard data flow", () => {
     expect(screen.queryByText("Product renamed.")).not.toBeInTheDocument();
   });
 });
+
+function dashboardFetch(data: ReturnType<typeof dashboardFixture>) {
+  return (input: RequestInfo | URL) =>
+    Promise.resolve(feedbackApiResponse(String(input)) ?? json(data));
+}
+
+function feedbackApiResponse(path: string): Response | null {
+  if (path.includes("/groups?")) {
+    return json({ groups: [], hasMore: false, limit: 50, offset: 0 });
+  }
+  if (path.endsWith("/github-repo")) return json(null);
+  return null;
+}
 
 function json(body: unknown): Response {
   return new Response(JSON.stringify(body), {

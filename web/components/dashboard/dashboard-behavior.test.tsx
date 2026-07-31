@@ -589,7 +589,7 @@ describe("dashboard view behavior", () => {
   });
 
   it("keeps the Feedback list usable when one report has malformed findings", () => {
-    const data = dashboardFixture();
+    const data = dashboardFixture({ currentRole: "member" });
     const malformedReport = {
       ...data.reports[0],
       id: "88888888-8888-4888-8888-888888888888",
@@ -619,7 +619,7 @@ describe("dashboard view behavior", () => {
   });
 
   it("filters feedback by the displayed received time", () => {
-    const data = dashboardFixture();
+    const data = dashboardFixture({ currentRole: "member" });
     const report = {
       ...data.reports[0],
       createdAt: new Date().toISOString(),
