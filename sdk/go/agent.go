@@ -78,18 +78,59 @@ func FeedbackFromResponse(response *http.Response, body []byte) (*Envelope, erro
 }
 
 func validEnvelope(envelope *Envelope) bool {
-	if envelope == nil || envelope.V != 1 || !envelope.Requested {
+	if envelope == nil || envelope.V != 1 {
+		return false
+	}
+	if envelope.State == "feedback_disabled" {
+		return !envelope.Requested && envelope.Mode == FeedbackAskOnce &&
+			envelope.ConfiguredMode == FeedbackAskOnce && !envelope.ConsentRequired &&
+			envelope.ConsentPolicy == "once" && envelope.ConsentManagedBy == "epode" &&
+			envelope.When == "only_after_explicit_user_request" && envelope.Submit == nil &&
+			envelope.RequiredAction == nil && validManageConsent(envelope.ManageConsent, "declined")
+	}
+	if !envelope.Requested {
 		return false
 	}
 	if envelope.State == "feedback_ready" {
-		return envelope.Mode == FeedbackNeverAsk && !envelope.ConsentRequired &&
-			envelope.ConsentPolicy == "none" && envelope.Submit != nil &&
+		valid := envelope.Mode == FeedbackNeverAsk && !envelope.ConsentRequired &&
+			envelope.ConsentPolicy == "none" && envelope.When == "after_experience_known_before_final_response" &&
+			envelope.Submit != nil && envelope.RequiredAction == nil && envelope.Submit.URL != "" &&
 			envelope.Submit.Method == http.MethodPost &&
 			envelope.Submit.ContentType == "application/json" &&
 			strings.HasPrefix(envelope.Submit.Authorization, "Bearer afr2_")
+		if !valid {
+			return false
+		}
+		if envelope.ConfiguredMode == FeedbackAskOnce {
+			return validManageConsent(envelope.ManageConsent, "approved")
+		}
+		return envelope.ManageConsent == nil
 	}
-	return envelope.State == "consent_required" && envelope.ConsentRequired &&
-		envelope.ConsentManagedBy == "epode" && envelope.RequiredAction != nil && envelope.Submit == nil
+	if envelope.State != "consent_required" || !envelope.ConsentRequired ||
+		envelope.ConsentManagedBy != "epode" || envelope.RequiredAction == nil || envelope.Submit != nil {
+		return false
+	}
+	modeContract := envelope.Mode == FeedbackAskOnce && envelope.ConfiguredMode == FeedbackAskOnce &&
+		envelope.ConsentPolicy == "once" && envelope.When == "after_experience_known_and_consent_resolved"
+	modeContract = modeContract || envelope.Mode == FeedbackAskAlways && envelope.ConfiguredMode == FeedbackAskAlways &&
+		envelope.ConsentPolicy == "always" && envelope.When == "after_experience_known_and_explicit_user_approval"
+	modeContract = modeContract || envelope.Mode == FeedbackAskAlways && envelope.ConfiguredMode == FeedbackAskOnce &&
+		envelope.ConsentPolicy == "always" && envelope.When == "after_experience_known_and_explicit_user_approval"
+	action := envelope.RequiredAction.SubmitDecision
+	decisions := action.BodySchema["decision"]
+	return modeContract && envelope.RequiredAction.Type == "ask_user" && envelope.RequiredAction.Question != "" &&
+		action.Method == http.MethodPost && action.ContentType == "application/json" && action.URL != "" &&
+		strings.HasPrefix(action.Authorization, "Bearer afr2_") && len(action.BodySchema) == 1 && len(decisions) == 2 &&
+		decisions[0] == "approved" && decisions[1] == "declined"
+}
+
+func validManageConsent(action *ManageConsentContract, current string) bool {
+	if action == nil || action.Current != current || action.URL == "" || action.Method != http.MethodPost ||
+		action.ContentType != "application/json" || !strings.HasPrefix(action.Authorization, "Bearer afr2_") {
+		return false
+	}
+	decisions := action.BodySchema["decision"]
+	return len(action.BodySchema) == 1 && len(decisions) == 2 && decisions[0] == "approved" && decisions[1] == "declined"
 }
 
 // SubmitFeedbackConsent records only an explicit approved or declined answer.

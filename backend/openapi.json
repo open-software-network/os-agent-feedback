@@ -4236,6 +4236,61 @@
         ]
       }
     },
+    "/api/v2/capabilities/introspect": {
+      "post": {
+        "tags": [
+          "ingest"
+        ],
+        "operationId": "capability_inspection_handler",
+        "responses": {
+          "200": {
+            "description": "Verified capability policy and canonical product consent copy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilityInspectionResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or expired interaction capability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Feedback collection is disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Capability inspection failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/api/v2/consent/decisions": {
       "post": {
         "tags": [
@@ -4747,6 +4802,41 @@
           }
         }
       },
+      "CapabilityInspectionResponse": {
+        "type": "object",
+        "required": [
+          "state",
+          "configuredMode",
+          "consentPolicy",
+          "productName",
+          "canonicalQuestion",
+          "expiresAt"
+        ],
+        "properties": {
+          "canonicalQuestion": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "configuredMode": {
+            "type": "string"
+          },
+          "consentPolicy": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "productName": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        }
+      },
       "ClassificationDiscovery": {
         "type": "object",
         "required": [
@@ -5120,12 +5210,20 @@
         "type": "object",
         "required": [
           "prompt",
+          "askOncePrompt",
+          "askAlwaysPrompt",
           "askOnceScope",
           "askAlwaysScope",
           "onRefusalOrNoResponse"
         ],
         "properties": {
+          "askAlwaysPrompt": {
+            "type": "string"
+          },
           "askAlwaysScope": {
+            "type": "string"
+          },
+          "askOncePrompt": {
             "type": "string"
           },
           "askOnceScope": {
@@ -5316,6 +5414,7 @@
         "required": [
           "url",
           "authentication",
+          "capabilityInspectionUrl",
           "consentStateUrl",
           "consentDecisionUrl",
           "consentOwner",
@@ -5330,6 +5429,9 @@
         ],
         "properties": {
           "authentication": {
+            "type": "string"
+          },
+          "capabilityInspectionUrl": {
             "type": "string"
           },
           "confidenceRange": {

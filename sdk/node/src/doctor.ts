@@ -88,10 +88,10 @@ async function main(): Promise<void> {
       !action.submitDecision.authorization?.startsWith("Bearer afr2_") ||
       action.submitDecision.bodySchema?.decision?.join(",") !== "approved,declined"
     ) {
-      fail("Response has an invalid question-first consent contract");
+      fail("Response has an invalid answer-first consent contract");
     }
     console.log("PASS response injection");
-    console.log(`PASS ${envelope.mode} question-first decision contract`);
+    console.log(`PASS ${envelope.mode} answer-first decision contract`);
     console.log("PASS report schema withheld until approval");
     console.log("PASS synthetic decision skipped; the doctor cannot impersonate the user");
     return;

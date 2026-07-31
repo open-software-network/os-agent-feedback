@@ -9,13 +9,13 @@
     "v": { "const": 1 },
     "mode": { "enum": ["never_ask", "ask_once", "ask_always"] },
     "configuredMode": { "enum": ["ask_once", "ask_always"] },
-    "state": { "enum": ["consent_required", "feedback_ready"] },
-    "requested": { "const": true },
+    "state": { "enum": ["consent_required", "feedback_ready", "feedback_disabled"] },
+    "requested": { "type": "boolean" },
     "consentRequired": { "type": "boolean" },
     "consentPolicy": { "enum": ["none", "once", "always"] },
     "consentManagedBy": { "const": "epode" },
     "reliability": { "const": "best_effort_without_agent_adapter" },
-    "when": { "enum": ["after_experience_known_before_final_response", "after_experience_known_and_consent_resolved", "after_experience_known_and_explicit_user_approval"] },
+    "when": { "enum": ["after_experience_known_before_final_response", "after_experience_known_and_consent_resolved", "after_experience_known_and_explicit_user_approval", "only_after_explicit_user_request"] },
     "instruction": { "type": "string", "minLength": 1, "maxLength": 2400 },
     "requiredAction": {
       "type": "object",
@@ -40,6 +40,24 @@
               "properties": { "decision": { "const": ["approved", "declined"] } }
             }
           }
+        }
+      }
+    },
+    "manageConsent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current", "url", "method", "authorization", "contentType", "bodySchema"],
+      "properties": {
+        "current": { "enum": ["approved", "declined"] },
+        "url": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "method": { "const": "POST" },
+        "authorization": { "type": "string", "pattern": "^Bearer afr2_" },
+        "contentType": { "const": "application/json" },
+        "bodySchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["decision"],
+          "properties": { "decision": { "const": ["approved", "declined"] } }
         }
       }
     },
@@ -78,25 +96,225 @@
   },
   "oneOf": [
     {
-      "properties": {
-        "state": { "const": "consent_required" },
-        "mode": { "enum": ["ask_once", "ask_always"] },
-        "consentRequired": { "const": true },
-        "consentManagedBy": { "const": "epode" }
-      },
-      "required": ["configuredMode", "consentManagedBy", "requiredAction"],
-      "not": { "required": ["submit"] }
-    },
-    {
+      "title": "Never ask feedback is ready",
       "properties": {
         "state": { "const": "feedback_ready" },
         "mode": { "const": "never_ask" },
+        "requested": { "const": true },
         "consentRequired": { "const": false },
         "consentPolicy": { "const": "none" },
-        "when": { "const": "after_experience_known_before_final_response" }
+        "when": { "const": "after_experience_known_before_final_response" },
+        "submit": {}
       },
       "required": ["submit"],
-      "not": { "required": ["requiredAction"] }
+      "allOf": [
+        {
+          "not": {
+            "properties": { "requiredAction": {} },
+            "required": ["requiredAction"]
+          }
+        },
+        {
+          "not": {
+            "properties": { "configuredMode": {} },
+            "required": ["configuredMode"]
+          }
+        },
+        {
+          "not": {
+            "properties": { "consentManagedBy": {} },
+            "required": ["consentManagedBy"]
+          }
+        },
+        {
+          "not": {
+            "properties": { "manageConsent": {} },
+            "required": ["manageConsent"]
+          }
+        }
+      ]
+    },
+    {
+      "title": "Feedback is ready after Ask once approval",
+      "properties": {
+        "state": { "const": "feedback_ready" },
+        "mode": { "const": "never_ask" },
+        "configuredMode": { "const": "ask_once" },
+        "requested": { "const": true },
+        "consentRequired": { "const": false },
+        "consentPolicy": { "const": "none" },
+        "consentManagedBy": { "const": "epode" },
+        "when": { "const": "after_experience_known_before_final_response" },
+        "manageConsent": {
+          "type": "object",
+          "properties": { "current": { "const": "approved" } }
+        },
+        "submit": {},
+        "requiredAction": {}
+      },
+      "required": ["configuredMode", "consentManagedBy", "submit"],
+      "not": {
+        "properties": { "requiredAction": {} },
+        "required": ["requiredAction"]
+      }
+    },
+    {
+      "title": "Feedback is ready after Ask always approval",
+      "properties": {
+        "state": { "const": "feedback_ready" },
+        "mode": { "const": "never_ask" },
+        "configuredMode": { "const": "ask_always" },
+        "requested": { "const": true },
+        "consentRequired": { "const": false },
+        "consentPolicy": { "const": "none" },
+        "consentManagedBy": { "const": "epode" },
+        "when": { "const": "after_experience_known_before_final_response" },
+        "submit": {},
+        "requiredAction": {},
+        "manageConsent": {}
+      },
+      "required": ["configuredMode", "consentManagedBy", "submit"],
+      "allOf": [
+        {
+          "not": {
+            "properties": { "requiredAction": {} },
+            "required": ["requiredAction"]
+          }
+        },
+        {
+          "not": {
+            "properties": { "manageConsent": {} },
+            "required": ["manageConsent"]
+          }
+        }
+      ]
+    },
+    {
+      "title": "Ask once consent is required",
+      "properties": {
+        "state": { "const": "consent_required" },
+        "mode": { "const": "ask_once" },
+        "configuredMode": { "const": "ask_once" },
+        "requested": { "const": true },
+        "consentRequired": { "const": true },
+        "consentPolicy": { "const": "once" },
+        "consentManagedBy": { "const": "epode" },
+        "when": { "const": "after_experience_known_and_consent_resolved" },
+        "requiredAction": {},
+        "submit": {},
+        "manageConsent": {}
+      },
+      "required": ["configuredMode", "consentManagedBy", "requiredAction"],
+      "allOf": [
+        {
+          "not": {
+            "properties": { "submit": {} },
+            "required": ["submit"]
+          }
+        },
+        {
+          "not": {
+            "properties": { "manageConsent": {} },
+            "required": ["manageConsent"]
+          }
+        }
+      ]
+    },
+    {
+      "title": "Ask once falls back to Ask always without a stable customer reference",
+      "properties": {
+        "state": { "const": "consent_required" },
+        "mode": { "const": "ask_always" },
+        "configuredMode": { "const": "ask_once" },
+        "requested": { "const": true },
+        "consentRequired": { "const": true },
+        "consentPolicy": { "const": "always" },
+        "consentManagedBy": { "const": "epode" },
+        "when": { "const": "after_experience_known_and_explicit_user_approval" },
+        "requiredAction": {},
+        "submit": {},
+        "manageConsent": {}
+      },
+      "required": ["configuredMode", "consentManagedBy", "requiredAction"],
+      "allOf": [
+        {
+          "not": {
+            "properties": { "submit": {} },
+            "required": ["submit"]
+          }
+        },
+        {
+          "not": {
+            "properties": { "manageConsent": {} },
+            "required": ["manageConsent"]
+          }
+        }
+      ]
+    },
+    {
+      "title": "Ask always consent is required",
+      "properties": {
+        "state": { "const": "consent_required" },
+        "mode": { "const": "ask_always" },
+        "configuredMode": { "const": "ask_always" },
+        "requested": { "const": true },
+        "consentRequired": { "const": true },
+        "consentPolicy": { "const": "always" },
+        "consentManagedBy": { "const": "epode" },
+        "when": { "const": "after_experience_known_and_explicit_user_approval" },
+        "requiredAction": {},
+        "submit": {},
+        "manageConsent": {}
+      },
+      "required": ["configuredMode", "consentManagedBy", "requiredAction"],
+      "allOf": [
+        {
+          "not": {
+            "properties": { "submit": {} },
+            "required": ["submit"]
+          }
+        },
+        {
+          "not": {
+            "properties": { "manageConsent": {} },
+            "required": ["manageConsent"]
+          }
+        }
+      ]
+    },
+    {
+      "title": "Ask once feedback is disabled after decline",
+      "properties": {
+        "state": { "const": "feedback_disabled" },
+        "mode": { "const": "ask_once" },
+        "configuredMode": { "const": "ask_once" },
+        "requested": { "const": false },
+        "consentRequired": { "const": false },
+        "consentPolicy": { "const": "once" },
+        "consentManagedBy": { "const": "epode" },
+        "when": { "const": "only_after_explicit_user_request" },
+        "manageConsent": {
+          "type": "object",
+          "properties": { "current": { "const": "declined" } }
+        },
+        "requiredAction": {},
+        "submit": {}
+      },
+      "required": ["configuredMode", "consentManagedBy", "manageConsent"],
+      "allOf": [
+        {
+          "not": {
+            "properties": { "requiredAction": {} },
+            "required": ["requiredAction"]
+          }
+        },
+        {
+          "not": {
+            "properties": { "submit": {} },
+            "required": ["submit"]
+          }
+        }
+      ]
     }
   ]
 }

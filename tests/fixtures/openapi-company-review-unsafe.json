@@ -1,0 +1,223 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Unsafe review fixture",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://user:password@example.test/v1"
+    }
+  ],
+  "paths": {
+    "/auth/callback": {
+      "get": {
+        "operationId": "authCallback",
+        "description": "Complete authentication.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/JsonOk" }
+        }
+      }
+    },
+    "/logout": {
+      "get": {
+        "operationId": "logout",
+        "description": "Log out.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/JsonOk" }
+        }
+      }
+    },
+    "/api-keys": {
+      "get": {
+        "operationId": "listApiKeys",
+        "description": "List keys.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/JsonOk" }
+        }
+      }
+    },
+    "/admin/audit": {
+      "get": {
+        "operationId": "adminAudit",
+        "description": "Read the audit log.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/JsonOk" }
+        }
+      }
+    },
+    "/mcp": {
+      "get": {
+        "operationId": "mcpInfo",
+        "description": "Read MCP metadata.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/JsonOk" }
+        }
+      }
+    },
+    "/download": {
+      "get": {
+        "operationId": "downloadArchive",
+        "description": "Download an archive.",
+        "responses": {
+          "200": {
+            "description": "Archive",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/events": {
+      "get": {
+        "operationId": "streamEvents",
+        "description": "Stream events.",
+        "responses": {
+          "200": {
+            "description": "Event stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/missing-description": {
+      "get": {
+        "operationId": "missingDescription",
+        "responses": {
+          "200": { "$ref": "#/components/responses/JsonOk" }
+        }
+      }
+    },
+    "/items/{id}": {
+      "get": {
+        "operationId": "itemWithoutParameter",
+        "description": "Read an item.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/JsonOk" }
+        }
+      }
+    },
+    "/callback-capable": {
+      "get": {
+        "operationId": "callbackCapable",
+        "description": "Read and call back.",
+        "callbacks": {
+          "completion": {
+            "{$request.query.callbackUrl}": {
+              "post": {
+                "responses": {
+                  "204": {
+                    "description": "Received"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/JsonOk" }
+        }
+      }
+    },
+    "/search": {
+      "post": {
+        "operationId": "searchWithPost",
+        "description": "Search with a mutation-shaped request.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/JsonOk" }
+        }
+      }
+    },
+    "/duplicate-a": {
+      "get": {
+        "operationId": "duplicateId",
+        "description": "First duplicate.",
+        "parameters": [
+          {
+            "name": "access_token",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/JsonOk" }
+        }
+      }
+    },
+    "/duplicate-b": {
+      "get": {
+        "operationId": "duplicateId",
+        "description": "Second duplicate.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/JsonOk" }
+        }
+      }
+    },
+    "/bad path": {
+      "get": {
+        "operationId": "bad id",
+        "description": "Unstable identifiers.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/JsonOk" }
+        }
+      }
+    },
+    "/webhooks/status": {
+      "get": {
+        "operationId": "webhookStatus",
+        "description": "Read webhook state.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/JsonOk" }
+        }
+      }
+    }
+  },
+  "webhooks": {
+    "delivery": {
+      "post": {
+        "operationId": "receiveDelivery",
+        "description": "Receive a webhook.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/JsonOk" }
+        }
+      }
+    }
+  },
+  "components": {
+    "responses": {
+      "JsonOk": {
+        "description": "JSON success",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    }
+  }
+}

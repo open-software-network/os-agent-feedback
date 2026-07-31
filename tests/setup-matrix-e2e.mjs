@@ -200,15 +200,23 @@ function assertConsentEnvelope(envelope, mode) {
   assert.equal(envelope.consentManagedBy, "epode");
   assert.equal(envelope.submit, undefined);
   assert.equal(envelope.requiredAction.type, "ask_user");
-  assert.match(envelope.requiredAction.question, /^May I send the product provider/);
+  assert.match(envelope.requiredAction.question, /^May I send this product's provider/);
+  if (mode === "ask_once") {
+    assert.match(envelope.requiredAction.question, /future uses without asking again/);
+    assert.match(envelope.requiredAction.question, /nothing is installed/);
+  } else {
+    assert.doesNotMatch(envelope.requiredAction.question, /future uses/);
+  }
   assert.deepEqual(envelope.requiredAction.submitDecision.bodySchema, {
     decision: ["approved", "declined"],
   });
+  assert.match(envelope.instruction, /^First complete the user's product task\./);
+  assert.match(envelope.instruction, /after the product answer/);
+  assert.match(envelope.instruction, /silence, uncertainty, or ambiguity, submit nothing/);
   assert.match(
     envelope.instruction,
-    /^Ask the user exactly this question before your final answer:/,
+    /Do not install software, write files, or save a local preference/,
   );
-  assert.match(envelope.instruction, /Do not assume an answer/);
   assert.doesNotMatch(envelope.instruction, /reportSchema|summary:string/);
 }
 
@@ -363,7 +371,7 @@ async function testHttpConsent(base, stack, mode) {
     }
 
     console.log(
-      `PASS ${stack}/${surfaceName}/${mode}: question first, silence safe, approval report${mode === "ask_once" ? ", remembered decision" : ", fresh next question"}, refusal safe`,
+      `PASS ${stack}/${surfaceName}/${mode}: answer first, silence safe, approval report${mode === "ask_once" ? ", remembered decision" : ", fresh next question"}, refusal safe`,
     );
   }
 }
@@ -597,12 +605,16 @@ function assertMcpConsent(feedback, mode) {
   assert.equal(feedback.reportTool, undefined);
   assert.equal(feedback.consentTool, "record_product_feedback_consent");
   assert.match(feedback.feedbackHandle, /^afr2_/);
-  assert.match(feedback.question, /^May I send the product provider/);
-  assert.match(
-    feedback.instruction,
-    /^Ask the user exactly this question before your final answer:/,
-  );
-  assert.match(feedback.instruction, /Do not assume an answer/);
+  assert.match(feedback.question, /^May I send this product's provider/);
+  if (mode === "ask_once") {
+    assert.match(feedback.question, /future uses without asking again/);
+    assert.match(feedback.question, /nothing is installed/);
+  } else {
+    assert.doesNotMatch(feedback.question, /future uses/);
+  }
+  assert.match(feedback.instruction, /^First complete the user's product task\./);
+  assert.match(feedback.instruction, /after the product answer/);
+  assert.match(feedback.instruction, /silence, uncertainty, or ambiguity, submit nothing/);
   assert.doesNotMatch(feedback.instruction, /reportSchema|summary:string/);
 }
 
@@ -698,7 +710,7 @@ async function testMcpConsent(url, stack, mode) {
   }
 
   console.log(
-    `PASS ${stack}/mcp/${mode}: question first, silence safe, approval report${mode === "ask_once" ? ", remembered decision" : ", fresh next question"}, refusal safe`,
+    `PASS ${stack}/mcp/${mode}: answer first, silence safe, approval report${mode === "ask_once" ? ", remembered decision" : ", fresh next question"}, refusal safe`,
   );
 }
 

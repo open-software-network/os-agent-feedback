@@ -56,6 +56,8 @@ pub(crate) struct FeedbackWorkaroundShapeDiscovery {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FeedbackConsentDiscovery {
     pub prompt: String,
+    pub ask_once_prompt: String,
+    pub ask_always_prompt: String,
     pub ask_once_scope: String,
     pub ask_always_scope: String,
     pub on_refusal_or_no_response: String,
@@ -66,6 +68,7 @@ pub(crate) struct FeedbackConsentDiscovery {
 pub(crate) struct FeedbackSubmissionDiscovery {
     pub url: String,
     pub authentication: String,
+    pub capability_inspection_url: String,
     pub consent_state_url: String,
     pub consent_decision_url: String,
     pub consent_owner: String,
@@ -693,6 +696,18 @@ pub(crate) struct ConsentStateInput {
 #[derive(Debug, Serialize, ToSchema)]
 pub(crate) struct ConsentStateResponse {
     pub state: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CapabilityInspectionResponse {
+    pub state: String,
+    pub configured_mode: String,
+    pub consent_policy: String,
+    pub product_name: String,
+    #[schema(required = true, nullable)]
+    pub canonical_question: Option<String>,
+    pub expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

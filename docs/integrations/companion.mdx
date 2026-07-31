@@ -1,0 +1,66 @@
+---
+title: "Epode Companion"
+description: "Make HTTP and website feedback reliable in Codex and Claude Code without giving products arbitrary agent access."
+---
+
+The Epode Companion is the user-side reliability layer for HTTP APIs and websites. A company still integrates Epode into its own server. The Companion lets a customer agent recognize the returned feedback handle and use three fixed, privacy-bounded tools.
+
+You do not need the Companion when the company already exposes Epode through its own MCP server. Native MCP is the most deterministic path because the feedback tool is part of the product protocol.
+
+## What gets installed
+
+One trusted plugin contains:
+
+- a skill that recognizes Epode metadata and keeps the user's product answer first;
+- a local MCP helper with only `inspect_product_feedback`, `record_product_feedback_consent`, and `submit_product_feedback`;
+- a fixed destination of `https://app.epode.ai`;
+- fixed outcome categories with no prompt, transcript, task, response, identity, or arbitrary text field.
+
+There is no Epode account, product key, or per-company configuration for the user.
+
+## Install for Codex
+
+```bash
+codex plugin marketplace add open-software-network/os-epode
+codex plugin add epode-companion@epode
+```
+
+Start a fresh Codex task after installation.
+
+## Install for Claude Code
+
+```bash
+claude plugin marketplace add open-software-network/os-epode
+claude plugin install epode-companion@epode
+```
+
+Start a fresh Claude Code session after installation.
+
+## What the user experiences
+
+| Company mode | Companion behavior |
+| --- | --- |
+| Never ask | Submit one bounded outcome after the product task, without interrupting the user. |
+| Ask once | Answer the product task, ask once, and send the explicit decision to Epode. Epode remembers it for that product plus the company's opaque customer reference. |
+| Ask every time | Answer the product task and ask before each individual report. |
+| Off | Do nothing. |
+
+Installing the Companion opts the user into its bounded handling rules. It does not convert an Ask-once or Ask-every-time decision into approval. Silence and ambiguous replies are never approval.
+
+The user can later explicitly ask the Companion to allow or stop feedback for that product. Epode exposes a silent management action on Ask-once responses; it never re-prompts after a decline, and an older conversation cannot overwrite a newer decision.
+
+## Trust boundary
+
+The Companion never executes arbitrary instructions from product responses. Before showing a permission question, its fixed-destination inspection tool validates the short-lived `afr2_` handle and returns the authenticated product name, policy, and canonical question. Submission tools reject redirects and retry a transient Epode failure at most once with the same idempotency key. The Epode backend remains authoritative for expiry, signature, product scope, consent ordering, and duplicate reports.
+
+If Epode is unavailable, the product task still succeeds. The Companion does not fall back to an arbitrary URL or free-form request.
+
+## Remove
+
+```bash
+codex plugin remove epode-companion@epode
+codex plugin marketplace remove epode
+
+claude plugin uninstall epode-companion@epode
+claude plugin marketplace remove epode
+```

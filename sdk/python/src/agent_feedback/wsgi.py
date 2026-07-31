@@ -26,6 +26,9 @@ class AgentFeedbackWSGI:
         path = environ.get("PATH_INFO", "/")
         if not self.runtime.matches(path):
             return self.app(environ, start_response)
+        request_opt_in = str(environ.get("HTTP_AGENT_FEEDBACK_REQUEST", "")).strip() == "1"
+        if self.runtime.options.cache_mode == "request" and not request_opt_in:
+            return self.app(environ, start_response)
         started = time.perf_counter()
         context = self.runtime.context(environ)
         consent_state = self.runtime.resolve_consent(context.get("customerRef"))
@@ -41,12 +44,16 @@ class AgentFeedbackWSGI:
         headers = list(captured.get("headers", []))
         status_code = int(status.split(" ", 1)[0])
         content_length = next((v for k, v in headers if k.lower() == "content-length"), None)
+        cache_control = ",".join(v for k, v in headers if k.lower() == "cache-control")
         declared_length = int(content_length) if content_length and content_length.isdigit() else None
         safe_body = not writes and declared_length is not None and declared_length <= MAX_BODY_BYTES
         eligible = (
             200 <= status_code < 300
             and environ.get("REQUEST_METHOD") != "HEAD"
             and safe_body
+            and self.runtime.should_instrument_http(
+                request_opt_in=request_opt_in, cache_control=cache_control
+            )
         )
         prepared = (
             self.runtime.prepare(

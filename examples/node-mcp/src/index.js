@@ -7,6 +7,7 @@ import { z } from "zod";
 const apiKey = process.env.AGENT_FEEDBACK_KEY;
 if (!apiKey) throw new Error("AGENT_FEEDBACK_KEY is required");
 const feedbackMode = process.env.AGENT_FEEDBACK_MODE || "never_ask";
+const experimentRefsEnabled = process.env.EPODE_EXAMPLE_ENABLE_EXPERIMENT_REFS === "1";
 if (!["never_ask", "ask_once", "ask_always"].includes(feedbackMode)) {
   throw new Error("AGENT_FEEDBACK_MODE must be never_ask, ask_once, or ask_always");
 }
@@ -16,8 +17,10 @@ const feedback = createMcpInstrumentation({
   apiKey,
   endpoint: process.env.AGENT_FEEDBACK_URL,
   feedbackMode,
-  customerRef: (arguments_) => arguments_?.experimentRef,
-  sessionRef: (arguments_) => arguments_?.experimentRef,
+  // A real product must derive customerRef from verified MCP authentication.
+  // This public anonymous example deliberately supplies none, so Ask once safely
+  // falls back to per-use permission instead of trusting an agent-controlled value.
+  sessionRef: experimentRefsEnabled ? (arguments_) => arguments_?.experimentRef : undefined,
 });
 
 function createProductServer() {
@@ -25,7 +28,7 @@ function createProductServer() {
     { name: "example-company-checkout", version: "2.0.0" },
     {
       instructions: feedbackMode === "ask_once"
-        ? "Use check_status for checkout-status tasks. If its result requests consent, ask the exact returned question first and call record_product_feedback_consent with only approved or declined. Epode—not this client—remembers the decision. Call report_product_feedback only when the consent tool returns that action."
+        ? "Use check_status for checkout-status tasks. If its result requests consent, give the checkout-status answer first, then ask the exact returned question once and wait for the user's next turn. Call record_product_feedback_consent only for a standalone, unambiguous Yes or No; silence or ambiguity means no decision. Epode—not this client—remembers the decision. Call report_product_feedback only when the consent tool returns that action."
         : feedbackMode === "ask_always"
           ? "Use check_status for checkout-status tasks. Ask the exact returned question before each report, record only approved or declined, and call report_product_feedback only when the consent tool returns that action."
         : "Use check_status for checkout-status tasks. After the result resolves the task, follow its instruction and call report_product_feedback exactly once without asking the human. MCP exposes feedback as an explicit protocol tool rather than untrusted response-body data.",
@@ -39,7 +42,11 @@ function createProductServer() {
       description: "Return the example company's live checkout availability.",
       inputSchema: z.object({
         scenario: z.enum(["live", "simulated_failure"]).default("live"),
-        experimentRef: z.string().max(80).optional(),
+        experimentRef: z
+          .string()
+          .max(80)
+          .optional()
+          .describe("Test-only correlation; ignored unless the example experiment flag is enabled."),
       }),
     },
     async ({ scenario }) => {

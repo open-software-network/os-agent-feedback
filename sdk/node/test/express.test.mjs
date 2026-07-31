@@ -4,9 +4,45 @@ import test from "node:test";
 
 import express from "express";
 
+import { AgentFeedbackRuntime, consentSubject } from "../dist/core.js";
 import { agentFeedback } from "../dist/express.js";
 
 const key = `af_live_0123456789abcdef0123456789abcdef_${"x".repeat(32)}`;
+
+test("Ask-once consent survives product-key rotation", () => {
+  const scope = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const first = `af_live_11111111111111111111111111111111_${scope}_${"x".repeat(32)}`;
+  const rotated = `af_live_22222222222222222222222222222222_${scope}_${"y".repeat(32)}`;
+  const otherProduct = `af_live_33333333333333333333333333333333_${"b".repeat(32)}_${"z".repeat(32)}`;
+  assert.equal(consentSubject(first, "acct_123"), consentSubject(rotated, "acct_123"));
+  assert.notEqual(consentSubject(first, "acct_123"), consentSubject(otherProduct, "acct_123"));
+});
+
+test("Ask-once exposes a silent, explicit permission-management path", async () => {
+  const runtime = new AgentFeedbackRuntime({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    feedbackMode: "ask_once",
+  });
+  const declined = runtime.prepare({
+    customerRef: "acct_123",
+    consentState: "declined",
+  }).envelope;
+  assert.equal(declined.state, "feedback_disabled");
+  assert.equal(declined.requested, false);
+  assert.equal(declined.manageConsent.current, "declined");
+  assert.equal(declined.submit, undefined);
+  assert.equal(declined.requiredAction, undefined);
+
+  const approved = runtime.prepare({
+    customerRef: "acct_123",
+    consentState: "approved",
+  }).envelope;
+  assert.equal(approved.state, "feedback_ready");
+  assert.equal(approved.manageConsent.current, "approved");
+  assert.ok(approved.submit);
+  await runtime.shutdown();
+});
 
 test("Express rejects an unknown JavaScript feedback mode", () => {
   assert.throws(
@@ -84,7 +120,7 @@ test("Express preserves JSON shape and queues a non-blocking opportunity", async
   await server.close();
 });
 
-test("Express Ask-once emits only the question-first decision action for an unknown customer", async () => {
+test("Express Ask-once emits an answer-first decision action for an unknown customer", async () => {
   const middleware = agentFeedback({
     apiKey: key,
     endpoint: "https://feedback.test",
@@ -119,11 +155,11 @@ test("Express Ask-once emits only the question-first decision action for an unkn
     decision: ["approved", "declined"],
   });
   assert.equal(contract.when, "after_experience_known_and_consent_resolved");
-  assert.match(
-    contract.instruction,
-    /^Ask the user exactly this question before your final answer:/,
-  );
-  assert.match(contract.instruction, /Do not assume an answer/);
+  assert.match(contract.requiredAction.question, /future uses without asking again/);
+  assert.match(contract.requiredAction.question, /nothing is installed/);
+  assert.match(contract.instruction, /^First complete the user's product task\./);
+  assert.match(contract.instruction, /after the product answer/);
+  assert.match(contract.instruction, /silence, uncertainty, or ambiguity, submit nothing/);
   assert.doesNotMatch(contract.instruction, /reportSchema|summary:string/);
   await middleware.shutdown();
   await server.close();
@@ -149,11 +185,35 @@ test("Express Ask-always mode requires fresh permission for every report", async
   assert.equal(contract.consentPolicy, "always");
   assert.equal(contract.submit, undefined);
   assert.equal(contract.when, "after_experience_known_and_explicit_user_approval");
-  assert.match(
-    contract.instruction,
-    /^Ask the user exactly this question before your final answer:/,
-  );
-  assert.match(contract.instruction, /Do not assume an answer/);
+  assert.doesNotMatch(contract.requiredAction.question, /future uses/);
+  assert.match(contract.instruction, /^First complete the user's product task\./);
+  assert.match(contract.instruction, /after the product answer/);
+  await middleware.shutdown();
+  await server.close();
+});
+
+test("Express Ask-once without customerRef does not promise a remembered choice", async () => {
+  const middleware = agentFeedback({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    feedbackMode: "ask_once",
+    include: ["/search"],
+    flushIntervalMs: 1,
+    logger: { debug() {}, warn() {} },
+    fetch: async () => new Response("{}", { status: 202 }),
+  });
+  const app = express();
+  app.use(middleware);
+  app.get("/search", (_request, response) => response.json({ answer: "found" }));
+  const server = await serve(app);
+
+  const contract = (await (await fetch(`${server.url}/search`)).json())._agentFeedback;
+  assert.equal(contract.mode, "ask_always");
+  assert.equal(contract.configuredMode, "ask_once");
+  assert.equal(contract.consentPolicy, "always");
+  assert.equal(contract.when, "after_experience_known_and_explicit_user_approval");
+  assert.doesNotMatch(contract.requiredAction.question, /future uses|remember your choice/);
+  assert.match(contract.requiredAction.question, /about this use/);
   await middleware.shutdown();
   await server.close();
 });

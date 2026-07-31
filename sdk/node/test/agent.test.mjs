@@ -55,7 +55,7 @@ const consentEnvelope = {
   consentManagedBy: "epode",
   reliability: "best_effort_without_agent_adapter",
   when: "after_experience_known_and_consent_resolved",
-  instruction: "Ask the exact question and do not assume an answer.",
+  instruction: "Answer the product task, then ask the exact question and wait.",
   requiredAction: {
     type: "ask_user",
     question: "May I send feedback?",
@@ -117,7 +117,7 @@ test("feedback-aware adapter submits a structured report without a consent attes
   assert.equal(JSON.parse(request.init.body).consent, undefined);
 });
 
-test("question-first consent records only a decision and reveals reporting after approval", async () => {
+test("answer-first consent records only a decision and reveals reporting after approval", async () => {
   assert.equal(feedbackConsentAction(consentEnvelope), "ask");
   let decisionBody;
   const approved = await submitFeedbackConsent(consentEnvelope, "approved", {
@@ -160,4 +160,75 @@ test("feedback-aware adapter rejects wrong-stage and untrusted contracts", async
     /untrusted origin/,
   );
   assert.equal(feedbackConsentAction({ ...consentEnvelope, requiredAction: undefined }), "skip");
+  assert.equal(feedbackConsentAction({ ...consentEnvelope, consentPolicy: "always" }), "skip");
+  assert.equal(
+    feedbackConsentAction({
+      ...consentEnvelope,
+      when: "after_experience_known_and_explicit_user_approval",
+    }),
+    "skip",
+  );
+  assert.equal(
+    feedbackConsentAction({
+      ...consentEnvelope,
+      requiredAction: {
+        ...consentEnvelope.requiredAction,
+        submitDecision: {
+          ...consentEnvelope.requiredAction.submitDecision,
+          authorization: "Bearer untrusted",
+        },
+      },
+    }),
+    "skip",
+  );
+  assert.equal(
+    feedbackConsentAction({
+      ...consentEnvelope,
+      requiredAction: {
+        ...consentEnvelope.requiredAction,
+        submitDecision: {
+          ...consentEnvelope.requiredAction.submitDecision,
+          bodySchema: { decision: ["approved", "declined", "unsure"] },
+        },
+      },
+    }),
+    "skip",
+  );
+  assert.equal(
+    feedbackConsentAction({ ...envelope, when: "after_experience_known_and_consent_resolved" }),
+    "skip",
+  );
+  assert.equal(
+    feedbackConsentAction({ ...envelope, requiredAction: consentEnvelope.requiredAction }),
+    "skip",
+  );
+  assert.equal(
+    feedbackConsentAction({
+      ...consentEnvelope,
+      requiredAction: {
+        ...consentEnvelope.requiredAction,
+        submitDecision: {
+          ...consentEnvelope.requiredAction.submitDecision,
+          bodySchema: {
+            decision: ["approved", "declined"],
+            foreign: ["unexpected"],
+          },
+        },
+      },
+    }),
+    "skip",
+  );
+});
+
+test("feedback-aware adapter accepts the safe per-use fallback for unscoped ask-once", () => {
+  assert.equal(
+    feedbackConsentAction({
+      ...consentEnvelope,
+      mode: "ask_always",
+      configuredMode: "ask_once",
+      consentPolicy: "always",
+      when: "after_experience_known_and_explicit_user_approval",
+    }),
+    "ask",
+  );
 });

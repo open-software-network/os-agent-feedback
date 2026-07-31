@@ -93,8 +93,17 @@ function validConsentContract(value: Record<string, unknown>): boolean {
     );
   }
   if (value.state === "consent_required") {
+    const modeContract =
+      (value.mode === "ask_once" &&
+        value.configuredMode === "ask_once" &&
+        value.consentPolicy === "once" &&
+        value.when === "after_experience_known_and_consent_resolved") ||
+      (value.mode === "ask_always" &&
+        (value.configuredMode === "ask_always" || value.configuredMode === "ask_once") &&
+        value.consentPolicy === "always" &&
+        value.when === "after_experience_known_and_explicit_user_approval");
     return (
-      (value.mode === "ask_once" || value.mode === "ask_always") &&
+      modeContract &&
       value.consentRequired === true &&
       value.consentManagedBy === "epode" &&
       object(value.requiredAction) &&
@@ -114,6 +123,7 @@ function parseEnvelope(value: unknown): FeedbackEnvelope | undefined {
     if (
       submit.method !== "POST" ||
       typeof submit.url !== "string" ||
+      submit.url.length === 0 ||
       typeof submit.authorization !== "string" ||
       !submit.authorization.startsWith("Bearer afr2_") ||
       submit.contentType !== "application/json"
@@ -121,8 +131,26 @@ function parseEnvelope(value: unknown): FeedbackEnvelope | undefined {
       return undefined;
     }
   } else {
-    const action = (value.requiredAction as Record<string, unknown>).submitDecision;
-    if (!object(action) || action.method !== "POST" || typeof action.url !== "string") {
+    const requiredAction = value.requiredAction as Record<string, unknown>;
+    const action = requiredAction.submitDecision;
+    const bodySchema = object(action) ? action.bodySchema : undefined;
+    if (
+      requiredAction.type !== "ask_user" ||
+      typeof requiredAction.question !== "string" ||
+      requiredAction.question.length === 0 ||
+      !object(action) ||
+      action.method !== "POST" ||
+      typeof action.url !== "string" ||
+      typeof action.authorization !== "string" ||
+      !action.authorization.startsWith("Bearer afr2_") ||
+      action.contentType !== "application/json" ||
+      !object(bodySchema) ||
+      Object.keys(bodySchema).length !== 1 ||
+      !Array.isArray(bodySchema.decision) ||
+      bodySchema.decision.length !== 2 ||
+      bodySchema.decision[0] !== "approved" ||
+      bodySchema.decision[1] !== "declined"
+    ) {
       return undefined;
     }
   }

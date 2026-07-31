@@ -10,31 +10,93 @@ from urllib.parse import urlparse
 from .core import DEFAULT_ENDPOINT
 
 
-def _valid(value: Any) -> bool:
-    if not (
+def _valid_manage_consent(value: Any, current: str) -> bool:
+    body_schema = value.get("bodySchema") if isinstance(value, dict) else None
+    return (
         isinstance(value, dict)
-        and value.get("v") == 1
-        and value.get("requested") is True
-    ):
+        and value.get("current") == current
+        and value.get("method") == "POST"
+        and value.get("contentType") == "application/json"
+        and str(value.get("authorization", "")).startswith("Bearer afr2_")
+        and isinstance(value.get("url"), str)
+        and bool(value.get("url"))
+        and isinstance(body_schema, dict)
+        and set(body_schema) == {"decision"}
+        and body_schema.get("decision") == ["approved", "declined"]
+    )
+
+
+def _valid(value: Any) -> bool:
+    if not (isinstance(value, dict) and value.get("v") == 1):
+        return False
+    if value.get("state") == "feedback_disabled":
+        return (
+            value.get("requested") is False
+            and value.get("mode") == "ask_once"
+            and value.get("configuredMode") == "ask_once"
+            and value.get("consentRequired") is False
+            and value.get("consentPolicy") == "once"
+            and value.get("consentManagedBy") == "epode"
+            and value.get("when") == "only_after_explicit_user_request"
+            and _valid_manage_consent(value.get("manageConsent"), "declined")
+            and value.get("requiredAction") is None
+            and value.get("submit") is None
+        )
+    if value.get("requested") is not True:
         return False
     if value.get("state") == "feedback_ready":
         submit = value.get("submit")
-        return (
+        valid = (
             value.get("mode") == "never_ask"
             and
             value.get("consentRequired") is False
             and value.get("consentPolicy") == "none"
+            and value.get("when") == "after_experience_known_before_final_response"
             and isinstance(submit, dict)
             and submit.get("method") == "POST"
             and submit.get("contentType") == "application/json"
             and str(submit.get("authorization", "")).startswith("Bearer afr2_")
+            and isinstance(submit.get("url"), str)
+            and bool(submit.get("url"))
+            and "requiredAction" not in value
         )
+        if not valid:
+            return False
+        if value.get("configuredMode") == "ask_once":
+            return _valid_manage_consent(value.get("manageConsent"), "approved")
+        return value.get("manageConsent") is None
+    mode = value.get("mode")
+    mode_contract = (
+        mode == "ask_once"
+        and value.get("configuredMode") == "ask_once"
+        and value.get("consentPolicy") == "once"
+        and value.get("when") == "after_experience_known_and_consent_resolved"
+    ) or (
+        mode == "ask_always"
+        and value.get("configuredMode") in {"ask_always", "ask_once"}
+        and value.get("consentPolicy") == "always"
+        and value.get("when") == "after_experience_known_and_explicit_user_approval"
+    )
+    required_action = value.get("requiredAction")
+    action = required_action.get("submitDecision") if isinstance(required_action, dict) else None
+    body_schema = action.get("bodySchema") if isinstance(action, dict) else None
     return (
         value.get("state") == "consent_required"
-        and value.get("mode") in {"ask_once", "ask_always"}
+        and mode_contract
         and value.get("consentRequired") is True
         and value.get("consentManagedBy") == "epode"
-        and isinstance(value.get("requiredAction"), dict)
+        and isinstance(required_action, dict)
+        and required_action.get("type") == "ask_user"
+        and isinstance(required_action.get("question"), str)
+        and bool(required_action.get("question"))
+        and isinstance(action, dict)
+        and action.get("method") == "POST"
+        and action.get("contentType") == "application/json"
+        and str(action.get("authorization", "")).startswith("Bearer afr2_")
+        and isinstance(action.get("url"), str)
+        and isinstance(body_schema, dict)
+        and set(body_schema) == {"decision"}
+        and body_schema.get("decision") == ["approved", "declined"]
         and value.get("submit") is None
     )
 

@@ -19,4 +19,8 @@ The customer's MCP client can see and call the feedback tool explicitly. A busin
 
 Set `AGENT_FEEDBACK_MODE=never_ask` to submit autonomously, `ask_once` to let Epode remember approval or refusal by opaque `customerRef`, or `ask_always` to ask before each report. Both ask modes expose only `record_product_feedback_consent` first and reveal `report_product_feedback` after approval.
 
+This hosted example is anonymous and intentionally does not derive `customerRef` from tool arguments. Therefore `ask_once` safely uses the per-use permission fallback. In a real authenticated MCP server, derive `customerRef` only from verified transport authentication such as `context.http.authInfo.extra.accountId`. Never trust an agent-supplied tool argument as customer identity.
+
+`experimentRef` is test-only session correlation and is ignored unless `EPODE_EXAMPLE_ENABLE_EXPERIMENT_REFS=1` is set on a disposable evaluator deployment.
+
 This example intentionally does not claim to identify the agent. MCP client information remains a self-reported runtime hint, and Epode records each tool call as its own interaction unless the product supplies an explicit application-level continuity handle.

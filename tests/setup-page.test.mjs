@@ -78,7 +78,7 @@ test("dashboard action notices are ephemeral fixed toasts", () => {
 
 test("products exist before integration setup without an environment picker", () => {
   assert.match(dashboardHtml, /id="product-scope"/);
-  assert.match(dashboardHtml, /app\.js\?v=20260730-quality/);
+  assert.match(dashboardHtml, /app\.js\?v=20260731-companion/);
   assert.match(dashboardScript, /Create your first product/);
   assert.match(dashboardScript, /id="product-select"/);
   assert.match(dashboardScript, /\+ New product/);
@@ -105,7 +105,7 @@ test("collection policy distinguishes Epode-managed once and per-report consent"
   assert.match(dashboardScript, /Ask once — Epode remembers the answer/);
   assert.match(dashboardScript, /Ask every time — request permission for each report/);
   assert.match(dashboardScript, /agent stores nothing/);
-  assert.match(dashboardScript, /Silence never becomes approval/);
+  assert.match(dashboardScript, /Silence or ambiguity never becomes approval/);
   assert.match(backendStore, /"never_ask", "ask_once", "ask_always", "off"/);
   assert.match(neverAskMigration, /SET feedback_mode = 'never_ask'/);
   assert.match(neverAskMigration, /SET DEFAULT 'never_ask'/);
@@ -131,6 +131,18 @@ test("setup offers one guided install with a manual fallback", () => {
   assert.match(dashboardScript, /Send one real interaction/);
 });
 
+test("setup explains the real customer-agent coverage path", () => {
+  assert.match(dashboardScript, /Customer-agent coverage: native MCP/);
+  assert.match(dashboardScript, /No separate Epode install is required/);
+  assert.match(dashboardScript, /Customer-agent coverage: HTTP/);
+  assert.match(dashboardScript, /Epode Companion makes this reliable in Codex and Claude Code/);
+  assert.match(dashboardScript, /codex plugin marketplace add open-software-network\/os-epode/);
+  assert.match(
+    dashboardScript,
+    /there is no Epode account, key, or per-product setup for the user/,
+  );
+});
+
 test("setup links to the public Mintlify documentation", () => {
   assert.match(dashboardScript, /https:\/\/docs\.epode\.ai/);
   assert.match(dashboardScript, /Read the integration docs/);
@@ -154,7 +166,7 @@ test("setup warns about legacy keys and keeps rotation visible", () => {
   assert.match(dashboardScript, /\/\^af_\(live\|read\)_\[0-9a-f\]\{8\}\$\//);
   assert.match(dashboardScript, /class="secret-callout warning"/);
   assert.match(dashboardStyles, /\.secret-callout\.warning/);
-  assert.match(dashboardHtml, /styles\.css\?v=20260730-quality/);
+  assert.match(dashboardHtml, /styles\.css\?v=20260731-companion/);
   assert.match(dashboardScript, /legacy key and cannot produce valid afr2 capabilities/i);
   assert.match(dashboardScript, /V2 integrations will fail boot validation/);
   assert.match(dashboardScript, /current key will keep working for one hour/);

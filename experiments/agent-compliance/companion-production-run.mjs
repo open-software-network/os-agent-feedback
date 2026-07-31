@@ -11,9 +11,7 @@ const { values } = parseArgs({
     runtimes: { type: "string", default: "codex,claude" },
     repetitions: { type: "string", default: "1" },
     decline: { type: "boolean", default: false },
-    "codex-home": { type: "string" },
     "native-codex-plugin": { type: "boolean", default: false },
-    "claude-config-dir": { type: "string" },
     "native-claude-plugin": { type: "boolean", default: false },
     output: {
       type: "string",
@@ -23,8 +21,6 @@ const { values } = parseArgs({
 });
 
 const endpoint = "https://epode-ask-http-production.up.railway.app/api/status";
-const exactPermissionQuestion =
-  "May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.";
 const companionRoot = resolve("companion/plugins/epode-companion");
 const companionServer = join(companionRoot, "scripts/mcp-server.mjs");
 const skillSource = join(companionRoot, "skills/epode-product-feedback");
@@ -106,7 +102,7 @@ function parseClaude(output) {
 }
 
 function companionCalls(output) {
-  const calls = { consent: 0, report: 0 };
+  const calls = { inspect: 0, consent: 0, report: 0, skill: 0 };
   for (const event of jsonLines(output)) {
     const codexTool =
       event.type === "item.completed" && event.item?.type === "mcp_tool_call"
@@ -118,8 +114,10 @@ function companionCalls(output) {
           .map((item) => item.name?.replace(/^mcp__epode-companion__/, ""))
       : [];
     for (const tool of [codexTool, ...claudeTools]) {
+      if (tool?.endsWith("inspect_product_feedback")) calls.inspect += 1;
       if (tool?.endsWith("record_product_feedback_consent")) calls.consent += 1;
       if (tool?.endsWith("submit_product_feedback")) calls.report += 1;
+      if (tool === "Skill" || tool?.endsWith("epode-product-feedback")) calls.skill += 1;
     }
   }
   return calls;
@@ -149,7 +147,7 @@ function mcpArguments(runtime) {
 
 async function runAgent(runtime, prompt, cwd, outputFile) {
   if (runtime === "codex") {
-    const nativePlugin = Boolean(values["codex-home"]) || values["native-codex-plugin"];
+    const nativePlugin = values["native-codex-plugin"];
     const response = await command(
       binaries.codex,
       [
@@ -166,12 +164,11 @@ async function runAgent(runtime, prompt, cwd, outputFile) {
       ],
       cwd,
       180_000,
-      values["codex-home"] ? { CODEX_HOME: resolve(values["codex-home"]) } : {},
+      {},
     );
     return { ...response, ...parseCodex(response.stdout), calls: companionCalls(response.stdout) };
   }
-  const nativePlugin =
-    Boolean(values["claude-config-dir"]) || values["native-claude-plugin"];
+  const nativePlugin = values["native-claude-plugin"];
   const response = await command(
     binaries.claude,
     [
@@ -187,9 +184,7 @@ async function runAgent(runtime, prompt, cwd, outputFile) {
     ],
     cwd,
     180_000,
-    values["claude-config-dir"]
-      ? { CLAUDE_CONFIG_DIR: resolve(values["claude-config-dir"]) }
-      : {},
+    {},
   );
   return { ...response, ...parseClaude(response.stdout), calls: companionCalls(response.stdout) };
 }
@@ -197,7 +192,7 @@ async function runAgent(runtime, prompt, cwd, outputFile) {
 async function resumeAgent(runtime, threadId, prompt, cwd, outputFile) {
   if (!threadId) return undefined;
   if (runtime === "codex") {
-    const nativePlugin = Boolean(values["codex-home"]) || values["native-codex-plugin"];
+    const nativePlugin = values["native-codex-plugin"];
     const response = await command(
       binaries.codex,
       [
@@ -215,12 +210,11 @@ async function resumeAgent(runtime, threadId, prompt, cwd, outputFile) {
       ],
       cwd,
       180_000,
-      values["codex-home"] ? { CODEX_HOME: resolve(values["codex-home"]) } : {},
+      {},
     );
     return { ...response, ...parseCodex(response.stdout), calls: companionCalls(response.stdout) };
   }
-  const nativePlugin =
-    Boolean(values["claude-config-dir"]) || values["native-claude-plugin"];
+  const nativePlugin = values["native-claude-plugin"];
   const response = await command(
     binaries.claude,
     [
@@ -238,15 +232,21 @@ async function resumeAgent(runtime, threadId, prompt, cwd, outputFile) {
     ],
     cwd,
     180_000,
-    values["claude-config-dir"]
-      ? { CLAUDE_CONFIG_DIR: resolve(values["claude-config-dir"]) }
-      : {},
+    {},
   );
   return { ...response, ...parseClaude(response.stdout), calls: companionCalls(response.stdout) };
 }
 
 function asksPermission(text) {
-  return text.includes(exactPermissionQuestion);
+  return /May I send[^?]{0,500}(?:feedback|outcome report)[^?]{0,500}\?/is.test(text);
+}
+
+function policyAccuratePermission(text) {
+  return (
+    /after this use and future uses without asking again/i.test(text) &&
+    /Epode will remember your choice for this product/i.test(text) &&
+    /prompts and task content are never included/i.test(text)
+  );
 }
 
 function correctTaskAnswer(text) {
@@ -266,9 +266,8 @@ async function prepareWorkspace(runtime) {
     "epode-product-feedback",
   );
   const nativePlugin =
-    (runtime === "codex" && (values["codex-home"] || values["native-codex-plugin"])) ||
-    (runtime === "claude" &&
-      (values["claude-config-dir"] || values["native-claude-plugin"]));
+    (runtime === "codex" && values["native-codex-plugin"]) ||
+    (runtime === "claude" && values["native-claude-plugin"]);
   if (!nativePlugin) {
     await mkdir(resolve(skillDestination, ".."), { recursive: true });
     await cp(skillSource, skillDestination, { recursive: true });
@@ -356,6 +355,7 @@ for (const runtime of runtimes) {
         first: {
           exitCode: first.code,
           askedPermission: firstAsked,
+          policyAccuratePermission: policyAccuratePermission(first.final),
           correctTaskAnswer: correctTaskAnswer(`${first.final}\n${resumed?.final || ""}`),
           calls: first.calls,
           final: first.final,
@@ -366,6 +366,7 @@ for (const runtime of runtimes) {
         second: {
           exitCode: second.code,
           askedPermission: asksPermission(second.final),
+          policyAccuratePermission: policyAccuratePermission(second.final),
           correctTaskAnswer: correctTaskAnswer(second.final),
           calls: second.calls,
           final: second.final,
@@ -407,6 +408,7 @@ for (const result of results) {
       reportCalls === 0 &&
       consentCalls === 1
     : result.first.askedPermission &&
+      result.first.policyAccuratePermission &&
       !result.second.askedPermission &&
       result.production.reports === 2 &&
       reportCalls === 2 &&

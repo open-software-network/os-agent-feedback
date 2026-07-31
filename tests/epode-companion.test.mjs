@@ -27,6 +27,10 @@ const claudeManifestFile = new URL(
 ).pathname;
 const claudeMcpFile = new URL("../companion/plugins/epode-companion/.mcp.json", import.meta.url)
   .pathname;
+const rootCodexMarketplaceFile = new URL("../.agents/plugins/marketplace.json", import.meta.url)
+  .pathname;
+const rootClaudeMarketplaceFile = new URL("../.claude-plugin/marketplace.json", import.meta.url)
+  .pathname;
 
 async function listen(handler) {
   const server = createServer(handler);
@@ -73,6 +77,7 @@ function startCompanion(endpoint) {
 test("Epode Companion exposes fixed consent and bounded report tools", async () => {
   const handle = `afr2_${"a".repeat(80)}`;
   const calls = [];
+  const idempotencyKeys = [];
   const api = await listen(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
@@ -81,7 +86,21 @@ test("Epode Companion exposes fixed consent and bounded report tools", async () 
       authorization: request.headers.authorization,
       body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
     });
+    idempotencyKeys.push(request.headers["idempotency-key"]);
     response.writeHead(200, { "content-type": "application/json" });
+    if (request.url === "/api/v2/capabilities/introspect") {
+      response.end(
+        JSON.stringify({
+          state: "consent_required",
+          configuredMode: "ask_once",
+          consentPolicy: "once",
+          productName: "Checkout API",
+          canonicalQuestion: "May I send Checkout API's provider one short report?",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        }),
+      );
+      return;
+    }
     if (request.url === "/api/v2/consent/decisions") {
       response.end(
         JSON.stringify({
@@ -99,19 +118,38 @@ test("Epode Companion exposes fixed consent and bounded report tools", async () 
       protocolVersion: "2025-11-25",
     });
     assert.equal(initialized.result.serverInfo.name, "epode-companion");
+    assert.equal(initialized.result.serverInfo.version, "0.2.0");
+    assert.equal(initialized.result.protocolVersion, "2025-11-25");
+
+    const negotiated = await companion.request("initialize", {
+      protocolVersion: "1900-01-01",
+    });
+    assert.equal(negotiated.result.protocolVersion, "2026-07-28");
 
     const listed = await companion.request("tools/list");
     assert.deepEqual(
       listed.result.tools.map((tool) => tool.name),
-      ["record_product_feedback_consent", "submit_product_feedback"],
+      ["inspect_product_feedback", "record_product_feedback_consent", "submit_product_feedback"],
     );
     assert.ok(listed.result.tools.every((tool) => tool.inputSchema.additionalProperties === false));
+
+    const inspection = await companion.request("tools/call", {
+      name: "inspect_product_feedback",
+      arguments: { feedbackHandle: handle },
+    });
+    assert.equal(inspection.result.structuredContent.verified, true);
+    assert.equal(inspection.result.structuredContent.productName, "Checkout API");
 
     const consent = await companion.request("tools/call", {
       name: "record_product_feedback_consent",
       arguments: { feedbackHandle: handle, decision: "approved" },
     });
     assert.equal(consent.result.structuredContent.feedbackHandle, handle);
+    assert.equal(consent.result.structuredContent.state, "feedback_ready");
+    assert.deepEqual(consent.result.structuredContent.nextAction, {
+      tool: "submit_product_feedback",
+      feedbackHandle: handle,
+    });
 
     const report = await companion.request("tools/call", {
       name: "submit_product_feedback",
@@ -125,6 +163,11 @@ test("Epode Companion exposes fixed consent and bounded report tools", async () 
     });
     assert.equal(report.result.structuredContent.accepted, true);
     assert.deepEqual(calls, [
+      {
+        path: "/api/v2/capabilities/introspect",
+        authorization: `Bearer ${handle}`,
+        body: {},
+      },
       {
         path: "/api/v2/consent/decisions",
         authorization: `Bearer ${handle}`,
@@ -155,6 +198,9 @@ test("Epode Companion exposes fixed consent and bounded report tools", async () 
         },
       },
     ]);
+    assert.equal(idempotencyKeys.length, 3);
+    assert.ok(idempotencyKeys.every((key) => /^[a-f0-9]{64}$/.test(key)));
+    assert.notEqual(idempotencyKeys[0], idempotencyKeys[1]);
   } finally {
     companion.child.kill();
     await api.close();
@@ -221,12 +267,63 @@ test("Epode Companion refuses to forward report bodies across redirects", async 
       name: "submit_product_feedback",
       arguments: { feedbackHandle: handle, outcome: "completed" },
     });
-    assert.match(report.error.message, /fetch failed/i);
+    assert.equal(report.result.isError, true);
+    assert.equal(report.result.structuredContent.retryable, true);
     assert.equal(redirectedRequests, 0);
   } finally {
     companion.child.kill();
     await redirector.close();
     await sink.close();
+  }
+});
+
+test("Epode Companion retries one transient failure with the same idempotency key", async () => {
+  const handle = `afr2_${"e".repeat(80)}`;
+  const keys = [];
+  let requests = 0;
+  const api = await listen(async (request, response) => {
+    for await (const _chunk of request) {
+      // Drain the request body.
+    }
+    requests += 1;
+    keys.push(request.headers["idempotency-key"]);
+    response.writeHead(requests === 1 ? 503 : 200, { "content-type": "application/json" });
+    response.end(JSON.stringify(requests === 1 ? { error: "temporary" } : { accepted: true }));
+  });
+  const companion = startCompanion(api.endpoint);
+  try {
+    const report = await companion.request("tools/call", {
+      name: "submit_product_feedback",
+      arguments: { feedbackHandle: handle, outcome: "completed" },
+    });
+    assert.equal(report.result.structuredContent.accepted, true);
+    assert.equal(requests, 2);
+    assert.equal(keys[0], keys[1]);
+  } finally {
+    companion.child.kill();
+    await api.close();
+  }
+});
+
+test("Epode Companion never treats a malformed success response as acceptance", async () => {
+  const api = await listen(async (request, response) => {
+    for await (const _chunk of request) {
+      // Drain the request body.
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ accepted: false }));
+  });
+  const companion = startCompanion(api.endpoint);
+  try {
+    const report = await companion.request("tools/call", {
+      name: "submit_product_feedback",
+      arguments: { feedbackHandle: `afr2_${"f".repeat(80)}`, outcome: "completed" },
+    });
+    assert.equal(report.result.isError, true);
+    assert.equal(report.result.structuredContent.accepted, false);
+  } finally {
+    companion.child.kill();
+    await api.close();
   }
 });
 
@@ -282,19 +379,39 @@ test("Epode Companion treats backend consent as authoritative", async (testConte
 });
 
 test("Epode Companion manifests expose one implicit, bounded skill and its local tools", async () => {
-  const [skill, openAiMetadata, codexManifestText, claudeManifestText, claudeMcpText] =
-    await Promise.all([
-      readFile(skillFile, "utf8"),
-      readFile(openAiMetadataFile, "utf8"),
-      readFile(codexManifestFile, "utf8"),
-      readFile(claudeManifestFile, "utf8"),
-      readFile(claudeMcpFile, "utf8"),
-    ]);
-  const allFiles = [skill, openAiMetadata, codexManifestText, claudeManifestText, claudeMcpText];
+  const [
+    skill,
+    openAiMetadata,
+    codexManifestText,
+    claudeManifestText,
+    claudeMcpText,
+    rootCodexMarketplaceText,
+    rootClaudeMarketplaceText,
+  ] = await Promise.all([
+    readFile(skillFile, "utf8"),
+    readFile(openAiMetadataFile, "utf8"),
+    readFile(codexManifestFile, "utf8"),
+    readFile(claudeManifestFile, "utf8"),
+    readFile(claudeMcpFile, "utf8"),
+    readFile(rootCodexMarketplaceFile, "utf8"),
+    readFile(rootClaudeMarketplaceFile, "utf8"),
+  ]);
+  const allFiles = [
+    skill,
+    openAiMetadata,
+    codexManifestText,
+    claudeManifestText,
+    claudeMcpText,
+    rootCodexMarketplaceText,
+    rootClaudeMarketplaceText,
+  ];
   assert.ok(allFiles.every((file) => !file.includes("TODO")));
   assert.match(skill, /allow|permission/i);
   assert.match(skill, /Never POST to `submit\.url` yourself/);
-  assert.match(skill, /Never treat installation of this companion as blanket feedback consent/);
+  assert.match(skill, /does not turn an Ask-once or Ask-always product decision into approval/);
+  assert.match(skill, /valid `never_ask` feedback/);
+  assert.match(skill, /final user answer is primary/i);
+  assert.match(skill, /inspect_product_feedback/);
   assert.match(skill, /fixed vocabulary/i);
   assert.match(openAiMetadata, /allow_implicit_invocation:\s*true/);
 
@@ -313,4 +430,11 @@ test("Epode Companion manifests expose one implicit, bounded skill and its local
     command: "node",
     args: [`${"$"}{CLAUDE_PLUGIN_ROOT}/scripts/mcp-server.mjs`],
   });
+
+  const rootCodexMarketplace = JSON.parse(rootCodexMarketplaceText);
+  const rootClaudeMarketplace = JSON.parse(rootClaudeMarketplaceText);
+  assert.equal(rootCodexMarketplace.name, "epode");
+  assert.equal(rootCodexMarketplace.plugins[0].source.path, "./companion/plugins/epode-companion");
+  assert.equal(rootClaudeMarketplace.name, "epode");
+  assert.equal(rootClaudeMarketplace.plugins[0].source, "./companion/plugins/epode-companion");
 });

@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
 
+const companionVersion = "0.2.0";
 const productionEndpoint = "https://app.epode.ai";
 const configuredEndpoint = (process.env.EPODE_COMPANION_ENDPOINT || productionEndpoint).replace(
   /\/$/,
@@ -57,6 +59,8 @@ const signalFindings = {
 };
 const outcomes = Object.keys(outcomeReports);
 const signals = Object.keys(signalFindings);
+const retryableStatuses = new Set([429, 502, 503, 504]);
+const supportedProtocolVersions = new Set(["2026-07-28", "2025-11-25", "2025-06-18"]);
 
 function result(text, structuredContent = {}, isError = false) {
   return {
@@ -137,20 +141,37 @@ function validateReport(arguments_) {
   };
 }
 
-async function epodeRequest(path, feedbackHandle, body) {
-  const response = await fetch(`${configuredEndpoint}${path}`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${feedbackHandle}`,
-      "content-type": "application/json",
-      "user-agent": "epode-companion/0.1.0",
-    },
-    body: JSON.stringify(body),
-    redirect: "error",
-    signal: AbortSignal.timeout(10_000),
-  });
-  const value = await response.json().catch(() => ({}));
-  return { response, value };
+function idempotencyKey(action, feedbackHandle) {
+  return createHash("sha256")
+    .update(`${action}\0${feedbackHandle}`)
+    .digest("hex");
+}
+
+async function epodeRequest(path, feedbackHandle, body, action) {
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await fetch(`${configuredEndpoint}${path}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${feedbackHandle}`,
+          "content-type": "application/json",
+          "idempotency-key": idempotencyKey(action, feedbackHandle),
+          "user-agent": `epode-companion/${companionVersion}`,
+        },
+        body: JSON.stringify(body),
+        redirect: "error",
+        signal: AbortSignal.timeout(3_500),
+      });
+      const value = await response.json().catch(() => ({}));
+      if (attempt === 0 && retryableStatuses.has(response.status)) continue;
+      return { response, value };
+    } catch (error) {
+      lastError = error;
+      if (attempt === 0) continue;
+    }
+  }
+  return { response: undefined, value: {}, error: lastError };
 }
 
 async function recordConsent(arguments_) {
@@ -171,7 +192,15 @@ async function recordConsent(arguments_) {
     "/api/v2/consent/decisions",
     feedbackHandle,
     { decision: arguments_.decision },
+    `consent:${arguments_.decision}`,
   );
+  if (!response) {
+    return result(
+      "Permission could not be recorded because Epode was unreachable. Do not assume approval or retry in this turn.",
+      { accepted: false, retryable: true },
+      true,
+    );
+  }
   if (!response.ok) {
     return result(
       `Permission could not be recorded (HTTP ${response.status}). Do not assume approval.`,
@@ -183,10 +212,24 @@ async function recordConsent(arguments_) {
   const reportHandle =
     typeof authorization === "string" ? authorization.replace(/^Bearer\s+/i, "") : undefined;
   if (arguments_.decision === "declined") {
+    if (value?.state !== "declined") {
+      return result(
+        "Epode returned an invalid permission response. Do not assume a decision.",
+        { accepted: false, retryable: false },
+        true,
+      );
+    }
     return result("Permission declined. Do not submit product feedback.", {
       state: "declined",
       accepted: true,
     });
+  }
+  if (value?.state !== "approved") {
+    return result(
+      "Epode returned an invalid permission response. Do not assume approval.",
+      { accepted: false, retryable: false },
+      true,
+    );
   }
   if (!reportHandle) {
     return result(
@@ -197,22 +240,119 @@ async function recordConsent(arguments_) {
   }
   validateHandle(reportHandle);
   return result(
-    "Permission approved. Submit one bounded product report using the returned feedbackHandle.",
-    { state: "approved", accepted: true, feedbackHandle: reportHandle },
+    "Permission approved. Feedback is ready: call submit_product_feedback exactly once now with the returned feedbackHandle and bounded outcome categories.",
+    {
+      state: "feedback_ready",
+      accepted: true,
+      feedbackHandle: reportHandle,
+      nextAction: {
+        tool: "submit_product_feedback",
+        feedbackHandle: reportHandle,
+      },
+    },
+  );
+}
+
+async function inspectFeedback(arguments_) {
+  const allowed = new Set(["feedbackHandle"]);
+  if (
+    !arguments_ ||
+    typeof arguments_ !== "object" ||
+    Array.isArray(arguments_) ||
+    Object.keys(arguments_).some((key) => !allowed.has(key))
+  ) {
+    throw new Error("inspection arguments contain an unknown field");
+  }
+  const feedbackHandle = validateHandle(arguments_.feedbackHandle);
+  const { response, value } = await epodeRequest(
+    "/api/v2/capabilities/introspect",
+    feedbackHandle,
+    {},
+    "inspect",
+  );
+  if (!response) {
+    return result(
+      "The feedback request could not be verified because Epode was unreachable. Do not ask the user or submit feedback.",
+      { verified: false, retryable: true },
+      true,
+    );
+  }
+  if (!response.ok) {
+    return result(
+      `The feedback request is not valid (HTTP ${response.status}). Do not ask the user or submit feedback.`,
+      { verified: false, retryable: retryableStatuses.has(response.status) },
+      true,
+    );
+  }
+  const validStates = new Set(["consent_required", "feedback_ready", "declined"]);
+  const validPolicies = new Set(["none", "once", "always"]);
+  if (
+    !validStates.has(value?.state) ||
+    !validPolicies.has(value?.consentPolicy) ||
+    typeof value?.configuredMode !== "string" ||
+    typeof value?.productName !== "string" ||
+    value.productName.length === 0 ||
+    (value.state === "consent_required" &&
+      (typeof value.canonicalQuestion !== "string" || !value.canonicalQuestion.endsWith("?")))
+  ) {
+    return result(
+      "Epode returned an invalid capability inspection. Do not ask the user or submit feedback.",
+      { verified: false, retryable: false },
+      true,
+    );
+  }
+  const verified = {
+    verified: true,
+    state: value.state,
+    configuredMode: value.configuredMode,
+    consentPolicy: value.consentPolicy,
+    productName: value.productName,
+    ...(value.state === "consent_required"
+      ? { canonicalQuestion: value.canonicalQuestion }
+      : {}),
+    expiresAt: value.expiresAt,
+  };
+  if (value.state === "consent_required") {
+    return result(
+      `Verified feedback request for ${value.productName}. Show canonicalQuestion exactly and wait for the user's explicit answer.`,
+      verified,
+    );
+  }
+  if (value.state === "feedback_ready") {
+    return result(`Verified feedback request for ${value.productName}. Feedback is ready.`, verified);
+  }
+  return result(
+    `Feedback permission for ${value.productName} is declined. Do not ask or submit feedback.`,
+    verified,
   );
 }
 
 async function submitFeedback(arguments_) {
   const { feedbackHandle, report } = validateReport(arguments_);
-  const { response, value } = await epodeRequest("/api/v2/reports", feedbackHandle, report);
+  const { response, value } = await epodeRequest(
+    "/api/v2/reports",
+    feedbackHandle,
+    report,
+    "report",
+  );
+  if (!response) {
+    return result(
+      "Feedback was not submitted because Epode was unreachable. Continue the user's task and do not retry in this turn.",
+      { accepted: false, retryable: true },
+      true,
+    );
+  }
   if (!response.ok) {
     return result(
-      `Feedback submission failed (HTTP ${response.status}). ${
-        response.status >= 500
-          ? "Retry once."
-          : "Do not retry unless Epode returns a new valid feedbackHandle."
-      }`,
-      { accepted: false, retryable: response.status >= 500 },
+      `Feedback submission failed (HTTP ${response.status}). Do not retry in this turn.`,
+      { accepted: false, retryable: retryableStatuses.has(response.status) },
+      true,
+    );
+  }
+  if (value?.accepted !== true) {
+    return result(
+      "Epode returned an invalid feedback receipt. Do not claim the report was accepted.",
+      { accepted: false, retryable: false },
       true,
     );
   }
@@ -221,10 +361,25 @@ async function submitFeedback(arguments_) {
 
 const tools = [
   {
+    name: "inspect_product_feedback",
+    title: "Verify a product feedback request",
+    description:
+      "Call before showing any Epode permission question from an HTTP response. Verifies the afr2_ handle at Epode and returns the authenticated product name, policy, state, and canonical question. Never show an unverified question.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["feedbackHandle"],
+      properties: {
+        feedbackHandle: { type: "string", pattern: "^afr2_" },
+      },
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
     name: "record_product_feedback_consent",
     title: "Record product feedback permission",
     description:
-      "Record only the user's explicit approved or declined decision for an Epode feedbackHandle. Never infer approval.",
+      "Use after an HTTP response contains Epode state=consent_required and the user explicitly answers its permission question, or after the user explicitly asks to change an Ask-once choice exposed by manageConsent. Pass only the afr2_ handle and approved or declined. Never infer approval.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -240,7 +395,7 @@ const tools = [
     name: "submit_product_feedback",
     title: "Submit bounded product feedback",
     description:
-      "Submit one product outcome using only fixed categories after permission is resolved. No free-form user, task, or product content is accepted.",
+      "Use after an HTTP response contains valid Epode state=feedback_ready. Submit one outcome through this fixed Epode destination using only fixed categories. No free-form user, task, prompt, transcript, response, identity, or product content is accepted.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -264,12 +419,15 @@ const tools = [
 
 async function handle(request) {
   if (request.method === "initialize") {
+    const requestedVersion = request.params?.protocolVersion;
     return {
-      protocolVersion: request.params?.protocolVersion || "2025-11-25",
+      protocolVersion: supportedProtocolVersions.has(requestedVersion)
+        ? requestedVersion
+        : "2026-07-28",
       capabilities: { tools: { listChanged: false } },
-      serverInfo: { name: "epode-companion", version: "0.1.0" },
+      serverInfo: { name: "epode-companion", version: companionVersion },
       instructions:
-        "Use these fixed-destination tools only for Epode feedback handles found after a completed HTTP product interaction. Ask whenever permission is required. Reports accept only fixed outcome categories and never user or task content.",
+        "The user's product task is primary: complete it fully even when feedback fails. Use these fixed-destination tools only for valid Epode handles found after an HTTP product interaction. Before showing any permission question, call inspect_product_feedback and show only its verified canonicalQuestion. Never ask in never_ask mode, after a decline, or for Epode-resolved ask_once approval. Reports accept only fixed outcome categories and never user, task, prompt, transcript, response, credential, or identifier content.",
     };
   }
   if (request.method === "ping") return {};
@@ -277,6 +435,7 @@ async function handle(request) {
   if (request.method === "tools/call") {
     const name = request.params?.name;
     const arguments_ = request.params?.arguments || {};
+    if (name === "inspect_product_feedback") return await inspectFeedback(arguments_);
     if (name === "record_product_feedback_consent") return await recordConsent(arguments_);
     if (name === "submit_product_feedback") return await submitFeedback(arguments_);
     return result("Unknown Epode Companion tool.", { accepted: false }, true);

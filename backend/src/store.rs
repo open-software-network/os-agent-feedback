@@ -20,19 +20,19 @@ use crate::{
         IssueCount, IssueFindingRollup, IssueTemplateData, contains_sensitive_report_text,
     },
     models::{
-        ApiKeyPublic, ConsentDecisionInput, ConsentStateInput, ConsentStateResponse,
-        CreateProductInput, CreateTeamInvitationInput, DashboardContext, DashboardData,
-        DashboardListState, DashboardSessionDetail, DeleteProductInput, FeedbackFindingInput,
-        FeedbackInteractionItem, FeedbackInteractionsPage, FeedbackListInteractionsInput,
-        FeedbackListReportsInput, FeedbackOperationSummary, FeedbackReportItem,
-        FeedbackReportsPage, FeedbackReportsResponse, FeedbackSummary, FeedbackSurfaceSummary,
-        FeedbackWindow, GithubIssueLink, InsightCount, Insights, InteractionTelemetryInput,
-        MergeReportGroupsResponse, PolicyInput, Product, ProductAuth, ProductEnvironment,
-        ProductFeedbackReport, ProductFeedbackReportInput, ProductFeedbackReportWithInteraction,
-        ProductGithubRepo, ProductGithubRepoInput, ProductInteraction, ProductReportGroup,
-        ProductSession, TeamInvitation, TeamMember, TelemetryBatchInput, TelemetryBatchResult,
-        UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput, Workspace,
-        WorkspaceMembership,
+        ApiKeyPublic, CapabilityInspectionResponse, ConsentDecisionInput, ConsentStateInput,
+        ConsentStateResponse, CreateProductInput, CreateTeamInvitationInput, DashboardContext,
+        DashboardData, DashboardListState, DashboardSessionDetail, DeleteProductInput,
+        FeedbackFindingInput, FeedbackInteractionItem, FeedbackInteractionsPage,
+        FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackOperationSummary,
+        FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse, FeedbackSummary,
+        FeedbackSurfaceSummary, FeedbackWindow, GithubIssueLink, InsightCount, Insights,
+        InteractionTelemetryInput, MergeReportGroupsResponse, PolicyInput, Product, ProductAuth,
+        ProductEnvironment, ProductFeedbackReport, ProductFeedbackReportInput,
+        ProductFeedbackReportWithInteraction, ProductGithubRepo, ProductGithubRepoInput,
+        ProductInteraction, ProductReportGroup, ProductSession, TeamInvitation, TeamMember,
+        TelemetryBatchInput, TelemetryBatchResult, UpdateFeedbackWorkflowInput, UpdateNameInput,
+        UpdateTeamMemberInput, Workspace, WorkspaceMembership,
     },
     os_accounts::OsUser,
     security::{
@@ -2065,7 +2065,12 @@ pub(crate) async fn create_product_with_default_key(
     .fetch_one(&mut *tx)
     .await?;
     let key_id = Uuid::new_v4();
-    let secret = format!("af_live_{}_{}", key_id.simple(), random_token(""));
+    let secret = format!(
+        "af_live_{}_{}_{}",
+        key_id.simple(),
+        environment.id.simple(),
+        random_token("")
+    );
     let api_key = sqlx::query_as::<_, ApiKeyPublic>(
         r"INSERT INTO api_keys
         (id, workspace_id, environment_id, label, prefix, kind, key_hash)
@@ -2225,7 +2230,16 @@ pub(crate) async fn create_api_key(
         ));
     }
     let key_id = Uuid::new_v4();
-    let secret = format!("{key_prefix}{}_{}", key_id.simple(), random_token(""));
+    let secret = if kind == "write" {
+        format!(
+            "{key_prefix}{}_{}_{}",
+            key_id.simple(),
+            environment_id.simple(),
+            random_token("")
+        )
+    } else {
+        format!("{key_prefix}{}_{}", key_id.simple(), random_token(""))
+    };
     let prefix = secret.chars().take(16).collect::<String>();
     let row = sqlx::query_as::<_, ApiKeyPublic>(
         r"INSERT INTO api_keys
@@ -2283,7 +2297,16 @@ pub(crate) async fn rotate_api_key(
         "af_live_"
     };
     let successor_id = Uuid::new_v4();
-    let secret = format!("{key_prefix}{}_{}", successor_id.simple(), random_token(""));
+    let secret = if old.2 == "write" {
+        format!(
+            "{key_prefix}{}_{}_{}",
+            successor_id.simple(),
+            old.0.simple(),
+            random_token("")
+        )
+    } else {
+        format!("{key_prefix}{}_{}", successor_id.simple(), random_token(""))
+    };
     let prefix = secret.chars().take(16).collect::<String>();
     let successor_expires_at = if old.2 == "read" {
         Some(Utc::now() + Duration::days(90))
@@ -3753,6 +3776,85 @@ pub(crate) async fn feedback_consent_state(
     Ok(ConsentStateResponse { state })
 }
 
+pub(crate) async fn inspect_feedback_capability(
+    pool: &PgPool,
+    capability: &str,
+) -> Result<CapabilityInspectionResponse, ApiError> {
+    let parsed = parse_capability(capability)?;
+    let key = sqlx::query_as::<_, (Vec<u8>, String, Uuid, String)>(
+        r"SELECT k.key_hash, e.feedback_mode, e.id, p.name
+        FROM api_keys k
+        JOIN product_environments e ON e.id = k.environment_id
+        JOIN products p ON p.id = e.product_id
+        WHERE k.id = $1 AND k.kind = 'write' AND k.revoked_at IS NULL
+          AND (k.expires_at IS NULL OR k.expires_at > NOW())",
+    )
+    .bind(parsed.key_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(ApiError::unauthorized)?;
+    let claims = verify_capability(parsed, &key.0, Utc::now())?;
+    let (state, consent_policy) = match key.1.as_str() {
+        "off" => return Err(ApiError::gone("Feedback collection is disabled")),
+        "never_ask" => ("feedback_ready".to_owned(), "none".to_owned()),
+        "ask_once" => {
+            if let Some(subject) = claims.s.as_deref() {
+                let decision = sqlx::query_scalar::<_, String>(
+                    "SELECT decision FROM feedback_consent_subjects WHERE environment_id = $1 AND subject = $2",
+                )
+                .bind(key.2)
+                .bind(subject)
+                .fetch_optional(pool)
+                .await?;
+                match decision.as_deref() {
+                    Some("approved") => ("feedback_ready".to_owned(), "none".to_owned()),
+                    Some("declined") => ("declined".to_owned(), "once".to_owned()),
+                    _ => ("consent_required".to_owned(), "once".to_owned()),
+                }
+            } else {
+                ("consent_required".to_owned(), "always".to_owned())
+            }
+        }
+        "ask_always" => {
+            let decision = sqlx::query_scalar::<_, String>(
+                "SELECT decision FROM feedback_consent_interactions WHERE environment_id = $1 AND interaction_id = $2",
+            )
+            .bind(key.2)
+            .bind(claims.i)
+            .fetch_optional(pool)
+            .await?;
+            match decision.as_deref() {
+                Some("approved") => ("feedback_ready".to_owned(), "none".to_owned()),
+                Some("declined") => ("declined".to_owned(), "always".to_owned()),
+                _ => ("consent_required".to_owned(), "always".to_owned()),
+            }
+        }
+        _ => return Err(ApiError::internal("Invalid product feedback policy")),
+    };
+    let canonical_question = (state == "consent_required").then(|| {
+        if consent_policy == "once" {
+            format!(
+                "May I send {}'s provider one short, privacy-safe outcome report after this use and future uses without asking again? Epode will remember your choice for this product. Your prompts and task content are never included; nothing is installed.",
+                key.3
+            )
+        } else {
+            format!(
+                "May I send {}'s provider one short, privacy-safe outcome report about this use? Your prompts and task content will not be included.",
+                key.3
+            )
+        }
+    });
+    let expires_at = DateTime::from_timestamp(claims.exp, 0).ok_or_else(ApiError::unauthorized)?;
+    Ok(CapabilityInspectionResponse {
+        state,
+        configured_mode: key.1,
+        consent_policy,
+        product_name: key.3,
+        canonical_question,
+        expires_at,
+    })
+}
+
 pub(crate) async fn record_feedback_consent_decision(
     pool: &PgPool,
     capability: &str,
@@ -3791,50 +3893,71 @@ pub(crate) async fn record_feedback_consent_decision(
     }
 
     let mut tx = pool.begin().await?;
-    let existing = sqlx::query_as::<_, (String,)>(
-        "SELECT decision FROM feedback_consent_interactions WHERE interaction_id = $1 FOR UPDATE",
+    let inserted_decision = sqlx::query_scalar::<_, String>(
+        r"INSERT INTO feedback_consent_interactions
+        (interaction_id, environment_id, subject, decision)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (interaction_id) DO NOTHING
+        RETURNING decision",
     )
     .bind(claims.i)
+    .bind(key.2)
+    .bind(claims.s.as_deref())
+    .bind(&input.decision)
     .fetch_optional(&mut *tx)
     .await?;
-    let decision = if let Some((decision,)) = existing {
-        decision
-    } else {
-        let durable_decision = if key.1 == "ask_once"
+    let decision = if inserted_decision.is_some() {
+        if key.1 == "ask_once"
             && let Some(subject) = claims.s.as_deref()
         {
-            sqlx::query(
-                r"INSERT INTO feedback_consent_subjects (environment_id, subject, decision)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (environment_id, subject) DO NOTHING",
+            let applied_decision = sqlx::query_scalar::<_, String>(
+                r"INSERT INTO feedback_consent_subjects (environment_id, subject, decision, decided_at)
+                VALUES ($1, $2, $3, TO_TIMESTAMP($4))
+                ON CONFLICT (environment_id, subject) DO UPDATE SET
+                  decision = EXCLUDED.decision,
+                  decided_at = EXCLUDED.decided_at,
+                  updated_at = NOW()
+                WHERE feedback_consent_subjects.decided_at < EXCLUDED.decided_at
+                RETURNING decision",
             )
             .bind(key.2)
             .bind(subject)
             .bind(&input.decision)
+            .bind(claims.iat)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let durable_decision = if let Some(decision) = applied_decision {
+                decision
+            } else {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT decision FROM feedback_consent_subjects WHERE environment_id = $1 AND subject = $2",
+                )
+                .bind(key.2)
+                .bind(subject)
+                .fetch_one(&mut *tx)
+                .await?
+            };
+            sqlx::query(
+                "UPDATE feedback_consent_interactions SET decision = $3 WHERE interaction_id = $1 AND environment_id = $2",
+            )
+            .bind(claims.i)
+            .bind(key.2)
+            .bind(&durable_decision)
             .execute(&mut *tx)
             .await?;
-            sqlx::query_scalar::<_, String>(
-                "SELECT decision FROM feedback_consent_subjects WHERE environment_id = $1 AND subject = $2",
-            )
-            .bind(key.2)
-            .bind(subject)
-            .fetch_one(&mut *tx)
-            .await?
+            durable_decision
         } else {
             input.decision.clone()
-        };
-        sqlx::query(
-            r"INSERT INTO feedback_consent_interactions
-            (interaction_id, environment_id, subject, decision)
-            VALUES ($1, $2, $3, $4)",
+        }
+    } else {
+        sqlx::query_scalar::<_, String>(
+            "SELECT decision FROM feedback_consent_interactions WHERE interaction_id = $1 AND environment_id = $2",
         )
         .bind(claims.i)
         .bind(key.2)
-        .bind(claims.s.as_deref())
-        .bind(&durable_decision)
-        .execute(&mut *tx)
-        .await?;
-        durable_decision
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| ApiError::conflict("interactionId belongs to another product environment"))?
     };
     tx.commit().await?;
     Ok((decision, key.1, claims.exp))

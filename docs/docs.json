@@ -41,6 +41,7 @@
           {
             "group": "HTTP and websites",
             "pages": [
+              "integrations/companion",
               "integrations/node-express",
               "integrations/node-fastify",
               "integrations/python-asgi",
