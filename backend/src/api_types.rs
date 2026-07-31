@@ -167,6 +167,13 @@ pub(crate) struct McpInfoResponse {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConsentDecisionResponse {
     pub state: String,
+    /// When the standing decision was made. Matches the request time when this
+    /// call recorded the decision, and the original decision time when a prior
+    /// decision stands.
+    pub decided_at: chrono::DateTime<chrono::Utc>,
+    /// True when this call recorded the standing decision; false when a prior
+    /// decision already stood and was returned unchanged.
+    pub changed: bool,
     #[schema(required = true, nullable)]
     pub feedback: Option<serde_json::Value>,
 }

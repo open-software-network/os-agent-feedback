@@ -159,6 +159,16 @@ test("v1 schema accepts every envelope stage emitted by current SDKs", () => {
   const readyWithoutManagementHandle = structuredClone(validEnvelopes.readyAfterAskOnce);
   delete readyWithoutManagementHandle.manageConsent;
   assertValid(readyWithoutManagementHandle, "ready after Ask once without management handle");
+
+  const readyViaProtocolTool = {
+    ...validEnvelopes.readyAfterAskOnce,
+    reliability: "protocol_tool",
+  };
+  assertValid(readyViaProtocolTool, "ready after Ask once via the MCP protocol tool");
+  assertInvalid(
+    { ...validEnvelopes.neverAsk, reliability: "deterministic" },
+    "unknown reliability value",
+  );
 });
 
 test("v1 schema makes submit and requiredAction mutually exclusive by stage", () => {
