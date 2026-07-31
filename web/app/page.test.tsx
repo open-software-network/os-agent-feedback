@@ -73,6 +73,7 @@ describe("dashboard data flow", () => {
     ["connected", "GitHub connected successfully.", "status"],
     ["conflict", "That GitHub installation is already connected to another workspace.", "alert"],
     ["error", "Could not connect GitHub. Try again.", "alert"],
+    ["unexpected", "Could not connect GitHub. Try again.", "alert"],
   ])("consumes the GitHub %s callback result", async (result, message, role) => {
     window.history.replaceState({}, "", `/?view=connectors&github=${result}`);
     vi.stubGlobal(

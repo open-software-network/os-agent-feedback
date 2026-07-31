@@ -80,6 +80,8 @@ export function DashboardApp() {
         );
       } else if (githubResult === "error") {
         showNotice("Could not connect GitHub. Try again.", 6_000, "error");
+      } else {
+        showNotice("Could not connect GitHub. Try again.", 6_000, "error");
       }
     }
     if (url.searchParams.get("invite") === "invalid") {

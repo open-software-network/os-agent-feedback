@@ -25,7 +25,7 @@ export async function fetchProductGroupsWindow(
   productId: string,
   requestedLimit: number,
 ): Promise<ProductGroupsResponse> {
-  const groups: ProductReportGroup[] = [];
+  const groups = new Map<string, ProductReportGroup>();
   let hasMore = true;
   let offset = 0;
   let remaining = requestedLimit;
@@ -33,14 +33,14 @@ export async function fetchProductGroupsWindow(
   while (remaining > 0 && hasMore) {
     const limit = Math.min(GROUP_PAGE_SIZE, remaining);
     const page = await fetchProductGroups(workspaceId, productId, limit, offset);
-    groups.push(...page.groups);
+    for (const group of page.groups) groups.set(group.groupKey, group);
     hasMore = page.hasMore;
-    if (!page.groups.length) break;
-    remaining -= limit;
+    remaining -= page.limit;
     offset += page.limit;
+    if (!page.groups.length) break;
   }
 
-  return { groups, hasMore, limit: requestedLimit, offset: 0 };
+  return { groups: [...groups.values()], hasMore, limit: requestedLimit, offset: 0 };
 }
 
 export function fileGroupGithubIssue(

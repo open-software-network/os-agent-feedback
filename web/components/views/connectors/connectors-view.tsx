@@ -201,11 +201,15 @@ function ProductRepoMapping({
   const saveMutation = useMutation({
     mutationFn: (input: ProductGithubRepoInput) =>
       setProductGithubRepo(workspaceId, product.id, input),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: mappingKey }),
+    onSuccess: () => {
+      return queryClient.invalidateQueries({ queryKey: mappingKey });
+    },
   });
   const clearMutation = useMutation({
     mutationFn: () => clearProductGithubRepo(workspaceId, product.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: mappingKey }),
+    onSuccess: () => {
+      return queryClient.invalidateQueries({ queryKey: mappingKey });
+    },
   });
 
   if (mappingQuery.isPending || repositoryQueries.some((query) => query.isPending)) {
@@ -214,20 +218,11 @@ function ProductRepoMapping({
   if (mappingQuery.isError) {
     return <ErrorState error={mappingQuery.error} onRetry={() => mappingQuery.refetch()} />;
   }
-  const repositoryError = repositoryQueries.find((query) => query.isError)?.error;
-  if (repositoryError) {
-    return (
-      <ErrorState
-        error={repositoryError}
-        onRetry={() => {
-          void Promise.all(repositoryQueries.map((query) => query.refetch()));
-        }}
-      />
-    );
-  }
-
   const repositoryResponses = repositoryQueries.flatMap((query) =>
     query.data ? [query.data] : [],
+  );
+  const failedInstallations = repositoryQueries.flatMap((query, index) =>
+    query.isError ? [installations[index].accountLogin] : [],
   );
   const options = repositoryOptions(repositoryResponses, mappingQuery.data);
   const mutationError = saveMutation.error ?? clearMutation.error;
@@ -263,12 +258,18 @@ function ProductRepoMapping({
       mapping={mappingQuery.data}
       options={options}
       truncated={repositoryResponses.some((response) => response.truncated)}
+      failedInstallations={failedInstallations}
       editable={editable}
       busy={busy}
       error={mutationError}
       status={actionStatus}
       save={save}
       clear={clear}
+      retryFailedInstallations={() => {
+        void Promise.all(
+          repositoryQueries.filter((query) => query.isError).map((query) => query.refetch()),
+        );
+      }}
     />
   );
 }
@@ -279,22 +280,26 @@ function ProductRepoMappingForm({
   mapping,
   options,
   truncated,
+  failedInstallations,
   editable,
   busy,
   error,
   status,
   save,
   clear,
+  retryFailedInstallations,
 }: {
   mapping: ProductGithubRepo | null;
   options: RepositoryOption[];
   truncated: boolean;
+  failedInstallations: string[];
   editable: boolean;
   busy: boolean;
   error: Error | null;
   status: string;
   save: (input: ProductGithubRepoInput) => Promise<void>;
   clear: () => Promise<void>;
+  retryFailedInstallations: () => void;
 }) {
   const mappedOption = mapping
     ? options.find((option) => option.fullName === mapping.repoFullName)
@@ -361,6 +366,15 @@ function ProductRepoMappingForm({
             This repository list is partial because at least one installation reached GitHub&apos;s
             1,000-repository limit. The repository you need may not be listed.
           </p>
+        ) : null}
+        {failedInstallations.length ? (
+          <StatusMessage tone="error">
+            Could not load repositories for {failedInstallations.join(", ")}. Repositories from
+            other installations are still available.{" "}
+            <Button type="button" variant="outline" size="sm" onClick={retryFailedInstallations}>
+              Retry failed installations
+            </Button>
+          </StatusMessage>
         ) : null}
         {!options.length ? (
           <p className="text-sm text-muted-foreground">

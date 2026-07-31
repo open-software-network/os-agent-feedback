@@ -35,7 +35,9 @@ export function FeedbackGroups({ data }: { data: DashboardData }) {
   });
   const filingMutation = useMutation({
     mutationFn: (groupKey: string) => fileGroupGithubIssue(data.workspace.id, groupKey),
-    onSuccess: () => groupsQuery.refetch(),
+    onSuccess: () => {
+      return groupsQuery.refetch();
+    },
   });
 
   if (!editable) return null;

@@ -17,7 +17,7 @@ describe("feedback group filing", () => {
     const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
       const path = String(input);
       if (path === `/api/products/${productId}/github-repo`) {
-        return Promise.resolve(json({ error: "Repository mapping not found" }, 404));
+        return Promise.resolve(json(null));
       }
       if (path === groupsPath(productId, 50, 0)) {
         return Promise.resolve(

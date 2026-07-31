@@ -1,4 +1,4 @@
-import { ApiError, apiRequest } from "@/lib/api/client";
+import { apiRequest } from "@/lib/api/client";
 import type { components } from "@/lib/api/types";
 
 export type GithubInstallation = components["schemas"]["GithubInstallationResponse"];
@@ -25,19 +25,14 @@ export function fetchGithubRepositories(
   );
 }
 
-export async function fetchProductGithubRepo(
+export function fetchProductGithubRepo(
   workspaceId: string,
   productId: string,
 ): Promise<ProductGithubRepo | null> {
-  try {
-    return await apiRequest<ProductGithubRepo | null>(
-      `/api/products/${encodeURIComponent(productId)}/github-repo`,
-      { workspaceId },
-    );
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 404) return null;
-    throw error;
-  }
+  return apiRequest<ProductGithubRepo | null>(
+    `/api/products/${encodeURIComponent(productId)}/github-repo`,
+    { workspaceId },
+  );
 }
 
 export function setProductGithubRepo(
