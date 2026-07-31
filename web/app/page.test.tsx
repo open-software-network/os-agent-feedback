@@ -23,6 +23,7 @@ describe("dashboard data flow", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Connectors" })).toBeVisible();
     expect(screen.getByText("Search results omitted the newest document")).toBeVisible();
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining("interactionLimit=250"),
@@ -45,13 +46,15 @@ describe("dashboard data flow", () => {
   });
 
   it("does not expose editor-only views or product actions to members", async () => {
+    window.history.replaceState({}, "", "/?view=connectors");
     vi.stubGlobal(
       "fetch",
-      vi
-        .fn()
-        .mockImplementation(() =>
-          Promise.resolve(json(dashboardFixture({ currentRole: "member" }))),
-        ),
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        if (String(input) === "/api/github/installations") {
+          return Promise.resolve(json({ configured: true, installations: [] }));
+        }
+        return Promise.resolve(json(dashboardFixture({ currentRole: "member" })));
+      }),
     );
 
     render(
@@ -63,7 +66,36 @@ describe("dashboard data flow", () => {
     expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Setup" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Policy" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Connectors" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "New product" })).not.toBeInTheDocument();
+    await waitFor(() => expect(window.location.search).not.toContain("view=connectors"));
+  });
+
+  it.each([
+    ["connected", "GitHub connected successfully.", "status"],
+    ["conflict", "That GitHub installation is already connected to another workspace.", "alert"],
+    ["error", "Could not connect GitHub. Try again.", "alert"],
+  ])("consumes the GitHub %s callback result", async (result, message, role) => {
+    window.history.replaceState({}, "", `/?view=connectors&github=${result}`);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        if (String(input) === "/api/github/installations") {
+          return Promise.resolve(json({ configured: true, installations: [] }));
+        }
+        return Promise.resolve(json(dashboardFixture()));
+      }),
+    );
+
+    render(
+      <Providers>
+        <Home />
+      </Providers>,
+    );
+
+    expect(await screen.findByRole("heading", { name: "Connectors" })).toBeVisible();
+    expect(await screen.findByText(message)).toHaveAttribute("role", role);
+    expect(window.location.search).not.toContain("github=");
   });
 
   it("restores dashboard state when the browser goes Back", async () => {

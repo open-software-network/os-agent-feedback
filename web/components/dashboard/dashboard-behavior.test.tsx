@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ProductControls } from "@/components/dashboard/product-controls";
 import { dashboardFixture } from "@/components/dashboard/test-fixture";
+import { ConnectorsView } from "@/components/views/connectors/connectors-view";
 import { FeedbackView } from "@/components/views/feedback/feedback-view";
 import { InteractionDetail } from "@/components/views/interactions/interaction-detail";
 import { PolicyView } from "@/components/views/policy/policy-view";
@@ -17,6 +18,98 @@ describe("dashboard view behavior", () => {
     vi.restoreAllMocks();
     window.history.replaceState({}, "", "/");
     window.sessionStorage.clear();
+  });
+
+  it("loads GitHub installations and fetches repositories only when one expands", async () => {
+    const data = dashboardFixture();
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/github/installations") {
+        return Promise.resolve(
+          json({
+            configured: true,
+            installations: [
+              {
+                id: "88888888-8888-4888-8888-888888888888",
+                installationId: 4242,
+                accountLogin: "open-software-network",
+                accountType: "Organization",
+                createdAt: "2026-07-30T12:00:00Z",
+              },
+            ],
+          }),
+        );
+      }
+      if (path === "/api/github/installations/4242/repositories") {
+        return Promise.resolve(
+          json({
+            installationId: 4242,
+            truncated: true,
+            repositories: [
+              {
+                fullName: "open-software-network/os-epode",
+                defaultBranch: "main",
+                private: true,
+              },
+            ],
+          }),
+        );
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWithQuery(<ConnectorsView data={data} />);
+
+    expect(await screen.findByText("open-software-network")).toBeVisible();
+    expect(screen.getByText("Organization")).toBeVisible();
+    expect(screen.getByRole("link", { name: "Add organization" })).toHaveAttribute(
+      "href",
+      "/api/github/install",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(new Headers(fetchMock.mock.calls[0][1].headers).get("x-workspace-id")).toBe(
+      data.workspace.id,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Show repositories for open-software-network" }),
+    );
+
+    expect(await screen.findByText("open-software-network/os-epode")).toBeVisible();
+    expect(screen.getByText("main · Private")).toBeVisible();
+    expect(screen.getByText(/partial repository list/i)).toBeVisible();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(new Headers(fetchMock.mock.calls[1][1].headers).get("x-workspace-id")).toBe(
+      data.workspace.id,
+    );
+  });
+
+  it("distinguishes an unconfigured GitHub App from an empty installation list", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(json({ configured: false, installations: [] })),
+    );
+
+    renderWithQuery(<ConnectorsView data={dashboardFixture()} />);
+
+    expect(await screen.findByText("GitHub App is not configured on this server.")).toBeVisible();
+    expect(screen.queryByRole("link", { name: "Add organization" })).not.toBeInTheDocument();
+  });
+
+  it("marks planned connectors as disabled and non-interactive", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(json({ configured: true, installations: [] })),
+    );
+
+    renderWithQuery(<ConnectorsView data={dashboardFixture()} />);
+
+    expect(await screen.findByText("No GitHub installations")).toBeVisible();
+    expect(screen.getAllByRole("button", { name: "Planned", hidden: true })).toHaveLength(3);
+    for (const button of screen.getAllByRole("button", { name: "Planned", hidden: true })) {
+      expect(button).toHaveAttribute("aria-disabled", "true");
+    }
   });
 
   it("sends workflow changes using the generated API shape", async () => {
