@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import fnmatch
 import hashlib
 import hmac
 import json
@@ -77,6 +76,16 @@ def normalize_operation(path: str) -> str:
     path = path.split("?", 1)[0] or "/"
     path = re.sub(r"\b[0-9a-f]{8}-[0-9a-f-]{27,}\b", ":id", path, flags=re.I)
     return re.sub(r"/(\d+)(?=/|$)", "/:id", path)
+
+
+def match_pattern(path: str, pattern: str) -> bool:
+    """Match one path segment per ``*``; ``**`` crosses any depth (Node/Go parity)."""
+    placeholder = "\0"
+    escaped = re.sub(r"[.+?^${}()|\[\]\\]", lambda match: "\\" + match.group(0), pattern)
+    escaped = escaped.replace("**", placeholder)
+    escaped = escaped.replace("*", "[^/]*")
+    escaped = escaped.replace(placeholder, ".*")
+    return re.fullmatch(escaped, path) is not None
 
 
 @dataclass(slots=True)
@@ -214,10 +223,10 @@ class AgentFeedback:
         path = path.split("?", 1)[0] or "/"
         if not self.enabled:
             return False
-        if any(fnmatch.fnmatchcase(path, pattern) for pattern in (*DEFAULT_EXCLUDE, *self.options.exclude)):
+        if any(match_pattern(path, pattern) for pattern in (*DEFAULT_EXCLUDE, *self.options.exclude)):
             return False
         return not self.options.include or any(
-            fnmatch.fnmatchcase(path, pattern) for pattern in self.options.include
+            match_pattern(path, pattern) for pattern in self.options.include
         )
 
     def should_instrument_http(self, *, request_opt_in: bool, cache_control: str = "") -> bool:

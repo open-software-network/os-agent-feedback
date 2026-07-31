@@ -18,6 +18,7 @@ from agent_feedback import (
     submit_product_feedback,
 )
 from agent_feedback.core import _key_parts
+from agent_feedback.core import match_pattern
 
 KEY = "af_live_0123456789abcdef0123456789abcdef_conformance_secret_0123456789abcdef"
 TOKEN = "afr2_0123456789abcdef0123456789abcdef.eyJ2IjoxLCJpIjoiMDE4ZjFmMmUtN2I0YS03YzEyLTljOGQtMTIzNDU2Nzg5YWJjIiwiaWF0IjoxNzE1MDAwMDAwLCJleHAiOjE3MTUwMDcyMDAsIm4iOiJBUUlEQkFVR0J3Z0pDZ3NNRFE0UEVCRVMifQ.wxJ0YGS21x9eW-Cn33t9V1INhyGNj1_U3qoQns3vdWA"
@@ -102,6 +103,25 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
             failing.prepare(), surface="http", operation="/status", status_code=200, duration_ms=1
         )
         self.assertFalse(failing.shutdown())
+
+    def test_wildcards_match_one_segment_and_double_wildcards_match_any_depth(self) -> None:
+        self.assertTrue(match_pattern("/docs/page", "/docs/*"))
+        self.assertFalse(match_pattern("/docs/deep/nested/page", "/docs/*"))
+        self.assertTrue(match_pattern("/docs/deep/nested/page", "/docs/**"))
+        self.assertTrue(match_pattern("/docs/page", "/docs/**"))
+        self.assertTrue(match_pattern("/api/v2/consent/decisions", "/api/v2/consent/*"))
+        self.assertFalse(match_pattern("/api/v2/consent/a/b", "/api/v2/consent/*"))
+        runtime = AgentFeedback(
+            AgentFeedbackOptions(
+                api_key=KEY,
+                endpoint="https://feedback.test",
+                include=("/docs/*",),
+                sender=lambda *_: None,
+            )
+        )
+        self.assertTrue(runtime.matches("/docs/page"))
+        self.assertFalse(runtime.matches("/docs/deep/nested/page"))
+        runtime.shutdown()
 
     def test_capability_conformance(self) -> None:
         claims = {
