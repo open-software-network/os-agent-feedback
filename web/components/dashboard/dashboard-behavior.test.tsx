@@ -246,6 +246,80 @@ describe("dashboard view behavior", () => {
     }
   });
 
+  it("renders repository settings while another installation is still loading", async () => {
+    const data = dashboardFixture();
+    const productId = data.currentProduct?.id ?? "";
+    const mappingPath = `/api/products/${productId}/github-repo`;
+    let resolveSlowListing: ((response: Response) => void) | undefined;
+    const slowListing = new Promise<Response>((resolve) => {
+      resolveSlowListing = resolve;
+    });
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/github/installations") {
+        return Promise.resolve(
+          json({
+            configured: true,
+            installations: [
+              {
+                id: "88888888-8888-4888-8888-888888888888",
+                installationId: 101,
+                accountLogin: "ready-org",
+                accountType: "Organization",
+                createdAt: "2026-07-30T12:00:00Z",
+              },
+              {
+                id: "99999999-9999-4999-8999-999999999999",
+                installationId: 202,
+                accountLogin: "slow-org",
+                accountType: "Organization",
+                createdAt: "2026-07-30T13:00:00Z",
+              },
+            ],
+          }),
+        );
+      }
+      if (path === "/api/github/installations/101/repositories") {
+        return Promise.resolve(
+          json({
+            installationId: 101,
+            truncated: false,
+            repositories: [
+              { fullName: "ready-org/service", defaultBranch: "main", private: false },
+            ],
+          }),
+        );
+      }
+      if (path === "/api/github/installations/202/repositories") return slowListing;
+      if (path === mappingPath) return Promise.resolve(json(null));
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWithQuery(<ConnectorsView data={data} />);
+
+    expect(await screen.findByText("ready-org")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Configure repository" }));
+
+    expect(await screen.findByRole("option", { name: "ready-org/service" })).toBeVisible();
+    expect(screen.getByText(/still loading repositories for slow-org/i)).toBeVisible();
+    expect(screen.queryByRole("option", { name: "slow-org/app" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveSlowListing?.(
+        json({
+          installationId: 202,
+          truncated: true,
+          repositories: [{ fullName: "slow-org/app", defaultBranch: "develop", private: true }],
+        }),
+      );
+    });
+
+    expect(await screen.findByRole("option", { name: "slow-org/app" })).toBeVisible();
+    expect(screen.queryByText(/still loading repositories for slow-org/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/repository list is partial/i)).toBeVisible();
+  });
+
   it("surfaces a missing product from the repository mapping lookup", async () => {
     const data = dashboardFixture();
     const mappingPath = `/api/products/${data.currentProduct?.id ?? ""}/github-repo`;

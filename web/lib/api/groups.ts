@@ -6,6 +6,7 @@ export type ProductGroupsResponse = components["schemas"]["ProductGroupsResponse
 export type ProductReportGroup = components["schemas"]["ProductReportGroup"];
 
 const GROUP_PAGE_SIZE = 50;
+const MAX_CONSECUTIVE_EMPTY_PAGES = 3;
 
 export function fetchProductGroups(
   workspaceId: string,
@@ -29,15 +30,21 @@ export async function fetchProductGroupsWindow(
   let hasMore = true;
   let offset = 0;
   let remaining = requestedLimit;
+  let consecutiveEmptyPages = 0;
 
   while (remaining > 0 && hasMore) {
     const limit = Math.min(GROUP_PAGE_SIZE, remaining);
     const page = await fetchProductGroups(workspaceId, productId, limit, offset);
     for (const group of page.groups) groups.set(group.groupKey, group);
     hasMore = page.hasMore;
-    remaining -= page.limit;
     offset += page.limit;
-    if (!page.groups.length) break;
+    if (page.groups.length) {
+      consecutiveEmptyPages = 0;
+      remaining -= page.limit;
+    } else {
+      consecutiveEmptyPages += 1;
+      if (consecutiveEmptyPages >= MAX_CONSECUTIVE_EMPTY_PAGES) break;
+    }
   }
 
   return { groups: [...groups.values()], hasMore, limit: requestedLimit, offset: 0 };
