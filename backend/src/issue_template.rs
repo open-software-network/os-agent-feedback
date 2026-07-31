@@ -213,17 +213,34 @@ pub(crate) fn group_backlink(web_app_url: &str, group_key: &str) -> String {
 }
 
 pub(crate) fn contains_sensitive_report_text(value: &str) -> bool {
+    // Shape detection needs the original casing — lowercasing first would erase
+    // the mixed-case signal that distinguishes a credential from an identifier.
+    let original = value;
     let value = value.to_ascii_lowercase();
     let forbidden_pattern = [
         "af_live_",
         "af_read_",
         "github_pat_",
+        "ghp_",
+        "gho_",
+        "ghs_",
+        "ghr_",
+        "akia",
+        "asia",
         "-----begin ",
         "xoxb-",
         "xoxp-",
+        "xoxa-",
+        "xapp-",
         "sk-proj-",
+        "sk-ant-",
         "api key",
+        "apikey",
+        "api_key",
+        "secret",
         "password",
+        "passwd",
+        "authorization:",
         "transcript:",
         "prompt:",
         "raw input:",
@@ -252,7 +269,75 @@ pub(crate) fn contains_sensitive_report_text(value: &str) -> bool {
                 .chars()
                 .all(|character| character.is_ascii_alphanumeric() || "-._~+/=".contains(character))
     });
-    forbidden_pattern || bearer_credential || email_like
+    let secret_shaped = original.split_whitespace().any(looks_like_secret_token);
+    forbidden_pattern || bearer_credential || email_like || secret_shaped
+}
+
+/// Fails closed on credential-shaped tokens the prefix list does not know.
+///
+/// Matching only known prefixes lets any unrecognised or future credential
+/// format through into a public issue body, so shape is checked too. The
+/// signal is deliberately narrow to avoid redacting ordinary text: an opaque
+/// run of at least 32 characters that mixes upper case, lower case and digits
+/// (or is long hex) and carries high per-character entropy. Log identifiers are
+/// normally `snake_case` or `camelCase` without digits, so they do not qualify;
+/// real API keys, JWT segments and hashes do.
+fn looks_like_secret_token(word: &str) -> bool {
+    const MIN_TOKEN_LEN: usize = 32;
+    const MIN_ENTROPY_BITS: f64 = 3.0;
+
+    let token = word.trim_matches(|character: char| {
+        !character.is_ascii_alphanumeric() && !"-._~+/=".contains(character)
+    });
+    if token.len() < MIN_TOKEN_LEN {
+        return false;
+    }
+    // A URL is not a credential; its query string is handled by the caller's
+    // other checks.
+    if token.contains("://") {
+        return false;
+    }
+    if !token
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || "-._~+/=".contains(character))
+    {
+        return false;
+    }
+
+    let hex_like = token
+        .chars()
+        .all(|character| character.is_ascii_hexdigit() || character == '-');
+    let mixed_case_with_digits = token.chars().any(|c| c.is_ascii_lowercase())
+        && token.chars().any(|c| c.is_ascii_uppercase())
+        && token.chars().any(|c| c.is_ascii_digit());
+    if !hex_like && !mixed_case_with_digits {
+        return false;
+    }
+
+    shannon_entropy_bits_per_char(token) >= MIN_ENTROPY_BITS
+}
+
+/// Shannon entropy per character, used to separate opaque credentials from
+/// repetitive strings of the same shape (`aaaa…` is hex-like but not a secret).
+fn shannon_entropy_bits_per_char(value: &str) -> f64 {
+    let mut counts = [0_u32; 256];
+    let mut total = 0_u32;
+    for byte in value.bytes() {
+        counts[usize::from(byte)] += 1;
+        total += 1;
+    }
+    if total == 0 {
+        return 0.0;
+    }
+    let total_bits = f64::from(total);
+    counts
+        .iter()
+        .filter(|&&count| count > 0)
+        .map(|&count| {
+            let probability = f64::from(count) / total_bits;
+            -probability * probability.log2()
+        })
+        .sum()
 }
 
 fn render_workaround(body: &mut String, workaround: &Value) {
@@ -549,6 +634,39 @@ mod tests {
             "[View this feedback group in Epode](https://app.example/?view=feedback&group=abc)"
         ));
         assert!(capped.contains("… and additional content was omitted."));
+    }
+
+    #[test]
+    fn sensitive_guard_fails_closed_on_unrecognised_credential_shapes() {
+        // None of these carry a prefix the allowlist knows; they must still be
+        // caught on shape alone, or they reach a public issue body.
+        for secret in [
+            "Token was Zx8Qp2LmVn4TbW9yRc6HdKe1JgAo5UfS",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r",
+            "digest 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        ] {
+            assert!(
+                contains_sensitive_report_text(secret),
+                "expected redaction for: {secret}"
+            );
+        }
+    }
+
+    #[test]
+    fn sensitive_guard_does_not_redact_ordinary_report_text() {
+        // Long identifiers and prose must survive; over-redacting would gut the
+        // issue body that makes filing useful.
+        for benign in [
+            "The search_reports operation returned a 503 after retrying three times",
+            "Handler com.example.service.internal.SearchReportsController failed",
+            "error_code_5xx_timeout_exceeded_during_retry_backoff_window",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(
+                !contains_sensitive_report_text(benign),
+                "unexpected redaction for: {benign}"
+            );
+        }
     }
 
     #[test]
