@@ -7,6 +7,30 @@
 !web/
 !web/**
 
+# Production example images also build from the repository root so npm can
+# install the exact SDK tarball committed with the source.
+!backend/
+backend/*
+!backend/public/
+backend/public/*
+!backend/public/agent-feedback-node-0.1.0.tgz
+!examples/
+examples/*
+!examples/node-express/
+examples/node-express/*
+!examples/node-express/Dockerfile
+!examples/node-express/package.json
+!examples/node-express/package-lock.json
+!examples/node-express/src/
+!examples/node-express/src/**
+!examples/node-mcp/
+examples/node-mcp/*
+!examples/node-mcp/Dockerfile
+!examples/node-mcp/package.json
+!examples/node-mcp/package-lock.json
+!examples/node-mcp/src/
+!examples/node-mcp/src/**
+
 # Never let local dependency/build state back into the root build context.
 .git
 **/node_modules
