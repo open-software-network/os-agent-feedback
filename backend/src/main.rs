@@ -3272,6 +3272,8 @@ fn approved_feedback_contract(
             "reportSchema": {
                 "required": ["summary"],
                 "optional": ["impact", "confidence", "findings", "workaround"],
+                "summaryMinLength": 8,
+                "summaryMaxLength": 700,
                 "impacts": ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"],
                 "findingKinds": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"],
                 "findingSeverities": ["minor", "major", "blocking"],
@@ -3279,8 +3281,12 @@ fn approved_feedback_contract(
                 "findingRequired": ["kind", "topic", "detail"],
                 "findingOptional": ["severity"],
                 "findingTopicFormat": "lowercase_slug",
+                "findingDetailMinLength": 3,
+                "findingDetailMaxLength": 350,
                 "workaroundRequired": ["used"],
                 "workaroundOptional": ["detail"],
+                "workaroundDetailMinLength": 3,
+                "workaroundDetailMaxLength": 350,
                 "maxFindings": 8
             }
         },

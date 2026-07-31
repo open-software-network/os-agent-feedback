@@ -77,6 +77,8 @@
           "properties": {
             "required": { "const": ["summary"] },
             "optional": { "const": ["impact", "confidence", "findings", "workaround"] },
+            "summaryMinLength": { "const": 8 },
+            "summaryMaxLength": { "const": 700 },
             "impacts": { "const": ["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"] },
             "findingKinds": { "const": ["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"] },
             "findingSeverities": { "const": ["minor", "major", "blocking"] },
@@ -84,8 +86,12 @@
             "findingRequired": { "const": ["kind", "topic", "detail"] },
             "findingOptional": { "const": ["severity"] },
             "findingTopicFormat": { "const": "lowercase_slug" },
+            "findingDetailMinLength": { "const": 3 },
+            "findingDetailMaxLength": { "const": 350 },
             "workaroundRequired": { "const": ["used"] },
             "workaroundOptional": { "const": ["detail"] },
+            "workaroundDetailMinLength": { "const": 3 },
+            "workaroundDetailMaxLength": { "const": 350 },
             "maxFindings": { "const": 8 }
           }
         }
