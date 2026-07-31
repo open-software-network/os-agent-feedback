@@ -432,6 +432,7 @@ export function FeedbackView({
             }}
             onLoadMore={() => {
               filing.reset();
+              merging.reset();
               setGroupLimit((current) => current + groupsPageSize);
             }}
             onRetry={() => Promise.all([groups.refetch(), mapping.refetch()])}
@@ -519,14 +520,6 @@ function SignalsView({
   if (loading || !groups) {
     return <p className="p-4 text-sm text-muted-foreground">Loading signals…</p>;
   }
-  if (!groups.groups.length) {
-    return (
-      <EmptyState
-        title="No signals yet"
-        description="Related reports will appear here once recurring feedback is detected."
-      />
-    );
-  }
 
   const pendingMessage =
     filingError instanceof ApiError && filingError.status === 409 ? filingError.message : null;
@@ -577,19 +570,26 @@ function SignalsView({
           survives.
         </StatusMessage>
       ) : null}
-      <Panel className="min-h-0 gap-0 overflow-hidden p-0">
-        <SignalsTable
-          groups={groups.groups}
-          mappingAvailable={mappingAvailable}
-          mutationGroupKey={mutationGroupKey}
-          filingPending={filingPending}
-          onFileIssue={onFileIssue}
-          mergePendingSource={mergePendingSource}
-          mergePending={mergePending}
-          onBeginMerge={onBeginMerge}
-          onMerge={onMerge}
+      {groups.groups.length ? (
+        <Panel className="min-h-0 gap-0 overflow-hidden p-0">
+          <SignalsTable
+            groups={groups.groups}
+            mappingAvailable={mappingAvailable}
+            mutationGroupKey={mutationGroupKey}
+            filingPending={filingPending}
+            onFileIssue={onFileIssue}
+            mergePendingSource={mergePendingSource}
+            mergePending={mergePending}
+            onBeginMerge={onBeginMerge}
+            onMerge={onMerge}
+          />
+        </Panel>
+      ) : (
+        <EmptyState
+          title="No signals yet"
+          description="Related reports will appear here once recurring feedback is detected."
         />
-      </Panel>
+      )}
       {groups.hasMore ? (
         <Button className="w-fit" type="button" variant="outline" onClick={onLoadMore}>
           Load more
@@ -624,20 +624,26 @@ function SignalsTable({
   const [intoGroupKey, setIntoGroupKey] = useState("");
 
   useEffect(() => {
-    if (mergeSourceGroupKey && !groups.some((group) => group.groupKey === mergeSourceGroupKey)) {
+    const listedGroupKeys = new Set(groups.map((group) => group.groupKey));
+    if (mergeSourceGroupKey && !listedGroupKeys.has(mergeSourceGroupKey)) {
       setMergeSourceGroupKey(null);
       setIntoGroupKey("");
+    } else if (intoGroupKey && !listedGroupKeys.has(intoGroupKey)) {
+      setIntoGroupKey("");
     }
-  }, [groups, mergeSourceGroupKey]);
+  }, [groups, intoGroupKey, mergeSourceGroupKey]);
 
   return (
     <Table className="min-w-[680px] table-fixed">
       <TableHeader className="bg-background">
         <TableRow className="hover:bg-background">
-          <TableHead className="w-[52%] pl-4 text-xs text-muted-foreground">Signal</TableHead>
-          <TableHead className="w-[12%] text-xs text-muted-foreground">Reports</TableHead>
-          <TableHead className="w-[18%] text-xs text-muted-foreground">Latest observed</TableHead>
-          <TableHead className="w-[18%] pr-4 text-xs text-muted-foreground">GitHub issue</TableHead>
+          <TableHead className="w-[44%] pl-4 text-xs text-muted-foreground">Signal</TableHead>
+          <TableHead className="w-[10%] text-xs text-muted-foreground">Reports</TableHead>
+          <TableHead className="w-[16%] text-xs text-muted-foreground">Latest observed</TableHead>
+          <TableHead className="w-[20%] text-xs text-muted-foreground">GitHub issue</TableHead>
+          <TableHead className="w-[10%] px-1 pr-2 text-right text-xs text-muted-foreground">
+            Actions
+          </TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -683,66 +689,66 @@ function SignalsTable({
                 >
                   {group.latestOccurredAt ? relativeDate(group.latestOccurredAt) : "Not recorded"}
                 </TableCell>
-                <TableCell className="pr-4 text-xs">
-                  <div className="flex flex-wrap items-center gap-2">
-                    {group.githubIssue ? (
-                      <a
-                        href={group.githubIssue.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex max-w-full items-center gap-1 text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
-                      >
-                        <span className="truncate">
-                          {group.githubIssue.repoFullName}#{group.githubIssue.issueNumber}
-                        </span>
-                        <IconArrowUpRight className="shrink-0" size={13} />
-                      </a>
-                    ) : mappingAvailable ? (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        disabled={filingPending}
-                        aria-busy={filingPending && mutationGroupKey === group.groupKey}
-                        onClick={() => onFileIssue(group.groupKey)}
-                      >
-                        {filingPending && mutationGroupKey === group.groupKey
-                          ? "Filing…"
-                          : "File GitHub issue"}
-                      </Button>
-                    ) : (
-                      <span className="text-muted-foreground">Not linked</span>
-                    )}
+                <TableCell className="text-xs">
+                  {group.githubIssue ? (
+                    <a
+                      href={group.githubIssue.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex max-w-full items-center gap-1 text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+                    >
+                      <span className="truncate">
+                        {group.githubIssue.repoFullName}#{group.githubIssue.issueNumber}
+                      </span>
+                      <IconArrowUpRight className="shrink-0" size={13} />
+                    </a>
+                  ) : mappingAvailable ? (
                     <Button
                       type="button"
-                      variant="ghost"
+                      variant="outline"
                       size="sm"
-                      aria-expanded={mergeExpanded}
-                      aria-label={
-                        mergeExpanded
-                          ? `Cancel merge of signal ${group.groupKey}`
-                          : `Merge signal ${group.groupKey}`
-                      }
-                      disabled={mergePendingForRow && !mergeExpanded}
-                      onClick={() => {
-                        if (mergeExpanded) {
-                          setMergeSourceGroupKey(null);
-                          setIntoGroupKey("");
-                        } else {
-                          onBeginMerge();
-                          setMergeSourceGroupKey(group.groupKey);
-                          setIntoGroupKey("");
-                        }
-                      }}
+                      disabled={filingPending}
+                      aria-busy={filingPending && mutationGroupKey === group.groupKey}
+                      onClick={() => onFileIssue(group.groupKey)}
                     >
-                      {mergeExpanded ? "Cancel" : "Merge"}
+                      {filingPending && mutationGroupKey === group.groupKey
+                        ? "Filing…"
+                        : "File GitHub issue"}
                     </Button>
-                  </div>
+                  ) : (
+                    <span className="text-muted-foreground">Not linked</span>
+                  )}
+                </TableCell>
+                <TableCell className="px-1 pr-2 text-right text-xs">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    aria-expanded={mergeExpanded}
+                    aria-label={
+                      mergeExpanded
+                        ? `Cancel merge of signal ${group.groupKey}`
+                        : `Merge signal ${group.groupKey}`
+                    }
+                    disabled={mergePendingForRow && !mergeExpanded}
+                    onClick={() => {
+                      if (mergeExpanded) {
+                        setMergeSourceGroupKey(null);
+                        setIntoGroupKey("");
+                      } else {
+                        onBeginMerge();
+                        setMergeSourceGroupKey(group.groupKey);
+                        setIntoGroupKey("");
+                      }
+                    }}
+                  >
+                    {mergeExpanded ? "Cancel" : "Merge"}
+                  </Button>
                 </TableCell>
               </TableRow>
               {mergeExpanded ? (
                 <TableRow className="bg-background hover:bg-background">
-                  <TableCell colSpan={4} className="p-4">
+                  <TableCell colSpan={5} className="p-4">
                     <form
                       className="grid gap-3"
                       onSubmit={(event) => {
