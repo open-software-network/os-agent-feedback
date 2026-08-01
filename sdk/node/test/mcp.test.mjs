@@ -264,6 +264,43 @@ test("MCP can group a session-creation call by an identifier returned in its res
   assert.equal(calls[0].body.events[0].sessionRef, "browser_session_42");
 });
 
+test("MCP tool errors remain eligible for bounded outcome feedback", async () => {
+  const tools = new Map();
+  const telemetry = [];
+  const server = {
+    registerTool(name, configuration, handler) {
+      tools.set(name, { configuration, handler });
+      return { remove() {} };
+    },
+  };
+  const feedback = createMcpInstrumentation({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    flushIntervalMs: 1,
+    fetch: async (url, init) => {
+      if (String(url).endsWith("/api/v2/telemetry/batches")) {
+        telemetry.push(JSON.parse(init.body));
+      }
+      return new Response("{}", { status: 202 });
+    },
+  });
+  feedback.instrument(server);
+  server.registerTool("create_payment", {}, async () => ({
+    isError: true,
+    content: [{ type: "text", text: "Price is not enabled." }],
+    structuredContent: { code: "price_restricted" },
+  }));
+
+  const result = await tools.get("create_payment").handler({}, {});
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent.code, "price_restricted");
+  assert.equal(result.structuredContent._agentFeedback.reportTool, "report_product_feedback");
+  assert.match(result.structuredContent._agentFeedback.feedbackHandle, /^afr2_/);
+  await feedback.shutdown();
+  assert.equal(telemetry[0].events[0].statusCode, 500);
+  assert.equal(telemetry[0].events[0].classification, "confirmed");
+});
+
 test("MCP Ask-always uses a question-only tool before revealing report submission", async () => {
   const tools = new Map();
   const reports = [];

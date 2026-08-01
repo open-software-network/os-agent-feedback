@@ -189,9 +189,9 @@ function instrumentServer(
           sessionSource: sessionRef ? "mcp" : undefined,
         });
         if (!shouldRequestFeedback) return result;
-        // Match HTTP behavior: never attach feedback instructions to failed
-        // product results. Telemetry above still records the failure.
-        if (result.isError) return result;
+        // Unlike a generic HTTP error, an MCP isError result is an explicit,
+        // agent-readable product outcome. Keep its confirmed failure telemetry
+        // and allow the agent to report the bounded friction or gap.
         runtime.warmConsent(customerRef);
 
         const envelope = prepared.envelope;
