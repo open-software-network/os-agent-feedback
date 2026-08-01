@@ -45,6 +45,69 @@ describe("dashboard data flow", () => {
     ).toBeVisible();
   });
 
+  it("recovers from a removed team saved only in local storage", async () => {
+    const staleTeam = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const data = dashboardFixture();
+    window.localStorage.setItem("epode:last-team", staleTeam);
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (
+        path ===
+        `/api/dashboard?workspaceId=${staleTeam}&interactionLimit=250&reportLimit=250&sessionLimit=100`
+      ) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: "You are not a member of this team" }), {
+            status: 403,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
+      return Promise.resolve(feedbackApiResponse(path, data) ?? json(data));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <Providers>
+        <Home />
+      </Providers>,
+    );
+
+    expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining(`workspaceId=${staleTeam}`),
+      expect.any(Object),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/dashboard?interactionLimit=250&reportLimit=250&sessionLimit=100",
+      expect.any(Object),
+    );
+    expect(window.localStorage.getItem("epode:last-team")).toBe(data.workspace.id);
+    expect(new URL(window.location.href).searchParams.get("team")).toBe(data.workspace.id);
+  });
+
+  it("preserves an explicit forbidden team deep link and its error", async () => {
+    const forbiddenTeam = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    window.history.replaceState({}, "", `/?view=feedback&team=${forbiddenTeam}`);
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: "You are not a member of this team" }), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <Providers>
+        <Home />
+      </Providers>,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("You are not a member of this team");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(new URL(window.location.href).searchParams.get("team")).toBe(forbiddenTeam);
+    expect(window.localStorage.getItem("epode:last-team")).toBeNull();
+  });
+
   it("does not expose editor-only views or product actions to members", async () => {
     window.history.replaceState({}, "", "/?view=connectors");
     const fetchMock = vi

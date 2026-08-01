@@ -19,7 +19,10 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
     routing::get,
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -119,6 +122,7 @@ struct AppState {
 }
 
 const TEAM_INVITE_COOKIE: &str = "af_team_invite";
+const AUTH_RETURN_TO_COOKIE: &str = "af_auth_return_to";
 const GITHUB_STATE_COOKIE: &str = "af_gh_state";
 const GITHUB_WORKSPACE_COOKIE: &str = "af_gh_ws";
 const MAX_GROUP_ISSUE_SYNCS_PER_REQUEST: usize = 5;
@@ -704,6 +708,7 @@ fn feedback_discovery(public_base_url: &str) -> FeedbackDiscoveryResponse {
     get,
     path = "/auth/start",
     tag = "auth",
+    params(AuthStartQuery),
     responses(
         (
             status = 303,
@@ -716,7 +721,10 @@ fn feedback_discovery(public_base_url: &str) -> FeedbackDiscoveryResponse {
         (status = 500, description = "Authentication flow setup failed", body = ApiErrorEnvelope)
     )
 )]
-async fn auth_start(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
+async fn auth_start(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AuthStartQuery>,
+) -> Result<Response, ApiError> {
     let (verifier, oauth_state, login_url) =
         state.accounts.new_flow().map_err(ApiError::internal)?;
     let mut response = Redirect::to(login_url.as_str()).into_response();
@@ -728,7 +736,30 @@ async fn auth_start(State(state): State<Arc<AppState>>) -> Result<Response, ApiE
         &mut response,
         &http_only_cookie(STATE_COOKIE, &oauth_state, 600, state.secure_cookies),
     )?;
+    if let Some(return_to) = validated_return_to(query.return_to.as_deref()) {
+        append_cookie(
+            &mut response,
+            &http_only_cookie(
+                AUTH_RETURN_TO_COOKIE,
+                &URL_SAFE_NO_PAD.encode(return_to),
+                600,
+                state.secure_cookies,
+            ),
+        )?;
+    } else {
+        append_cookie(
+            &mut response,
+            &clear_cookie(AUTH_RETURN_TO_COOKIE, state.secure_cookies),
+        )?;
+    }
     Ok(response)
+}
+
+#[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+struct AuthStartQuery {
+    /// Same-origin relative dashboard path restored after authentication.
+    return_to: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::IntoParams)]
@@ -764,6 +795,7 @@ async fn auth_callback(
 ) -> Result<Response, ApiError> {
     let verifier = cookie(&headers, PKCE_COOKIE);
     let expected_state = cookie(&headers, STATE_COOKIE);
+    let return_to = auth_return_to(&headers);
     let valid = query.code.is_some()
         && verifier.is_some()
         && expected_state.is_some()
@@ -794,7 +826,7 @@ async fn auth_callback(
                 |_| "/?view=team&invite=invalid".into(),
                 |workspace_id| format!("/?view=team&team={workspace_id}"),
             ),
-        None => "/".into(),
+        None => return_to.unwrap_or_else(|| "/".into()),
     };
     let mut response = Redirect::to(&redirect).into_response();
     attach_token_cookies(&mut response, &state, &tokens)?;
@@ -2262,6 +2294,27 @@ fn auth_failure(state: &AppState) -> Result<Response, ApiError> {
     Ok(response)
 }
 
+fn validated_return_to(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    if value.is_empty()
+        || value.len() > 4_096
+        || !value.starts_with('/')
+        || value.starts_with("//")
+        || value.contains('\\')
+        || value.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+fn auth_return_to(headers: &HeaderMap) -> Option<String> {
+    let encoded = cookie(headers, AUTH_RETURN_TO_COOKIE)?;
+    let decoded = URL_SAFE_NO_PAD.decode(encoded).ok()?;
+    let decoded = String::from_utf8(decoded).ok()?;
+    validated_return_to(Some(&decoded))
+}
+
 fn append_cookie(response: &mut Response, value: &str) -> Result<(), ApiError> {
     response.headers_mut().append(
         header::SET_COOKIE,
@@ -2297,7 +2350,11 @@ fn attach_token_cookies(
 
 fn clear_flow_cookies(response: &mut Response, state: &AppState) -> Result<(), ApiError> {
     append_cookie(response, &clear_cookie(PKCE_COOKIE, state.secure_cookies))?;
-    append_cookie(response, &clear_cookie(STATE_COOKIE, state.secure_cookies))
+    append_cookie(response, &clear_cookie(STATE_COOKIE, state.secure_cookies))?;
+    append_cookie(
+        response,
+        &clear_cookie(AUTH_RETURN_TO_COOKIE, state.secure_cookies),
+    )
 }
 
 async fn dashboard_auth(
@@ -4159,7 +4216,7 @@ mod page_tests {
         github_callback_redirect_target, group_issue_reconciliation_resolution,
         group_issue_state_refresh_due, group_issue_sync_needed, group_marker_comment,
         mcp_auth_error, mcp_tool_allowed, mcp_tools, resolve_web_app_url, reveal_auth_error,
-        valid_report_group_key,
+        valid_report_group_key, validated_return_to,
     };
     use chrono::{Duration, TimeZone as _, Utc};
     use serde_json::{Value, json};
@@ -4216,6 +4273,32 @@ mod page_tests {
         assert_eq!(
             resolve_web_app_url("http://localhost:8080/", None),
             "http://localhost:8080"
+        );
+    }
+
+    #[test]
+    fn auth_return_target_accepts_only_bounded_same_origin_relative_paths() {
+        for valid in [
+            "/?view=feedback&report=report-1",
+            "/?view=sessions&session=session-1",
+            "/team?tab=members#selected",
+        ] {
+            assert_eq!(validated_return_to(Some(valid)), Some(valid.to_owned()));
+        }
+        for invalid in [
+            "https://evil.example/",
+            "//evil.example/",
+            "/\\evil.example/",
+            "team?tab=members",
+            "/dashboard\nset-cookie: injected",
+            "",
+        ] {
+            assert_eq!(validated_return_to(Some(invalid)), None, "{invalid}");
+        }
+        assert_eq!(validated_return_to(None), None);
+        assert_eq!(
+            validated_return_to(Some(&format!("/{}", "x".repeat(4_096)))),
+            None
         );
     }
 
