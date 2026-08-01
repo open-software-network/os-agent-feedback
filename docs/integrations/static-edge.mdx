@@ -7,6 +7,11 @@ Use this advanced path only when your team controls a server-side edge route or 
 static site, CMS, or hosted documentation origin. A browser script, tag manager, theme snippet, or public build
 variable is never safe: `AGENT_FEEDBACK_KEY` must remain an edge secret.
 
+Bind the Worker only to dedicated public docs routes such as `/docs/*`; never attach it as a hostname-wide
+catch-all or fallback. The SDK `include` list is a second fail-closed boundary, not a substitute for the edge
+platform's route binding. Paths outside `include` return 404 and methods other than GET or HEAD return 405 without
+contacting the upstream origin.
+
 If the hosting platform cannot route the site's public hostname through infrastructure you control, direct
 integration is still unsupported. Do not proxy customer feedback through your origin; reports go directly to
 Epode with a short-lived write-only capability.
@@ -26,6 +31,7 @@ let proxy;
 
 export default {
   fetch(request, env, context) {
+    // The edge platform must route only dedicated public docs paths here.
     proxy ??= createStaticDocsProxy({
       apiKey: env.AGENT_FEEDBACK_KEY,
       feedbackMode: env.AGENT_FEEDBACK_MODE || "never_ask",

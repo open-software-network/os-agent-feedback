@@ -35,8 +35,9 @@ context, adds only `Agent-Feedback-Request: 1`, and stops on redirects; the publ
 
 When your team controls the public edge route, use the [static docs trusted-edge proxy](/integrations/static-edge).
 It preserves the upstream body and ordinary public cache policy, keeps the product key in an edge secret, and
-sends feedback reports directly to Epode. If you cannot control the public response route, keep the site
-uninstrumented; client JavaScript is not a safe fallback.
+sends feedback reports directly to Epode. Bind it only to dedicated public docs routes, never a hostname-wide
+catch-all; `include` provides a second fail-closed path boundary. If you cannot control the public response route,
+keep the site uninstrumented; client JavaScript is not a safe fallback.
 
 ## Async APIs
 

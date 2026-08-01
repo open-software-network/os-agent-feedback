@@ -32,7 +32,8 @@ export const SETUP_SURFACES = {
   },
   static: {
     name: "Static site / hosted docs",
-    description: "Proxy finite HTML through a trusted edge without exposing the product key.",
+    description:
+      "Bind a dedicated docs route to a trusted edge proxy without exposing the product key.",
     stacks: ["static-edge"],
   },
 } as const;
@@ -125,6 +126,7 @@ export function setupInstructions(
 let proxy;
 export default {
   fetch(request, env, context) {
+    // Bind this Worker only to dedicated public docs routes at the edge.
     proxy ??= createStaticDocsProxy({
       apiKey: env.AGENT_FEEDBACK_KEY,
       upstreamOrigin: "https://your-docs-origin.example",
@@ -134,7 +136,7 @@ export default {
   },
 };`,
       verify:
-        "Compare an ordinary docs response with one carrying Agent-Feedback-Request: 1; their bodies must be identical.",
+        "Confirm an adjacent path returns 404 and POST returns 405 without reaching upstream; then compare ordinary and opted-in docs responses: their bodies must be identical.",
     },
     "manual-http": {
       install: `curl -O ${artifacts}/agent-feedback-protocol-v1.zip`,
@@ -174,6 +176,10 @@ export function setupAgentPrompt(
   instructions: { install: string; code: string },
   origin: string,
 ): string {
+  const routeBoundaryRequirement =
+    surface === "static"
+      ? "- Bind the Worker only to dedicated public docs routes at the edge, never a hostname-wide catch-all. Treat include as a second fail-closed boundary."
+      : "- Limit HTTP or HTML integration to routes used by customer agents.";
   return `Add Agent Feedback to this repository.
 
 Product surface: ${SETUP_SURFACES[surface].name}
@@ -186,7 +192,7 @@ Requirements:
 
 ${instructions.code}
 
-- Limit HTTP or HTML integration to routes used by customer agents.
+${routeBoundaryRequirement}
 - Never put the product key in browser JavaScript.
 - Preserve response shapes, errors, streams, and binary responses.
 - Make one real request or MCP tool call to verify the connection.

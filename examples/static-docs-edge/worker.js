@@ -4,6 +4,8 @@ let proxy;
 
 export default {
   fetch(request, env, context) {
+    // Bind this Worker only to dedicated public docs routes at the edge.
+    // `include` is a second fail-closed boundary, not the route binding itself.
     proxy ??= createStaticDocsProxy({
       apiKey: env.AGENT_FEEDBACK_KEY,
       endpoint: env.AGENT_FEEDBACK_URL,

@@ -98,6 +98,10 @@ test("setup starts with the selected product integration", () => {
   assert.match(dashboardScript, /Trusted edge proxy/);
   assert.match(dashboardScript, /createStaticDocsProxy/);
   assert.match(dashboardScript, /"static-edge"/);
+  assert.match(dashboardScript, /dedicated public docs routes/);
+  assert.match(dashboardScript, /never a hostname-wide catch-all/);
+  assert.match(dashboardScript, /second fail-closed boundary/);
+  assert.match(dashboardScript, /returns 404 and POST returns 405 without reaching upstream/);
   assert.doesNotMatch(dashboardScript, /Edge integration coming soon/);
   assert.match(dashboardScript, /setupStackOptions\[setupSurface\]/);
   assert.doesNotMatch(dashboardScript, /Run backend contract test/);

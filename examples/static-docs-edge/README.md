@@ -5,10 +5,16 @@ site, CMS, or hosted documentation origin. It never edits the page body and neve
 browser JavaScript. Feedback reports still go directly to Epode with a short-lived `afr2_` capability; this
 proxy is not a feedback relay.
 
-The public Worker route and `DOCS_UPSTREAM_ORIGIN` must use different origins. Route only the public docs
-paths through the Worker, keep the upstream origin out of public links, and store `AGENT_FEEDBACK_KEY` as an
-edge secret. Do not deploy the example until `docs-origin.example.com` and the include patterns have been
-replaced with infrastructure your team controls.
+The public Worker route and `DOCS_UPSTREAM_ORIGIN` must use different origins. Bind the Worker only to dedicated
+public docs paths such as `/docs/*`; never attach it as a hostname-wide catch-all or fallback. The `include` list
+is a second fail-closed boundary, not a replacement for the platform route binding. Keep the upstream origin out
+of public links, and store `AGENT_FEEDBACK_KEY` as an edge secret. Do not deploy the example until
+`docs-origin.example.com`, the edge route, and the include patterns have been replaced with infrastructure your
+team controls.
+
+A request outside `include` returns 404, and a method other than GET or HEAD returns 405. Neither rejection
+contacts the upstream origin, so unrelated pages, admin paths, and unsafe methods cannot become reachable merely
+because this Worker was installed.
 
 Ordinary responses retain their public `Cache-Control`, body, content encoding, and authentication context.
 They add only `Vary: Agent-Feedback-Request` and a same-public-URL discovery `Link`. An opted-in refetch gets

@@ -52,12 +52,17 @@ the product key in the edge runtime, leaves the upstream body byte-for-byte, pre
 and gives only an explicit `Agent-Feedback-Request: 1` refetch a private capability header. Reports still submit
 directly to Epode; the edge is not a feedback relay.
 
+Bind the Worker only to dedicated public docs routes, never a hostname-wide catch-all. The `include` list is a
+second fail-closed boundary: unmatched paths return 404 and methods other than GET or HEAD return 405 without
+contacting the upstream origin.
+
 ```ts
 import { createStaticDocsProxy } from "@agent-feedback/node/edge";
 
 let proxy;
 export default {
   fetch(request, env, context) {
+    // The edge platform must route only dedicated public docs paths here.
     proxy ??= createStaticDocsProxy({
       apiKey: env.AGENT_FEEDBACK_KEY,
       upstreamOrigin: "https://docs-origin.example.com",

@@ -2,6 +2,7 @@ import {
   type AgentFeedbackOptions,
   AgentFeedbackRuntime,
   encodedEnvelope,
+  matchPattern,
   normalizeOperation,
   requestDiscoveryLink,
 } from "./core.js";
@@ -52,6 +53,17 @@ function requestOptedIn(request: Request): boolean {
   return (request.headers.get("agent-feedback-request") || "")
     .split(",")
     .some((value) => value.trim() === "1");
+}
+
+function ownsPublicPath(runtime: AgentFeedbackRuntime<Request>, pathname: string): boolean {
+  if (runtime.exclude.some((pattern) => matchPattern(pathname, pattern))) return false;
+  return runtime.include.some((pattern) => matchPattern(pathname, pattern));
+}
+
+function rejectedRoute(status: 404 | 405): Response {
+  const headers = new Headers({ "cache-control": "private, no-store" });
+  if (status === 405) headers.set("allow", "GET, HEAD");
+  return new Response(null, { status, headers });
 }
 
 function ensureRequestVary(headers: Headers): void {
@@ -116,6 +128,8 @@ function rewriteSafeUpstreamRedirect(
  * The product key stays inside the runtime. Ordinary responses preserve their
  * public cache policy and advertise a same-URL opt-in. Only an explicit
  * feedback-aware refetch receives a private, write-only feedback capability.
+ * Mount it only on a dedicated public route boundary. Paths outside `include`
+ * and methods other than GET or HEAD are rejected without reaching upstream.
  */
 export function createStaticDocsProxy(options: StaticDocsProxyOptions): StaticDocsProxy {
   if (!options.include.length) throw new Error("include must contain at least one public path");
@@ -138,6 +152,9 @@ export function createStaticDocsProxy(options: StaticDocsProxyOptions): StaticDo
         status: 502,
       });
     }
+    if (!ownsPublicPath(runtime, publicUrl.pathname)) return rejectedRoute(404);
+    if (request.method !== "GET" && request.method !== "HEAD") return rejectedRoute(405);
+
     const upstreamUrl = new URL(`${publicUrl.pathname}${publicUrl.search}`, upstreamOrigin);
     const upstreamHeaders = new Headers(request.headers);
     upstreamHeaders.delete("agent-feedback-request");
@@ -151,10 +168,7 @@ export function createStaticDocsProxy(options: StaticDocsProxyOptions): StaticDo
     const upstreamResponse = await fetchImplementation(cleanUpstreamRequest);
     const headers = new Headers(upstreamResponse.headers);
     rewriteSafeUpstreamRedirect(upstreamResponse, headers, upstreamOrigin, publicUrl.origin);
-    const matched = runtime.matches(publicUrl.pathname);
-    if (!matched || (request.method !== "GET" && request.method !== "HEAD")) {
-      return relayResponse(upstreamResponse, headers);
-    }
+    if (!runtime.enabled) return relayResponse(upstreamResponse, headers);
 
     ensureRequestVary(headers);
     if (!finiteSupportedResponse(upstreamResponse, maxResponseBytes)) {

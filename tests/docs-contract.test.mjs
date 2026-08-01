@@ -175,12 +175,17 @@ test("static-site guidance requires a trusted edge and ships an executable proxy
     "private, no-store",
     "never in `wrangler.jsonc`",
     "advanced-only",
+    "never attach it as a hostname-wide",
+    "return 404",
+    "return 405 without",
   ]) {
     assert.ok(content.includes(expected), `static edge docs omit ${expected}`);
   }
   const example = await read("examples/static-docs-edge/worker.js");
   assert.match(example, /createStaticDocsProxy/);
   assert.match(example, /env\.AGENT_FEEDBACK_KEY/);
+  assert.match(example, /dedicated public docs routes/);
+  assert.match(example, /second fail-closed boundary/);
   assert.doesNotMatch(example, /af_live_/);
   assert.ok(navigationPages(docsConfig.navigation).includes("integrations/static-edge"));
   assert.match(dashboard, /"static-edge"/);

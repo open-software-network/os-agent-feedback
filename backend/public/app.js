@@ -550,7 +550,7 @@ const setupSurfaceCopy = {
   static: {
     name: "Static site / hosted docs",
     summary: "Advanced trusted-edge proxy",
-    detail: "Proxy finite HTML through an edge route your team controls. The private product key never enters browser JavaScript.",
+    detail: "Bind only dedicated public docs routes to an edge proxy your team controls, never a hostname-wide catch-all. The private product key never enters browser JavaScript.",
   },
 };
 
@@ -578,7 +578,7 @@ const setupStackOptions = {
     ["manual-http", "Another stack", "Use the language-neutral HTML protocol."],
   ],
   static: [
-    ["static-edge", "Trusted edge proxy", "Cloudflare Worker-compatible, header-only handoff."],
+    ["static-edge", "Trusted edge proxy", "Dedicated-route, fail-closed, header-only handoff."],
   ],
 };
 
@@ -650,6 +650,7 @@ function setupInstructions() {
 let proxy;
 export default {
   fetch(request, env, context) {
+    // Bind this Worker only to dedicated public docs routes at the edge.
     proxy ??= createStaticDocsProxy({
       apiKey: env.AGENT_FEEDBACK_KEY,
       upstreamOrigin: "https://your-docs-origin.example",
@@ -658,7 +659,7 @@ export default {
     return proxy.fetch(request, context);
   },
 };`,
-      verify: "Compare an ordinary docs response with one carrying Agent-Feedback-Request: 1. The bodies must be identical; only the opted-in response has Agent-Feedback.",
+      verify: "Confirm an adjacent path returns 404 and POST returns 405 without reaching upstream. Then compare ordinary and opted-in docs responses: the bodies must be identical, and only the opted-in response has Agent-Feedback.",
     },
     "manual-http": {
       name: "Language-neutral HTTP protocol",
@@ -680,7 +681,8 @@ function setupConnectionStatus(apiKeyId) {
 function setupAgentPrompt(integration) {
   const surface = setupSurfaceCopy[setupSurface];
   const identityRequirement = setupSurface === "static" ? "- Do not invent customerRef for public documentation. Add it only from verified edge authentication." : "- Keep customerRef wired to a stable opaque account ID. Epode needs it to remember Ask once approval or refusal; never use a name or email.";
-  return `Add Agent Feedback to this repository.\n\nProduct surface: ${surface.name}\nIntegration: ${integration.name}\n\nRequirements:\n- Use AGENT_FEEDBACK_KEY from the server environment. It is already configured; never print or expose it.\n- Install the official package with: ${integration.install}\n- Configure the integration once using this reference:\n\n${integration.code}\n\n- For HTTP or HTML, change include routes in code to only the product surfaces used by customer agents.\n${identityRequirement}\n- Do not put the product key in browser JavaScript.\n- Do not change existing response shapes, error handling, streams, or binary responses.\n- Verify unknown, approved, and declined consent states when AGENT_FEEDBACK_MODE=ask_once.\n- Start the product and make one real request or MCP tool call so the connection can be verified.\n\nProtocol: ${location.origin}/.well-known/agent-feedback-v1.json`;
+  const routeBoundaryRequirement = setupSurface === "static" ? "- Bind the Worker only to dedicated public docs routes at the edge, never a hostname-wide catch-all. Treat include as a second fail-closed boundary." : "- For HTTP or HTML, change include routes in code to only the product surfaces used by customer agents.";
+  return `Add Agent Feedback to this repository.\n\nProduct surface: ${surface.name}\nIntegration: ${integration.name}\n\nRequirements:\n- Use AGENT_FEEDBACK_KEY from the server environment. It is already configured; never print or expose it.\n- Install the official package with: ${integration.install}\n- Configure the integration once using this reference:\n\n${integration.code}\n\n${routeBoundaryRequirement}\n${identityRequirement}\n- Do not put the product key in browser JavaScript.\n- Do not change existing response shapes, error handling, streams, or binary responses.\n- Verify unknown, approved, and declined consent states when AGENT_FEEDBACK_MODE=ask_once.\n- Start the product and make one real request or MCP tool call so the connection can be verified.\n\nProtocol: ${location.origin}/.well-known/agent-feedback-v1.json`;
 }
 
 function readKeyClientSnippets() {

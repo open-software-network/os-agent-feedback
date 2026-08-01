@@ -67,6 +67,105 @@ test("static docs proxy preserves public caching and same-URL discovery", async 
   await proxy.shutdown();
 });
 
+test("paths outside the dedicated proxy scope fail closed before upstream", async () => {
+  const upstream = [];
+  const proxy = createStaticDocsProxy({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    upstreamOrigin: "https://docs-origin.test",
+    include: ["/docs", "/docs/**"],
+    exclude: ["/docs/admin/**"],
+    fetch: async (input) => {
+      upstream.push(input);
+      return response();
+    },
+  });
+
+  for (const url of [
+    "https://docs.example.test/admin/users",
+    "https://docs.example.test/docs/admin/secrets",
+  ]) {
+    const result = await proxy.fetch(
+      new Request(url, { headers: { "agent-feedback-request": "1" } }),
+      executionContext(),
+    );
+    assert.equal(result.status, 404, url);
+    assert.equal(result.headers.get("cache-control"), "private, no-store", url);
+    assert.equal(result.headers.get("agent-feedback"), null, url);
+    assert.equal(await result.text(), "", url);
+  }
+
+  assert.equal(upstream.length, 0);
+  await proxy.shutdown();
+});
+
+test("unsafe methods fail closed before upstream", async () => {
+  let upstreamCalls = 0;
+  const proxy = createStaticDocsProxy({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    upstreamOrigin: "https://docs-origin.test",
+    include: ["/docs/**"],
+    fetch: async () => {
+      upstreamCalls += 1;
+      return response();
+    },
+  });
+
+  for (const method of ["POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
+    const result = await proxy.fetch(
+      new Request("https://docs.example.test/docs/admin", {
+        method,
+        headers: { "agent-feedback-request": "1" },
+      }),
+      executionContext(),
+    );
+    assert.equal(result.status, 405, method);
+    assert.equal(result.headers.get("allow"), "GET, HEAD", method);
+    assert.equal(result.headers.get("cache-control"), "private, no-store", method);
+    assert.equal(result.headers.get("agent-feedback"), null, method);
+  }
+
+  assert.equal(upstreamCalls, 0);
+  await proxy.shutdown();
+});
+
+test("eligible HEAD requests preserve routing and discovery behavior", async () => {
+  const upstream = [];
+  const proxy = createStaticDocsProxy({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    upstreamOrigin: "https://docs-origin.test",
+    include: ["/docs/**"],
+    fetch: async (input) => {
+      upstream.push(input);
+      return new Response(null, {
+        status: 200,
+        headers: new Headers({
+          "content-type": "text/html; charset=utf-8",
+          "content-length": "123",
+          "cache-control": "public, max-age=300",
+          vary: "Accept-Encoding",
+        }),
+      });
+    },
+  });
+  const context = executionContext();
+  const result = await proxy.fetch(
+    new Request("https://docs.example.test/docs/start?lang=en", { method: "HEAD" }),
+    context,
+  );
+
+  assert.equal(result.status, 200);
+  assert.equal(await result.text(), "");
+  assert.match(result.headers.get("vary") || "", /Agent-Feedback-Request/);
+  assert.match(result.headers.get("link") || "", /^<\/docs\/start\?lang=en>/);
+  assert.equal(upstream.length, 1);
+  assert.equal(upstream[0].method, "HEAD");
+  assert.equal(context.promises.length, 0);
+  await proxy.shutdown();
+});
+
 test("common CDN HTML without Content-Length remains supported byte-for-byte", async () => {
   const proxy = createStaticDocsProxy({
     apiKey: key,
@@ -147,7 +246,7 @@ test("opted-in docs receive only a private capability and background telemetry",
 test("ineligible edge responses are relayed without feedback or telemetry", async () => {
   const cases = [
     [
-      "https://docs.example.test/assets/app.js",
+      "https://docs.example.test/docs/app.js",
       response("script", {
         headers: { "content-type": "application/javascript", "content-length": "6" },
       }),
