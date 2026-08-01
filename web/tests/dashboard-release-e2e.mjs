@@ -631,6 +631,19 @@ async function textVisible(page, text) {
   );
 }
 
+async function metricVisible(page, label, value) {
+  await page.waitForFunction(
+    ({ targetLabel, targetValue }) =>
+      [...document.querySelectorAll("dt")].some(
+        (term) =>
+          term.textContent?.trim() === targetLabel &&
+          term.parentElement?.querySelector("dd")?.textContent?.trim() === targetValue,
+      ),
+    { timeout: 15_000 },
+    { targetLabel: label, targetValue: value },
+  );
+}
+
 async function input(page, selector, value) {
   await page.waitForSelector(selector, { visible: true, timeout: 15_000 });
   await page.click(selector, { clickCount: 3 });
@@ -687,7 +700,13 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await clickText(page, "New product");
   await input(page, "#create-product-name", "Analytics API");
   await clickText(page, "Create");
-  await textVisible(page, "Agent feedback");
+  await page.waitForFunction(
+    () => new URL(window.location.href).searchParams.get("view") === "setup",
+    { timeout: 15_000 },
+  );
+  await metricVisible(page, "First opportunity", "Waiting");
+  await metricVisible(page, "First confirmed", "Waiting");
+  await metricVisible(page, "First report", "Waiting");
   await textVisible(page, "Save this server-side key now");
   await textVisible(page, "Coding-agent setup prompt");
 
