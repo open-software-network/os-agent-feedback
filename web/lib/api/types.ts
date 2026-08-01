@@ -738,9 +738,9 @@ export interface components {
         /**
          * @description Facet counts across the complete retained search/time window.
          *
-         *     Counts deliberately ignore categorical facet selections so choosing one
-         *     value never makes the other retained values undiscoverable. Pagination is
-         *     never applied to these aggregates.
+         *     Counts use disjunctive faceting: each facet honors every active filter
+         *     except its own selection, so alternative values remain discoverable within
+         *     the filtered context. Pagination is never applied to these aggregates.
          */
         DashboardFeedbackFacets: {
             assignee: components["schemas"]["InsightCount"][];

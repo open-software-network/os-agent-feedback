@@ -5552,7 +5552,7 @@
       },
       "DashboardFeedbackFacets": {
         "type": "object",
-        "description": "Facet counts across the complete retained search/time window.\n\nCounts deliberately ignore categorical facet selections so choosing one\nvalue never makes the other retained values undiscoverable. Pagination is\nnever applied to these aggregates.",
+        "description": "Facet counts across the complete retained search/time window.\n\nCounts use disjunctive faceting: each facet honors every active filter\nexcept its own selection, so alternative values remain discoverable within\nthe filtered context. Pagination is never applied to these aggregates.",
         "required": [
           "status",
           "impact",
