@@ -65,6 +65,9 @@ esac
 if [[ -n "$expected_schema_fingerprint" && ! "$expected_schema_fingerprint" =~ ^[0-9a-f]{64}$ ]]; then
   fail "EXPECTED_SCHEMA_FINGERPRINT must be lowercase SHA-256"
 fi
+if [[ "$mode" == "verify-before" && -n "$expected_schema_fingerprint" ]]; then
+  fail "verify-before must not compare the pre-migration schema to a post-migration fingerprint"
+fi
 
 migration_name="$(basename "$migration_path")"
 migration_prefix="${migration_name%%_*}"

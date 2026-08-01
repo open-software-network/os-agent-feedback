@@ -167,6 +167,10 @@ test("additive database expansion is separately approved, attested, and fail-clo
   assert.match(readOnly, /startsWith\(inputs\.operation, 'verify'\)/);
   assert.match(readOnly, /verify-before/);
   assert.match(readOnly, /verify-after/);
+  assert.match(
+    readOnly,
+    /EXPECTED_SCHEMA_FINGERPRINT: \$\{\{ inputs\.verification_state == 'after' && inputs\.expected_schema_fingerprint \|\| '' \}\}/,
+  );
   assert.doesNotMatch(readOnly, /MIGRATION_MODE:\s*apply/);
   assert.doesNotMatch(readOnly, /railway (?:redeploy|variable set)/);
 
@@ -296,6 +300,10 @@ test("migration ledger helper permits only exact one-step additive DDL", async (
   assert.match(source, /statement_timeout=300000/);
   assert.match(source, /\\if :SHELL_ERROR/);
   assert.match(source, /schema_fingerprint/);
+  assert.match(
+    source,
+    /verify-before must not compare the pre-migration schema to a post-migration fingerprint/,
+  );
   assert.match(source, /information_schema\.columns/);
   assert.match(source, /pg_get_constraintdef/);
   assert.match(source, /pg_indexes/);

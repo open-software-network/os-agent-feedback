@@ -810,7 +810,7 @@ jobs:
         if: startsWith(inputs.operation, 'verify')
         env:
           MIGRATION_MODE: ${{ inputs.verification_state == 'before' && 'verify-before' || 'verify-after' }}
-          EXPECTED_SCHEMA_FINGERPRINT: ${{ inputs.expected_schema_fingerprint }}
+          EXPECTED_SCHEMA_FINGERPRINT: ${{ inputs.verification_state == 'after' && inputs.expected_schema_fingerprint || '' }}
         run: scripts/verify-migration-ledger.sh
 
       - name: Verify the applied canary ledger before recovery
