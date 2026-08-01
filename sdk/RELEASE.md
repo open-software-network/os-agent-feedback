@@ -45,5 +45,7 @@ repository `open-software-network/os-epode`, workflow file
 
 The Go module is published by its protected `sdk/go/vX.Y.Z` tag and is then
 available through the Go module proxy; it has no separate registry credential.
+The Go release job polls `proxy.golang.org` and fails if that exact version does
+not become publicly installable within five minutes.
 Protect the `sdk/*/v*` tag pattern and keep the release environment restricted
 to SDK maintainers.

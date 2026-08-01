@@ -171,7 +171,7 @@ jobs:
           cargo publish --locked --manifest-path sdk/rust/Cargo.toml
 
   publish-go:
-    name: Confirm Go module release tag
+    name: Verify Go module release tag
     needs: preflight
     if: needs.preflight.outputs.package == 'go'
     runs-on: ubuntu-latest
@@ -179,6 +179,25 @@ jobs:
     permissions:
       contents: read
     steps:
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.24.x"
+      - name: Verify the tag through the public Go module proxy
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          module="github.com/open-software-network/os-epode/sdk/go"
+          for _ in $(seq 1 30); do
+            resolved="$(GOPROXY=https://proxy.golang.org go list -m -f '{{.Version}}' "$module@v${VERSION}" 2>/dev/null || true)"
+            if [[ "$resolved" == "v${VERSION}" ]]; then
+              echo "Verified $module@$resolved through proxy.golang.org."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::$module@v${VERSION} was not installable through proxy.golang.org after five minutes."
+          exit 1
       - name: Record Go module publication boundary
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
