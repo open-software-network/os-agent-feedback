@@ -9,6 +9,8 @@ You do not need to know who the customer's agent is.
 
 `customerRef` is an optional opaque identifier derived from authentication your product already has.
 Good values are internal account or tenant IDs. Do not send names, email addresses, prompts, or task text.
+Epode stores this value with interaction telemetry so your dashboard can group usage by customer. The
+agent-facing feedback envelope receives only an HMAC-derived consent subject, never the raw reference.
 
 ```ts
 app.use(agentFeedback({

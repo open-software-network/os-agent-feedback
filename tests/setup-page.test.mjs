@@ -78,7 +78,7 @@ test("dashboard action notices are ephemeral fixed toasts", () => {
 
 test("products exist before integration setup without an environment picker", () => {
   assert.match(dashboardHtml, /id="product-scope"/);
-  assert.match(dashboardHtml, /app\.js\?v=20260731-coverage/);
+  assert.match(dashboardHtml, /app\.js\?v=20260731-privacy/);
   assert.match(dashboardScript, /Create your first product/);
   assert.match(dashboardScript, /id="product-select"/);
   assert.match(dashboardScript, /\+ New product/);
@@ -104,7 +104,7 @@ test("collection policy distinguishes Epode-managed once and per-report consent"
   assert.doesNotMatch(dashboardScript, />Auto —/);
   assert.match(dashboardScript, /Ask once — Epode remembers the answer/);
   assert.match(dashboardScript, /Ask every time — request permission for each report/);
-  assert.match(dashboardScript, /agent stores nothing/);
+  assert.match(dashboardScript, /never shown to the agent/);
   assert.match(dashboardScript, /Silence or ambiguity never becomes approval/);
   assert.match(backendStore, /"never_ask", "ask_once", "ask_always", "off"/);
   assert.match(neverAskMigration, /SET feedback_mode = 'never_ask'/);

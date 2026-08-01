@@ -427,15 +427,20 @@ impl Runtime {
         let Ok(permit) = self.consent_slots.clone().try_acquire_owned() else {
             return;
         };
-        let Ok(mut lookups) = self.consent_lookups.try_lock() else {
-            return;
-        };
-        if !lookups.insert(subject.clone()) {
-            return;
-        }
-        drop(lookups);
         let runtime = self.clone();
         tokio::spawn(async move {
+            // The product response must never wait for consent I/O or lock
+            // contention. The semaphore was acquired synchronously above, so
+            // at most MAX_CONCURRENT_CONSENT_LOOKUPS tasks can reach this
+            // asynchronous deduplication point. Waiting for this tiny critical
+            // section in the detached task avoids probabilistically dropping a
+            // distinct lookup merely because another task held the set lock for
+            // an instant.
+            let mut lookups = runtime.consent_lookups.lock().await;
+            if !lookups.insert(subject.clone()) {
+                return;
+            }
+            drop(lookups);
             let _permit = permit;
             if runtime.cached_consent_subject(&subject).await.is_some() {
                 runtime.consent_lookups.lock().await.remove(&subject);
@@ -1875,6 +1880,13 @@ mod tests {
                         let worker_active = server_active.clone();
                         let worker_maximum = server_maximum.clone();
                         thread::spawn(move || {
+                            // Accepted sockets may inherit the listener's
+                            // nonblocking mode on some platforms. This worker
+                            // intentionally performs a bounded blocking read;
+                            // otherwise an immediate WouldBlock is mistaken for
+                            // a non-consent request and makes the concurrency
+                            // assertion nondeterministic.
+                            let _ = stream.set_nonblocking(false);
                             let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                             let mut request = [0_u8; 4096];
                             let size = stream.read(&mut request).unwrap_or_default();
@@ -1950,7 +1962,13 @@ mod tests {
                 }
             })
             .await
-            .expect("consent warming did not exercise the concurrency limit");
+            .unwrap_or_else(|_| {
+                panic!(
+                    "consent warming stalled after {} of {} bounded lookups",
+                    lookup_count.load(Ordering::SeqCst),
+                    MAX_CONCURRENT_CONSENT_LOOKUPS
+                )
+            });
         }
 
         let mut responses = tokio::task::JoinSet::new();

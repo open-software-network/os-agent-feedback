@@ -4031,7 +4031,7 @@ pub(crate) async fn record_feedback_consent_decision(
         {
             let applied = sqlx::query_as::<_, (String, DateTime<Utc>, Option<String>)>(
                 r"INSERT INTO feedback_consent_subjects (environment_id, subject, decision, decided_at)
-                VALUES ($1, $2, $3, TO_TIMESTAMP($4))
+                VALUES ($1, $2, $3, $4)
                 ON CONFLICT (environment_id, subject) DO UPDATE SET
                   decision = EXCLUDED.decision,
                   decided_at = EXCLUDED.decided_at,
@@ -4048,7 +4048,12 @@ pub(crate) async fn record_feedback_consent_decision(
             .bind(key.2)
             .bind(subject)
             .bind(&input.decision)
-            .bind(claims.iat)
+            // Order durable consent by when Epode accepted the user's
+            // decision, not by the capability's second-resolution issue time.
+            // Two interactions are routinely signed in the same second, and
+            // an explicit later choice must not be discarded as a timestamp
+            // tie. Per-interaction idempotency above still makes retries safe.
+            .bind(interaction_decided_at)
             .fetch_optional(&mut *tx)
             .await?;
             let changed = applied.is_some();
@@ -4814,12 +4819,27 @@ mod product_tests {
         interaction_id: Uuid,
         subject: Option<&str>,
     ) -> String {
-        let now = Utc::now();
+        test_capability_with_subject_issued_at(
+            secret,
+            key_id,
+            interaction_id,
+            subject,
+            Utc::now().timestamp(),
+        )
+    }
+
+    fn test_capability_with_subject_issued_at(
+        secret: &str,
+        key_id: Uuid,
+        interaction_id: Uuid,
+        subject: Option<&str>,
+        issued_at: i64,
+    ) -> String {
         let claims = crate::security::CapabilityClaims {
             v: 1,
             i: interaction_id,
-            iat: now.timestamp(),
-            exp: (now + Duration::hours(1)).timestamp(),
+            iat: issued_at,
+            exp: issued_at + Duration::hours(1).num_seconds(),
             n: format!("nonce-{}", Uuid::new_v4().simple()),
             s: subject.map(str::to_owned),
         };
@@ -8166,6 +8186,109 @@ mod product_tests {
         .await;
         sqlx::query("DELETE FROM workspaces WHERE id = $1")
             .bind(workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn same_second_ask_once_decisions_follow_user_action_order() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Same-second consent ordering").await?;
+
+        let result = async {
+            let (_, environment) = create_product(
+                &pool,
+                workspace.id,
+                CreateProductInput {
+                    name: "Consent ordering product".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let (write_key, write_secret) = create_api_key(
+                &pool,
+                workspace.id,
+                environment.id,
+                Some("Consent writer".into()),
+                Some("write".into()),
+                None,
+            )
+            .await
+            .map_err(test_error)?;
+            update_policy(
+                &pool,
+                workspace.id,
+                PolicyInput {
+                    environment_id: environment.id,
+                    feedback_mode: "ask_once".into(),
+                    collect_event_summaries: false,
+                    retention_days: 30,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+
+            let subject = format!("afsub1_{}", "z".repeat(43));
+            let issued_at = Utc::now().timestamp();
+            let approval = test_capability_with_subject_issued_at(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&subject),
+                issued_at,
+            );
+            let decline = test_capability_with_subject_issued_at(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&subject),
+                issued_at,
+            );
+
+            let approved = record_feedback_consent_decision(
+                &pool,
+                &approval,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(approved.decision == "approved" && approved.changed);
+
+            let declined = record_feedback_consent_decision(
+                &pool,
+                &decline,
+                ConsentDecisionInput {
+                    decision: "declined".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(declined.decision == "declined" && declined.changed);
+            anyhow::ensure!(declined.flipped_from.as_deref() == Some("approved"));
+
+            let durable: String = sqlx::query_scalar(
+                "SELECT decision FROM feedback_consent_subjects WHERE environment_id = $1 AND subject = $2",
+            )
+            .bind(environment.id)
+            .bind(&subject)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(durable == "declined");
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
             .execute(&pool)
             .await?;
         result

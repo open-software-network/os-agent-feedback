@@ -95,9 +95,11 @@ export function PolicyView({
             <option value="off">Off: do not request feedback</option>
           </NativeSelect>
           <p className="max-w-3xl text-sm text-muted-foreground">
-            Ask once is remembered by Epode for this product and an opaque customer reference, so it
-            can survive new agent sessions. Without a customer reference, permission is safely
-            requested for each use. Ask every time always requires fresh permission.
+            Ask once is remembered under an HMAC-derived subject, so it can survive new agent
+            sessions without showing the customer reference to the agent. Epode stores the opaque
+            customer reference separately with interaction telemetry for dashboard grouping. Without
+            a customer reference, permission is safely requested for each use. Ask every time always
+            requires fresh permission.
           </p>
         </Panel>
         <Panel title="Outside the feedback protocol">

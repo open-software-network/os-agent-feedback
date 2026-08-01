@@ -15,9 +15,8 @@ describe("PolicyView", () => {
       />,
     );
 
-    expect(
-      screen.getByText(/remembered by Epode for this product and an opaque customer reference/i),
-    ).toBeVisible();
+    expect(screen.getByText(/remembered under an HMAC-derived subject/i)).toBeVisible();
+    expect(screen.getByText(/stores .* separately with interaction telemetry/i)).toBeVisible();
     expect(screen.getByText(/survive new agent sessions/i)).toBeVisible();
     expect(
       screen.getByText(

@@ -32,10 +32,13 @@ it to create a scoped `afr2_...` capability locally. The capability contains no 
 ## Agent and customer identity
 
 Epode does not identify an agent. HTTP runtime headers and MCP client information are unverified hints. Optional
-`customerRef` and session references are opaque values supplied by your own authenticated product context.
+`customerRef` and session references are opaque values supplied by your own authenticated product
+context. Epode stores `customerRef` with interaction telemetry for optional customer grouping. Session
+references are hashed before storage. Ask-once consent uses an HMAC-derived subject, so neither the raw
+`customerRef` nor the stored telemetry value is exposed to the customer's agent in the feedback envelope.
+Use non-personal internal identifiers only.
 
 ## Origin safety
 
 Agent-side HTTP helpers require an explicit allowlist of HTTPS submit origins. MCP servers validate every present
 browser `Origin` against an explicit allowlist. Empty MCP origin allowlists reject browser-originated requests.
-
