@@ -18,6 +18,14 @@ database recovery:
 - Add an environment-scoped `RAILWAY_TOKEN` secret and `RAILWAY_PROJECT_ID`
   variable to `v2-canary` and `production`. The Railway token must be limited
   to the Epode project.
+- Add `RAILWAY_CANARY_TOKEN` to the protected `production` environment. It must
+  be scoped to read `v2-canary`, not to mutate production; promotion and the
+  additive-migration workflow use it only to verify canary attestations.
+- The `Postgres` service in both environments must expose
+  `DATABASE_PUBLIC_URL` to the GitHub-hosted migration runner. If the database
+  service has another name, set `RAILWAY_DATABASE_SERVICE`. Keep Railway's
+  network controls and credential rotation in place; the workflow masks the
+  resolved URL and never writes it to an artifact or summary.
 - In `v2-canary`, set `V2_CANARY_API_DOMAIN` and `V2_CANARY_WEB_DOMAIN` to
   hostnames already attached to their services, without `https://` or a path.
   `agent-feedback-api-v2-canary.up.railway.app` is the existing public API
@@ -92,6 +100,81 @@ attempts both service restorations independently. Tag movement also restores
 both prior production tags before failing. A manual cancellation or external
 Railway mutation can still interrupt this recovery path; inspect both service
 deployment IDs, digests, and tags before retrying.
+
+## Additive database expansion
+
+Ordinary production promotion deliberately rejects an API image whose embedded
+SQL migration ledger differs from the active API image. Do not remove or bypass
+that check. Once SQLx records a newer migration, an older binary that does not
+know that migration is not an automatic restart or rollback candidate.
+
+Schema expansion therefore uses the separate, manually dispatched `Verify or
+apply additive database expansion` workflow. It has five operations:
+
+- `verify-canary` and `verify-production` read the SQLx ledger, verify every
+  known SQLx SHA-384 checksum, and compute a canonical public-schema
+  fingerprint. They do not set Railway variables, redeploy a service, or alter
+  the database. Choose whether the database must be in the `before` or `after`
+  state. Production `after` verification requires the reviewed canary schema
+  fingerprint.
+- `apply-canary` accepts exactly one new migration, applies it under the Epode
+  advisory lock, restarts the currently active immutable API bridge image, and
+  proves that the same image and digest boot successfully against the expanded
+  schema. Only then does it record the exact commit, migration path, SHA-256,
+  schema fingerprint, bridge image/digest, restarted deployment ID, and
+  workflow run as verified canary migration evidence.
+- `stage-production-bridge` enters the protected `production` GitHub
+  environment and requires `confirm_production=true`. It accepts only a green
+  protected-main migration-marker commit whose sole first-parent change is the
+  reviewed migration. It verifies that the exact immutable API/web pair and
+  migration passed expanded canary, captures the complete restorable
+  production pair, then deploys API followed by web while production remains
+  on the previous schema. Public health, authentication start, and downloadable
+  integration artifacts must pass before production tags move and the exact
+  refs, digests, deployment IDs, canary migration run, and schema fingerprint
+  are attested. A deployment, smoke, or tag failure restores both prior
+  services and tags; this operation never connects to or mutates the database.
+- `apply-production` enters the protected `production` GitHub environment. It
+  requires a recent opaque backup reference, its RFC3339 verification time, a
+  restore-test reference, and `confirm_production=true`. It fails before the
+  database changes unless the exact migration has verified canary evidence and
+  production is still running the exact API/web migration-marker pair recorded
+  by `stage-production-bridge`. It then applies under the same advisory lock,
+  requires the production schema fingerprint to equal canary, checks public API
+  health, restarts the exact API bridge against the expanded schema, and
+  records the recovery, exact application-pair, and schema evidence.
+
+The migration file and the workflow input checksum are two distinct review
+facts. `migration_sha256` is the independently reviewed SHA-256 of the exact
+file at `target_sha`; SQLx's installed SHA-384 is separately compared with the
+database ledger. `target_sha` must be a full protected-main commit with a green
+exact-commit CI run.
+
+The dedicated path accepts schema-only additive DDL. It rejects `DROP`,
+`TRUNCATE`, replacement/renaming, destructive `ALTER`, and all `INSERT`,
+`UPDATE`, `DELETE`, or `MERGE` statements. Data population belongs in a
+separately tested, bounded, idempotent backfill after the application is dual
+writing. This keeps the expansion transaction short and prevents a migration
+from rewriting or locking a live evidence table for the duration of a
+historical backfill. Apply mode also sets a five-second PostgreSQL lock timeout
+and a five-minute statement timeout; exceeding either fails and rolls back the
+migration rather than extending an unbounded production lock.
+
+Use three deliberately separate commits. First deploy an ordinary bridge commit
+whose embedded ledger is still version N and which can boot either database N
+or the explicitly configured N+1. Next merge a migration-marker commit whose
+only change is the reviewed N+1 migration. Its exact API/web pair is deployed to
+canary, `apply-canary` expands canary and forces the API bridge to restart, then
+`stage-production-bridge` deploys that same exact pair to production while its
+database is still N. Only after the production pair is attested should
+`apply-production` expand production and restart the exact API bridge. Finally,
+merge a normal feature commit whose ledger remains N+1 and promote it through
+the unchanged ordinary canary and production workflows. Never combine feature
+code with the migration-marker commit or weaken the ordinary promotion ledger
+equality gate.
+
+Use opaque provider IDs in backup fields. Never paste a database URL, signed
+backup URL, access token, or other credential into a workflow input or summary.
 
 ## Rollback
 
