@@ -339,6 +339,7 @@ test("every enabled setup choice has a fresh executable E2E example", async () =
       "rust",
       "manual-http",
     ],
+    static: ["static-edge"],
   };
   for (const [surface, integrations] of Object.entries(expected)) {
     const start = dashboardScript.indexOf(`  ${surface}: [`);
@@ -360,6 +361,7 @@ test("every enabled setup choice has a fresh executable E2E example", async () =
     "setup-matrix-manual-http/server.py",
     "setup-matrix-node-mcp/index.js",
     "setup-matrix-manual-mcp/server.py",
+    "static-docs-edge/worker.js",
   ];
   await Promise.all(
     fixtures.map((fixture) => access(new URL(`../examples/${fixture}`, import.meta.url))),
