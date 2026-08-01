@@ -33,10 +33,10 @@ jobs:
           node-version: "24"
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.24.x"
       - name: Install Rust 1.88
@@ -72,7 +72,7 @@ jobs:
       - name: Build, dry-run, and smoke-test release artifacts
         run: SDK_ARTIFACT_DIR=.artifacts/sdk-release bash scripts/sdk-release-readiness.sh
       - name: Upload immutable release candidate
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sdk-release-candidate
           path: .artifacts/sdk-release
@@ -93,7 +93,7 @@ jobs:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: sdk-release-candidate
           path: release-candidate
@@ -109,12 +109,12 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: sdk-release-candidate
           path: release-candidate
       - name: Publish the reviewed distributions with PyPI OIDC
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: release-candidate/python
 
@@ -129,14 +129,46 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: sdk-release-candidate
+          path: release-candidate
       - name: Install Rust 1.88
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: "1.88"
+      - name: Revalidate the reviewed crate against checkout
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          (
+            cd release-candidate
+            shasum -a 256 --check CHECKSUMS.sha256
+          )
+          reviewed="release-candidate/rust/agent-feedback-${VERSION}.crate"
+          if [[ ! -f "$reviewed" ]]; then
+            echo "::error::The reviewed Rust crate $reviewed is missing."
+            exit 1
+          fi
+
+          export SOURCE_DATE_EPOCH
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          cargo package --locked --manifest-path sdk/rust/Cargo.toml >/dev/null
+          rebuilt="sdk/rust/target/package/agent-feedback-${VERSION}.crate"
+          if ! cmp --silent "$reviewed" "$rebuilt"; then
+            echo "::error::The crate packaged from checkout differs from the reviewed release candidate."
+            shasum -a 256 "$reviewed" "$rebuilt"
+            exit 1
+          fi
       - name: Exchange the GitHub OIDC token for crates.io credentials
-        uses: rust-lang/crates-io-auth-action@v1
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1
       - name: Publish the reviewed crate
-        run: cargo publish --locked --manifest-path sdk/rust/Cargo.toml
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          cargo publish --locked --manifest-path sdk/rust/Cargo.toml
 
   publish-go:
     name: Confirm Go module release tag

@@ -1,21 +1,32 @@
-name: Promote artifacts
+name: Promote or rollback production
 
 on:
   workflow_dispatch:
     inputs:
-      artifact:
-        description: Artifact to promote.
+      operation:
+        description: Promote reviewed artifacts or roll back to previously deployed SHA tags.
         required: true
-        default: api
+        default: promote
         type: choice
         options:
-          - api
-          - web
-          - all
-      from-tag:
-        description: Source tag to promote; use staging or a 7-40 character lowercase SHA tag.
+          - promote
+          - rollback
+      api_sha:
+        description: API image commit SHA (7-40 lowercase hexadecimal characters).
+        required: true
+        type: string
+      web_sha:
+        description: Web image commit SHA (7-40 lowercase hexadecimal characters).
+        required: true
+        type: string
+      confirm_rollback:
+        description: Required acknowledgement when operation is rollback.
         required: false
-        default: staging
+        default: false
+        type: boolean
+      rollback_reason:
+        description: Required operator-visible reason when operation is rollback.
+        required: false
         type: string
 
 permissions:
@@ -32,67 +43,38 @@ env:
 
 jobs:
   plan:
-    name: Plan promotion
+    name: Resolve complete production pair
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: read
     outputs:
-      matrix: ${{ steps.resolve.outputs.matrix }}
+      api_ref: ${{ steps.resolve.outputs.api_ref }}
+      api_digest: ${{ steps.resolve.outputs.api_digest }}
+      api_revision: ${{ steps.resolve.outputs.api_revision }}
+      web_ref: ${{ steps.resolve.outputs.web_ref }}
+      web_digest: ${{ steps.resolve.outputs.web_digest }}
+      web_revision: ${{ steps.resolve.outputs.web_revision }}
     env:
-      ARTIFACT: ${{ inputs.artifact }}
-      FROM_TAG: ${{ inputs.from-tag }}
+      OPERATION: ${{ inputs.operation }}
+      API_SHA: ${{ inputs.api_sha }}
+      WEB_SHA: ${{ inputs.web_sha }}
+      CONFIRM_ROLLBACK: ${{ inputs.confirm_rollback }}
+      ROLLBACK_REASON: ${{ inputs.rollback_reason }}
     steps:
-      - name: Validate inputs and select artifacts
-        id: select
+      - name: Validate operation inputs
         run: |
           set -euo pipefail
-          case "$ARTIFACT" in
-            api|web|all) ;;
-            *)
-              echo "::error::artifact must be 'api', 'web', or 'all'."
+          if [[ "$OPERATION" == "rollback" ]]; then
+            if [[ "$CONFIRM_ROLLBACK" != "true" ]]; then
+              echo "::error::A rollback requires confirm_rollback."
               exit 1
-              ;;
-          esac
-          if [[ "$FROM_TAG" != "staging" && ! "$FROM_TAG" =~ ^[0-9a-f]{7,40}$ ]]; then
-            echo "::error::from-tag must be 'staging' or a 7-40 character lowercase hexadecimal SHA tag."
-            exit 1
+            fi
+            if [[ -z "${ROLLBACK_REASON//[[:space:]]/}" ]]; then
+              echo "::error::A rollback requires rollback_reason for the audit summary."
+              exit 1
+            fi
           fi
-
-          # Images are only ever tagged with --short=7, so normalize a longer
-          # valid SHA before any registry lookup.
-          if [[ "$FROM_TAG" != "staging" ]]; then
-            FROM_TAG="${FROM_TAG:0:7}"
-          fi
-
-          artifact_rows='[
-            {
-              "artifact": "api",
-              "image": "os-epode-api",
-              "service": "epode-api"
-            },
-            {
-              "artifact": "web",
-              "image": "os-epode-web",
-              "service": "epode-web"
-            }
-          ]'
-          if [[ "$ARTIFACT" == "all" ]]; then
-            selected_rows=$(jq -c . <<< "$artifact_rows")
-          else
-            selected_rows=$(jq -cn \
-              --argjson rows "$artifact_rows" \
-              --arg artifact "$ARTIFACT" \
-              '[$rows[] | select(.artifact == $artifact)]')
-          fi
-
-          {
-            echo "FROM_TAG=$FROM_TAG"
-          } >> "$GITHUB_ENV"
-          {
-            echo "rows=$selected_rows"
-            echo "from_tag=$FROM_TAG"
-          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -104,104 +86,75 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve source images
+      # Resolve both sides before the production approval and before any
+      # Railway mutation. There is deliberately no artifact=all matrix: this
+      # workflow has one explicit pair and applies it API-first, then web.
+      - name: Resolve API and web SHA tags
         id: resolve
-        env:
-          ARTIFACT_ROWS: ${{ steps.select.outputs.rows }}
-          FROM_TAG: ${{ steps.select.outputs.from_tag }}
         run: |
           set -euo pipefail
-          resolved_rows='[]'
-          while IFS= read -r row; do
-            artifact=$(jq -r '.artifact' <<< "$row")
-            image_name=$(jq -r '.image' <<< "$row")
-            IMAGE="${REGISTRY}/open-software-network/${image_name}"
-            source="${IMAGE}:${FROM_TAG}"
-            if ! docker buildx imagetools inspect "$source" --raw > /dev/null 2>&1; then
-              echo "::error::Image $source does not exist."
+          for artifact in api web; do
+            if [[ "$artifact" == "api" ]]; then
+              requested_sha="$API_SHA"
+            else
+              requested_sha="$WEB_SHA"
+            fi
+            if [[ ! "$requested_sha" =~ ^[0-9a-f]{7,40}$ ]]; then
+              echo "::error::${artifact}_sha must be a 7-40 character lowercase hexadecimal commit SHA."
               exit 1
             fi
 
-            digest=$(docker buildx imagetools inspect "$source" \
-              --format '{{ json .Manifest }}' | jq -r '.digest')
-            revision=$(docker buildx imagetools inspect "$source" \
-              --format '{{ json .Image }}' \
-              | jq -r 'first(.. | objects | select(.config?.Labels?["org.opencontainers.image.revision"] != null) | .config.Labels["org.opencontainers.image.revision"]) // empty')
-
-            if [[ -z "$revision" && "$FROM_TAG" =~ ^[0-9a-f]{7}$ ]]; then
-              revision="$FROM_TAG"
-            fi
-            if [[ ! "$revision" =~ ^[0-9a-f]{7,40}$ ]]; then
-              echo "::error::Could not resolve a commit SHA from $source."
+            sha_short="${requested_sha:0:7}"
+            image="${REGISTRY}/open-software-network/os-epode-${artifact}"
+            ref="${image}:${sha_short}"
+            if ! docker buildx imagetools inspect "$ref" --raw >/dev/null 2>&1; then
+              echo "::error::Required image $ref does not exist."
               exit 1
             fi
 
-            sha_short="${revision:0:7}"
-            sha_ref="${IMAGE}:${sha_short}"
-            if ! docker buildx imagetools inspect "$sha_ref" --raw > /dev/null 2>&1; then
-              echo "::error::Concrete SHA image $sha_ref does not exist."
-              exit 1
-            fi
-            sha_digest=$(docker buildx imagetools inspect "$sha_ref" \
-              --format '{{ json .Manifest }}' | jq -r '.digest')
+            digest="$(
+              docker buildx imagetools inspect "$ref" \
+                --format '{{ json .Manifest }}' | jq -r '.digest // empty'
+            )"
+            revision="$(
+              docker buildx imagetools inspect "$ref" \
+                --format '{{ json .Image }}' \
+                | jq -r 'first(.. | objects | select(.config?.Labels?["org.opencontainers.image.revision"] != null) | .config.Labels["org.opencontainers.image.revision"]) // empty'
+            )"
             if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-              echo "::error::Unresolved digest for $source."
+              echo "::error::Could not resolve an immutable digest for $ref."
               exit 1
             fi
-            if [[ ! "$sha_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-              echo "::error::Unresolved digest for $sha_ref."
+            if [[ ! "$revision" =~ ^[0-9a-f]{40}$ || "${revision:0:${#requested_sha}}" != "$requested_sha" ]]; then
+              echo "::error::$ref was built from ${revision:-an unknown revision}, not $requested_sha."
               exit 1
             fi
-            if [[ "$sha_digest" != "$digest" ]]; then
-              echo "::error::$source and $sha_ref do not resolve to the same digest."
-              exit 1
-            fi
-
-            resolved_rows=$(jq -cn \
-              --argjson rows "$resolved_rows" \
-              --argjson row "$row" \
-              --arg digest "$digest" \
-              --arg sha_short "$sha_short" \
-              '$rows + [$row + {digest: $digest, sha_short: $sha_short}]')
 
             {
-              echo "### ${artifact^^} promotion source"
-              echo "- **Source tag:** \`${FROM_TAG}\`"
-              echo "- **SHA tag:** \`${sha_ref}\`"
-              echo "- **Digest:** \`${digest}\`"
-            } >> "$GITHUB_STEP_SUMMARY"
-          done < <(jq -c '.[]' <<< "$ARTIFACT_ROWS")
-
-          selected_count=$(jq 'length' <<< "$ARTIFACT_ROWS")
-          resolved_count=$(jq 'length' <<< "$resolved_rows")
-          if [[ "$resolved_count" -ne "$selected_count" ]]; then
-            echo "::error::Resolved $resolved_count of $selected_count requested artifacts."
-            exit 1
-          fi
-
-          matrix=$(jq -cn --argjson include "$resolved_rows" '{include: $include}')
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+              echo "${artifact}_ref=$ref"
+              echo "${artifact}_digest=$digest"
+              echo "${artifact}_revision=$revision"
+            } >>"$GITHUB_OUTPUT"
+            {
+              echo "### ${artifact^^} ${OPERATION} target"
+              echo "- **SHA tag:** \`$ref\`"
+              echo "- **Digest:** \`$digest\`"
+              echo "- **Revision:** \`$revision\`"
+            } >>"$GITHUB_STEP_SUMMARY"
+          done
 
   deploy:
-    name: Deploy ${{ matrix.artifact }} production
+    name: ${{ inputs.operation == 'rollback' && 'Rollback' || 'Promote' }} API then web
     needs: plan
     runs-on: ubuntu-latest
-    # One GitHub approval covers all jobs queued for this environment in a run;
-    # only an individually re-run matrix leg gets its own approval.
     environment: production
-    strategy:
-      # Each leg performs an independent irreversible Railway mutation; do not
-      # cancel a sibling mid-poll after its mutation has fired.
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     env:
-      ARTIFACT: ${{ matrix.artifact }}
-      IMAGE: ghcr.io/open-software-network/${{ matrix.image }}
-      SERVICE: ${{ matrix.service }}
-      IMAGE_REF: ghcr.io/open-software-network/${{ matrix.image }}:${{ matrix.sha_short }}
-      IMAGE_DIGEST_REF: ghcr.io/open-software-network/${{ matrix.image }}@${{ matrix.digest }}
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+      API_SERVICE: ${{ vars.RAILWAY_API_SERVICE || 'epode-api' }}
+      WEB_SERVICE: ${{ vars.RAILWAY_WEB_SERVICE || 'epode-web' }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
@@ -219,135 +172,153 @@ jobs:
       - name: Install Railway CLI
         run: npm install --global "@railway/cli@${RAILWAY_CLI_VERSION}"
 
-      - name: Pin verified SHA tag
-        run: |
-          set -euo pipefail
-          docker buildx imagetools create \
-            --tag "$IMAGE_REF" \
-            "$IMAGE_DIGEST_REF"
-
-      - name: Deploy SHA image and wait for production
-        # RAILWAY_TOKEN is step-scoped so npm install and docker steps never see it.
+      - name: Capture recoverable production state
+        id: previous
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           set -euo pipefail
-          if [[ -z "$RAILWAY_TOKEN" ]]; then
-            echo "::error::The production environment secret RAILWAY_TOKEN is not configured."
-            exit 1
-          fi
-          if [[ -z "$RAILWAY_PROJECT_ID" ]]; then
-            echo "::error::The RAILWAY_PROJECT_ID variable is not configured."
+          if [[ -z "$RAILWAY_TOKEN" || -z "$RAILWAY_PROJECT_ID" ]]; then
+            echo "::error::The production RAILWAY_TOKEN secret and RAILWAY_PROJECT_ID variable are required."
             exit 1
           fi
 
-          previous_id=$(railway deployment list \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment production \
-            --service "$SERVICE" \
-            --limit 1 \
-            --json | jq -r '.[0].id // empty')
-          current_image=$(railway service list \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment production \
-            --json \
-            | jq -r --arg service "$SERVICE" \
-              '.[] | select(.name == $service) | .source.image // empty')
-          mutation_started_at=$(node --eval 'process.stdout.write(new Date().toISOString())')
-
-          if [[ "$current_image" == "$IMAGE_REF" ]]; then
-            railway redeploy \
-              --project "$RAILWAY_PROJECT_ID" \
-              --environment production \
-              --service "$SERVICE" \
-              --from-source \
-              --yes \
-              --json
-          else
-            # Railway CLI 5.30 reads non-TTY stdin as JSON configuration.
-            # Allocate a PTY so the explicit --service-config flags are used.
-            script --quiet --return --command \
-              "railway environment edit --project \"$RAILWAY_PROJECT_ID\" --environment production --service-config \"$SERVICE\" source.image \"$IMAGE_REF\" --message \"Deploy $IMAGE_REF to production\" --json" \
-              /dev/null
-          fi
-
-          # Neither mutation returns a deployment ID for these modes (verified against
-          # CLI 5.30.1). Discovery requires id != previous AND image match AND
-          # createdAt after the mutation; a deployment passing all three that we
-          # did not initiate is the same image on the same service seconds apart —
-          # its outcome is the outcome this gate exists to report. Discover
-          # the matching deployment once, then freeze and poll that exact ID.
-          deployment_id=""
-          for _ in $(seq 1 60); do
-            deployments=$(railway deployment list \
-              --project "$RAILWAY_PROJECT_ID" \
-              --environment production \
-              --service "$SERVICE" \
-              --limit 100 \
-              --json)
-
-            if [[ -z "$deployment_id" ]]; then
-              deployment_id=$(jq -r \
-                --arg previous_id "$previous_id" \
-                --arg image "$IMAGE_REF" \
-                --arg started_at "$mutation_started_at" \
-                'first(.[] | select(
-                  .id != $previous_id
-                  and .meta.image == $image
-                  and .createdAt > $started_at
-                ) | .id) // empty' <<< "$deployments")
-              if [[ -z "$deployment_id" ]]; then
-                sleep 10
-                continue
-              fi
-              echo "Tracking production deployment $deployment_id."
+          services="$(railway service list --project "$RAILWAY_PROJECT_ID" --environment production --json)"
+          for artifact in api web; do
+            if [[ "$artifact" == "api" ]]; then
+              service="$API_SERVICE"
+            else
+              service="$WEB_SERVICE"
             fi
-
-            deployment=$(jq -c \
-              --arg deployment_id "$deployment_id" \
-              'first(.[] | select(.id == $deployment_id)) // empty' <<< "$deployments")
-            if [[ -z "$deployment" ]]; then
-              sleep 10
-              continue
-            fi
-            status=$(jq -r '.status // empty' <<< "$deployment")
-            deployment_image=$(jq -r '.meta.image // empty' <<< "$deployment")
-            if [[ "$deployment_image" != "$IMAGE_REF" ]]; then
-              echo "::error::Production deployment $deployment_id uses $deployment_image instead of $IMAGE_REF."
+            count="$(jq --arg service "$service" '[.[] | select(.name == $service)] | length' <<<"$services")"
+            if [[ "$count" -ne 1 ]]; then
+              echo "::error::Expected exactly one production service named $service; found $count."
               exit 1
             fi
-
-            case "$status" in
-              SUCCESS)
-                echo "Production deployment $deployment_id succeeded."
-                exit 0
-                ;;
-              FAILED|CRASHED|REMOVED)
-                echo "::error::Production deployment $deployment_id finished with status $status."
-                exit 1
-                ;;
-              *)
-                sleep 10
-                ;;
-            esac
+            active_id="$(jq -r --arg service "$service" 'first(.[] | select(.name == $service) | .deploymentId) // empty' <<<"$services")"
+            if [[ -z "$active_id" ]]; then
+              echo "::error::$service has no active deployment to restore if the paired change fails."
+              exit 1
+            fi
+            deployments="$(railway deployment list --project "$RAILWAY_PROJECT_ID" --environment production --service "$service" --limit 100 --json)"
+            previous_ref="$(jq -r --arg id "$active_id" 'first(.[] | select(.id == $id) | .meta.image) // empty' <<<"$deployments")"
+            previous_digest="$(jq -r --arg id "$active_id" 'first(.[] | select(.id == $id) | .meta.imageDigest) // empty' <<<"$deployments")"
+            expected_image="ghcr.io/open-software-network/os-epode-${artifact}"
+            previous_tag="${previous_ref#"${expected_image}:"}"
+            if [[ "$previous_tag" == "$previous_ref" || ! "$previous_tag" =~ ^[0-9a-f]{7}$ ]]; then
+              echo "::error::Active $service image $previous_ref is not a recoverable immutable Epode SHA tag."
+              exit 1
+            fi
+            if [[ ! "$previous_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Active $service deployment $active_id has no recoverable imageDigest."
+              exit 1
+            fi
+            registry_digest="$(
+              docker buildx imagetools inspect "$previous_ref" \
+                --format '{{ json .Manifest }}' | jq -r '.digest // empty'
+            )"
+            if [[ "$registry_digest" != "$previous_digest" ]]; then
+              echo "::error::Cannot safely restore $service: $previous_ref now resolves to ${registry_digest:-no digest}, not active digest $previous_digest."
+              exit 1
+            fi
+            {
+              echo "${artifact}_ref=$previous_ref"
+              echo "${artifact}_digest=$previous_digest"
+            } >>"$GITHUB_OUTPUT"
           done
 
-          echo "::error::Timed out waiting for the production deployment."
+      - name: Promote API
+        id: promote_api
+        if: inputs.operation == 'promote'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          bash scripts/railway-deploy-image.sh \
+            production \
+            "$API_SERVICE" \
+            "${{ needs.plan.outputs.api_ref }}" \
+            "${{ needs.plan.outputs.api_digest }}"
+
+      - name: Roll back API
+        id: rollback_api
+        if: inputs.operation == 'rollback'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          bash scripts/railway-deploy-image.sh \
+            production \
+            "$API_SERVICE" \
+            "${{ needs.plan.outputs.api_ref }}" \
+            "${{ needs.plan.outputs.api_digest }}"
+
+      - name: Promote web
+        id: promote_web
+        if: inputs.operation == 'promote'
+        continue-on-error: true
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          bash scripts/railway-deploy-image.sh \
+            production \
+            "$WEB_SERVICE" \
+            "${{ needs.plan.outputs.web_ref }}" \
+            "${{ needs.plan.outputs.web_digest }}"
+
+      - name: Roll back web
+        id: rollback_web
+        if: inputs.operation == 'rollback'
+        continue-on-error: true
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          bash scripts/railway-deploy-image.sh \
+            production \
+            "$WEB_SERVICE" \
+            "${{ needs.plan.outputs.web_ref }}" \
+            "${{ needs.plan.outputs.web_digest }}"
+
+      - name: Restore API after a failed web change
+        if: >-
+          (inputs.operation == 'promote' && steps.promote_web.outcome == 'failure') ||
+          (inputs.operation == 'rollback' && steps.rollback_web.outcome == 'failure')
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          bash scripts/railway-deploy-image.sh \
+            production \
+            "$API_SERVICE" \
+            "${{ steps.previous.outputs.api_ref }}" \
+            "${{ steps.previous.outputs.api_digest }}"
+
+      - name: Fail an incomplete paired change
+        if: >-
+          (inputs.operation == 'promote' && steps.promote_web.outcome == 'failure') ||
+          (inputs.operation == 'rollback' && steps.rollback_web.outcome == 'failure')
+        run: |
+          echo "::error::The web change failed. The workflow restored the previous API image; production tags were not moved."
           exit 1
 
-      - name: Retag verified image as production
+      - name: Move production tags after both services succeed
         run: |
           set -euo pipefail
           docker buildx imagetools create \
-            --tag "${IMAGE}:production" \
-            "$IMAGE_DIGEST_REF"
+            --tag "${REGISTRY}/open-software-network/os-epode-api:production" \
+            "${REGISTRY}/open-software-network/os-epode-api@${{ needs.plan.outputs.api_digest }}"
+          docker buildx imagetools create \
+            --tag "${REGISTRY}/open-software-network/os-epode-web:production" \
+            "${REGISTRY}/open-software-network/os-epode-web@${{ needs.plan.outputs.web_digest }}"
 
-      - name: Summarize production deployment
+      - name: Summarize production change
+        env:
+          OPERATION: ${{ inputs.operation }}
+          ROLLBACK_REASON: ${{ inputs.rollback_reason }}
         run: |
           {
-            echo "### Railway ${ARTIFACT^^} production deployment"
-            echo "- **Service:** \`${SERVICE}\`"
-            echo "- **Environment:** \`production\`"
-            echo "- **Image:** \`${IMAGE_REF}\`"
-            echo "- **Production tag:** \`${IMAGE}:production\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+            echo "### Production ${OPERATION} completed"
+            echo "- **API:** \`${{ needs.plan.outputs.api_ref }}@${{ needs.plan.outputs.api_digest }}\`"
+            echo "- **Web:** \`${{ needs.plan.outputs.web_ref }}@${{ needs.plan.outputs.web_digest }}\`"
+            if [[ "$OPERATION" == "rollback" ]]; then
+              echo "- **Reason:** ${ROLLBACK_REASON}"
+              echo "- **Database:** unchanged; Railway image rollback does not reverse SQL migrations."
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"

@@ -93,6 +93,7 @@ jobs:
               - ".github/workflows/ci.yml"
             workflows:
               - ".github/workflows/**"
+              - "scripts/railway-deploy-image.sh"
 
   backend:
     name: Backend
@@ -173,10 +174,10 @@ jobs:
           node-version: "22"
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.24.x"
       - name: Install Rust 1.88
@@ -188,7 +189,7 @@ jobs:
       - name: Build, validate, and install SDK artifacts
         run: SDK_ARTIFACT_DIR=.artifacts/sdk-release bash scripts/sdk-release-readiness.sh
       - name: Upload SDK release candidates
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sdk-release-candidate
           path: .artifacts/sdk-release
@@ -315,6 +316,8 @@ jobs:
           tar -xzf actionlint.tar.gz actionlint
       - name: Lint workflows
         run: ./actionlint -color
+      - name: Lint Railway deployment helper
+        run: shellcheck scripts/railway-deploy-image.sh
 
   ci-ok:
     name: CI
