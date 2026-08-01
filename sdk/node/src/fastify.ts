@@ -5,6 +5,7 @@ import {
   type AgentFeedbackOptions,
   AgentFeedbackRuntime,
   encodedEnvelope,
+  hasEmbeddedFeedback,
   injectHtml,
   isPlainObject,
   normalizeOperation,
@@ -155,6 +156,9 @@ export function agentFeedback(
         const prepared = attach(request, reply, "http_json", payload)?.prepared;
         return prepared?.envelope ? { ...payload, _agentFeedback: prepared.envelope } : payload;
       }
+      // Strings need to reach onSend so HTML can receive its embedded handoff.
+      // Scalar JSON still falls back to a header there.
+      if (typeof payload === "string") return payload;
       const state = attach(request, reply, "http_headers", payload);
       if (state?.prepared) headers(reply, state.prepared);
       return payload;
@@ -164,7 +168,7 @@ export function agentFeedback(
       if (runtime.cacheMode === "request" && runtime.matches(request.url)) {
         ensureRequestVary(reply);
       }
-      const contentType = String(reply.getHeader("content-type") || "");
+      const contentType = String(reply.getHeader("content-type") || "").toLowerCase();
       const supported =
         contentType.includes("application/json") || contentType.includes("text/html");
       const optedIn = request.headers["agent-feedback-request"] === "1";
@@ -187,8 +191,14 @@ export function agentFeedback(
         return payload;
       }
       if (typeof payload === "string" && contentType.includes("text/html")) {
-        const prepared = attach(request, reply, "http_html", payload)?.prepared;
-        return prepared?.envelope ? injectHtml(payload, prepared.envelope) : payload;
+        const surface = hasEmbeddedFeedback(payload) ? "http_headers" : "http_html";
+        const state = attach(request, reply, surface, payload);
+        if (!state?.prepared?.envelope) return payload;
+        if (surface === "http_headers") {
+          headers(reply, state.prepared);
+          return payload;
+        }
+        return injectHtml(payload, state.prepared.envelope);
       }
       if (
         !state?.prepared &&

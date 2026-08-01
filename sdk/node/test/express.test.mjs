@@ -4,6 +4,7 @@ import test from "node:test";
 
 import express from "express";
 
+import { feedbackFromResponse } from "../dist/agent.js";
 import { AgentFeedbackRuntime, consentSubject, matchPattern } from "../dist/core.js";
 import { agentFeedback } from "../dist/express.js";
 
@@ -433,6 +434,78 @@ test("Express uses headers for arrays and leaves failures untouched", async () =
   const failure = await fetch(`${server.url}/error`);
   assert.deepEqual(await failure.json(), { error: "no" });
   assert.equal(failure.headers.get("agent-feedback"), null);
+  await middleware.shutdown();
+  await server.close();
+});
+
+test("Express preserves a server-owned HTML marker and uses the header fallback end to end", async () => {
+  const telemetry = [];
+  const middleware = agentFeedback({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    include: ["/html", "/owned", "/cached"],
+    flushIntervalMs: 60_000,
+    fetch: async (_url, init) => {
+      telemetry.push(JSON.parse(init.body));
+      return new Response("{}", { status: 202 });
+    },
+  });
+  let ownedMarkup = "";
+  const app = express();
+  app.use(middleware);
+  app.get("/html", (_request, response) => {
+    response.set("content-type", "TEXT/HTML; charset=utf-8");
+    response.send("<!doctype html><html><head><title>Docs</title></head><body>Ready</body></html>");
+  });
+  app.get("/owned", (_request, response) => {
+    response.set("content-type", "TEXT/HTML; charset=utf-8");
+    response.send(ownedMarkup);
+  });
+  app.get("/cached", (_request, response) => {
+    response.set("content-type", "TEXT/HTML; charset=utf-8");
+    response.set("cache-control", "public, max-age=300");
+    response.send(ownedMarkup);
+  });
+  const server = await serve(app);
+
+  const injectedResponse = await fetch(`${server.url}/html`);
+  const injectedMarkup = await injectedResponse.text();
+  const injectedFeedback = feedbackFromResponse(injectedResponse, injectedMarkup);
+  assert.ok(injectedFeedback);
+  assert.match(injectedMarkup, /id="agent-feedback"/i);
+  assert.equal(injectedResponse.headers.get("agent-feedback"), null);
+  assert.equal(injectedResponse.headers.get("cache-control"), "private, no-store");
+
+  // Simulate a server-rendered template that already owns this id. The stale,
+  // otherwise-valid embedded contract must not shadow the new scoped receipt.
+  ownedMarkup = `<!doctype html><html><head><script type="application/json" id="agent-feedback">${JSON.stringify(
+    {
+      ...injectedFeedback,
+      submit: { ...injectedFeedback.submit, url: "https://stale-template.test/api/v2/reports" },
+    },
+  )}</script></head><body>Ready</body></html>`;
+  const fallbackResponse = await fetch(`${server.url}/owned`);
+  const fallbackMarkup = await fallbackResponse.text();
+  const fallbackFeedback = feedbackFromResponse(fallbackResponse, fallbackMarkup);
+  assert.equal(fallbackMarkup, ownedMarkup, "the product-owned body must not be mutated");
+  assert.equal([...fallbackMarkup.matchAll(/id=["']agent-feedback["']/gi)].length, 1);
+  assert.match(fallbackResponse.headers.get("agent-feedback") || "", /.+/);
+  assert.equal(fallbackResponse.headers.get("cache-control"), "private, no-store");
+  assert.equal(fallbackFeedback?.submit?.url, "https://feedback.test/api/v2/reports");
+
+  const cachedResponse = await fetch(`${server.url}/cached`);
+  assert.equal(await cachedResponse.text(), ownedMarkup);
+  assert.equal(cachedResponse.headers.get("agent-feedback"), null);
+  assert.equal(cachedResponse.headers.get("cache-control"), "public, max-age=300");
+
+  await middleware.flush();
+  assert.deepEqual(
+    telemetry
+      .flatMap((batch) => batch.events)
+      .map((event) => event.surface)
+      .sort(),
+    ["http_headers", "http_html"],
+  );
   await middleware.shutdown();
   await server.close();
 });

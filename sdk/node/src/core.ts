@@ -827,6 +827,18 @@ export function encodedEnvelope(envelope: FeedbackEnvelope): string {
   return Buffer.from(JSON.stringify(envelope)).toString("base64url");
 }
 
+/**
+ * A product-owned HTML document may already have this marker. Do not create a
+ * duplicate id: feedback-aware clients would otherwise observe an arbitrary
+ * first tag instead of the scoped receipt. HTTP integrations use the header
+ * fallback for that response instead.
+ */
+export function hasEmbeddedFeedback(html: string): boolean {
+  return /<script\b[^>]*\s+id\s*=\s*(?:"agent-feedback"|'agent-feedback'|agent-feedback)(?=\s|\/?>)/i.test(
+    html,
+  );
+}
+
 export function injectHtml(html: string, envelope: FeedbackEnvelope): string {
   const json = JSON.stringify(envelope).replace(/</g, "\\u003c");
   const tag = `<script id="agent-feedback" type="application/json">${json}</script>`;

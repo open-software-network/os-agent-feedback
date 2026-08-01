@@ -3,6 +3,7 @@ import test from "node:test";
 
 import Fastify from "fastify";
 
+import { feedbackFromResponse } from "../dist/agent.js";
 import { agentFeedback } from "../dist/fastify.js";
 
 const key = `af_live_1123456789abcdef0123456789abcdef_${"y".repeat(32)}`;
@@ -38,6 +39,79 @@ test("Fastify instruments JSON and agent-readable HTML", async () => {
   await plugin.shutdown();
   assert.equal(telemetry.length, 1);
   assert.equal(telemetry[0].events.length, 2);
+  await app.close();
+});
+
+test("Fastify preserves a server-owned HTML marker and falls back to the scoped header", async () => {
+  const telemetry = [];
+  let ownedMarkup = "";
+  const app = Fastify();
+  const plugin = agentFeedback({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    include: ["/html", "/owned", "/cached"],
+    flushIntervalMs: 60_000,
+    fetch: async (_url, init) => {
+      telemetry.push(JSON.parse(init.body));
+      return new Response("{}", { status: 202 });
+    },
+  });
+  await app.register(plugin);
+  app.get("/html", async (_request, reply) => {
+    reply.header("content-type", "TEXT/HTML; charset=utf-8");
+    return "<!doctype html><html><head><title>Docs</title></head><body>Ready</body></html>";
+  });
+  app.get("/owned", async (_request, reply) => {
+    reply.header("content-type", "TEXT/HTML; charset=utf-8");
+    return ownedMarkup;
+  });
+  app.get("/cached", async (_request, reply) => {
+    reply.header("content-type", "TEXT/HTML; charset=utf-8");
+    reply.header("cache-control", "public, max-age=300");
+    return ownedMarkup;
+  });
+  await app.ready();
+
+  const injected = await app.inject({ method: "GET", url: "/html" });
+  const injectedFeedback = feedbackFromResponse(
+    { headers: new Headers(injected.headers) },
+    injected.body,
+  );
+  assert.ok(injectedFeedback);
+  assert.match(injected.body, /id="agent-feedback"/i);
+  assert.equal(injected.headers["agent-feedback"], undefined);
+
+  ownedMarkup = `<!doctype html><html><head><script id="agent-feedback" type="application/json">${JSON.stringify(
+    {
+      ...injectedFeedback,
+      submit: { ...injectedFeedback.submit, url: "https://stale-template.test/api/v2/reports" },
+    },
+  )}</script></head><body>Ready</body></html>`;
+  const fallback = await app.inject({ method: "GET", url: "/owned" });
+  const fallbackFeedback = feedbackFromResponse(
+    { headers: new Headers(fallback.headers) },
+    fallback.body,
+  );
+  assert.equal(fallback.body, ownedMarkup);
+  assert.equal([...fallback.body.matchAll(/id=["']agent-feedback["']/gi)].length, 1);
+  assert.match(fallback.headers["agent-feedback"] || "", /.+/);
+  assert.equal(fallback.headers["cache-control"], "private, no-store");
+  assert.equal(fallbackFeedback?.submit?.url, "https://feedback.test/api/v2/reports");
+
+  const cached = await app.inject({ method: "GET", url: "/cached" });
+  assert.equal(cached.body, ownedMarkup);
+  assert.equal(cached.headers["agent-feedback"], undefined);
+  assert.equal(cached.headers["cache-control"], "public, max-age=300");
+
+  await plugin.flush();
+  assert.deepEqual(
+    telemetry
+      .flatMap((batch) => batch.events)
+      .map((event) => event.surface)
+      .sort(),
+    ["http_headers", "http_html"],
+  );
+  await plugin.shutdown();
   await app.close();
 });
 

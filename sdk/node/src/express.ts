@@ -4,6 +4,7 @@ import {
   type AgentFeedbackOptions,
   AgentFeedbackRuntime,
   encodedEnvelope,
+  hasEmbeddedFeedback,
   injectHtml,
   isPlainObject,
   normalizeOperation,
@@ -157,7 +158,7 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
 
     response.send = ((body?: unknown) => {
       if (matched && runtime.cacheMode === "request") ensureRequestVary(response);
-      const contentType = String(response.getHeader("content-type") || "");
+      const contentType = String(response.getHeader("content-type") || "").toLowerCase();
       const supported =
         contentType.includes("application/json") ||
         (typeof body === "string" && contentType.includes("text/html"));
@@ -168,10 +169,14 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
         return originalSend(body);
       }
       if (typeof body === "string" && contentType.includes("text/html")) {
-        const current = attach("http_html", body);
-        return originalSend(
-          current?.prepared.envelope ? injectHtml(body, current.prepared.envelope) : body,
-        );
+        const surface = hasEmbeddedFeedback(body) ? "http_headers" : "http_html";
+        const current = attach(surface, body);
+        if (!current?.prepared.envelope) return originalSend(body);
+        if (surface === "http_headers") {
+          attachHeaders(current);
+          return originalSend(body);
+        }
+        return originalSend(injectHtml(body, current.prepared.envelope));
       }
       if (
         !instrumentationSkipped &&

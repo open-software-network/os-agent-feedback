@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 
 import type { FeedbackEnvelope } from "./core.js";
 
@@ -64,6 +65,29 @@ export interface ProductFeedbackSubmission {
 }
 
 const DEFAULT_SUBMIT_ORIGIN = "https://app.epode.ai";
+
+/** A report transport failure after the product answer is safe to retry once. */
+export class FeedbackSubmissionError extends Error {
+  readonly retryable: boolean;
+  readonly status?: number;
+
+  constructor(message: string, options: { retryable: boolean; status?: number }) {
+    super(message);
+    this.name = "FeedbackSubmissionError";
+    this.retryable = options.retryable;
+    this.status = options.status;
+  }
+}
+
+function retryableReportStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function reportIdempotencyKey(authorization: string): string {
+  // The receipt binds one interaction, so this key intentionally remains the
+  // same across the single bounded retry without exposing the capability.
+  return createHash("sha256").update(`agent-feedback-report\0${authorization}`).digest("hex");
+}
 
 export type FeedbackConsentAction = "submit" | "ask" | "skip";
 
@@ -219,6 +243,20 @@ export function feedbackFromResponse(
   response: Pick<Response, "headers">,
   body: unknown,
 ): FeedbackEnvelope | undefined {
+  // Header metadata is the explicit fallback for arrays, scalar JSON, and
+  // HTML documents that already own the marker id. Prefer it when present so
+  // a product-owned HTML tag cannot shadow the scoped receipt.
+  const encoded = response.headers.get("agent-feedback");
+  if (encoded) {
+    try {
+      const headerEnvelope = parseEnvelope(
+        JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")),
+      );
+      if (headerEnvelope) return headerEnvelope;
+    } catch {
+      // Fall back to an embedded contract when a malformed header is present.
+    }
+  }
   if (object(body)) {
     const embedded = parseEnvelope(body._agentFeedback);
     if (embedded) return embedded;
@@ -227,13 +265,7 @@ export function feedbackFromResponse(
     const embedded = envelopeFromHtml(body);
     if (embedded) return embedded;
   }
-  const encoded = response.headers.get("agent-feedback");
-  if (!encoded) return undefined;
-  try {
-    return parseEnvelope(JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")));
-  } catch {
-    return undefined;
-  }
+  return undefined;
 }
 
 /**
@@ -292,28 +324,55 @@ export async function submitProductFeedback(
     throw new Error(`Refusing to submit feedback to untrusted origin ${submitUrl.origin}`);
   }
 
-  const response = await (options.fetch || globalThis.fetch)(submitUrl, {
-    method: "POST",
-    headers: {
-      authorization: parsed.submit.authorization,
-      "content-type": "application/json",
-      "user-agent": "@agent-feedback/node-agent/0.2.0",
-    },
-    body: JSON.stringify({
-      summary,
-      ...(report.impact ? { impact: report.impact } : {}),
-      ...(report.confidence !== undefined ? { confidence: report.confidence } : {}),
-      ...(report.findings ? { findings: report.findings } : {}),
-      ...(report.workaround ? { workaround: report.workaround } : {}),
-    }),
-    signal: AbortSignal.timeout(options.timeoutMs ?? 5_000),
+  const requestBody = JSON.stringify({
+    summary,
+    ...(report.impact ? { impact: report.impact } : {}),
+    ...(report.confidence !== undefined ? { confidence: report.confidence } : {}),
+    ...(report.findings ? { findings: report.findings } : {}),
+    ...(report.workaround ? { workaround: report.workaround } : {}),
   });
-  const body = (await response.json().catch(() => ({}))) as ProductFeedbackSubmission;
-  if (!response.ok) {
-    const retryable = response.status >= 500;
-    throw new Error(
-      `Feedback submission failed with HTTP ${response.status}${retryable ? "; retry once" : ""}`,
-    );
+  const idempotencyKey = reportIdempotencyKey(parsed.submit.authorization);
+  const fetchImplementation = options.fetch || globalThis.fetch;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetchImplementation(submitUrl, {
+        method: "POST",
+        headers: {
+          authorization: parsed.submit.authorization,
+          "content-type": "application/json",
+          "idempotency-key": idempotencyKey,
+          "user-agent": "@agent-feedback/node-agent/0.2.0",
+        },
+        body: requestBody,
+        signal: AbortSignal.timeout(options.timeoutMs ?? 5_000),
+      });
+    } catch {
+      if (attempt === 0) continue;
+      throw new FeedbackSubmissionError(
+        "Feedback submission could not reach Epode after one retry.",
+        { retryable: true },
+      );
+    }
+    const body = (await response.json().catch(() => ({}))) as ProductFeedbackSubmission;
+    if (!response.ok) {
+      const retryable = retryableReportStatus(response.status);
+      if (attempt === 0 && retryable) continue;
+      throw new FeedbackSubmissionError(
+        `Feedback submission failed with HTTP ${response.status}${retryable ? " after one retry" : ""}.`,
+        { retryable, status: response.status },
+      );
+    }
+    if (body.accepted !== true) {
+      throw new FeedbackSubmissionError("Epode returned an invalid feedback receipt.", {
+        retryable: false,
+        status: response.status,
+      });
+    }
+    return body;
   }
-  return body;
+  throw new FeedbackSubmissionError("Feedback submission could not reach Epode after one retry.", {
+    retryable: true,
+  });
 }
