@@ -832,8 +832,8 @@ describe("dashboard view behavior", () => {
     );
 
     expect(screen.getByText("End-to-end feedback loop proven")).toBeVisible();
-    expect(screen.getByText("1 product interaction(s) observed.")).toBeVisible();
-    expect(screen.getByText(/1 structured report\(s\) received/)).toBeVisible();
+    expect(screen.getByText(/1 product interaction\(s\) in the last 30 days/)).toBeVisible();
+    expect(screen.getByText(/1 structured report\(s\) in the last 30 days/)).toBeVisible();
     expect(screen.getByText(/Feedback received/)).toBeVisible();
     expect(screen.queryByText("Never seen")).not.toBeInTheDocument();
   });
@@ -867,8 +867,8 @@ describe("dashboard view behavior", () => {
     );
 
     expect(screen.getByText("End-to-end feedback loop proven")).toBeVisible();
-    expect(screen.getByText("1 product interaction(s) observed.")).toBeVisible();
-    expect(screen.getByText(/1 structured report\(s\) received/)).toBeVisible();
+    expect(screen.getByText(/1 product interaction\(s\) in the last 30 days/)).toBeVisible();
+    expect(screen.getByText(/1 structured report\(s\) in the last 30 days/)).toBeVisible();
     expect(screen.getAllByText(/af_live_5678efab/).length).toBeGreaterThan(0);
     expect(screen.getByText(/af_live_1234abcd/)).toBeVisible();
     expect(screen.getByText(/Never seen/)).toBeVisible();
@@ -882,6 +882,8 @@ describe("dashboard view behavior", () => {
     [1, 1, 1, "End-to-end feedback loop proven", /Activation complete/],
   ] as const)("separates opportunity, confirmation, and report activation at %i/%i/%i", (opportunities, confirmedInteractions, reports, description, nextAction) => {
     const base = dashboardFixture();
+    const activationMilestones = base.activationMilestones;
+    if (!activationMilestones) throw new Error("fixture requires activation milestones");
     const writeKey = base.apiKeys[0];
     const data = dashboardFixture({
       apiKeys: [
@@ -896,6 +898,12 @@ describe("dashboard view behavior", () => {
         opportunities,
         confirmedInteractions,
         reports,
+      },
+      activationMilestones: {
+        ...activationMilestones,
+        firstOpportunityAt: opportunities ? "2026-07-01T12:00:00Z" : null,
+        firstConfirmedInteractionAt: confirmedInteractions ? "2026-07-02T12:00:00Z" : null,
+        firstReportAt: reports ? "2026-07-03T12:00:00Z" : null,
       },
     });
 
@@ -914,6 +922,49 @@ describe("dashboard view behavior", () => {
     expect(screen.getByText("First confirmed interaction")).toBeVisible();
     expect(screen.getByText("First feedback report")).toBeVisible();
     expect(screen.getByText(nextAction)).toBeVisible();
+  });
+
+  it("keeps durable activation complete after the rolling insight window becomes quiet", () => {
+    const base = dashboardFixture();
+    const data = dashboardFixture({
+      interactions: [],
+      reports: [],
+      sessions: [],
+      listState: {
+        interactionsLoaded: 0,
+        interactionsTotal: 0,
+        reportsLoaded: 0,
+        reportsTotal: 0,
+        sessionsLoaded: 0,
+        sessionsTotal: 0,
+      },
+      insights: {
+        ...base.insights,
+        opportunities: 0,
+        confirmedInteractions: 0,
+        reports: 0,
+      },
+    });
+
+    renderWithQuery(
+      <SetupView
+        data={data}
+        secrets={null}
+        rememberSecret={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        setNotice={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("End-to-end feedback loop proven")).toBeVisible();
+    expect(
+      screen.getByText(/no product interactions in the current 30-day insight window/i),
+    ).toBeVisible();
+    expect(
+      screen.getByText(/no proven interactions in the current 30-day insight window/i),
+    ).toBeVisible();
+    expect(screen.getByText(/no reports in the current 30-day insight window/i)).toBeVisible();
+    expect(screen.getByText(/Activation complete/)).toBeVisible();
   });
 
   it("does not auto-recreate a removed write key and offers manual recovery", async () => {

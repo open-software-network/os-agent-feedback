@@ -718,6 +718,7 @@ export interface components {
             id: string;
         };
         DashboardData: {
+            activationMilestones: null | components["schemas"]["ProductActivationMilestones"];
             apiKeys: components["schemas"]["ApiKeyPublic"][];
             currentEnvironment: null | components["schemas"]["ProductEnvironment"];
             currentProduct: null | components["schemas"]["Product"];
@@ -1113,6 +1114,18 @@ export interface components {
             slug: string;
             /** Format: date-time */
             updatedAt: string;
+            /** Format: uuid */
+            workspaceId: string;
+        };
+        ProductActivationMilestones: {
+            /** Format: date-time */
+            firstConfirmedInteractionAt: string | null;
+            /** Format: date-time */
+            firstOpportunityAt: string | null;
+            /** Format: date-time */
+            firstReportAt: string | null;
+            /** Format: uuid */
+            productId: string;
             /** Format: uuid */
             workspaceId: string;
         };

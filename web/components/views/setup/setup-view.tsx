@@ -75,11 +75,18 @@ export function SetupView({
   const opportunityCount = data.insights.opportunities;
   const confirmedCount = data.insights.confirmedInteractions;
   const reportCount = data.insights.reports;
-  const activationDescription = reportCount
+  const firstOpportunityAt = data.activationMilestones?.firstOpportunityAt ?? null;
+  const firstConfirmedInteractionAt =
+    data.activationMilestones?.firstConfirmedInteractionAt ?? null;
+  const firstReportAt = data.activationMilestones?.firstReportAt ?? null;
+  const opportunityActivated = Boolean(firstOpportunityAt);
+  const confirmedActivated = Boolean(firstConfirmedInteractionAt);
+  const reportActivated = Boolean(firstReportAt);
+  const activationDescription = reportActivated
     ? "End-to-end feedback loop proven"
-    : confirmedCount
+    : confirmedActivated
       ? "Agent use confirmed"
-      : opportunityCount
+      : opportunityActivated
         ? "Product route connected"
         : "Not connected";
   const editor = isEditor(data.currentRole);
@@ -227,9 +234,9 @@ export function SetupView({
             label: "Product key",
             value: writeKey ? "Ready" : creatingWriteKey ? "Preparing" : "Missing",
           },
-          { label: "First opportunity", value: opportunityCount ? "Received" : "Waiting" },
-          { label: "First confirmed", value: confirmedCount ? "Received" : "Waiting" },
-          { label: "First report", value: reportCount ? "Received" : "Waiting" },
+          { label: "First opportunity", value: opportunityActivated ? "Received" : "Waiting" },
+          { label: "First confirmed", value: confirmedActivated ? "Received" : "Waiting" },
+          { label: "First report", value: reportActivated ? "Received" : "Waiting" },
         ]}
       />
       {error ? <StatusMessage tone="error">{error}</StatusMessage> : null}
@@ -323,45 +330,51 @@ export function SetupView({
       <Panel title="3. Prove activation">
         <ol className="flex flex-col gap-3">
           <ActivationMilestone
-            complete={opportunityCount > 0}
+            complete={opportunityActivated}
             title="First opportunity"
             detail={
-              opportunityCount
-                ? `${opportunityCount} product interaction(s) observed.`
+              firstOpportunityAt
+                ? opportunityCount
+                  ? `First received ${formatDate(firstOpportunityAt)} · ${opportunityCount} product interaction(s) in the last ${data.insights.windowDays} days.`
+                  : `First received ${formatDate(firstOpportunityAt)} · no product interactions in the current ${data.insights.windowDays}-day insight window.`
                 : "Waiting for an eligible 2xx response on an included route or a selected MCP product-tool call."
             }
           />
           <ActivationMilestone
-            complete={confirmedCount > 0}
+            complete={confirmedActivated}
             title="First confirmed interaction"
             detail={
-              confirmedCount
-                ? `${confirmedCount} interaction(s) have proof of agent use.`
+              firstConfirmedInteractionAt
+                ? confirmedCount
+                  ? `First confirmed ${formatDate(firstConfirmedInteractionAt)} · ${confirmedCount} proven interaction(s) in the last ${data.insights.windowDays} days.`
+                  : `First confirmed ${formatDate(firstConfirmedInteractionAt)} · no proven interactions in the current ${data.insights.windowDays}-day insight window.`
                 : "MCP confirms a normal product-tool call immediately. HTTP confirms when a feedback capability returns with a report."
             }
           />
           <ActivationMilestone
-            complete={reportCount > 0}
+            complete={reportActivated}
             title="First feedback report"
             detail={
-              reportCount
-                ? `${reportCount} structured report(s) received; the end-to-end loop is proven.`
+              firstReportAt
+                ? reportCount
+                  ? `First received ${formatDate(firstReportAt)} · ${reportCount} structured report(s) in the last ${data.insights.windowDays} days.`
+                  : `First received ${formatDate(firstReportAt)} · no reports in the current ${data.insights.windowDays}-day insight window.`
                 : "Waiting for a feedback-aware agent to follow the current action. Ask modes require a real user decision; the doctor never impersonates one."
             }
           />
         </ol>
-        {!opportunityCount ? (
+        {!opportunityActivated ? (
           <StatusMessage>
             Next: deploy the current write key, call the exact included route or tool, and check
             again. If it stays waiting, verify AGENT_FEEDBACK_ENABLED is not false, the include
             pattern matches, and the response is eligible.
           </StatusMessage>
-        ) : !confirmedCount ? (
+        ) : !confirmedActivated ? (
           <StatusMessage>
             The company-side connection works. Next: exercise it with a feedback-aware customer
             agent. A generic HTTP client creates only an unconfirmed opportunity.
           </StatusMessage>
-        ) : !reportCount ? (
+        ) : !reportActivated ? (
           <StatusMessage>
             Agent use is confirmed. Next: complete the returned feedback action; in an ask mode,
             approval must come from the user before a report is available.

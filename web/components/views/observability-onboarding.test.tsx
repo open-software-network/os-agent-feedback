@@ -262,11 +262,19 @@ function renderWithQuery(element: ReactElement) {
 
 function emptyDashboard(): DashboardData {
   const base = dashboardFixture();
+  const activationMilestones = base.activationMilestones;
+  if (!activationMilestones) throw new Error("fixture requires activation milestones");
   return {
     ...base,
     interactions: [],
     reports: [],
     sessions: [],
+    activationMilestones: {
+      ...activationMilestones,
+      firstOpportunityAt: null,
+      firstConfirmedInteractionAt: null,
+      firstReportAt: null,
+    },
     insights: {
       ...base.insights,
       reports: 0,

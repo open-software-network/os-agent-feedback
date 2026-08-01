@@ -29,12 +29,13 @@ use crate::{
         FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackOperationSummary,
         FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse, FeedbackSummary,
         FeedbackSurfaceSummary, FeedbackWindow, GithubIssueLink, InsightCount, Insights,
-        InteractionTelemetryInput, MergeReportGroupsResponse, PolicyInput, Product, ProductAuth,
-        ProductEnvironment, ProductFeedbackReport, ProductFeedbackReportInput,
-        ProductFeedbackReportWithInteraction, ProductGithubRepo, ProductGithubRepoInput,
-        ProductInteraction, ProductReportGroup, ProductSession, TeamInvitation, TeamMember,
-        TelemetryBatchInput, TelemetryBatchResult, UpdateFeedbackWorkflowInput, UpdateNameInput,
-        UpdateTeamMemberInput, Workspace, WorkspaceMembership,
+        InteractionTelemetryInput, MergeReportGroupsResponse, PolicyInput, Product,
+        ProductActivationMilestones, ProductAuth, ProductEnvironment, ProductFeedbackReport,
+        ProductFeedbackReportInput, ProductFeedbackReportWithInteraction, ProductGithubRepo,
+        ProductGithubRepoInput, ProductInteraction, ProductReportGroup, ProductSession,
+        TeamInvitation, TeamMember, TelemetryBatchInput, TelemetryBatchResult,
+        UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput, Workspace,
+        WorkspaceMembership,
     },
     os_accounts::OsUser,
     security::{
@@ -1976,6 +1977,59 @@ async fn product_auth_for_key(
     })
 }
 
+async fn record_product_activation(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    opportunity: bool,
+    confirmed_interaction: bool,
+    report: bool,
+) -> Result<(), ApiError> {
+    let confirmed_interaction = confirmed_interaction || report;
+    let opportunity = opportunity || confirmed_interaction;
+    sqlx::query(
+        r"INSERT INTO product_activation_milestones
+        (product_id, workspace_id, first_opportunity_at,
+         first_confirmed_interaction_at, first_report_at)
+        VALUES (
+          $1,
+          $2,
+          CASE WHEN $3 THEN NOW() END,
+          CASE WHEN $4 THEN NOW() END,
+          CASE WHEN $5 THEN NOW() END
+        )
+        ON CONFLICT (product_id) DO UPDATE SET
+          first_opportunity_at = COALESCE(
+            product_activation_milestones.first_opportunity_at,
+            EXCLUDED.first_opportunity_at
+          ),
+          first_confirmed_interaction_at = COALESCE(
+            product_activation_milestones.first_confirmed_interaction_at,
+            EXCLUDED.first_confirmed_interaction_at
+          ),
+          first_report_at = COALESCE(
+            product_activation_milestones.first_report_at,
+            EXCLUDED.first_report_at
+          ),
+          updated_at = NOW()
+        WHERE
+          (product_activation_milestones.first_opportunity_at IS NULL
+            AND EXCLUDED.first_opportunity_at IS NOT NULL)
+          OR (product_activation_milestones.first_confirmed_interaction_at IS NULL
+            AND EXCLUDED.first_confirmed_interaction_at IS NOT NULL)
+          OR (product_activation_milestones.first_report_at IS NULL
+            AND EXCLUDED.first_report_at IS NOT NULL)",
+    )
+    .bind(product_id)
+    .bind(workspace_id)
+    .bind(opportunity)
+    .bind(confirmed_interaction)
+    .bind(report)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn create_product(
     pool: &PgPool,
@@ -2021,6 +2075,7 @@ pub(crate) async fn create_product(
     .fetch_one(&mut *tx)
     .await
     .map_err(|error| database_conflict(error, "This product already exists"))?;
+    record_product_activation(&mut tx, workspace_id, product.id, false, false, false).await?;
     tx.commit().await?;
     Ok((product, environment))
 }
@@ -2087,6 +2142,7 @@ pub(crate) async fn create_product_with_default_key(
     .bind(sha256(&secret))
     .fetch_one(&mut *tx)
     .await?;
+    record_product_activation(&mut tx, workspace_id, product.id, false, false, false).await?;
     tx.commit().await?;
     Ok((product, environment, api_key, secret))
 }
@@ -3657,6 +3713,20 @@ pub(crate) async fn dashboard_with_limits(
     let retained_since = current_environment
         .as_ref()
         .map(|environment| Utc::now() - Duration::days(environment.retention_days.into()));
+    let activation_milestones = if let Some(product) = current_product.as_ref() {
+        sqlx::query_as::<_, ProductActivationMilestones>(
+            r"SELECT workspace_id, product_id, first_opportunity_at,
+              first_confirmed_interaction_at, first_report_at
+            FROM product_activation_milestones
+            WHERE workspace_id = $1 AND product_id = $2",
+        )
+        .bind(context.workspace.id)
+        .bind(product.id)
+        .fetch_optional(pool)
+        .await?
+    } else {
+        None
+    };
     let api_keys = sqlx::query_as::<_, ApiKeyPublic>(
         r"SELECT k.id, k.environment_id, k.label, k.prefix, k.kind, k.created_at,
           k.last_used_at, k.revoked_at, k.expires_at,
@@ -3818,6 +3888,7 @@ pub(crate) async fn dashboard_with_limits(
         environments,
         current_product,
         current_environment,
+        activation_milestones,
         api_keys,
         interactions,
         reports,
@@ -4181,6 +4252,7 @@ pub(crate) async fn ingest_telemetry_batch(
     }
     let mut accepted = 0;
     let mut dropped = 0;
+    let mut accepted_confirmed_interaction = false;
     let mut changed_interaction_ids = Vec::with_capacity(event_count);
     let mut session_evidence_by_interaction = BTreeMap::new();
     let mut events = input.events;
@@ -4198,6 +4270,7 @@ pub(crate) async fn ingest_telemetry_batch(
                 if evidence.is_none() {
                     *evidence = result.session_evidence;
                 }
+                accepted_confirmed_interaction |= result.confirmed;
                 accepted += 1;
             }
             Err(error) if error.status.is_client_error() => {
@@ -4215,6 +4288,17 @@ pub(crate) async fn ingest_telemetry_batch(
     }
     correlate_telemetry_sessions(&mut tx, auth, session_evidence_by_interaction).await?;
     regroup_changed_interaction_reports(&mut tx, &changed_interaction_ids).await?;
+    if accepted > 0 {
+        record_product_activation(
+            &mut tx,
+            auth.workspace.id,
+            auth.environment.product_id,
+            true,
+            accepted_confirmed_interaction,
+            false,
+        )
+        .await?;
+    }
     tx.commit().await?;
     Ok(TelemetryBatchResult { accepted, dropped })
 }
@@ -4228,6 +4312,7 @@ struct TelemetryUpsertResult {
 #[derive(Debug)]
 struct AcceptedTelemetryEvent {
     interaction_id: Uuid,
+    confirmed: bool,
     grouping_facts_changed: bool,
     session_evidence: Option<(String, String)>,
 }
@@ -4248,12 +4333,13 @@ async fn ingest_telemetry_event(
     }
     let customer_ref = opaque_ref(event.customer_ref);
     let session_evidence = session_evidence(event.session_ref, event.session_source)?;
-    let classification = if event.surface == "mcp" {
+    let confirmed = event.surface == "mcp";
+    let classification = if confirmed {
         "confirmed".to_string()
     } else {
         "unclassified".to_string()
     };
-    let confirmation_method = (event.surface == "mcp").then(|| "mcp".to_string());
+    let confirmation_method = confirmed.then(|| "mcp".to_string());
     // The INSERT depends on the materialized `previous` CTE so PostgreSQL must
     // lock and capture the pre-state before the upsert returns its post-state.
     let row = sqlx::query_as::<_, TelemetryUpsertResult>(
@@ -4326,6 +4412,7 @@ async fn ingest_telemetry_event(
         row.ok_or_else(|| ApiError::conflict("interactionId belongs to another workspace"))?;
     Ok(AcceptedTelemetryEvent {
         interaction_id: row.id,
+        confirmed,
         grouping_facts_changed: row.grouping_facts_changed,
         session_evidence,
     })
@@ -5419,6 +5506,7 @@ pub(crate) async fn submit_product_feedback(
     .bind(workaround)
     .fetch_optional(&mut *tx)
     .await?;
+    record_product_activation(&mut tx, key.0, key.4, true, true, true).await?;
     let Some(report) = inserted_report else {
         // `ON CONFLICT` waits for an in-flight competing insert to finish.
         // Reading after it returns therefore makes simultaneous retries behave
@@ -5567,6 +5655,46 @@ mod product_tests {
             session_source: None,
             occurred_at: Some(Utc::now()),
         }
+    }
+
+    fn http_telemetry_event(
+        interaction_id: Uuid,
+        occurred_at: DateTime<Utc>,
+    ) -> InteractionTelemetryInput {
+        InteractionTelemetryInput {
+            interaction_id,
+            sequence: Some(1),
+            surface: "http_json".into(),
+            operation: "/v1/search".into(),
+            status_code: Some(200),
+            duration_ms: Some(25),
+            customer_ref: None,
+            classification: None,
+            confirmation_method: None,
+            runtime_hint: None,
+            runtime_hint_source: None,
+            session_ref: None,
+            session_source: None,
+            occurred_at: Some(occurred_at),
+        }
+    }
+
+    async fn activation_milestones(
+        pool: &PgPool,
+        workspace_id: Uuid,
+        product_id: Uuid,
+    ) -> anyhow::Result<ProductActivationMilestones> {
+        sqlx::query_as::<_, ProductActivationMilestones>(
+            r"SELECT workspace_id, product_id, first_opportunity_at,
+              first_confirmed_interaction_at, first_report_at
+            FROM product_activation_milestones
+            WHERE workspace_id = $1 AND product_id = $2",
+        )
+        .bind(workspace_id)
+        .bind(product_id)
+        .fetch_one(pool)
+        .await
+        .map_err(Into::into)
     }
 
     #[derive(Debug)]
@@ -7803,6 +7931,264 @@ mod product_tests {
 
         sqlx::query("DELETE FROM workspaces WHERE id = $1")
             .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn product_activation_milestones_survive_windows_retention_and_retries()
+    -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Durable product activation").await?;
+
+        let result = async {
+            let (product, environment) = create_product(
+                &pool,
+                workspace.id,
+                CreateProductInput {
+                    name: "Durably activated product".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let (write_key, write_secret) = create_api_key(
+                &pool,
+                workspace.id,
+                environment.id,
+                Some("Activation writer".into()),
+                Some("write".into()),
+                None,
+            )
+            .await
+            .map_err(test_error)?;
+            let auth = ProductAuth {
+                workspace: workspace.clone(),
+                environment: environment.clone(),
+                api_key_id: write_key.id,
+            };
+            let initial = activation_milestones(&pool, workspace.id, product.id).await?;
+            anyhow::ensure!(initial.first_opportunity_at.is_none());
+            anyhow::ensure!(initial.first_confirmed_interaction_at.is_none());
+            anyhow::ensure!(initial.first_report_at.is_none());
+
+            let opportunity_id = Uuid::new_v4();
+            let opportunity_event = http_telemetry_event(opportunity_id, Utc::now());
+            let opportunity = ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![opportunity_event],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(opportunity.accepted == 1 && opportunity.dropped == 0);
+            let after_opportunity = activation_milestones(&pool, workspace.id, product.id).await?;
+            let first_opportunity_at = after_opportunity
+                .first_opportunity_at
+                .ok_or_else(|| anyhow::anyhow!("accepted telemetry did not mark opportunity"))?;
+            anyhow::ensure!(after_opportunity.first_confirmed_interaction_at.is_none());
+            anyhow::ensure!(after_opportunity.first_report_at.is_none());
+
+            let retry = ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![http_telemetry_event(opportunity_id, Utc::now())],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(retry.accepted == 1 && retry.dropped == 0);
+            let after_retry = activation_milestones(&pool, workspace.id, product.id).await?;
+            anyhow::ensure!(after_retry.first_opportunity_at == Some(first_opportunity_at));
+
+            let confirmed_id = Uuid::new_v4();
+            ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![grouping_telemetry_event(confirmed_id)],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let after_confirmation =
+                activation_milestones(&pool, workspace.id, product.id).await?;
+            let first_confirmed_at = after_confirmation
+                .first_confirmed_interaction_at
+                .ok_or_else(|| anyhow::anyhow!("accepted MCP telemetry did not mark confirmation"))?;
+            anyhow::ensure!(after_confirmation.first_opportunity_at == Some(first_opportunity_at));
+            anyhow::ensure!(after_confirmation.first_report_at.is_none());
+
+            let report_interaction_id = Uuid::new_v4();
+            let capability =
+                test_capability(&write_secret, write_key.id, report_interaction_id);
+            submit_product_feedback(
+                &pool,
+                &capability,
+                feedback_input("A durable activation report completed the product loop."),
+            )
+            .await
+            .map_err(test_error)?;
+            let after_report = activation_milestones(&pool, workspace.id, product.id).await?;
+            let first_report_at = after_report
+                .first_report_at
+                .ok_or_else(|| anyhow::anyhow!("accepted report did not mark activation"))?;
+            anyhow::ensure!(after_report.first_opportunity_at == Some(first_opportunity_at));
+            anyhow::ensure!(
+                after_report.first_confirmed_interaction_at == Some(first_confirmed_at)
+            );
+
+            submit_product_feedback(
+                &pool,
+                &capability,
+                feedback_input("A retry cannot replace the first accepted activation report."),
+            )
+            .await
+            .map_err(test_error)?;
+            let after_report_retry =
+                activation_milestones(&pool, workspace.id, product.id).await?;
+            anyhow::ensure!(after_report_retry.first_opportunity_at == Some(first_opportunity_at));
+            anyhow::ensure!(
+                after_report_retry.first_confirmed_interaction_at == Some(first_confirmed_at)
+            );
+            anyhow::ensure!(after_report_retry.first_report_at == Some(first_report_at));
+
+            sqlx::query(
+                "UPDATE interactions_v2 SET occurred_at = NOW() - INTERVAL '400 days' WHERE environment_id = $1",
+            )
+            .bind(environment.id)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "UPDATE product_environments SET retention_days = 1 WHERE id = $1",
+            )
+            .bind(environment.id)
+            .execute(&pool)
+            .await?;
+            let removed = purge_expired_product_data(&pool, 100)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(removed >= 3);
+
+            let after_purge = activation_milestones(&pool, workspace.id, product.id).await?;
+            anyhow::ensure!(after_purge.first_opportunity_at == Some(first_opportunity_at));
+            anyhow::ensure!(
+                after_purge.first_confirmed_interaction_at == Some(first_confirmed_at)
+            );
+            anyhow::ensure!(after_purge.first_report_at == Some(first_report_at));
+
+            let dashboard = dashboard_with_limits(
+                &pool,
+                DashboardContext {
+                    user: CurrentUser {
+                        id: workspace.os_user_id.clone(),
+                        handle: "activation-owner".into(),
+                        email: None,
+                        display_name: "Activation Owner".into(),
+                    },
+                    workspace: workspace.clone(),
+                    role: "owner".into(),
+                    workspace_memberships: vec![],
+                },
+                Some(product.id),
+                None,
+                10,
+                10,
+                10,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(dashboard.insights.opportunities == 0);
+            anyhow::ensure!(dashboard.insights.confirmed_interactions == 0);
+            anyhow::ensure!(dashboard.insights.reports == 0);
+            let durable = dashboard
+                .activation_milestones
+                .ok_or_else(|| anyhow::anyhow!("dashboard omitted durable activation"))?;
+            anyhow::ensure!(durable.first_opportunity_at == Some(first_opportunity_at));
+            anyhow::ensure!(
+                durable.first_confirmed_interaction_at == Some(first_confirmed_at)
+            );
+            anyhow::ensure!(durable.first_report_at == Some(first_report_at));
+
+            let (sibling, sibling_auth) =
+                telemetry_test_product(&pool, &workspace, "Unactivated sibling").await?;
+            let mut invalid_event = http_telemetry_event(Uuid::new_v4(), Utc::now());
+            invalid_event.operation = "/v1/search?customer=raw".into();
+            let invalid = ingest_telemetry_batch(
+                &pool,
+                &sibling_auth,
+                TelemetryBatchInput {
+                    events: vec![invalid_event],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(invalid.accepted == 0 && invalid.dropped == 1);
+            let sibling_activation =
+                activation_milestones(&pool, workspace.id, sibling.id).await?;
+            anyhow::ensure!(sibling_activation.first_opportunity_at.is_none());
+            anyhow::ensure!(sibling_activation.first_confirmed_interaction_at.is_none());
+            anyhow::ensure!(sibling_activation.first_report_at.is_none());
+
+            let sibling_dashboard = dashboard_with_limits(
+                &pool,
+                DashboardContext {
+                    user: CurrentUser {
+                        id: workspace.os_user_id.clone(),
+                        handle: "activation-owner".into(),
+                        email: None,
+                        display_name: "Activation Owner".into(),
+                    },
+                    workspace: workspace.clone(),
+                    role: "owner".into(),
+                    workspace_memberships: vec![],
+                },
+                Some(sibling.id),
+                None,
+                10,
+                10,
+                10,
+            )
+            .await
+            .map_err(test_error)?;
+            let sibling_durable = sibling_dashboard
+                .activation_milestones
+                .ok_or_else(|| anyhow::anyhow!("dashboard omitted sibling activation record"))?;
+            anyhow::ensure!(sibling_durable.product_id == sibling.id);
+            anyhow::ensure!(sibling_durable.first_opportunity_at.is_none());
+
+            delete_product(
+                &pool,
+                workspace.id,
+                product.id,
+                DeleteProductInput {
+                    confirmation: product.name.clone(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let remaining: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM product_activation_milestones WHERE product_id = $1",
+            )
+            .bind(product.id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(remaining == 0);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
             .execute(&pool)
             .await?;
         result

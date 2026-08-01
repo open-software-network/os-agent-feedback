@@ -895,6 +895,19 @@ pub(crate) struct DashboardSessionDetail {
     pub reports: Vec<ProductFeedbackReportWithInteraction>,
 }
 
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProductActivationMilestones {
+    pub workspace_id: Uuid,
+    pub product_id: Uuid,
+    #[schema(required = true, nullable)]
+    pub first_opportunity_at: Option<DateTime<Utc>>,
+    #[schema(required = true, nullable)]
+    pub first_confirmed_interaction_at: Option<DateTime<Utc>>,
+    #[schema(required = true, nullable)]
+    pub first_report_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DashboardData {
@@ -910,6 +923,8 @@ pub(crate) struct DashboardData {
     pub current_product: Option<Product>,
     #[schema(required = true, nullable)]
     pub current_environment: Option<ProductEnvironment>,
+    #[schema(required = true, nullable)]
+    pub activation_milestones: Option<ProductActivationMilestones>,
     pub api_keys: Vec<ApiKeyPublic>,
     pub interactions: Vec<ProductInteraction>,
     pub reports: Vec<ProductFeedbackReportWithInteraction>,

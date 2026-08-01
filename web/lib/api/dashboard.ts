@@ -4,6 +4,7 @@ import type { components, operations } from "@/lib/api/types";
 export type DashboardData = components["schemas"]["DashboardData"];
 export type DashboardQuery = NonNullable<operations["dashboard_handler"]["parameters"]["query"]>;
 export type Product = components["schemas"]["Product"];
+export type ProductActivationMilestones = components["schemas"]["ProductActivationMilestones"];
 export type ProductCreatedResponse = components["schemas"]["ProductCreatedResponse"];
 export type ProductResponse = components["schemas"]["ProductResponse"];
 export type ProductDeletedResponse = components["schemas"]["ProductDeletedResponse"];

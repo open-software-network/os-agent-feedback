@@ -5470,6 +5470,7 @@
           "environments",
           "currentProduct",
           "currentEnvironment",
+          "activationMilestones",
           "apiKeys",
           "interactions",
           "reports",
@@ -5478,6 +5479,16 @@
           "listState"
         ],
         "properties": {
+          "activationMilestones": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ProductActivationMilestones"
+              }
+            ]
+          },
           "apiKeys": {
             "type": "array",
             "items": {
@@ -6831,6 +6842,47 @@
           "updatedAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "ProductActivationMilestones": {
+        "type": "object",
+        "required": [
+          "workspaceId",
+          "productId",
+          "firstOpportunityAt",
+          "firstConfirmedInteractionAt",
+          "firstReportAt"
+        ],
+        "properties": {
+          "firstConfirmedInteractionAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "firstOpportunityAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "firstReportAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "productId": {
+            "type": "string",
+            "format": "uuid"
           },
           "workspaceId": {
             "type": "string",
