@@ -191,6 +191,8 @@ jobs:
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
       API_SERVICE: ${{ vars.RAILWAY_API_SERVICE || 'epode-api' }}
       WEB_SERVICE: ${{ vars.RAILWAY_WEB_SERVICE || 'epode-web' }}
+      CANARY_API_SERVICE: ${{ vars.RAILWAY_CANARY_API_SERVICE || 'agent-feedback-api' }}
+      CANARY_WEB_SERVICE: ${{ vars.RAILWAY_CANARY_WEB_SERVICE || 'epode-web' }}
       API_ORIGIN: ${{ vars.PRODUCTION_API_ORIGIN || 'https://api.epode.ai' }}
       WEB_ORIGIN: ${{ vars.PRODUCTION_WEB_ORIGIN || 'https://app.epode.ai' }}
     steps:
@@ -253,7 +255,7 @@ jobs:
         run: |
           set -euo pipefail
           services="$(railway service list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --json)"
-          attestation="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$API_SERVICE" --json)"
+          attestation="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$CANARY_API_SERVICE" --json)"
           attested_api_deployment_id="$(jq -r '.EPODE_CANARY_API_DEPLOYMENT_ID // empty' <<<"$attestation")"
           attested_web_deployment_id="$(jq -r '.EPODE_CANARY_WEB_DEPLOYMENT_ID // empty' <<<"$attestation")"
           jq -e \
@@ -279,12 +281,12 @@ jobs:
 
           for artifact in api web; do
             if [[ "$artifact" == "api" ]]; then
-              service="$API_SERVICE"
+              service="$CANARY_API_SERVICE"
               expected_ref="$EXPECTED_API_REF"
               expected_digest="$EXPECTED_API_DIGEST"
               attested_deployment_id="$attested_api_deployment_id"
             else
-              service="$WEB_SERVICE"
+              service="$CANARY_WEB_SERVICE"
               expected_ref="$EXPECTED_WEB_REF"
               expected_digest="$EXPECTED_WEB_DIGEST"
               attested_deployment_id="$attested_web_deployment_id"
