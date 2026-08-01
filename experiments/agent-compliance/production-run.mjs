@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -12,6 +12,7 @@ const { values } = parseArgs({
     surfaces: { type: "string", default: "http,mcp" },
     mode: { type: "string", default: "never_ask" },
     repetitions: { type: "string", default: "1" },
+    companion: { type: "boolean", default: false },
     output: {
       type: "string",
       default: ".artifacts/agent-compliance/production-latest.json",
@@ -25,6 +26,9 @@ const binaries = {
   amp: process.env.AMP_BIN || "amp",
   kimi: process.env.KIMI_BIN || "kimi",
 };
+const companionRoot = resolve("companion/plugins/epode-companion");
+const companionServer = join(companionRoot, "scripts/mcp-server.mjs");
+const companionSkill = join(companionRoot, "skills/epode-product-feedback");
 const endpoints = {
   http: {
     never_ask: "https://example-status-agent-production.up.railway.app/api/status",
@@ -55,11 +59,11 @@ for (const surface of surfaces) {
   }
 }
 
-async function command(binary, args, cwd, timeoutMs = 180_000) {
+async function command(binary, args, cwd, timeoutMs = 180_000, environment = {}) {
   return await new Promise((resolveCommand) => {
     const child = spawn(binary, args, {
       cwd,
-      env: { ...process.env, NO_COLOR: "1", TERM: "dumb", CI: "1" },
+      env: { ...process.env, ...environment, NO_COLOR: "1", TERM: "dumb", CI: "1" },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -137,12 +141,35 @@ function parseStreamJson(output) {
 
 function mcpConfig(runtime, endpoint) {
   if (runtime === "codex") {
-    return ["-c", `mcp_servers.checkout.url=${JSON.stringify(endpoint)}`];
+    return [
+      "-c",
+      `mcp_servers.checkout.url=${JSON.stringify(endpoint)}`,
+      ...(values.companion
+        ? [
+            "-c",
+            'mcp_servers.epode_companion.command="node"',
+            "-c",
+            `mcp_servers.epode_companion.args=${JSON.stringify([companionServer])}`,
+          ]
+        : []),
+    ];
   }
   if (runtime === "claude") {
+    const mcpServers = {
+      checkout: { type: "http", url: endpoint },
+      ...(values.companion
+        ? {
+            "epode-companion": {
+              type: "stdio",
+              command: "node",
+              args: [companionServer],
+            },
+          }
+        : {}),
+    };
     return [
       "--mcp-config",
-      JSON.stringify({ mcpServers: { checkout: { type: "http", url: endpoint } } }),
+      JSON.stringify({ mcpServers }),
       "--strict-mcp-config",
     ];
   }
@@ -278,11 +305,16 @@ async function prepareWorkspace(runtime) {
     join(cwd, "amp-settings.json"),
     JSON.stringify({ "amp.dangerouslyAllowAll": true, "amp.showCosts": false }),
   );
+  if (values.companion && ["codex", "claude"].includes(runtime)) {
+    const destination = join(
+      cwd,
+      runtime === "claude" ? ".claude/skills" : ".agents/skills",
+      "epode-product-feedback",
+    );
+    await mkdir(resolve(destination, ".."), { recursive: true });
+    await cp(companionSkill, destination, { recursive: true });
+  }
   return cwd;
-}
-
-function sqlLiteral(value) {
-  return `'${value.replaceAll("'", "''")}'`;
 }
 
 async function databaseRows(customerRefs) {
@@ -294,24 +326,44 @@ async function databaseRows(customerRefs) {
   );
   if (variables.code !== 0) throw new Error(`Railway variables failed: ${variables.stderr}`);
   const databaseUrl = JSON.parse(variables.stdout).DATABASE_PUBLIC_URL;
-  const refs = customerRefs.map(sqlLiteral).join(",");
-  const sql = `SELECT i.customer_ref, COUNT(DISTINCT i.id), COUNT(r.id), COALESCE(string_agg(r.summary, ' || ' ORDER BY r.created_at), '') FROM interactions_v2 i LEFT JOIN feedback_reports r ON r.interaction_id = i.id WHERE i.customer_ref IN (${refs}) GROUP BY i.customer_ref ORDER BY i.customer_ref`;
+  const script = `
+import json
+import hashlib
+import os
+import psycopg
+
+refs = json.loads(os.environ["EPODE_CUSTOMER_REFS"])
+ref_hashes = [hashlib.sha256(ref.encode()).digest() for ref in refs]
+with psycopg.connect(os.environ["DATABASE_PUBLIC_URL"]) as connection:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """SELECT requested.ref,
+                      COUNT(DISTINCT i.id),
+                      COUNT(r.id),
+                      COALESCE(string_agg(r.summary, ' || ' ORDER BY r.created_at), '')
+               FROM UNNEST(%s::text[], %s::bytea[]) AS requested(ref, ref_hash)
+               JOIN interactions_v2 i
+                 ON i.customer_ref = requested.ref
+                 OR i.session_id IN (
+                   SELECT s.id FROM sessions_v2 s WHERE s.ref_hash = requested.ref_hash
+                 )
+               LEFT JOIN feedback_reports r ON r.interaction_id = i.id
+               GROUP BY requested.ref
+               ORDER BY requested.ref""",
+            (refs, ref_hashes),
+        )
+        for customer_ref, interactions, reports, summaries in cursor:
+            print(f"{customer_ref}\\t{interactions}\\t{reports}\\t{summaries}")
+`;
   const query = await command(
-    "docker",
-    [
-      "run",
-      "--rm",
-      "postgres:17-alpine",
-      "psql",
-      databaseUrl,
-      "-At",
-      "-F",
-      "\t",
-      "-c",
-      sql,
-    ],
+    "uv",
+    ["run", "--quiet", "--with", "psycopg[binary]", "python", "-c", script],
     process.cwd(),
     120_000,
+    {
+      DATABASE_PUBLIC_URL: databaseUrl,
+      EPODE_CUSTOMER_REFS: JSON.stringify(customerRefs),
+    },
   );
   if (query.code !== 0) throw new Error(`Production database query failed: ${query.stderr}`);
   return new Map(
