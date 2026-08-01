@@ -54,4 +54,10 @@ of disguising the body failure as a success.
 Send one request to each included surface, then verify the response contract and Setup telemetry. Call
 `feedback.shutdown().await` during graceful shutdown; it has a two-second bound and returns delivery failures.
 
+## Customer-agent coverage
+
+Your Tower layer creates the HTTP/HTML feedback contract; it cannot make an independent customer agent act on
+it. For reliable Codex and Claude Code handling, customers install [Epode Companion](/integrations/companion)
+once for all Epode-instrumented products. This is a user-side plugin, not another company crate or product key.
+
 [View the runnable Rust example](https://github.com/open-software-network/os-epode/tree/main/examples/setup-matrix-rust)

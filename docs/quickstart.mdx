@@ -53,6 +53,19 @@ a public repository, or an MCP client configuration.
     has an additional `_agentFeedback` field; HTML and immutable JSON shapes use the documented
     HTML/header handoff.
   </Step>
+  <Step title="Choose customer-agent coverage">
+    This is a separate decision from your server integration:
+
+    - **MCP:** nothing else is required. Your product's MCP server exposes the feedback tools directly.
+    - **HTTP API or website:** the response contract is best effort in a generic agent. For reliable Codex
+      and Claude Code handling, share the one-time [Epode Companion install](/integrations/companion) with
+      customers who use those runtimes. It is a user-side plugin shared across every Epode-instrumented
+      product—not another SDK, account, key, or per-company configuration.
+
+    A company cannot silently install software into an independent customer's agent. Customers without the
+    Companion can still use your product normally; Epode records an opportunity and the product response is
+    never blocked.
+  </Step>
   <Step title="Verify the loop">
     For Node HTTP integrations, run:
 
@@ -80,3 +93,8 @@ response continues to work either way.
 - An MCP product-tool call is confirmed immediately.
 - **Feedback** shows the structured report and links it to the product interaction.
 - If you supplied a stable session reference, **Sessions** shows the linked journey.
+
+<Note>
+The doctor's synthetic report proves your company-side connection. For HTTP and websites, also test one fresh
+Codex or Claude Code task with Epode Companion installed; that proves the real customer-agent handoff.
+</Note>

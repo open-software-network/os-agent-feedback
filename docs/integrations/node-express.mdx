@@ -99,6 +99,13 @@ npx agent-feedback-doctor https://your-product.example/search?q=epode-test
 The doctor checks shape preservation, the scoped capability, submission origin, and telemetry. In
 `never_ask`, it submits one synthetic review. In ask modes, it validates consent without claiming approval.
 
+## Customer-agent coverage
+
+Your middleware creates the HTTP feedback contract; it cannot make an independent customer agent act on that
+contract. For reliable Codex and Claude Code handling, customers install [Epode Companion](/integrations/companion)
+once for all Epode-instrumented products. This is a user-side plugin, not another company SDK or product key.
+Generic agents without the Companion can still use the API normally, but feedback remains best effort.
+
 ## What is not instrumented
 
 Errors, redirects, health and metrics routes, assets, streams, binary responses, and routes outside

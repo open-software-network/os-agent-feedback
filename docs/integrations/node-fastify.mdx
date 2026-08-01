@@ -67,6 +67,14 @@ await app.register(agentFeedback({
 npx agent-feedback-doctor https://your-product.example/search?q=epode-test
 ```
 
+## Customer-agent coverage
+
+Your Fastify plugin creates the HTTP/HTML feedback contract; it cannot make an independent customer agent act
+on it. For reliable Codex and Claude Code handling, customers install
+[Epode Companion](/integrations/companion) once for all Epode-instrumented products. This is a user-side plugin,
+not another company SDK or product key. Generic agents without the Companion can still use the product normally,
+but feedback remains best effort.
+
 <Tip>
 Keep the plugin global and narrow `include` to product surfaces that customer agents actually use.
 </Tip>

@@ -1,6 +1,8 @@
 # Node MCP company product example
 
-This is the reliable autonomous integration for MCP `2026-07-28`. The server is stateless: every request carries its own version, client metadata, and capabilities. There is no initialization handshake or transport session.
+This is the native protocol integration for MCP `2026-07-28`. The server is stateless: every request carries
+its own version, client metadata, and capabilities. There is no initialization handshake or transport session.
+No Epode Companion install is required because the product server exposes the feedback tools itself.
 
 ```js
 const feedback = createMcpInstrumentation({

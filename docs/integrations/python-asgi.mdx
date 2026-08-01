@@ -71,4 +71,11 @@ npx agent-feedback-doctor --url https://your-product.example/search?q=epode-test
 Then confirm **Setup** shows telemetry. A generic HTTP client does not automatically prove agent use;
 the interaction becomes confirmed when its feedback capability returns.
 
+## Customer-agent coverage
+
+Your ASGI middleware creates the HTTP/HTML feedback contract; it cannot make an independent customer agent act
+on it. For reliable Codex and Claude Code handling, customers install
+[Epode Companion](/integrations/companion) once for every Epode-instrumented product they use. This is a
+user-side plugin, not another Python package, account, or product key.
+
 [View the runnable ASGI example](https://github.com/open-software-network/os-epode/tree/main/examples/setup-matrix-python-asgi)

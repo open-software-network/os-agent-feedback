@@ -68,7 +68,7 @@ For Codex and Claude Code users, **Epode Companion** is the trusted host adapter
 - `examples/python-asgi/` — FastAPI/ASGI product example
 - `examples/go-http/` — standard-library Go product example
 - `examples/rust-axum/` — Rust Axum product example
-- `examples/customer-agent-http/` — optional deterministic HTTP/HTML agent-side adapter
+- `examples/customer-agent-http/` — raw HTTP protocol/conformance harness; customer users install Epode Companion instead
 - `web/` — Next.js dashboard frontend
 
 ## Production
