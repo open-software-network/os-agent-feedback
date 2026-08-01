@@ -120,9 +120,14 @@ cp \
   "$go_stage/agent-feedback-go-$version/"
 chmod 0644 "$go_stage/agent-feedback-go-$version/"*
 TZ=UTC touch -t 202001010000 "$go_stage/agent-feedback-go-$version/"*
+if tar --version 2>&1 | grep -q "GNU tar"; then
+  tar_owner_args=(--owner=0 --group=0)
+else
+  tar_owner_args=(--uid 0 --gid 0 --uname root --gname root)
+fi
 COPYFILE_DISABLE=1 tar \
   --format ustar \
-  --uid 0 --gid 0 --uname root --gname root \
+  "${tar_owner_args[@]}" \
   -cf - -C "$go_stage/agent-feedback-go-$version" \
   go.mod agent.go agentfeedback.go README.md \
   | gzip -n > "$go_tarball"
