@@ -881,12 +881,12 @@ jobs:
             echo "::error::The canary API origin is missing or invalid."
             exit 1
           }
-          railway link \
+          railway redeploy \
             --project "$RAILWAY_PROJECT_ID" \
             --environment v2-canary \
             --service "$API_SERVICE" \
+            --yes \
             --json >/dev/null
-          railway redeploy --service "$API_SERVICE" --yes --json >/dev/null
           restarted_id=""
           for _ in $(seq 1 60); do
             services="$(railway service list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --json)"
@@ -1107,12 +1107,12 @@ jobs:
           EXPECTED_BRIDGE_DIGEST: ${{ steps.production_evidence.outputs.bridge_digest }}
         run: |
           set -euo pipefail
-          railway link \
+          railway redeploy \
             --project "$RAILWAY_PROJECT_ID" \
             --environment production \
             --service "$API_SERVICE" \
+            --yes \
             --json >/dev/null
-          railway redeploy --service "$API_SERVICE" --yes --json >/dev/null
           restarted_id=""
           for _ in $(seq 1 60); do
             services="$(railway service list --project "$RAILWAY_PROJECT_ID" --environment production --json)"
