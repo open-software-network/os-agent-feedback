@@ -11,6 +11,7 @@ on:
         options:
           - verify-canary
           - apply-canary
+          - recover-canary
           - stage-production-bridge
           - verify-production
           - apply-production
@@ -132,7 +133,8 @@ jobs:
             exit 1
           fi
 
-          if [[ "$OPERATION" == "apply-canary" || "$OPERATION" == "stage-production-bridge" \
+          if [[ "$OPERATION" == "apply-canary" || "$OPERATION" == "recover-canary" \
+            || "$OPERATION" == "stage-production-bridge" \
             || "$OPERATION" == "apply-production" ]]; then
             changed_paths="$(git diff --name-only "${TARGET_SHA}^1" "$TARGET_SHA")"
             if [[ "$changed_paths" != "$MIGRATION_PATH" ]]; then
@@ -811,8 +813,41 @@ jobs:
           EXPECTED_SCHEMA_FINGERPRINT: ${{ inputs.expected_schema_fingerprint }}
         run: scripts/verify-migration-ledger.sh
 
+      - name: Verify the applied canary ledger before recovery
+        id: verify_recovery
+        if: inputs.operation == 'recover-canary'
+        env:
+          MIGRATION_MODE: verify-after
+        run: scripts/verify-migration-ledger.sh
+
+      - name: Require matching interrupted canary evidence
+        if: inputs.operation == 'recover-canary'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          set -euo pipefail
+          variables="$(railway variable list \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment v2-canary \
+            --service "$API_SERVICE" \
+            --json)"
+          jq -e \
+            --arg revision "$TARGET_SHA" \
+            --arg path "$MIGRATION_PATH" \
+            --arg sha "$EXPECTED_MIGRATION_SHA256" \
+            --arg version "${{ needs.plan.outputs.migration_version }}" \
+            '.EPODE_MIGRATION_STATUS == "pending"
+              and .EPODE_MIGRATION_REVISION == $revision
+              and .EPODE_MIGRATION_PATH == $path
+              and .EPODE_MIGRATION_SHA256 == $sha
+              and .EPODE_MIGRATION_VERSION == $version
+              and .EPODE_MIGRATION_BRIDGE_MAX_VERSION == $version' <<< "$variables" >/dev/null || {
+            echo "::error::Canary recovery requires matching pending evidence from an interrupted apply."
+            exit 1
+          }
+
       - name: Invalidate previous canary migration evidence
-        if: inputs.operation == 'apply-canary'
+        if: inputs.operation == 'apply-canary' || inputs.operation == 'recover-canary'
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
@@ -836,7 +871,7 @@ jobs:
 
       - name: Capture the exact canary bridge image
         id: bridge
-        if: inputs.operation == 'apply-canary'
+        if: inputs.operation == 'apply-canary' || inputs.operation == 'recover-canary'
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
@@ -869,7 +904,7 @@ jobs:
 
       - name: Restart and verify the exact bridge image on expanded canary schema
         id: restart_bridge
-        if: inputs.operation == 'apply-canary'
+        if: inputs.operation == 'apply-canary' || inputs.operation == 'recover-canary'
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           BEFORE_DEPLOYMENT_ID: ${{ steps.bridge.outputs.before_deployment_id }}
@@ -916,10 +951,10 @@ jobs:
           echo "deployment_id=$restarted_id" >> "$GITHUB_OUTPUT"
 
       - name: Attest expanded canary schema and bridge restart
-        if: inputs.operation == 'apply-canary'
+        if: inputs.operation == 'apply-canary' || inputs.operation == 'recover-canary'
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          SCHEMA_FINGERPRINT: ${{ steps.apply_canary.outputs.schema_fingerprint }}
+          SCHEMA_FINGERPRINT: ${{ inputs.operation == 'apply-canary' && steps.apply_canary.outputs.schema_fingerprint || steps.verify_recovery.outputs.schema_fingerprint }}
           BRIDGE_REF: ${{ steps.bridge.outputs.ref }}
           BRIDGE_DIGEST: ${{ steps.bridge.outputs.digest }}
           BRIDGE_DEPLOYMENT_ID: ${{ steps.restart_bridge.outputs.deployment_id }}
