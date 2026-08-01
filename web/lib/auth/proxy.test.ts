@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { NextRequest } from "next/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AUTH_ROUTE_ALLOWLIST, proxy } from "@/proxy";
 
@@ -11,6 +11,10 @@ function expectNext(response: Response): void {
 }
 
 describe("auth plumbing proxy", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("allows only the explicit auth routes through without a cookie", () => {
     expect([...AUTH_ROUTE_ALLOWLIST]).toEqual([
       "/auth/signin",
@@ -52,6 +56,31 @@ describe("auth plumbing proxy", () => {
         }),
       ),
     );
+  });
+
+  it("accepts the local dev cookie only with an explicit non-production opt-in", () => {
+    const request = () =>
+      new NextRequest("http://localhost:3000/team", {
+        headers: { cookie: "af_dev_identity=signed-by-rust", host: "localhost:3000" },
+      });
+
+    vi.stubEnv("DEV_AUTH_ENABLED", "true");
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("WEB_APP_URL", "http://localhost:3000");
+    expectNext(proxy(request()));
+
+    vi.stubEnv("DEV_AUTH_ENABLED", "false");
+    expect(new URL(proxy(request()).headers.get("location") ?? "").pathname).toBe("/auth/signin");
+
+    vi.stubEnv("DEV_AUTH_ENABLED", "true");
+    vi.stubEnv("NODE_ENV", "production");
+    expect(new URL(proxy(request()).headers.get("location") ?? "").pathname).toBe("/auth/signin");
+
+    vi.stubEnv("NODE_ENV", "development");
+    const remote = new NextRequest("https://remote.example/team", {
+      headers: { cookie: "af_dev_identity=signed-by-rust", host: "remote.example" },
+    });
+    expect(new URL(proxy(remote).headers.get("location") ?? "").pathname).toBe("/auth/signin");
   });
 
   it("does not redirect API or MCP machine traffic", () => {

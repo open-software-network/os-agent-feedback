@@ -3,6 +3,8 @@ import https from "node:https";
 
 import type { NextRequest } from "next/server";
 
+import { isLocalDevAuthRequest, stripDevAuthCookie } from "@/lib/auth/dev-auth";
+
 const API_URL_DEFAULT = "http://localhost:8080";
 const UPSTREAM_TIMEOUT_MS = 30_000;
 const MAX_REQUEST_BODY_BYTES = 64 * 1024;
@@ -95,6 +97,12 @@ function requestHeaders(request: NextRequest, upstreamPath: string): Headers {
       headers.append(name, value);
     }
   });
+
+  if (!isLocalDevAuthRequest(request)) {
+    const cookies = stripDevAuthCookie(headers.get("cookie") ?? "");
+    if (cookies) headers.set("cookie", cookies);
+    else headers.delete("cookie");
+  }
 
   const authorization = machineAuthorization(request.headers, upstreamPath);
   if (authorization) {

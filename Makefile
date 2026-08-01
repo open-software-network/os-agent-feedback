@@ -1,4 +1,4 @@
-.PHONY: help install node-install backend-install node-version-check backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test sdk-node-test web-install web-types-check web-check web-typecheck web-test web-release-e2e web-build docs-validate docs-a11y types check
+.PHONY: help install node-install backend-install node-version-check dev-setup dev-db dev-db-stop dev-backend dev-web backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test sdk-node-test web-install web-types-check web-check web-typecheck web-test web-release-e2e web-build docs-validate docs-a11y types check
 
 .DEFAULT_GOAL := help
 
@@ -20,6 +20,24 @@ backend-install:  ## Install the Rust components required by backend checks
 node-version-check:  ## Require the repository's supported Node range (>=22.13.0 <25)
 	@command -v node >/dev/null 2>&1 || { echo "Node.js is required; install Node >=22.13.0 <25 and retry." >&2; exit 1; }
 	@node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 22 || major >= 25 || (major === 22 && minor < 13)) { console.error(`Node $${process.versions.node} is unsupported; switch to Node >=22.13.0 <25 and retry.`); process.exit(1); }'
+
+# --- Local development ---
+dev-setup: node-version-check node-install backend-install  ## Install dependencies and create local env files without overwriting them
+	@test -f backend/.env || { cp backend/.env.example backend/.env; echo "Created backend/.env"; }
+	@test -f web/.env.local || { cp web/.env.example web/.env.local; echo "Created web/.env.local"; }
+	@echo "Local setup complete. Configure backend/.env, then run 'make dev-backend' and 'make dev-web' in separate terminals."
+
+dev-db:  ## Start the local PostgreSQL container and wait until it is healthy
+	docker-compose -f backend/docker-compose.yml up -d --wait
+
+dev-db-stop:  ## Stop local PostgreSQL without deleting its data
+	docker-compose -f backend/docker-compose.yml stop
+
+dev-backend: dev-db  ## Start the Rust API on http://localhost:8080
+	cd backend && cargo run --locked
+
+dev-web: node-version-check  ## Start the Next.js dashboard on http://localhost:3000
+	pnpm --filter @epode/web dev
 
 # --- Backend ---
 backend-fmt-check:  ## Check backend Rust formatting

@@ -109,6 +109,25 @@ For Codex and Claude Code users, **Epode Companion** is the trusted host adapter
 - `examples/customer-agent-http/` — raw HTTP protocol/conformance harness; customer users install Epode Companion instead
 - `web/` — Next.js dashboard frontend
 
+## Local development
+
+Install Node `>=22.13.0 <25`, Rust with `rustup`, `pnpm`, and a container runtime that supports `docker-compose`. Then prepare the repository without overwriting existing local environment files:
+
+```sh
+make dev-setup
+```
+
+For local login without OS Accounts, edit `backend/.env` and uncomment `APP_ENV=development` and `DEV_AUTH_ENABLED=true`. Set `DEV_AUTH_SIGNING_KEY` to an unpadded base64url encoding of 32 random bytes, and set `DEV_AUTH_ENABLED=true` in `web/.env.local`. The backend README documents the security constraints. Keep the API and dashboard on the same loopback hostname.
+
+Start the services in separate terminals:
+
+```sh
+make dev-backend # starts PostgreSQL, runs migrations, and serves http://localhost:8080
+make dev-web     # serves the dashboard at http://localhost:3000
+```
+
+With developer authentication enabled, open `http://localhost:8080/__dev`, enter an email, and continue to the dashboard. Stop PostgreSQL later with `make dev-db-stop`. Run `make help` to list all setup and verification commands.
+
 ## Production
 
 - Dashboard/API: https://app.epode.ai

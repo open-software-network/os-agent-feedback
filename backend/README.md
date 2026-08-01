@@ -91,3 +91,21 @@ Required production environment variables are `DATABASE_URL`, `EPODE_IDENTITY_HM
 at least 32 random bytes and remain stable across product-key rotation; changing it intentionally starts
 a new customer-identity namespace.
 `DATABASE_MAX_CONNECTIONS` is optional and defaults to `10`; lower it for disposable validation environments that share a small PostgreSQL connection budget.
+
+## Optional local developer authentication
+
+Local development can explicitly enable an OS Accounts identity bypass with
+`APP_ENV=development`, `DEV_AUTH_ENABLED=true`, and a
+`DEV_AUTH_SIGNING_KEY` containing the unpadded base64url encoding of exactly 32
+random bytes. `PUBLIC_BASE_URL` and the required `WEB_APP_URL` must use the same
+loopback hostname so the host-only cookie reaches both the Rust API and Next.js
+dashboard. Set `DEV_AUTH_ENABLED=true` for the Next.js process as well.
+
+When enabled, `GET /__dev` shows a local login form accepting any valid email.
+The resulting signed identity cookie bypasses only OS Accounts verification;
+workspace creation, invitations, membership, and roles continue through the
+normal PostgreSQL authorization path. The cookie expires after eight hours and
+contains no role or workspace claims. The feature refuses production, Railway,
+non-loopback, mismatched-host, missing-key, and weak-key configurations. When it
+is disabled, the development routes return `404` and development cookies are
+ignored. Production OAuth behavior is unchanged.
