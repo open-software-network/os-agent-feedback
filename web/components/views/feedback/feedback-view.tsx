@@ -146,6 +146,12 @@ export function FeedbackView({
   const [groupLimit, setGroupLimit] = useState(groupsPageSize);
   const productId = data.currentProduct?.id;
   const since = useMemo(() => rangeStart(range), [range]);
+  const hasFacetFilters = facetOrder.some((facet) => filters[facet].length > 0);
+  const canSeedReportList =
+    !query.trim() &&
+    !hasFacetFilters &&
+    data.listState.reportsLoaded === data.listState.reportsTotal &&
+    data.reports.every((report) => !since || new Date(report.occurredAt) >= new Date(since));
   const reportPages = useInfiniteQuery({
     queryKey: ["feedback-list", data.workspace.id, productId, query, filters, since],
     queryFn: ({ pageParam }) =>
@@ -167,17 +173,19 @@ export function FeedbackView({
       }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (page) => page.nextCursor ?? undefined,
-    initialData: {
-      pages: [
-        {
-          reports: data.reports,
-          total: data.listState.reportsTotal,
-          limit: Math.min(100, Math.max(1, data.reports.length || 50)),
-          nextCursor: null,
-        },
-      ],
-      pageParams: [undefined],
-    },
+    initialData: canSeedReportList
+      ? {
+          pages: [
+            {
+              reports: data.reports,
+              total: data.listState.reportsTotal,
+              limit: Math.min(100, Math.max(1, data.reports.length || 50)),
+              nextCursor: null,
+            },
+          ],
+          pageParams: [undefined],
+        }
+      : undefined,
     initialDataUpdatedAt: 0,
     enabled: Boolean(productId),
   });
@@ -402,23 +410,39 @@ export function FeedbackView({
                 onSelect={selectReport}
               />
             </section>
+          ) : reportPages.isPending ? (
+            <div className="min-h-0 flex-1 bg-canvas" />
           ) : (
             <div className="min-h-0 flex-1 bg-canvas p-4">
               <EmptyState
-                title="No matching feedback"
-                description="Try a wider filter or wait for agents to submit feedback."
+                title={
+                  data.listState.reportsTotal === 0 ? "No feedback yet" : "No matching feedback"
+                }
+                description={
+                  data.listState.reportsTotal === 0
+                    ? "Finish setup and send one real product request before waiting for an agent report."
+                    : "Clear the filters and show all retained feedback."
+                }
                 action={
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      setQuery("");
-                      setRange(defaultRange);
-                      commitFilters(createEmptyFilters());
-                    }}
-                  >
-                    Clear filters
-                  </Button>
+                  data.listState.reportsTotal === 0 ? (
+                    isEditor(data.currentRole) ? (
+                      <Button size="sm" onClick={() => navigateToSetup()}>
+                        Open Setup
+                      </Button>
+                    ) : null
+                  ) : (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setQuery("");
+                        setRange("all");
+                        commitFilters(createEmptyFilters());
+                      }}
+                    >
+                      Show all retained feedback
+                    </Button>
+                  )
                 }
               />
             </div>
@@ -452,6 +476,16 @@ export function FeedbackView({
       </Tabs>
     </DetailWorkspace>
   );
+}
+
+function navigateToSetup() {
+  const url = new URL(window.location.href);
+  url.searchParams.set("view", "setup");
+  url.searchParams.delete("report");
+  url.searchParams.delete("session");
+  url.searchParams.delete("interaction");
+  window.history.pushState({}, "", url);
+  window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
 function SignalsView({

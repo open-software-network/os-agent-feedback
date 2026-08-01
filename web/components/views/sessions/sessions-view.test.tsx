@@ -99,7 +99,7 @@ describe("SessionsView", () => {
     expect(selectSession).toHaveBeenNthCalledWith(3, data.sessions[0].id);
   });
 
-  it("uses complete server rollups when interaction and report windows do not overlap", () => {
+  it("uses complete server rollups when interaction and report windows do not overlap", async () => {
     const base = dashboardFixture();
     const data = dashboardFixture({
       interactions: [],
@@ -116,6 +116,7 @@ describe("SessionsView", () => {
         },
       ],
     });
+    vi.stubGlobal("fetch", sessionFetch(data));
 
     renderWithQuery(
       <SessionsView
@@ -137,7 +138,9 @@ describe("SessionsView", () => {
     expect(screen.getAllByText("Interactions")[0].parentElement).toHaveTextContent("12");
 
     fireEvent.click(screen.getByRole("button", { name: "Has feedback" }));
-    expect(screen.getByRole("row", { name: new RegExp(base.sessions[0].refHint) })).toBeVisible();
+    expect(
+      await screen.findByRole("row", { name: new RegExp(base.sessions[0].refHint) }),
+    ).toBeVisible();
   });
 
   it("restores and updates shareable server filter state", async () => {

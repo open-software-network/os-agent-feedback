@@ -12,12 +12,18 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import type { DashboardData } from "@/lib/api/dashboard";
-import { formatDuration, interfaceLabel, relativeDate, titleCase } from "@/lib/dashboard/format";
+import {
+  formatDuration,
+  interfaceLabel,
+  isEditor,
+  relativeDate,
+  titleCase,
+} from "@/lib/dashboard/format";
 import { reportFindings } from "@/lib/dashboard/reports";
 import { cn } from "@/lib/utils";
 
 type InsightCount = { name: string; count: number };
-type VisibleDashboardView = "feedback" | "sessions";
+type VisibleDashboardView = "feedback" | "sessions" | "setup";
 
 const impactTone: Record<string, string> = {
   blocked: "bg-impact-negative",
@@ -39,6 +45,7 @@ export function HomeView({
   refresh: () => Promise<unknown>;
 }) {
   const insights = data.insights;
+  const needsSetup = insights.opportunities === 0 && isEditor(data.currentRole);
   const feedbackGap = Math.max(insights.confirmedInteractions - insights.reports, 0);
   const topBlockingTopic = insights.blockingTopics[0];
   const blockingByTopic = new Map(
@@ -115,6 +122,9 @@ export function HomeView({
               )}
             </p>
             <div className="mt-6 flex flex-wrap gap-2">
+              {needsSetup ? (
+                <Button onClick={() => navigateToDashboardView("setup")}>Finish setup</Button>
+              ) : null}
               <Button variant="outline" onClick={openLeadingFeedback}>
                 {leadingBlockerReport ? "Review leading blocker" : "Browse feedback"}
                 <IconArrowUpRight data-icon="inline-end" />

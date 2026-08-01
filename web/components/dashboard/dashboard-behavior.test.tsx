@@ -1083,13 +1083,30 @@ describe("dashboard view behavior", () => {
   });
 
   it("filters feedback by the displayed received time", async () => {
+    window.history.replaceState({}, "", "/?view=feedback&range=all");
     const data = dashboardFixture();
     const report = {
       ...data.reports[0],
       createdAt: new Date().toISOString(),
       occurredAt: "2020-01-01T00:00:00Z",
     };
-    vi.stubGlobal("fetch", feedbackGroupFetch(data));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.startsWith("/api/dashboard/feedback?")) {
+          const reports = path.includes("since=") ? [] : [report];
+          return Promise.resolve(
+            json({ reports, total: reports.length, limit: 50, nextCursor: null }),
+          );
+        }
+        if (path.includes("/groups?")) {
+          return Promise.resolve(json({ groups: [], hasMore: false, limit: 50, offset: 0 }));
+        }
+        if (path.endsWith("/github-repo")) return Promise.resolve(json(null));
+        throw new Error(`Unexpected request: ${path}`);
+      }),
+    );
 
     renderWithQuery(
       <FeedbackView
@@ -1107,12 +1124,15 @@ describe("dashboard view behavior", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
     expect(await screen.findByText("No signals yet")).toBeVisible();
     fireEvent.click(screen.getByRole("tab", { name: "Reports" }));
-    fireEvent.click(screen.getByRole("button", { name: "Filters" }));
-    fireEvent.click(await screen.findByRole("tab", { name: "Received" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Filters/ }));
+    fireEvent.click(await screen.findByRole("tab", { name: /^Received/ }));
     fireEvent.click(screen.getByRole("button", { name: "Last 7 days" }));
-    expect(
-      screen.getByRole("row", { name: /Search results omitted the newest document/ }),
-    ).toBeVisible();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("row", { name: /Search results omitted the newest document/ }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(await screen.findByText("No matching feedback")).toBeVisible();
   });
 
   it("preserves the existing policy fields while changing feedback mode", async () => {

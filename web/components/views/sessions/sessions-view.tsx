@@ -120,6 +120,10 @@ export function SessionsView({
   const [query, setQuery] = useState(initialLocation.query);
   const [filter, setFilter] = useState<SessionFilter>(initialLocation.filter);
   const productId = data.currentProduct?.id;
+  const canSeedSessionList =
+    !query.trim() &&
+    filter === "all" &&
+    data.listState.sessionsLoaded === data.listState.sessionsTotal;
   const sessionPages = useInfiniteQuery({
     queryKey: ["session-list", data.workspace.id, productId, query, filter],
     queryFn: ({ pageParam }) =>
@@ -132,29 +136,31 @@ export function SessionsView({
       }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (page) => page.nextCursor ?? undefined,
-    initialData: {
-      pages: [
-        {
-          sessions: data.sessions,
-          rollup: {
-            sessions: data.listState.sessionsTotal,
-            interactions: data.sessions.reduce(
-              (total, session) => total + session.interactionCount,
-              0,
-            ),
-            multiStepSessions: data.sessions.filter((session) => session.interactionCount > 1)
-              .length,
-            averageInteractions: data.sessions.length
-              ? data.sessions.reduce((total, session) => total + session.interactionCount, 0) /
-                data.sessions.length
-              : 0,
-          },
-          limit: Math.min(100, Math.max(1, data.sessions.length || 50)),
-          nextCursor: null,
-        },
-      ],
-      pageParams: [undefined],
-    },
+    initialData: canSeedSessionList
+      ? {
+          pages: [
+            {
+              sessions: data.sessions,
+              rollup: {
+                sessions: data.listState.sessionsTotal,
+                interactions: data.sessions.reduce(
+                  (total, session) => total + session.interactionCount,
+                  0,
+                ),
+                multiStepSessions: data.sessions.filter((session) => session.interactionCount > 1)
+                  .length,
+                averageInteractions: data.sessions.length
+                  ? data.sessions.reduce((total, session) => total + session.interactionCount, 0) /
+                    data.sessions.length
+                  : 0,
+              },
+              limit: Math.min(100, Math.max(1, data.sessions.length || 50)),
+              nextCursor: null,
+            },
+          ],
+          pageParams: [undefined],
+        }
+      : undefined,
     initialDataUpdatedAt: 0,
     enabled: Boolean(productId),
   });
@@ -289,19 +295,29 @@ export function SessionsView({
         ) : (
           <div className="h-full bg-canvas p-4">
             <EmptyState
-              title="No matching sessions"
-              description="Clear the search or choose a different session view."
+              title={
+                data.listState.sessionsTotal === 0
+                  ? "No proven sessions yet"
+                  : "No matching sessions"
+              }
+              description={
+                data.listState.sessionsTotal === 0
+                  ? "Sessions appear only after the product supplies a stable application-level reference."
+                  : "Clear the search or choose a different session view."
+              }
               action={
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    setQuery("");
-                    setFilter("all");
-                  }}
-                >
-                  Clear filters
-                </Button>
+                data.listState.sessionsTotal === 0 ? null : (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setQuery("");
+                      setFilter("all");
+                    }}
+                  >
+                    Clear filters
+                  </Button>
+                )
               }
             />
           </div>
