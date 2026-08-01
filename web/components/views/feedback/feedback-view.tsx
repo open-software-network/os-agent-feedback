@@ -16,10 +16,15 @@ import { IconStopCircle } from "central-icons/IconStopCircle";
 import { IconThumbUpCurved } from "central-icons/IconThumbUpCurved";
 import { IconWarningSign } from "central-icons/IconWarningSign";
 import type { ComponentType } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 
 import { DetailRail, DetailWorkspace } from "@/components/dashboard/detail-rail";
-import { EmptyState, Panel, StatusMessage } from "@/components/dashboard/view-primitives";
+import {
+  EmptyState,
+  NativeSelect,
+  Panel,
+  StatusMessage,
+} from "@/components/dashboard/view-primitives";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -43,6 +48,8 @@ import type {
 import {
   fetchProductGroupsWindow,
   fileGroupGithubIssue,
+  type MergeReportGroupsResponse,
+  mergeReportGroups,
   type ProductGroupsResponse,
   type ProductReportGroup,
 } from "@/lib/api/groups";
@@ -170,6 +177,29 @@ export function FeedbackView({
     mutationFn: (groupKey: string) => fileGroupGithubIssue(data.workspace.id, groupKey),
     onSuccess: () => groups.refetch(),
   });
+  const merging = useMutation({
+    mutationFn: ({ sourceGroupKey, intoGroupKey }: MergeRequest) =>
+      mergeReportGroups(data.workspace.id, sourceGroupKey, { intoGroupKey }),
+    onSuccess: () => groups.refetch(),
+  });
+  const resetMerging = merging.reset;
+  const previousMergeContext = useRef({
+    mode,
+    productId,
+    workspaceId: data.workspace.id,
+  });
+
+  useEffect(() => {
+    const previous = previousMergeContext.current;
+    if (
+      previous.mode !== mode ||
+      previous.productId !== productId ||
+      previous.workspaceId !== data.workspace.id
+    ) {
+      resetMerging();
+    }
+    previousMergeContext.current = { mode, productId, workspaceId: data.workspace.id };
+  }, [data.workspace.id, mode, productId, resetMerging]);
 
   useEffect(() => {
     writeFilterLocation(query, filters, range);
@@ -385,8 +415,24 @@ export function FeedbackView({
               await groups.refetch();
               filing.reset();
             }}
+            mergePendingSource={merging.variables?.sourceGroupKey}
+            mergePending={merging.isPending}
+            mergeError={merging.error}
+            mergeResult={merging.data}
+            onBeginMerge={() => {
+              if (!merging.isPending) merging.reset();
+            }}
+            onMerge={(sourceGroupKey, intoGroupKey) => {
+              merging.reset();
+              merging.mutate({ sourceGroupKey, intoGroupKey });
+            }}
+            onCheckMergeAgain={async () => {
+              await groups.refetch();
+              merging.reset();
+            }}
             onLoadMore={() => {
               filing.reset();
+              merging.reset();
               setGroupLimit((current) => current + groupsPageSize);
             }}
             onRetry={() => Promise.all([groups.refetch(), mapping.refetch()])}
@@ -410,6 +456,13 @@ function SignalsView({
   filingError,
   onFileIssue,
   onCheckAgain,
+  mergePendingSource,
+  mergePending,
+  mergeError,
+  mergeResult,
+  onBeginMerge,
+  onMerge,
+  onCheckMergeAgain,
   onLoadMore,
   onRetry,
 }: {
@@ -425,6 +478,13 @@ function SignalsView({
   filingError: Error | null;
   onFileIssue: (groupKey: string) => void;
   onCheckAgain: () => Promise<void>;
+  mergePendingSource: string | undefined;
+  mergePending: boolean;
+  mergeError: Error | null;
+  mergeResult: MergeReportGroupsResponse | undefined;
+  onBeginMerge: () => void;
+  onMerge: (sourceGroupKey: string, intoGroupKey: string) => void;
+  onCheckMergeAgain: () => Promise<void>;
   onLoadMore: () => void;
   onRetry: () => unknown;
 }) {
@@ -460,18 +520,13 @@ function SignalsView({
   if (loading || !groups) {
     return <p className="p-4 text-sm text-muted-foreground">Loading signals…</p>;
   }
-  if (!groups.groups.length) {
-    return (
-      <EmptyState
-        title="No signals yet"
-        description="Related reports will appear here once recurring feedback is detected."
-      />
-    );
-  }
 
   const pendingMessage =
     filingError instanceof ApiError && filingError.status === 409 ? filingError.message : null;
   const failureMessage = filingError && !pendingMessage ? filingError.message : null;
+  const mergeConflictMessage =
+    mergeError instanceof ApiError && mergeError.status === 409 ? mergeError.message : null;
+  const mergeFailureMessage = mergeError && !mergeConflictMessage ? mergeError.message : null;
 
   return (
     <div className="grid gap-3">
@@ -485,22 +540,66 @@ function SignalsView({
       ) : null}
       {pendingMessage ? (
         <StatusMessage>
-          {pendingMessage}{" "}
+          GitHub issue filing for{" "}
+          <span className="font-mono">{mutationGroupKey ?? "unknown group"}</span>: {pendingMessage}{" "}
           <Button type="button" variant="outline" size="sm" onClick={() => void onCheckAgain()}>
             Check again
           </Button>
         </StatusMessage>
       ) : null}
-      {failureMessage ? <StatusMessage tone="error">{failureMessage}</StatusMessage> : null}
-      <Panel className="min-h-0 gap-0 overflow-hidden p-0">
-        <SignalsTable
-          groups={groups.groups}
-          mappingAvailable={mappingAvailable}
-          mutationGroupKey={mutationGroupKey}
-          filingPending={filingPending}
-          onFileIssue={onFileIssue}
+      {failureMessage ? (
+        <StatusMessage tone="error">
+          GitHub issue filing for{" "}
+          <span className="font-mono">{mutationGroupKey ?? "unknown group"}</span>: {failureMessage}
+        </StatusMessage>
+      ) : null}
+      {mergeConflictMessage ? (
+        <StatusMessage>
+          Merge source <span className="font-mono">{mergePendingSource ?? "unknown group"}</span>:{" "}
+          {mergeConflictMessage}{" "}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void onCheckMergeAgain()}
+          >
+            Check again
+          </Button>
+        </StatusMessage>
+      ) : null}
+      {mergeFailureMessage ? (
+        <StatusMessage tone="error">
+          Merge source <span className="font-mono">{mergePendingSource ?? "unknown group"}</span>:{" "}
+          {mergeFailureMessage}
+        </StatusMessage>
+      ) : null}
+      {mergeResult ? (
+        <StatusMessage>
+          Merged away <span className="font-mono">{mergePendingSource ?? "unknown group"}</span> and
+          moved {mergeResult.reportsMoved.toLocaleString()} reports into{" "}
+          <span className="font-mono">{mergeResult.targetGroupKey}</span>, which survives.
+        </StatusMessage>
+      ) : null}
+      {groups.groups.length ? (
+        <Panel className="min-h-0 gap-0 overflow-hidden p-0">
+          <SignalsTable
+            groups={groups.groups}
+            mappingAvailable={mappingAvailable}
+            mutationGroupKey={mutationGroupKey}
+            filingPending={filingPending}
+            onFileIssue={onFileIssue}
+            mergePendingSource={mergePendingSource}
+            mergePending={mergePending}
+            onBeginMerge={onBeginMerge}
+            onMerge={onMerge}
+          />
+        </Panel>
+      ) : (
+        <EmptyState
+          title="No signals yet"
+          description="Related reports will appear here once recurring feedback is detected."
         />
-      </Panel>
+      )}
       {groups.hasMore ? (
         <Button className="w-fit" type="button" variant="outline" onClick={onLoadMore}>
           Load more
@@ -516,95 +615,229 @@ function SignalsTable({
   mutationGroupKey,
   filingPending,
   onFileIssue,
+  mergePendingSource,
+  mergePending,
+  onBeginMerge,
+  onMerge,
 }: {
   groups: ProductReportGroup[];
   mappingAvailable: boolean;
   mutationGroupKey: string | undefined;
   filingPending: boolean;
   onFileIssue: (groupKey: string) => void;
+  mergePendingSource: string | undefined;
+  mergePending: boolean;
+  onBeginMerge: () => void;
+  onMerge: (sourceGroupKey: string, intoGroupKey: string) => void;
 }) {
+  const [mergeSourceGroupKey, setMergeSourceGroupKey] = useState<string | null>(null);
+  const [intoGroupKey, setIntoGroupKey] = useState("");
+
+  useEffect(() => {
+    const listedGroupKeys = new Set(groups.map((group) => group.groupKey));
+    if (mergeSourceGroupKey && !listedGroupKeys.has(mergeSourceGroupKey)) {
+      setMergeSourceGroupKey(null);
+      setIntoGroupKey("");
+    } else if (intoGroupKey && !listedGroupKeys.has(intoGroupKey)) {
+      setIntoGroupKey("");
+    }
+  }, [groups, intoGroupKey, mergeSourceGroupKey]);
+
   return (
     <Table className="min-w-[680px] table-fixed">
       <TableHeader className="bg-background">
         <TableRow className="hover:bg-background">
-          <TableHead className="w-[52%] pl-4 text-xs text-muted-foreground">Signal</TableHead>
-          <TableHead className="w-[12%] text-xs text-muted-foreground">Reports</TableHead>
-          <TableHead className="w-[18%] text-xs text-muted-foreground">Latest observed</TableHead>
-          <TableHead className="w-[18%] pr-4 text-xs text-muted-foreground">GitHub issue</TableHead>
+          <TableHead className="w-[44%] pl-4 text-xs text-muted-foreground">Signal</TableHead>
+          <TableHead className="w-[10%] text-xs text-muted-foreground">Reports</TableHead>
+          <TableHead className="w-[16%] text-xs text-muted-foreground">Latest observed</TableHead>
+          <TableHead className="w-[20%] text-xs text-muted-foreground">GitHub issue</TableHead>
+          <TableHead className="w-[10%] px-1 pr-2 text-right text-xs text-muted-foreground">
+            Actions
+          </TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {groups.map((group) => {
           const signal = describeSignal(group.explanation);
+          const mergeExpanded = mergeSourceGroupKey === group.groupKey;
+          const mergePendingForRow = mergePending && mergePendingSource === group.groupKey;
+          const selectedTarget = groups.find((target) => target.groupKey === intoGroupKey);
+          const invalidTarget =
+            !selectedTarget ||
+            selectedTarget.groupKey === group.groupKey ||
+            Boolean(group.githubIssue && selectedTarget.githubIssue);
           return (
-            <TableRow key={group.groupKey} className="bg-background hover:bg-muted/40">
-              <TableCell className="h-[66px] overflow-hidden pl-4">
-                {signal.operation ? (
-                  <p className="truncate text-[13px] font-medium leading-5">
-                    <span className="font-mono">{signal.operation}</span>
-                    {signal.surface ? (
-                      <span className="font-sans font-normal text-muted-foreground">
-                        {" "}
-                        on {signal.surface}
+            <Fragment key={group.groupKey}>
+              <TableRow className="bg-background hover:bg-muted/40">
+                <TableCell className="h-[66px] overflow-hidden pl-4">
+                  {signal.operation ? (
+                    <p className="truncate text-[13px] font-medium leading-5">
+                      <span className="font-mono">{signal.operation}</span>
+                      {signal.surface ? (
+                        <span className="font-sans font-normal text-muted-foreground">
+                          {" "}
+                          on {signal.surface}
+                        </span>
+                      ) : null}
+                    </p>
+                  ) : (
+                    <p className="line-clamp-2 text-[13px] font-medium leading-5">
+                      {signal.fallback}
+                    </p>
+                  )}
+                  <p className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+                    {signal.detail ? <span className="truncate">{signal.detail}</span> : null}
+                    <span className="truncate font-mono">{group.groupKey}</span>
+                  </p>
+                </TableCell>
+                <TableCell className="text-xs text-muted-foreground">
+                  {group.reportCount.toLocaleString()}
+                </TableCell>
+                <TableCell
+                  className="text-xs text-muted-foreground"
+                  title={group.latestOccurredAt ? formatDate(group.latestOccurredAt) : undefined}
+                >
+                  {group.latestOccurredAt ? relativeDate(group.latestOccurredAt) : "Not recorded"}
+                </TableCell>
+                <TableCell className="text-xs">
+                  {group.githubIssue ? (
+                    <a
+                      href={group.githubIssue.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex max-w-full items-center gap-1 text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+                    >
+                      <span className="truncate">
+                        {group.githubIssue.repoFullName}#{group.githubIssue.issueNumber}
                       </span>
-                    ) : null}
-                  </p>
-                ) : (
-                  <p className="line-clamp-2 text-[13px] font-medium leading-5">
-                    {signal.fallback}
-                  </p>
-                )}
-                <p className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
-                  {signal.detail ? <span className="truncate">{signal.detail}</span> : null}
-                  <span className="truncate font-mono">{group.groupKey}</span>
-                </p>
-              </TableCell>
-              <TableCell className="text-xs text-muted-foreground">
-                {group.reportCount.toLocaleString()}
-              </TableCell>
-              <TableCell
-                className="text-xs text-muted-foreground"
-                title={group.latestOccurredAt ? formatDate(group.latestOccurredAt) : undefined}
-              >
-                {group.latestOccurredAt ? relativeDate(group.latestOccurredAt) : "Not recorded"}
-              </TableCell>
-              <TableCell className="pr-4 text-xs">
-                {group.githubIssue ? (
-                  <a
-                    href={group.githubIssue.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex max-w-full items-center gap-1 text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
-                  >
-                    <span className="truncate">
-                      {group.githubIssue.repoFullName}#{group.githubIssue.issueNumber}
-                    </span>
-                    <IconArrowUpRight className="shrink-0" size={13} />
-                  </a>
-                ) : mappingAvailable ? (
+                      <IconArrowUpRight className="shrink-0" size={13} />
+                    </a>
+                  ) : mappingAvailable ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={filingPending}
+                      aria-busy={filingPending && mutationGroupKey === group.groupKey}
+                      onClick={() => onFileIssue(group.groupKey)}
+                    >
+                      {filingPending && mutationGroupKey === group.groupKey
+                        ? "Filing…"
+                        : "File GitHub issue"}
+                    </Button>
+                  ) : (
+                    <span className="text-muted-foreground">Not linked</span>
+                  )}
+                </TableCell>
+                <TableCell className="px-1 pr-2 text-right text-xs">
                   <Button
                     type="button"
-                    variant="outline"
+                    variant="ghost"
                     size="sm"
-                    disabled={filingPending}
-                    aria-busy={filingPending && mutationGroupKey === group.groupKey}
-                    onClick={() => onFileIssue(group.groupKey)}
+                    aria-expanded={mergeExpanded}
+                    aria-label={
+                      mergeExpanded
+                        ? `Cancel merge of signal ${group.groupKey}`
+                        : `Merge signal ${group.groupKey}`
+                    }
+                    disabled={mergePendingForRow && !mergeExpanded}
+                    onClick={() => {
+                      if (mergeExpanded) {
+                        setMergeSourceGroupKey(null);
+                        setIntoGroupKey("");
+                      } else {
+                        onBeginMerge();
+                        setMergeSourceGroupKey(group.groupKey);
+                        setIntoGroupKey("");
+                      }
+                    }}
                   >
-                    {filingPending && mutationGroupKey === group.groupKey
-                      ? "Filing…"
-                      : "File GitHub issue"}
+                    {mergeExpanded ? "Cancel" : "Merge"}
                   </Button>
-                ) : (
-                  <span className="text-muted-foreground">Not linked</span>
-                )}
-              </TableCell>
-            </TableRow>
+                </TableCell>
+              </TableRow>
+              {mergeExpanded ? (
+                <TableRow className="bg-background hover:bg-background">
+                  <TableCell colSpan={5} className="p-4">
+                    <form
+                      className="grid gap-3"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        if (invalidTarget || !selectedTarget) return;
+                        onMerge(group.groupKey, selectedTarget.groupKey);
+                      }}
+                    >
+                      <p className="flex flex-wrap items-center gap-2 text-sm">
+                        <Badge variant="outline">Merged away</Badge>
+                        <span className="font-mono">{group.groupKey}</span>
+                        <span className="text-muted-foreground">will disappear.</span>
+                        <Badge variant="secondary">Survives</Badge>
+                        <span className="font-mono">{intoGroupKey || "Choose a target below"}</span>
+                        <span className="text-muted-foreground">
+                          will absorb the source reports.
+                        </span>
+                      </p>
+                      <div className="flex flex-wrap items-end gap-2">
+                        <label
+                          htmlFor={`merge-target-${group.groupKey}`}
+                          className="grid min-w-[280px] flex-1 gap-1 text-xs font-medium"
+                        >
+                          Signal that survives
+                          <NativeSelect
+                            id={`merge-target-${group.groupKey}`}
+                            aria-label={`Signal that survives merge of ${group.groupKey}`}
+                            value={intoGroupKey}
+                            disabled={mergePendingForRow}
+                            onChange={(event) => setIntoGroupKey(event.target.value)}
+                          >
+                            <option value="">Choose the signal that survives</option>
+                            {groups
+                              .filter((target) => target.groupKey !== group.groupKey)
+                              .map((target) => {
+                                const bothHaveIssues = Boolean(
+                                  group.githubIssue && target.githubIssue,
+                                );
+                                return (
+                                  <option
+                                    key={target.groupKey}
+                                    value={target.groupKey}
+                                    disabled={bothHaveIssues}
+                                  >
+                                    {target.groupKey}
+                                    {bothHaveIssues
+                                      ? " (unavailable: both signals have GitHub issues)"
+                                      : target.githubIssue
+                                        ? " (has a GitHub issue)"
+                                        : ""}
+                                  </option>
+                                );
+                              })}
+                          </NativeSelect>
+                        </label>
+                        <Button type="submit" disabled={mergePending || invalidTarget}>
+                          {mergePendingForRow
+                            ? "Merging…"
+                            : intoGroupKey
+                              ? `Merge away into ${intoGroupKey}`
+                              : "Choose a surviving signal"}
+                        </Button>
+                      </div>
+                    </form>
+                  </TableCell>
+                </TableRow>
+              ) : null}
+            </Fragment>
           );
         })}
       </TableBody>
     </Table>
   );
 }
+
+type MergeRequest = {
+  sourceGroupKey: string;
+  intoGroupKey: string;
+};
 
 function describeSignal(explanation: string) {
   const parts = explanation
