@@ -172,7 +172,14 @@ test("additive database expansion is separately approved, attested, and fail-clo
   assert.match(source, /EPODE_MIGRATION_STATUS=pending/);
   assert.match(source, /Apply the reviewed migration to canary under advisory lock/);
   assert.match(source, /Restart and verify the exact bridge image on expanded canary schema/);
-  assert.match(source, /railway redeploy --service "\$API_SERVICE" --yes --json/);
+  assert.match(
+    source,
+    /railway redeploy \\\n\s+--project "\$RAILWAY_PROJECT_ID" \\\n\s+--environment v2-canary \\\n\s+--service "\$API_SERVICE" \\\n\s+--yes \\\n\s+--json/,
+  );
+  assert.match(
+    source,
+    /railway redeploy \\\n\s+--project "\$RAILWAY_PROJECT_ID" \\\n\s+--environment production \\\n\s+--service "\$API_SERVICE" \\\n\s+--yes \\\n\s+--json/,
+  );
   assert.match(source, /active_ref" != "\$EXPECTED_BRIDGE_REF"/);
   assert.match(source, /EPODE_MIGRATION_STATUS=verified/);
   assert.match(source, /EPODE_MIGRATION_SCHEMA_FINGERPRINT/);
