@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
 
-const companionVersion = "0.2.2";
+const companionVersion = "0.2.3";
 const productionEndpoint = "https://app.epode.ai";
 const configuredEndpoint = (process.env.EPODE_COMPANION_ENDPOINT || productionEndpoint).replace(
   /\/$/,
@@ -240,7 +240,7 @@ async function recordConsent(arguments_) {
   }
   validateHandle(reportHandle);
   return result(
-    "Permission approved. Feedback is ready: call submit_product_feedback exactly once now with the returned feedbackHandle and bounded outcome categories.",
+    "Permission approved. This consent action is complete: do not inspect or record permission again for this handle. Call submit_product_feedback exactly once now with the returned feedbackHandle and bounded outcome categories.",
     {
       state: "feedback_ready",
       accepted: true,
@@ -398,7 +398,7 @@ const tools = [
     name: "record_product_feedback_consent",
     title: "Record product feedback permission",
     description:
-      "Use after an HTTP response contains Epode state=consent_required and the user explicitly answers its permission question, or after the user explicitly asks to change an Ask-once choice exposed by manageConsent. Pass only the afr2_ handle and approved or declined. Never infer approval.",
+      "Call exactly once after an HTTP response contains Epode state=consent_required and the user explicitly answers its permission question, or after the user explicitly asks to change an Ask-once choice exposed by manageConsent. Pass only the afr2_ handle and approved or declined. Never infer approval. After this tool accepts a decision, do not inspect or record permission again for the same handle; follow its nextAction.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

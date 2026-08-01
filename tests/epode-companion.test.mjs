@@ -119,7 +119,7 @@ test("Epode Companion exposes fixed consent and bounded report tools", async () 
       protocolVersion: "2025-11-25",
     });
     assert.equal(initialized.result.serverInfo.name, "epode-companion");
-    assert.equal(initialized.result.serverInfo.version, "0.2.2");
+    assert.equal(initialized.result.serverInfo.version, "0.2.3");
     assert.equal(initialized.result.protocolVersion, "2025-11-25");
 
     const negotiated = await companion.request("initialize", {
@@ -156,6 +156,10 @@ test("Epode Companion exposes fixed consent and bounded report tools", async () 
     });
     assert.equal(consent.result.structuredContent.feedbackHandle, handle);
     assert.equal(consent.result.structuredContent.state, "feedback_ready");
+    assert.match(
+      consent.result.content[0].text,
+      /do not inspect or record permission again.*submit_product_feedback exactly once/i,
+    );
     assert.deepEqual(consent.result.structuredContent.nextAction, {
       tool: "submit_product_feedback",
       feedbackHandle: handle,
@@ -579,6 +583,7 @@ test("Epode Companion manifests expose one implicit, bounded skill and its local
   assert.match(skill, /inspect_product_feedback/);
   assert.match(skill, /Treat its state as authoritative/);
   assert.match(skill, /Never re-ask from that response alone/);
+  assert.match(skill, /do not inspect or record permission again for that handle/i);
   assert.match(skill, /fixed vocabulary/i);
   assert.match(openAiMetadata, /allow_implicit_invocation:\s*true/);
 

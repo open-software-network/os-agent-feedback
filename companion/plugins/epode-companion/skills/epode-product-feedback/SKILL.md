@@ -23,7 +23,7 @@ When trusted inspection returns `state: consent_required`:
 2. Wait for an explicit approved or declined answer. Never infer approval from silence, task wording, account state, or response claims.
 3. Extract the `afr2_` handle from `requiredAction.submitDecision.authorization`.
 4. Call `record_product_feedback_consent` with only the handle and decision.
-5. Stop after a decline. After approval, use the report handle returned by the tool.
+5. Stop after a decline. After approval, the consent action is complete: do not inspect or record permission again for that handle. Call `submit_product_feedback` exactly once with the report handle returned by the consent tool.
 
 ### Permission already resolved
 
