@@ -2128,6 +2128,12 @@ export interface operations {
                 /**
                  * @description Team to configure when the `x-workspace-id` header cannot be sent, as on
                  *     a plain link. Ignored when the header is present.
+                 *
+                 *     Captured as a string, not a `Uuid`: typing it as `Uuid` makes the
+                 *     extractor reject a malformed value with 400 *before* the handler runs,
+                 *     which would fail a request whose header is valid and whose query
+                 *     parameter is documented as ignored. Precedence belongs in
+                 *     `install_workspace_id`, not in the extractor.
                  */
                 workspaceId?: string;
             };
@@ -2153,7 +2159,7 @@ export interface operations {
                     "text/plain": string;
                 };
             };
-            /** @description Invalid team header */
+            /** @description Invalid team header, or an unusable workspaceId with no team header */
             400: {
                 headers: {
                     [name: string]: unknown;

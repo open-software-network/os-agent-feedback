@@ -184,11 +184,10 @@
           {
             "name": "workspaceId",
             "in": "query",
-            "description": "Team to configure when the `x-workspace-id` header cannot be sent, as on\na plain link. Ignored when the header is present.",
+            "description": "Team to configure when the `x-workspace-id` header cannot be sent, as on\na plain link. Ignored when the header is present.\n\nCaptured as a string, not a `Uuid`: typing it as `Uuid` makes the\nextractor reject a malformed value with 400 *before* the handler runs,\nwhich would fail a request whose header is valid and whose query\nparameter is documented as ignored. Precedence belongs in\n`install_workspace_id`, not in the extractor.",
             "required": false,
             "schema": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             }
           }
         ],
@@ -218,7 +217,7 @@
             }
           },
           "400": {
-            "description": "Invalid team header",
+            "description": "Invalid team header, or an unusable workspaceId with no team header",
             "content": {
               "application/json": {
                 "schema": {

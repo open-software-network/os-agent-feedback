@@ -964,20 +964,36 @@ async fn auth_callback(
 struct GithubInstallQuery {
     /// Team to configure when the `x-workspace-id` header cannot be sent, as on
     /// a plain link. Ignored when the header is present.
-    workspace_id: Option<Uuid>,
+    ///
+    /// Captured as a string, not a `Uuid`: typing it as `Uuid` makes the
+    /// extractor reject a malformed value with 400 *before* the handler runs,
+    /// which would fail a request whose header is valid and whose query
+    /// parameter is documented as ignored. Precedence belongs in
+    /// `install_workspace_id`, not in the extractor.
+    workspace_id: Option<String>,
 }
 
 /// Header wins when both are supplied; the query parameter is the no-header
 /// fallback. Neither is trusted on its own — the winner is handed to
 /// `dashboard_auth`, which rejects a team the caller is not a member of.
-const fn install_workspace_id(
+///
+/// A malformed query parameter is only an error when it would actually be used.
+/// With a valid header it is ignored outright; without one it is about to
+/// decide the team, so it fails loudly rather than silently falling back to the
+/// caller's default team — that silent fallback is the original bug.
+fn install_workspace_id(
     header_workspace_id: Option<Uuid>,
-    query_workspace_id: Option<Uuid>,
-) -> Option<Uuid> {
-    match header_workspace_id {
-        Some(workspace_id) => Some(workspace_id),
-        None => query_workspace_id,
+    query_workspace_id: Option<&str>,
+) -> Result<Option<Uuid>, ApiError> {
+    if let Some(workspace_id) = header_workspace_id {
+        return Ok(Some(workspace_id));
     }
+    query_workspace_id
+        .map(|value| {
+            Uuid::parse_str(value)
+                .map_err(|_| ApiError::bad_request("Invalid workspaceId query parameter"))
+        })
+        .transpose()
 }
 
 #[utoipa::path(
@@ -999,7 +1015,7 @@ const fn install_workspace_id(
                 ("Set-Cookie" = String, description = "Short-lived GitHub installation state and team cookies")
             )
         ),
-        (status = 400, description = "Invalid team header", body = ApiErrorEnvelope),
+        (status = 400, description = "Invalid team header, or an unusable workspaceId with no team header", body = ApiErrorEnvelope),
         (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
         (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
         (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
@@ -1018,8 +1034,10 @@ async fn github_install_handler(
     // as a query parameter too, and resolve it through the SAME dashboard_auth
     // path: `resolve_workspace_access` is what proves membership, so a crafted
     // link cannot install into a team the caller does not belong to.
-    let requested_workspace =
-        install_workspace_id(requested_workspace_id(&headers)?, query.workspace_id);
+    let requested_workspace = install_workspace_id(
+        requested_workspace_id(&headers)?,
+        query.workspace_id.as_deref(),
+    )?;
     let (context, tokens) = dashboard_auth(&state, &headers, requested_workspace).await?;
     require_workspace_editor(&context)?;
     let github = require_github(&state)?;
@@ -4906,19 +4924,53 @@ mod page_tests {
     fn install_workspace_id_prefers_the_header_and_falls_back_to_the_query() {
         let header = uuid::Uuid::from_u128(1);
         let query = uuid::Uuid::from_u128(2);
+        let query_text = query.to_string();
+        let q = Some(query_text.as_str());
 
         // Header wins when both are present.
         assert_eq!(
-            install_workspace_id(Some(header), Some(query)),
+            install_workspace_id(Some(header), q).ok().flatten(),
             Some(header)
         );
         // Query parameter is the fallback for the plain install link, which
         // cannot set headers.
-        assert_eq!(install_workspace_id(None, Some(query)), Some(query));
+        assert_eq!(install_workspace_id(None, q).ok().flatten(), Some(query));
         // Header alone keeps working for the header-driven dashboard calls.
-        assert_eq!(install_workspace_id(Some(header), None), Some(header));
+        assert_eq!(
+            install_workspace_id(Some(header), None).ok().flatten(),
+            Some(header)
+        );
         // Neither: dashboard_auth falls back to the caller's personal team.
-        assert_eq!(install_workspace_id(None, None), None);
+        assert_eq!(install_workspace_id(None, None).ok().flatten(), None);
+    }
+
+    #[test]
+    fn install_workspace_id_ignores_a_malformed_query_only_when_a_header_decides() {
+        let header = uuid::Uuid::from_u128(1);
+        let junk_values = ["", "not-a-uuid", "../../etc/passwd", "%00"];
+
+        // A valid header must not be defeated by junk in a parameter the docs
+        // say is ignored. Typing the extractor as `Uuid` would 400 this before
+        // the handler ever ran.
+        for junk in junk_values {
+            assert_eq!(
+                install_workspace_id(Some(header), Some(junk))
+                    .ok()
+                    .flatten(),
+                Some(header),
+                "header must win over junk query {junk:?}"
+            );
+        }
+
+        // With no header the parameter is load-bearing, so a malformed value is
+        // a hard error. Falling back to the caller's default team here would
+        // resurrect exactly the bug this endpoint was fixed for.
+        for junk in junk_values {
+            let error = install_workspace_id(None, Some(junk))
+                .expect_err("a load-bearing malformed workspaceId must fail");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST, "{junk:?}");
+            assert!(error.message.contains("workspaceId"), "{}", error.message);
+        }
     }
 
     #[test]
