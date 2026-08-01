@@ -94,6 +94,14 @@ test("production promotion verifies the active canary pair and can compensate ei
     "a production-scoped Railway token cannot read the environment-scoped canary attestation",
   );
   assert.doesNotMatch(canaryVerification, /RAILWAY_TOKEN: \$\{\{ secrets\.RAILWAY_TOKEN \}\}/);
+  assert.match(
+    canaryVerification,
+    /--service "\$CANARY_API_SERVICE"/,
+    "canary attestation lookup must not reuse the production API service name",
+  );
+  assert.match(canaryVerification, /service="\$CANARY_API_SERVICE"/);
+  assert.match(canaryVerification, /service="\$CANARY_WEB_SERVICE"/);
+  assert.doesNotMatch(canaryVerification, /--service "\$API_SERVICE"/);
   assert.match(source, /Verify both production tags by digest/);
   assert.match(source, /id: tag_readback/);
   assert.match(source, /steps\.tag_readback\.outcome != 'success'/);
