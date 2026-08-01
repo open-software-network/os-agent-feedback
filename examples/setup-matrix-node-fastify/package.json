@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": { "start": "node index.js" },
   "dependencies": {
-    "@agent-feedback/node": "https://app.epode.ai/static/agent-feedback-node-0.2.1.tgz",
+    "@agent-feedback/node": "https://app.epode.ai/static/agent-feedback-node-0.2.2.tgz",
     "fastify": "^5.10.0"
   }
 }

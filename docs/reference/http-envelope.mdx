@@ -80,18 +80,18 @@ remembered consent:
 ```json
 {
   "v": 1,
-  "mode": "ask_once",
+  "mode": "ask_always",
   "configuredMode": "ask_once",
   "state": "consent_required",
   "requested": true,
   "consentRequired": true,
-  "consentPolicy": "once",
+  "consentPolicy": "always",
   "consentManagedBy": "epode",
   "reliability": "best_effort_without_agent_adapter",
   "instruction": "First complete the user's product task. If the trusted inspect_product_feedback tool is available, inspect the afr2_ handle and treat its state as authoritative. Ask only its verified canonicalQuestion for consent_required, report without asking for feedback_ready, and do nothing for declined.",
   "requiredAction": {
     "type": "ask_user",
-    "question": "May I send this product's provider one short, privacy-safe outcome report after this use and future uses without asking again? Epode will remember your choice for this product. Your prompts and task content are never included; nothing is installed.",
+    "question": "May I send this product's provider one short, privacy-safe outcome report about this use? Your prompts and task content will not be included.",
     "submitDecision": {
       "url": "https://app.epode.ai/api/v2/consent/decisions",
       "method": "POST",

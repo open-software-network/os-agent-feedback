@@ -681,19 +681,22 @@ fn feedback_discovery(public_base_url: &str) -> FeedbackDiscoveryResponse {
         },
         integrations: IntegrationsDiscovery {
             node: format!(
-                "{public_base_url}/static/agent-feedback-node-0.2.1.tgz"
+                "{public_base_url}/static/agent-feedback-node-0.2.2.tgz"
             ),
             python: format!(
-                "{public_base_url}/static/agent_feedback-0.2.1-py3-none-any.whl"
+                "{public_base_url}/static/agent_feedback-0.2.2-py3-none-any.whl"
             ),
-            go: format!("{public_base_url}/static/agent-feedback-go-0.2.1.tar.gz"),
+            go: format!("{public_base_url}/static/agent-feedback-go-0.2.2.tar.gz"),
             rust: format!(
-                "{public_base_url}/static/agent-feedback-rust-0.2.1.tar.gz"
+                "{public_base_url}/static/agent-feedback-rust-0.2.2.tar.gz"
             ),
             protocol: format!(
-                "{public_base_url}/static/agent-feedback-protocol-v1.zip"
+                "{public_base_url}/static/agent-feedback-protocol-v1-0.2.2.zip"
             ),
         },
+        integrity_manifest: format!(
+            "{public_base_url}/static/agent-feedback-integrations-0.2.2.json"
+        ),
         reliability: ReliabilityDiscovery {
             http: "best effort for generic agents; deterministic with a feedback-aware runtime"
                 .to_owned(),
@@ -3614,7 +3617,7 @@ async fn consent_decision_handler(
         safe_input::<ConsentDecisionInput>(value)?,
     )
     .await?;
-    let feedback = (outcome.decision == "approved").then(|| {
+    let feedback = outcome.feedback_action_allowed.then(|| {
         approved_feedback_contract(
             &state.public_base_url,
             &capability,
@@ -4534,12 +4537,13 @@ mod page_tests {
                 "legacyCompatibility": ["2025-11-25"]
             },
             "integrations": {
-                "node": "https://epode.test/static/agent-feedback-node-0.2.1.tgz",
-                "python": "https://epode.test/static/agent_feedback-0.2.1-py3-none-any.whl",
-                "go": "https://epode.test/static/agent-feedback-go-0.2.1.tar.gz",
-                "rust": "https://epode.test/static/agent-feedback-rust-0.2.1.tar.gz",
-                "protocol": "https://epode.test/static/agent-feedback-protocol-v1.zip"
+                "node": "https://epode.test/static/agent-feedback-node-0.2.2.tgz",
+                "python": "https://epode.test/static/agent_feedback-0.2.2-py3-none-any.whl",
+                "go": "https://epode.test/static/agent-feedback-go-0.2.2.tar.gz",
+                "rust": "https://epode.test/static/agent-feedback-rust-0.2.2.tar.gz",
+                "protocol": "https://epode.test/static/agent-feedback-protocol-v1-0.2.2.zip"
             },
+            "integrityManifest": "https://epode.test/static/agent-feedback-integrations-0.2.2.json",
             "reliability": {
                 "http": "best effort for generic agents; deterministic with a feedback-aware runtime",
                 "mcp": "protocol-backed explicit feedback tool"

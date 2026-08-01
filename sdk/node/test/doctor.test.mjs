@@ -65,17 +65,19 @@ function consentEnvelope(feedbackOrigin) {
   };
 }
 
-test("doctor accepts --url and submits only to an explicitly trusted test origin", async () => {
-  let reports = 0;
+test("doctor accepts --url and verifies capability without creating feedback", async () => {
+  let inspections = 0;
   let optedIn = false;
   const feedback = await listen((request, response) => {
-    if (request.url !== "/api/v2/reports") {
+    if (request.url !== "/api/v2/capabilities/introspect") {
       response.writeHead(404).end();
       return;
     }
-    reports += 1;
+    inspections += 1;
     response.writeHead(200, { "content-type": "application/json" });
-    response.end('{"accepted":true,"interactionId":"doctor-test"}');
+    response.end(
+      '{"state":"feedback_ready","configuredMode":"never_ask","consentPolicy":"none","productName":"Doctor test","canonicalQuestion":null,"expiresAt":"2026-08-01T12:00:00Z"}',
+    );
   });
   const product = await listen((request, response) => {
     optedIn = request.headers["agent-feedback-request"] === "1";
@@ -92,9 +94,11 @@ test("doctor accepts --url and submits only to an explicitly trusted test origin
       { cwd: new URL("..", import.meta.url) },
     );
     assert.match(accepted.stdout, /PASS trusted Epode submission origin/);
-    assert.match(accepted.stdout, /PASS first confirmed interaction and first report/);
+    assert.match(accepted.stdout, /PASS scoped capability inspection for Doctor test/);
+    assert.match(accepted.stdout, /no feedback report was created/);
+    assert.match(accepted.stdout, /NEXT .*prove confirmation and reporting/);
     assert.equal(optedIn, true, "the doctor must opt into request-mode cached handoffs");
-    assert.equal(reports, 1);
+    assert.equal(inspections, 1);
 
     await assert.rejects(
       run(process.execPath, ["dist/doctor.js", `${product.origin}/search`], {
@@ -102,7 +106,11 @@ test("doctor accepts --url and submits only to an explicitly trusted test origin
       }),
       /untrusted feedback origin/,
     );
-    assert.equal(reports, 1, "the doctor must reject the origin before posting a report");
+    assert.equal(
+      inspections,
+      1,
+      "the doctor must reject the origin before inspecting a capability",
+    );
   } finally {
     await product.close();
     await feedback.close();
@@ -111,11 +119,14 @@ test("doctor accepts --url and submits only to an explicitly trusted test origin
 
 test("doctor reads authenticated product headers from the environment only", async () => {
   let productRequests = 0;
-  let reportAuthorization;
+  let inspectionAuthorization;
   const feedback = await listen((request, response) => {
-    reportAuthorization = request.headers.authorization;
+    assert.equal(request.url, "/api/v2/capabilities/introspect");
+    inspectionAuthorization = request.headers.authorization;
     response.writeHead(200, { "content-type": "application/json" });
-    response.end('{"accepted":true,"interactionId":"authenticated-doctor"}');
+    response.end(
+      '{"state":"feedback_ready","configuredMode":"never_ask","consentPolicy":"none","productName":"Authenticated doctor","canonicalQuestion":null,"expiresAt":"2026-08-01T12:00:00Z"}',
+    );
   });
   const product = await listen((request, response) => {
     productRequests += 1;
@@ -148,7 +159,7 @@ test("doctor reads authenticated product headers from the environment only", asy
 
     assert.match(accepted.stdout, /PASS product route HTTP 200/);
     assert.equal(productRequests, 1);
-    assert.equal(reportAuthorization, "Bearer afr2_test.payload.signature");
+    assert.equal(inspectionAuthorization, "Bearer afr2_test.payload.signature");
   } finally {
     await product.close();
     await feedback.close();
@@ -263,6 +274,38 @@ test("doctor proves only the opportunity milestone when real permission is still
     assert.match(checked.stdout, /PASS first opportunity handoff/);
     assert.match(checked.stdout, /NEXT .*prove confirmation and reporting/);
     assert.equal(decisionRequests, 0, "a diagnostic must never fabricate a consent decision");
+  } finally {
+    await product.close();
+    await feedback.close();
+  }
+});
+
+test("doctor fails loudly when Ask once lost authenticated customer identity", async () => {
+  let decisionRequests = 0;
+  const feedback = await listen((_request, response) => {
+    decisionRequests += 1;
+    response.writeHead(500).end();
+  });
+  const product = await listen((_request, response) => {
+    const envelope = consentEnvelope(feedback.origin);
+    envelope.mode = "ask_always";
+    envelope.configuredMode = "ask_once";
+    envelope.consentPolicy = "always";
+    envelope.when = "after_experience_known_and_explicit_user_approval";
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ answer: "ok", _agentFeedback: envelope }));
+  });
+
+  try {
+    await assert.rejects(
+      run(
+        process.execPath,
+        ["dist/doctor.js", `${product.origin}/search`, "--feedback-origin", feedback.origin],
+        { cwd: new URL("..", import.meta.url) },
+      ),
+      /Ask once could not resolve customerRef.*authentication.*before Agent Feedback/s,
+    );
+    assert.equal(decisionRequests, 0);
   } finally {
     await product.close();
     await feedback.close();

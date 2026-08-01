@@ -310,6 +310,28 @@ export function SetupView({
           stable opaque ID established by your product authentication. Add sessionRef only for a
           journey your product already knows belongs together.
         </p>
+        {surface === "mcp" ? (
+          <p className="text-sm text-muted-foreground">
+            Customer-agent step: none. MCP exposes feedback as native tools; verify the server-level
+            instructions and returned action in each agent client you support.
+          </p>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            Customer-agent step: generic HTTP and website agents are best effort. For deterministic
+            handling, test this route with the shared Epode Companion enabled in a supported agent.
+            The company integration does not install anything on the customer&apos;s machine. See
+            the{" "}
+            <a
+              className="underline"
+              href="https://docs.epode.ai/quickstart#customer-agent-step"
+              target="_blank"
+              rel="noreferrer"
+            >
+              customer-agent setup
+            </a>
+            .
+          </p>
+        )}
         <p className="text-sm">Verify: {integration.verify}</p>
         <p className="text-sm">
           <a className="underline" href="https://docs.epode.ai" target="_blank" rel="noreferrer">

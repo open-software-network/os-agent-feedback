@@ -38,10 +38,6 @@ const validRanges = new Set(["24h", "7d", "30d", "all"]);
 if (!validViews.has(currentView)) currentView = "home";
 if (!validRanges.has(explorerRange)) explorerRange = "30d";
 
-function setupSecretKey(environmentId, kind = "write") {
-  return kind === "read" ? `agent-feedback:read-key:${environmentId}` : `agent-feedback:product-key:${environmentId}`;
-}
-
 function isLegacyKeyPrefix(prefix) {
   if (!prefix) return false;
   return !/^af_(live|read)_[0-9a-f]{8}$/.test(prefix);
@@ -49,24 +45,6 @@ function isLegacyKeyPrefix(prefix) {
 
 function keyKind(key) {
   return key?.kind === "read" ? "read" : "write";
-}
-
-function rememberSetupSecret(environmentId, secret, kind) {
-  if (!environmentId || !secret) return;
-  try {
-    sessionStorage.setItem(setupSecretKey(environmentId, kind), secret);
-  } catch {
-    // A private browsing policy may disable storage. The key still remains visible for this page load.
-  }
-}
-
-function recalledSetupSecret(environmentId, kind) {
-  if (!environmentId) return "";
-  try {
-    return sessionStorage.getItem(setupSecretKey(environmentId, kind)) || "";
-  } catch {
-    return "";
-  }
 }
 
 const esc = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
@@ -235,7 +213,6 @@ async function refresh() {
     });
     apiSecret = body.secret;
     setupConnectionId = body.apiKey.id;
-    rememberSetupSecret(dashboard.currentEnvironment.id, body.secret);
     const updatedDashboard = await request(`/api/dashboard?productId=${encodeURIComponent(selectedProductId)}`);
     if (generation !== refreshGeneration) return false;
     dashboard = updatedDashboard;
@@ -246,7 +223,6 @@ async function refresh() {
   const setupKey = dashboard.apiKeys.find((key) => key.id === setupConnectionId && keyKind(key) === "write") || dashboard.apiKeys.find((key) => keyKind(key) === "write");
   if (setupKey) {
     setupConnectionId = setupKey.id;
-    apiSecret = apiSecret || recalledSetupSecret(dashboard.currentEnvironment.id);
   } else {
     setupConnectionId = null;
     apiSecret = "";
@@ -254,7 +230,6 @@ async function refresh() {
   const readKey = dashboard.apiKeys.find((key) => key.id === readKeyId && keyKind(key) === "read") || dashboard.apiKeys.find((key) => keyKind(key) === "read");
   if (readKey) {
     readKeyId = readKey.id;
-    readSecret = readSecret || recalledSetupSecret(dashboard.currentEnvironment.id, "read");
   } else {
     readKeyId = null;
     readSecret = "";
@@ -585,60 +560,66 @@ const setupStackOptions = {
 function setupInstructions() {
   const artifacts = `${location.origin}/static`;
   const route = setupSurface === "static" ? "/docs/**" : setupSurface === "website" ? "/docs/*" : "/search";
-  const nodeInstall = `npm install ${artifacts}/agent-feedback-node-0.2.1.tgz`;
+  const verifiedDownload = (filename, sha256) => `epode_artifact="$(mktemp -d)/${filename}" &&\ncurl -fsSL ${artifacts}/${filename} -o "$epode_artifact" &&\nprintf '%s  %s\\n' '${sha256}' "$epode_artifact" | shasum -a 256 -c -`;
+  const nodeDownload = `mkdir -p .epode/artifacts &&\nepode_artifact=".epode/artifacts/agent-feedback-node-0.2.2.tgz" &&\ncurl -fsSL ${artifacts}/agent-feedback-node-0.2.2.tgz -o "$epode_artifact" &&\nprintf '%s  %s\\n' 'a108603544c2d17af6859c45d994593a246401ca2f0def1fbeb43f74f5c16fe8' "$epode_artifact" | shasum -a 256 -c -`;
+  const pythonDownload = verifiedDownload("agent_feedback-0.2.2-py3-none-any.whl", "5723fd4e86c140218708f9e23187e932cfa1d39f85b29e9d76cbc8dbb6fb0ea7");
+  const goDownload = verifiedDownload("agent-feedback-go-0.2.2.tar.gz", "7f28ce6fb875167aac3afab974ca7cfc5896043e69ed136c375a99b9cde6cc15");
+  const rustDownload = verifiedDownload("agent-feedback-rust-0.2.2.tar.gz", "f5bc42f38cea06b41449f0ae7b753b602d8e3a5dcf4a98fb3d8c21cd25fcfc62");
+  const protocolDownload = verifiedDownload("agent-feedback-protocol-v1-0.2.2.zip", "ba3b239e2bf5de1514ca866c5a50a369d9a396ea440c1f65525b529be9025845");
+  const nodeInstall = `${nodeDownload} &&\nnpm install "$epode_artifact"`;
   const environment = `AGENT_FEEDBACK_KEY=${apiSecret || "paste_product_key_here"}\nAGENT_FEEDBACK_MODE=${dashboard.currentEnvironment?.feedbackMode || "never_ask"}`;
   const instructions = {
     "node-mcp": {
       name: "Node MCP",
-      install: `${nodeInstall}\nnpm install @modelcontextprotocol/server @modelcontextprotocol/node @modelcontextprotocol/express`,
-      code: `import { createMcpInstrumentation } from "@agent-feedback/node/mcp";\nimport { createMcpExpressApp } from "@modelcontextprotocol/express";\nimport { toNodeHandler } from "@modelcontextprotocol/node";\nimport { createMcpHandler, McpServer } from "@modelcontextprotocol/server";\nimport { z } from "zod";\n\n// [] rejects browser Origin requests. Add only trusted browser client hostnames.\nconst app = createMcpExpressApp({ host: "0.0.0.0", allowedOrigins: [] });\nconst feedback = createMcpInstrumentation({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  customerRef: (_args, context) => context.http?.authInfo?.extra?.accountId,\n});\n\nfunction productServer() {\n  const server = new McpServer({ name: "your-product", version: "1.0.0" });\n  feedback.instrument(server);\n  server.registerTool("search", {\n    description: "Search your product",\n    inputSchema: z.object({ query: z.string() }),\n  }, async ({ query }) => ({\n    content: [{ type: "text", text: await search(query) }],\n  }));\n  return server;\n}\n\nconst mcp = createMcpHandler(productServer, { legacy: "stateless", responseMode: "json" });\nconst handleMcp = toNodeHandler(mcp);\napp.all("/mcp", (req, res) => handleMcp(req, res, req.body));\napp.listen(Number(process.env.PORT || 3000), "0.0.0.0");`,
+      install: `${nodeInstall} &&\nnpm install @modelcontextprotocol/server @modelcontextprotocol/node @modelcontextprotocol/express zod`,
+      code: `import { createMcpInstrumentation, type McpInstrumentationContext } from "@agent-feedback/node/mcp";\nimport { createMcpExpressApp, requireBearerAuth } from "@modelcontextprotocol/express";\nimport { toNodeHandler } from "@modelcontextprotocol/node";\nimport { createMcpHandler, McpServer } from "@modelcontextprotocol/server";\nimport { z } from "zod";\nimport { productTokenVerifier } from "./product-auth.js";\n\n// [] rejects browser Origin requests. Add only trusted browser client hostnames.\nconst app = createMcpExpressApp({ host: "0.0.0.0", allowedOrigins: [] });\n// Verify the token and authorize its tenant before the MCP handler runs.\napp.use("/mcp", requireBearerAuth({\n  verifier: productTokenVerifier, // existing signature/introspection verifier\n  requiredScopes: ["mcp"],\n}));\n\nfunction stringField(value: unknown, key: string): string | undefined {\n  if (typeof value !== "object" || value === null) return undefined;\n  const field = Reflect.get(value, key);\n  return typeof field === "string" && field.length > 0 ? field : undefined;\n}\nfunction authenticatedAccountId(context: McpInstrumentationContext) {\n  const accountId = context.http?.authInfo?.extra?.accountId;\n  return typeof accountId === "string" && accountId.length > 0 ? accountId : undefined;\n}\n\nconst feedback = createMcpInstrumentation({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  includeTools: ["search"],\n  customerRef: (_args, context) => authenticatedAccountId(context),\n  sessionRef: (args, _context, result) =>\n    stringField(args, "agentSessionId") ??\n    stringField(result?.structuredContent, "agentSessionId"),\n});\n\nconst feedbackInstructions =\n  "After each selected product tool call, find _agentFeedback in structuredContent or in a standalone JSON content block. Finish the product task first. For consent_required, show the product answer, ask the exact returned question once, and wait for the user's next turn; call record_product_feedback_consent only for an explicit standalone Yes or No. For feedback_ready, call report_product_feedback exactly once. For feedback_disabled, do nothing unless the user explicitly asks to change permission. Keep successful background reporting out of the final answer.";\n\nfunction productServer() {\n  const server = new McpServer(\n    { name: "your-product", version: "1.0.0" },\n    { instructions: feedbackInstructions },\n  );\n  feedback.instrument(server);\n  server.registerTool("search", {\n    description: "Search your product",\n    inputSchema: z.object({ query: z.string() }),\n  }, async ({ query }) => ({\n    content: [{ type: "text", text: await search(query) }],\n  }));\n  return server;\n}\n\nconst mcp = createMcpHandler(productServer, { legacy: "stateless", responseMode: "json" });\nconst handleMcp = toNodeHandler(mcp);\napp.all("/mcp", (req, res) => handleMcp(req, res, req.body));\napp.listen(Number(process.env.PORT || 3000), "0.0.0.0");`,
       verify: "Call server/discover, then call one normal product tool from an MCP 2026-07-28 client.",
     },
     "manual-mcp": {
       name: "Language-neutral MCP protocol",
-      install: `curl -O ${artifacts}/agent-feedback-protocol-v1.zip`,
-      code: `1. Implement stateless MCP 2026-07-28 and server/discover.\n2. Validate MCP-Protocol-Version, Mcp-Method, and Mcp-Name.\n3. Emit confirmed telemetry and add _agentFeedback to product-tool results.\n4. Register report_product_feedback and submit a structured product report.`,
-      verify: "Verify discovery, stateless headers, cache hints, a product tool call, and one feedback-report tool call.",
+      install: protocolDownload,
+      code: `1. Implement stateless MCP 2026-07-28 and server/discover.\n2. Authenticate and authorize the tenant before forwarding /mcp; derive customerRef only from that verified identity.\n3. Validate MCP-Protocol-Version, Mcp-Method, and Mcp-Name.\n4. Emit confirmed telemetry and add _agentFeedback to selected product-tool results.\n5. Register record_product_feedback_consent and report_product_feedback with strict schemas.\n6. From consent_required allow only the consent tool; from feedback_ready allow only the report tool.`,
+      verify: "Verify authentication, discovery, stateless headers, one product tool call, one explicit consent decision when requested, and one allowed feedback report.",
     },
     "node-express": {
       name: "Node · Express",
       install: nodeInstall,
-      code: `import { agentFeedback } from "@agent-feedback/node/express";\n\napp.use(agentFeedback({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  include: ["${route}"],\n  customerRef: req => req.user?.accountId,\n}));`,
-      advanced: `sessionRef: req => req.agentSessionId // optional journey grouping`,
+      code: `import { agentFeedback } from "@agent-feedback/node/express";\n\n// Product authentication must establish the verified tenant first.\napp.use(productAuthentication);\napp.use(agentFeedback({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  include: ["${route}"],\n  customerRef: req => req.user?.accountId,\n}));`,
+      advanced: `sessionRef: req => req.agentSession?.id // optional proven journey grouping`,
       verify: `npx agent-feedback-doctor https://your-product.example${route.replaceAll("*", "test")}`,
     },
     "node-fastify": {
       name: "Node · Fastify",
       install: nodeInstall,
-      code: `import { agentFeedback } from "@agent-feedback/node/fastify";\n\nawait app.register(agentFeedback({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  include: ["${route}"],\n  customerRef: req => req.user?.accountId,\n}));`,
-      advanced: `sessionRef: req => req.agentSessionId // optional journey grouping`,
+      code: `import { agentFeedback } from "@agent-feedback/node/fastify";\n\n// Verify the caller and authorize its tenant before Epode reads req.user.\napp.addHook("preHandler", productAuthentication);\nawait app.register(agentFeedback({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  include: ["${route}"],\n  customerRef: req => req.user?.accountId,\n}));`,
+      advanced: `sessionRef: req => req.agentSession?.id // optional proven journey grouping`,
       verify: `npx agent-feedback-doctor https://your-product.example${route.replaceAll("*", "test")}`,
     },
     "python-asgi": {
       name: "Python · ASGI",
-      install: `pip install ${artifacts}/agent_feedback-0.2.1-py3-none-any.whl`,
-      code: `from agent_feedback import AgentFeedbackASGI\n\napp = AgentFeedbackASGI(\n    app,\n    api_key=os.environ["AGENT_FEEDBACK_KEY"],\n    include=("${route}",),\n    customer_ref=lambda scope: scope.get("account_id"),\n)`,
-      advanced: `session_ref=lambda scope: scope.get("agent_session_id") # optional journey grouping`,
+      install: `${pythonDownload} &&\npip install "$epode_artifact"`,
+      code: `from agent_feedback import AgentFeedbackASGI\n\napp = AgentFeedbackASGI(\n    app,\n    api_key=os.environ["AGENT_FEEDBACK_KEY"],\n    include=("${route}",),\n    customer_ref=lambda scope: scope.get("state", {}).get("account_id"),\n)\n# Authentication is the outer wrapper and populates scope["state"] first.\napp = ProductAuthenticationASGI(app)`,
+      advanced: `session_ref=lambda scope: scope.get("state", {}).get("agent_session_id") # optional proven journey`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },
     "python-wsgi": {
       name: "Python · WSGI",
-      install: `pip install ${artifacts}/agent_feedback-0.2.1-py3-none-any.whl`,
-      code: `from agent_feedback import AgentFeedbackWSGI\n\napp.wsgi_app = AgentFeedbackWSGI(\n    app.wsgi_app,\n    api_key=os.environ["AGENT_FEEDBACK_KEY"],\n    include=("${route}",),\n    customer_ref=lambda environ: environ.get("account_id"),\n)`,
-      advanced: `session_ref=lambda environ: environ.get("agent_session_id") # optional journey grouping`,
+      install: `${pythonDownload} &&\npip install "$epode_artifact"`,
+      code: `from agent_feedback import AgentFeedbackWSGI\n\napp.wsgi_app = AgentFeedbackWSGI(\n    app.wsgi_app,\n    api_key=os.environ["AGENT_FEEDBACK_KEY"],\n    include=("${route}",),\n    customer_ref=lambda environ: environ.get("product.account_id"),\n)\n# Authentication is the outer wrapper and populates the verified identity first.\napp.wsgi_app = ProductAuthenticationWSGI(app.wsgi_app)`,
+      advanced: `session_ref=lambda environ: environ.get("product.agent_session_id") # optional proven journey`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },
     go: {
       name: "Go · net/http",
-      install: `go get github.com/open-software-network/os-epode/sdk/go@v0.2.1`,
-      code: `feedback, err := agentfeedback.New(agentfeedback.Options{\n    APIKey: os.Getenv("AGENT_FEEDBACK_KEY"),\n    Include: []string{"${route}"},\n    CustomerRef: func(r *http.Request) string { return accountID(r.Context()) },\n})\nif err != nil { log.Fatal(err) }\ndefer feedback.Shutdown(context.Background())\n\nhandler := feedback.Middleware(router)`,
+      install: `${goDownload} &&\nmkdir -p .epode/agent-feedback-go-0.2.2 &&\ntar -xzf "$epode_artifact" -C .epode/agent-feedback-go-0.2.2 &&\ngo mod edit -replace=github.com/open-software-network/os-epode/sdk/go=./.epode/agent-feedback-go-0.2.2 &&\ngo mod edit -require=github.com/open-software-network/os-epode/sdk/go@v0.2.2`,
+      code: `feedback, err := agentfeedback.New(agentfeedback.Options{\n    APIKey: os.Getenv("AGENT_FEEDBACK_KEY"),\n    Include: []string{"${route}"},\n    CustomerRef: func(r *http.Request) string { return authenticatedAccountID(r.Context()) },\n})\nif err != nil { log.Fatal(err) }\ndefer feedback.Shutdown(context.Background())\n\n// The outer authentication middleware populates the verified context first.\nhandler := productAuthentication(feedback.Middleware(router))`,
       advanced: `SessionRef: func(r *http.Request) string { return agentSessionID(r.Context()) }`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },
     rust: {
       name: "Rust · Axum/Tower",
-      install: `mkdir -p vendor/agent-feedback-rust\ncurl -fsSL ${artifacts}/agent-feedback-rust-0.2.1.tar.gz | tar -xz -C vendor/agent-feedback-rust`,
-      code: `// Cargo.toml: agent-feedback = { path = "vendor/agent-feedback-rust" }\nlet feedback = AgentFeedbackLayer::new(\n    Options::new(std::env::var("AGENT_FEEDBACK_KEY")?)\n        .include(["${route}"])\n        .customer_ref(|request| authenticated_account_id(request)),\n)?;\n\nlet app = router.layer(feedback);`,
+      install: `${rustDownload} &&\nmkdir -p vendor/agent-feedback-rust-0.2.2 &&\ntar -xzf "$epode_artifact" -C vendor/agent-feedback-rust-0.2.2`,
+      code: `// Cargo.toml: agent-feedback = { path = "vendor/agent-feedback-rust-0.2.2" }\nlet feedback = AgentFeedbackLayer::new(\n    Options::new(std::env::var("AGENT_FEEDBACK_KEY")?)\n        .include(["${route}"])\n        .customer_ref(|request| authenticated_account_id(request)),\n)?;\n\n// Tower executes the last layer first, so authentication establishes extensions first.\nlet app = router.layer(feedback).layer(product_auth_layer());`,
       advanced: `.session_ref(|request| agent_session_id(request)) // optional journey grouping`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },
@@ -653,6 +634,7 @@ export default {
     // Bind this Worker only to dedicated public docs routes at the edge.
     proxy ??= createStaticDocsProxy({
       apiKey: env.AGENT_FEEDBACK_KEY,
+      feedbackMode: env.AGENT_FEEDBACK_MODE,
       upstreamOrigin: "https://your-docs-origin.example",
       include: ["/docs", "/docs/**"],
     });
@@ -663,7 +645,7 @@ export default {
     },
     "manual-http": {
       name: "Language-neutral HTTP protocol",
-      install: `curl -O ${artifacts}/agent-feedback-protocol-v1.zip`,
+      install: protocolDownload,
       code: `GET ${location.origin}/.well-known/agent-feedback-v1.json\n\n1. Derive an opaque consent subject from your product key and authenticated customer ID.\n2. Resolve Ask once state through /api/v2/consent/state.\n3. Unknown: emit the answer-first decision action.\n4. Approved: emit the report contract. Declined: emit neither.\n5. Queue opportunity telemetry without failing the product response.`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")} and inspect _agentFeedback or the Agent-Feedback header.`,
     },
@@ -680,9 +662,9 @@ function setupConnectionStatus(apiKeyId) {
 
 function setupAgentPrompt(integration) {
   const surface = setupSurfaceCopy[setupSurface];
-  const identityRequirement = setupSurface === "static" ? "- Do not invent customerRef for public documentation. Add it only from verified edge authentication." : "- Keep customerRef wired to a stable opaque account ID. Epode needs it to remember Ask once approval or refusal; never use a name or email.";
-  const routeBoundaryRequirement = setupSurface === "static" ? "- Bind the Worker only to dedicated public docs routes at the edge, never a hostname-wide catch-all. Treat include as a second fail-closed boundary." : "- For HTTP or HTML, change include routes in code to only the product surfaces used by customer agents.";
-  return `Add Agent Feedback to this repository.\n\nProduct surface: ${surface.name}\nIntegration: ${integration.name}\n\nRequirements:\n- Use AGENT_FEEDBACK_KEY from the server environment. It is already configured; never print or expose it.\n- Install the official package with: ${integration.install}\n- Configure the integration once using this reference:\n\n${integration.code}\n\n${routeBoundaryRequirement}\n${identityRequirement}\n- Do not put the product key in browser JavaScript.\n- Do not change existing response shapes, error handling, streams, or binary responses.\n- Verify unknown, approved, and declined consent states when AGENT_FEEDBACK_MODE=ask_once.\n- Start the product and make one real request or MCP tool call so the connection can be verified.\n\nProtocol: ${location.origin}/.well-known/agent-feedback-v1.json`;
+  const identityRequirement = setupSurface === "static" ? "- Do not invent customerRef for public documentation. Add it only if verified edge authentication supplies a stable opaque account ID." : "- Run product authentication and authorized tenant selection before Agent Feedback. customerRef is a synchronous accessor over that verified identity, not an authentication hook. Use a stable opaque account or tenant ID, never a name, email, or caller-supplied unverified value. It is required for durable Ask once.";
+  const routeBoundaryRequirement = setupSurface === "static" ? "- Bind the Worker only to dedicated public docs routes at the edge, never a hostname-wide catch-all. Treat include as a second fail-closed boundary." : setupSurface === "mcp" ? "- Set includeTools to only customer-facing product tools whose use should appear in Epode." : "- Replace the example include route and limit instrumentation to routes used by customer agents.";
+  return `Add Agent Feedback to this repository.\n\nProduct surface: ${surface.name}\nIntegration: ${integration.name}\n\nRequirements:\n- Use AGENT_FEEDBACK_KEY from the server environment. It is already configured; never print or expose it.\n- Before installing hosted bytes, read integrityManifest from ${location.origin}/.well-known/agent-feedback-v1.json and verify the selected artifact's filename and SHA-256. Stop on any mismatch.\n- Install the official package with: ${integration.install}\n- Configure the integration once using this reference:\n\n${integration.code}\n\n${routeBoundaryRequirement}\n${identityRequirement}\n- Add sessionRef only when your product already has proof that interactions belong to one journey; never infer continuity.\n- Do not put the product key in browser JavaScript.\n- Preserve response shapes, errors, streams, and binary responses.\n- Run the integration doctor against one real company-authenticated request and prove only the first opportunity.\n- Never approve or decline feedback permission for a tester, fabricate customer feedback, or create a synthetic report. Ask modes require the real tester's explicit decision.\n- Finish by printing a copyable customer-agent activation task for a real tester. That separate task should use the product normally and follow the returned feedback action.\n\nProtocol: ${location.origin}/.well-known/agent-feedback-v1.json`;
 }
 
 function readKeyClientSnippets() {
@@ -725,7 +707,7 @@ function setupView() {
   const legacyKey = isLegacyKeyPrefix(setupKey?.prefix);
   const createKeyButton = setupKey ? `<button class="button" data-revoke-key="${esc(setupKey.id)}">Create new key</button>` : "";
   const legacyWarning = legacyKey ? `<div class="secret-callout warning"><div><b>This is a legacy key and cannot produce valid afr2 capabilities</b><code>${esc(setupKey.prefix)}…</code><small>V2 integrations will fail boot validation. Create a new key, then update the <code>AGENT_FEEDBACK_KEY</code> server environment variable.</small></div>${createKeyButton}</div>` : "";
-  const secret = apiSecret ? `<div class="secret-callout"><div><b>Save this server-side key now</b><code>${esc(apiSecret)}</code><small>It was created automatically for this product. Customer agents never receive it.</small></div><button class="button" data-copy="${esc(apiSecret)}">Copy key</button>${legacyKey ? "" : createKeyButton}</div>` : `<div class="secret-callout"><div><b>Server-side key ready</b><code>${setupKey ? `${esc(setupKey.prefix)}…` : "Preparing…"}</code><small>Use the value already saved in your server configuration. If it is unavailable, create a new key.</small></div>${legacyKey ? "" : createKeyButton}</div>`;
+  const secret = apiSecret ? `<div class="secret-callout"><div><b>Save this server-side key now</b><code>${esc(apiSecret)}</code><small>It stays only in page memory and disappears on reload. Move it directly to trusted server configuration; customer agents never receive it.</small></div><button class="button" data-copy="${esc(apiSecret)}">Copy key</button>${legacyKey ? "" : createKeyButton}</div>` : `<div class="secret-callout"><div><b>Full server-side key is hidden</b><code>${setupKey ? `${esc(setupKey.prefix)}…` : "Preparing…"}</code><small>Epode does not save full keys in browser storage. Use the value already in trusted server configuration, or create a new key and replace the lost value.</small></div>${legacyKey ? "" : createKeyButton}</div>`;
   const agentPrompt = setupAgentPrompt(integration);
   const installMode = `<div class="install-methods"><button data-install-mode="agent" aria-pressed="${setupInstallMode === "agent"}">Use a coding agent</button><button data-install-mode="manual" aria-pressed="${setupInstallMode === "manual"}">Manual setup</button></div>`;
   const agentInstall = `<div class="install-panel"><p>Copy this prompt into the coding agent that has access to your product repository. It receives the exact integration and verification requirements, but never the product key.</p><div class="copy-block"><pre><code>${esc(agentPrompt)}</code></pre><button class="button primary" data-copy="${esc(agentPrompt)}">Copy setup prompt</button></div></div>`;
@@ -744,7 +726,8 @@ function setupView() {
     return `<div class="connection-row"><span><strong>${esc(key.label)} <i class="key-kind ${esc(keyKind(key))}">${esc(keyKind(key))}</i></strong><small>${esc(key.prefix)}… · created ${date(key.createdAt)}</small><small>expires ${key.expiresAt ? date(key.expiresAt) : "never"} · ${key.lastUsedAt ? `last used ${date(key.lastUsedAt)}` : "never used"}</small></span><b class="${keyStatus.interactions.length ? "positive" : "neutral"}">${esc(state)}</b><button class="link-button" data-revoke-key="${esc(key.id)}">Rotate key</button></div>`;
   }).join("") || `<p class="muted">No integrations yet.</p>`;
   const readKeys = dashboard.apiKeys.filter((key) => keyKind(key) === "read");
-  const readSecretCallout = readSecret ? `<div class="secret-callout"><div><b>Save this read key now</b><code>${esc(readSecret)}</code><small>It is shown once. Keep it in your MCP client environment as <code>AGENT_FEEDBACK_READ_KEY</code>. It can read this product's feedback but never write.</small></div><button class="button" data-copy="${esc(readSecret)}">Copy key</button></div>` : "";
+  const visibleReadKey = dashboard.apiKeys.find((key) => key.id === readKeyId && keyKind(key) === "read") || readKeys[0];
+  const readSecretCallout = readSecret ? `<div class="secret-callout"><div><b>Save this read key now</b><code>${esc(readSecret)}</code><small>It stays only in page memory and disappears on reload. Keep it in your MCP client environment as <code>AGENT_FEEDBACK_READ_KEY</code>. It can read this product's feedback but never write.</small></div><button class="button" data-copy="${esc(readSecret)}">Copy key</button></div>` : visibleReadKey ? `<div class="secret-callout"><div><b>Full read key is hidden</b><code>${esc(visibleReadKey.prefix)}…</code><small>Epode does not save full keys in browser storage. If it is not already in your MCP client, rotate this read key below and save the replacement during this page load.</small></div></div>` : "";
   const clientSnippets = readKeyClientSnippets();
   const activeClient = clientSnippets[readSnippetClient] ? readSnippetClient : "claude-code";
   const clientTabs = `<div class="install-methods">${Object.entries(clientSnippets).map(([id, client]) => `<button data-read-client="${esc(id)}" aria-pressed="${activeClient === id}">${esc(client.name)}</button>`).join("")}</div>`;
@@ -782,7 +765,7 @@ function teamView() {
 
 function policyView() {
   const settings = dashboard.currentEnvironment;
-  return `${header("COLLECTION POLICY", "Data controls", dashboard.currentProduct.name)}<p class="page-context">These controls decide which machine-readable action a customer agent receives. Product traffic stays available if Epode is unavailable.</p><form id="policy-form" class="policy"><section><div><p class="eyebrow">FEEDBACK</p><h2>Feedback collection</h2><p>Choose how customer agents submit structured feedback after using your product.</p></div><label><span>Feedback mode</span><select name="feedbackMode"><option value="never_ask" ${settings.feedbackMode === "never_ask" ? "selected" : ""}>Never ask — submit autonomously</option><option value="ask_once" ${settings.feedbackMode === "ask_once" ? "selected" : ""}>Ask once — Epode remembers the answer</option><option value="ask_always" ${settings.feedbackMode === "ask_always" ? "selected" : ""}>Ask every time — request permission for each report</option><option value="off" ${settings.feedbackMode === "off" ? "selected" : ""}>Off — do not request feedback</option></select><small>Ask once lets the agent answer first, then returns only the permission action. Epode stores the decision under an HMAC-derived subject. Your opaque customerRef is stored separately with interaction telemetry for dashboard grouping and is never shown to the agent. A report action appears only after approval. Silence or ambiguity never becomes approval. Generic HTTP agents may still ignore a stored decision; MCP and trusted adapters are higher confidence.</small></label></section><input type="hidden" name="collectEventSummaries" value="off"><section class="guardrails"><div><p class="eyebrow">PRIVACY</p><h2>Outside the feedback protocol</h2><p>Integrations must never submit these values. Epode rejects unknown fields and common secret patterns, but your product remains responsible for keeping personal or customer content out of summaries.</p></div><ul><li>Prompts and transcripts</li><li>Secrets and authentication payloads</li><li>Personal data and raw customer content</li><li>Raw tool inputs or outputs</li><li>Unknown report fields</li></ul></section><div class="form-footer"><span>Current mode: <b>${esc(feedbackModeLabel(settings.feedbackMode))}</b></span><button class="button primary">Save changes</button></div></form>`;
+  return `${header("COLLECTION POLICY", "Data controls", dashboard.currentProduct.name)}<p class="page-context">These controls decide which machine-readable action a customer agent receives and how long product data stays available. Product traffic stays available if Epode is unavailable.</p><form id="policy-form" class="policy"><section><div><p class="eyebrow">FEEDBACK</p><h2>Feedback collection</h2><p>Choose how customer agents submit structured feedback after using your product.</p></div><label><span>Feedback mode</span><select name="feedbackMode"><option value="never_ask" ${settings.feedbackMode === "never_ask" ? "selected" : ""}>Never ask — submit autonomously</option><option value="ask_once" ${settings.feedbackMode === "ask_once" ? "selected" : ""}>Ask once — Epode remembers the answer</option><option value="ask_always" ${settings.feedbackMode === "ask_always" ? "selected" : ""}>Ask every time — request permission for each report</option><option value="off" ${settings.feedbackMode === "off" ? "selected" : ""}>Off — do not request feedback</option></select><small>Ask once lets the agent answer first, then returns only the permission action. Epode stores the decision under an HMAC-derived subject. Your opaque customerRef is stored separately with interaction telemetry for dashboard grouping and is never shown to the agent. A report action appears only after approval. Silence or ambiguity never becomes approval. Generic HTTP agents may still ignore a stored decision; MCP and trusted adapters are higher confidence.</small></label></section><input type="hidden" name="collectEventSummaries" value="off"><section><div><p class="eyebrow">RETENTION</p><h2>Data retention</h2><p>Choose a common period or enter any whole number from 1 to 365 days.</p></div><label><span>Retention days</span><input name="retentionDays" type="number" min="1" max="365" step="1" list="retention-day-presets" value="${esc(settings.retentionDays)}" required><datalist id="retention-day-presets"><option value="7"></option><option value="30"></option><option value="90"></option><option value="180"></option><option value="365"></option></datalist><small>Dashboard filtering changes immediately. Feedback reports, interactions, and sessions outside this window stop appearing right away; physical deletion may take up to the scheduled purge interval. Expired feedback, interactions, and sessions are then permanently removed. Durable Ask-once permission is separate and survives retention until it is explicitly changed or the product is deleted.</small></label></section><section class="guardrails"><div><p class="eyebrow">PRIVACY</p><h2>Outside the feedback protocol</h2><p>Integrations must never submit these values. Epode rejects unknown fields and common secret patterns, but your product remains responsible for keeping personal or customer content out of summaries.</p></div><ul><li>Prompts and transcripts</li><li>Secrets and authentication payloads</li><li>Personal data and raw customer content</li><li>Raw tool inputs or outputs</li><li>Unknown report fields</li></ul></section><div class="form-footer"><span>Current mode: <b>${esc(feedbackModeLabel(settings.feedbackMode))}</b> · ${esc(settings.retentionDays)} days</span><button class="button primary">Save changes</button></div></form>`;
 }
 
 function render() {
@@ -955,11 +938,9 @@ document.addEventListener("click", async (event) => {
         if (kind === "read") {
           readSecret = body.secret;
           readKeyId = body.apiKey.id;
-          rememberSetupSecret(dashboard.currentEnvironment.id, body.secret, "read");
         } else {
           apiSecret = body.secret;
           setupConnectionId = body.apiKey.id;
-          rememberSetupSecret(dashboard.currentEnvironment.id, body.secret);
         }
         await refresh();
         setNotice(kind === "read" ? "Read key rotated. Update AGENT_FEEDBACK_READ_KEY within one hour." : "Product key rotated. Deploy the new server-side key within one hour.", 6000);
@@ -1108,14 +1089,17 @@ document.addEventListener("submit", async (event) => {
       selectedProductId = body.product.id;
       apiSecret = body.secret || "";
       setupConnectionId = body.apiKey?.id || null;
-      rememberSetupSecret(body.environment.id, body.secret);
       currentView = "setup";
       await refresh();
       navigate("setup");
       setNotice(`${body.product.name} created. Choose its first integration.`, 4500);
     }
     if (event.target.id === "policy-form") {
-      await request("/api/settings/policy", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ environmentId: dashboard.currentEnvironment.id, feedbackMode: form.get("feedbackMode"), collectEventSummaries: false, retentionDays: dashboard.currentEnvironment.retentionDays }) });
+      const retentionDays = Number(form.get("retentionDays"));
+      if (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 365) {
+        throw new Error("Retention must be a whole number from 1 to 365 days.");
+      }
+      await request("/api/settings/policy", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ environmentId: dashboard.currentEnvironment.id, feedbackMode: form.get("feedbackMode"), collectEventSummaries: false, retentionDays }) });
       await refresh();
       setNotice("Policy enforced. Update AGENT_FEEDBACK_MODE in deployed integrations so their instructions stay in sync.", 6000);
     }
@@ -1126,7 +1110,6 @@ document.addEventListener("submit", async (event) => {
       const body = await request("/api/settings/api-keys", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
       readSecret = body.secret;
       readKeyId = body.apiKey.id;
-      rememberSetupSecret(dashboard.currentEnvironment.id, body.secret, "read");
       await refresh();
       setNotice("Read key created. Save it now — it is shown once.");
     }

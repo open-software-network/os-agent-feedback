@@ -11,6 +11,16 @@ case "$artifact_dir" in
   /*) ;;
   *) artifact_dir="$repo_root/$artifact_dir" ;;
 esac
+artifact_parent="$(dirname "$artifact_dir")"
+mkdir -p "$artifact_parent"
+artifact_dir="$(cd "$artifact_parent" && pwd -P)/$(basename "$artifact_dir")"
+case "$artifact_dir" in
+  "$repo_root/.artifacts/"*) ;;
+  *)
+    echo "SDK_ARTIFACT_DIR must be a dedicated child of $repo_root/.artifacts" >&2
+    exit 64
+    ;;
+esac
 source_date_epoch="${SOURCE_DATE_EPOCH:-$(git -C "$repo_root" log -1 --format=%ct)}"
 if [[ -n "${PYTHON_BIN:-}" ]]; then
   python_bin="$PYTHON_BIN"
@@ -99,17 +109,41 @@ cleanup_paths+=("$python_consumer")
 # A deterministic source archive is still produced for release inspection, and
 # the extracted module is compiled by an otherwise-empty consumer module.
 go_tarball="$artifact_dir/go/agent-feedback-go-$version.tar.gz"
-git -C "$repo_root" archive --format=tar --prefix="agent-feedback-go-$version/" HEAD:sdk/go | gzip -n > "$go_tarball"
+go_stage="$(mktemp -d "${TMPDIR:-/tmp}/agent-feedback-go-stage.XXXXXX")"
+cleanup_paths+=("$go_stage")
+mkdir -p "$go_stage/agent-feedback-go-$version"
+cp \
+  "$repo_root/sdk/go/go.mod" \
+  "$repo_root/sdk/go/agent.go" \
+  "$repo_root/sdk/go/agentfeedback.go" \
+  "$repo_root/sdk/go/README.md" \
+  "$go_stage/agent-feedback-go-$version/"
+chmod 0644 "$go_stage/agent-feedback-go-$version/"*
+TZ=UTC touch -t 202001010000 "$go_stage/agent-feedback-go-$version/"*
+COPYFILE_DISABLE=1 tar \
+  --format ustar \
+  --uid 0 --gid 0 --uname root --gname root \
+  -cf - -C "$go_stage/agent-feedback-go-$version" \
+  go.mod agent.go agentfeedback.go README.md \
+  | gzip -n > "$go_tarball"
 go_extract="$(mktemp -d "${TMPDIR:-/tmp}/agent-feedback-go-package.XXXXXX")"
 cleanup_paths+=("$go_extract")
 tar -xzf "$go_tarball" -C "$go_extract"
+grep -Fq "agent-feedback-go/$version" "$go_extract/agentfeedback.go" || {
+  echo "Go release candidate user-agent does not match v$version" >&2
+  exit 1
+}
+grep -Fq "agent-feedback-go-agent/$version" "$go_extract/agent.go" || {
+  echo "Go agent release candidate user-agent does not match v$version" >&2
+  exit 1
+}
 go_consumer="$(mktemp -d "${TMPDIR:-/tmp}/agent-feedback-go.XXXXXX")"
 cleanup_paths+=("$go_consumer")
 (
   cd "$go_consumer"
   go mod init example.com/agent-feedback-smoke >/dev/null
   go mod edit -require="github.com/open-software-network/os-epode/sdk/go@v$version"
-  go mod edit -replace="github.com/open-software-network/os-epode/sdk/go=$go_extract/agent-feedback-go-$version"
+  go mod edit -replace="github.com/open-software-network/os-epode/sdk/go=$go_extract"
   printf '%s\n' 'package main' 'import agentfeedback "github.com/open-software-network/os-epode/sdk/go"' 'func main() { _ = agentfeedback.Options{} }' > main.go
   go mod tidy
   go build ./...

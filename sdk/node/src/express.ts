@@ -20,6 +20,11 @@ type Instrumentation = {
   prepared: PreparedInteraction;
   surface: ProductSurface;
   operation: string;
+  context: {
+    customerRef?: string;
+    sessionRef?: string;
+    runtimeHint?: string;
+  };
 };
 
 export type AgentFeedbackExpress = RequestHandler & {
@@ -37,17 +42,56 @@ function appendLink(response: Response, value: string): void {
   response.append("Link", value);
 }
 
+function isCompleteSuccess(response: Response): boolean {
+  return (
+    response.statusCode >= 200 &&
+    response.statusCode < 300 &&
+    response.statusCode !== 204 &&
+    response.statusCode !== 205 &&
+    response.statusCode !== 206 &&
+    response.getHeader("content-range") === undefined
+  );
+}
+
+function stripBodyValidators(response: Response): void {
+  for (const name of [
+    "etag",
+    "content-md5",
+    "digest",
+    "content-digest",
+    "repr-digest",
+    "content-range",
+    "accept-ranges",
+  ]) {
+    response.removeHeader(name);
+  }
+}
+
+const CDN_CACHE_CONTROL_HEADERS = [
+  "cdn-cache-control",
+  "cloudflare-cdn-cache-control",
+  "surrogate-control",
+] as const;
+
+function cacheControlValues(response: Response): string[] {
+  return ["cache-control", ...CDN_CACHE_CONTROL_HEADERS]
+    .map((name) => response.getHeader(name))
+    .filter((value) => value !== undefined)
+    .map(String);
+}
+
+function makeResponsePrivate(response: Response): void {
+  for (const name of CDN_CACHE_CONTROL_HEADERS) response.removeHeader(name);
+  response.setHeader("Cache-Control", "private, no-store");
+}
+
 export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeedbackExpress {
   const runtime = new AgentFeedbackRuntime(options);
 
   const middleware = ((request: InstrumentedRequest, response: Response, next: NextFunction) => {
     const started = performance.now();
-    const requestContext = runtime.context(request);
     const matched = runtime.matches(request.originalUrl || request.url);
     if (matched && runtime.cacheMode === "request") ensureRequestVary(response);
-    const consentState = matched
-      ? runtime.cachedConsent(requestContext.customerRef)
-      : "unavailable";
     let instrumentation: Instrumentation | undefined;
     let instrumentationSkipped = false;
     let recorded = false;
@@ -65,8 +109,7 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
         runtime.cacheMode !== "request" ||
         requestOptedIn() ||
         (request.method !== "GET" && request.method !== "HEAD") ||
-        response.statusCode < 200 ||
-        response.statusCode >= 300
+        !isCompleteSuccess(response)
       ) {
         return;
       }
@@ -85,8 +128,7 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
 
     const attach = (surface: ProductSurface, body?: unknown): Instrumentation | undefined => {
       if (
-        response.statusCode < 200 ||
-        response.statusCode >= 300 ||
+        !isCompleteSuccess(response) ||
         (request.method === "HEAD" && surface !== "http_headers") ||
         !runtime.matches(request.originalUrl || request.url)
       ) {
@@ -100,20 +142,25 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
           statusCode: response.statusCode,
           body,
           requestOptIn: requestOptedIn(),
-          cacheControl: String(response.getHeader("cache-control") || ""),
+          cacheControls: cacheControlValues(response),
         })
       ) {
         return undefined;
       }
+      // Resolve identity only when the downstream handler has produced the
+      // response. This lets authentication middleware mounted after Epode add
+      // verified request context before Ask once chooses its consent subject.
+      const context = runtime.context(request);
       instrumentation = {
         prepared: runtime.prepare({
-          customerRef: requestContext.customerRef,
-          consentState,
+          customerRef: context.customerRef,
+          consentState: runtime.cachedConsent(context.customerRef),
         }),
         surface,
         operation: request[operationOverride] || normalizeOperation(routePath()),
+        context,
       };
-      response.setHeader("Cache-Control", "private, no-store");
+      makeResponsePrivate(response);
       return instrumentation;
     };
 
@@ -145,6 +192,7 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
           return originalJson(body);
         }
         const current = attach("http_json", body);
+        if (current?.prepared.envelope) stripBodyValidators(response);
         return originalJson(
           current?.prepared.envelope
             ? { ...body, _agentFeedback: current.prepared.envelope }
@@ -176,6 +224,7 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
           attachHeaders(current);
           return originalSend(body);
         }
+        stripBodyValidators(response);
         return originalSend(injectHtml(body, current.prepared.envelope));
       }
       if (
@@ -191,7 +240,7 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
     }) as Response["send"];
 
     response.once("finish", () => {
-      if (!instrumentation || recorded || response.statusCode < 200 || response.statusCode >= 300) {
+      if (!instrumentation || recorded || !isCompleteSuccess(response)) {
         return;
       }
       recorded = true;
@@ -200,14 +249,14 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
         operation: instrumentation.operation,
         statusCode: response.statusCode,
         durationMs: Math.max(0, Math.round(performance.now() - started)),
-        customerRef: requestContext.customerRef,
+        customerRef: instrumentation.context.customerRef,
         classification: "unclassified",
-        runtimeHint: requestContext.runtimeHint,
-        runtimeHintSource: requestContext.runtimeHint ? "http" : undefined,
-        sessionRef: requestContext.sessionRef,
-        sessionSource: requestContext.sessionRef ? "customer" : undefined,
+        runtimeHint: instrumentation.context.runtimeHint,
+        runtimeHintSource: instrumentation.context.runtimeHint ? "http" : undefined,
+        sessionRef: instrumentation.context.sessionRef,
+        sessionSource: instrumentation.context.sessionRef ? "customer" : undefined,
       });
-      runtime.warmConsent(requestContext.customerRef);
+      runtime.warmConsent(instrumentation.context.customerRef);
     });
 
     next();

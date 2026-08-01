@@ -59,15 +59,18 @@ const (
 )
 
 type Options struct {
-	APIKey        string
-	Endpoint      string
-	Include       []string
-	Exclude       []string
-	FeedbackMode  FeedbackMode
-	CacheMode     HTTPCacheMode
-	CustomerRef   func(*http.Request) string
-	SessionRef    func(*http.Request) string
-	RuntimeHint   func(*http.Request) string
+	APIKey       string
+	Endpoint     string
+	Include      []string
+	Exclude      []string
+	FeedbackMode FeedbackMode
+	CacheMode    HTTPCacheMode
+	CustomerRef  func(*http.Request) string
+	SessionRef   func(*http.Request) string
+	RuntimeHint  func(*http.Request) string
+	// Operation may return a product-owned normalized route template. When it
+	// is unset, Go 1.22+ ServeMux Request.Pattern is preferred over the raw path.
+	Operation     func(*http.Request) string
 	FlushInterval time.Duration
 	MaxQueueSize  int
 	// MaxResponseBodyBytes bounds middleware buffering. Larger responses are
@@ -176,6 +179,7 @@ type claims struct {
 	EXP int64  `json:"exp"`
 	N   string `json:"n"`
 	S   string `json:"s,omitempty"`
+	R   *int64 `json:"r,omitempty"`
 }
 
 func SignCapability(apiKey string, value any) (string, error) {
@@ -225,6 +229,7 @@ type Runtime struct {
 
 type cachedConsent struct {
 	state     string
+	revision  int64
 	expiresAt time.Time
 }
 
@@ -299,7 +304,7 @@ func (r *Runtime) warnMissingCustomerRef() {
 		if logger == nil {
 			logger = log.Default()
 		}
-		logger.Printf("[agent-feedback] Ask once needs CustomerRef to remember a decision across interactions. This request will use a safe per-interaction permission question.")
+		logger.Printf("[agent-feedback] Ask once could not resolve CustomerRef for an eligible response. Authentication and authorized tenant selection must run before Agent Feedback. This response is using per-interaction permission and will not remember the choice. Run the integration doctor with a real authenticated request.")
 	})
 }
 
@@ -398,18 +403,26 @@ func (r *Runtime) cachedConsent(customerRef string) string {
 }
 
 func (r *Runtime) cachedConsentSubject(subject string) string {
+	cached, ok := r.cachedConsentSnapshot(subject)
+	if !ok {
+		return ""
+	}
+	return cached.state
+}
+
+func (r *Runtime) cachedConsentSnapshot(subject string) (cachedConsent, bool) {
 	now := time.Now()
 	r.consentMu.Lock()
 	defer r.consentMu.Unlock()
 	cached, ok := r.consentCache[subject]
 	if !ok {
-		return ""
+		return cachedConsent{}, false
 	}
 	if !cached.expiresAt.After(now) {
 		delete(r.consentCache, subject)
-		return ""
+		return cachedConsent{}, false
 	}
-	return cached.state
+	return cached, true
 }
 
 // warmConsent refreshes Ask-once state in the background after a response has
@@ -457,7 +470,7 @@ func (r *Runtime) lookupConsentSubject(subject string) string {
 	}
 	request.Header.Set("Authorization", "Bearer "+r.options.APIKey)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", "agent-feedback-go/0.2.1")
+	request.Header.Set("User-Agent", "agent-feedback-go/0.2.2")
 	response, err := r.options.HTTPClient.Do(request)
 	if err != nil {
 		return "unavailable"
@@ -467,7 +480,8 @@ func (r *Runtime) lookupConsentSubject(subject string) string {
 		return "unavailable"
 	}
 	var result struct {
-		State string `json:"state"`
+		State    string `json:"state"`
+		Revision int64  `json:"revision"`
 	}
 	if json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&result) != nil {
 		return "unavailable"
@@ -475,9 +489,12 @@ func (r *Runtime) lookupConsentSubject(subject string) string {
 	if result.State != "unknown" && result.State != "approved" && result.State != "declined" {
 		return "unavailable"
 	}
+	if result.Revision < 0 || (result.State == "unknown" && result.Revision != 0) || (result.State != "unknown" && result.Revision == 0) {
+		return "unavailable"
+	}
 	if result.State != "unknown" {
 		r.consentMu.Lock()
-		r.consentCache[subject] = cachedConsent{state: result.State, expiresAt: time.Now().Add(r.options.ConsentCacheTTL)}
+		r.consentCache[subject] = cachedConsent{state: result.State, revision: result.Revision, expiresAt: time.Now().Add(r.options.ConsentCacheTTL)}
 		r.consentMu.Unlock()
 	}
 	return result.State
@@ -507,6 +524,14 @@ func (r *Runtime) prepare(now time.Time, consent ...string) (preparedInteraction
 	if mode == FeedbackAskOnce && customerRef != "" {
 		subject, _ = r.consentSubject(customerRef)
 	}
+	var subjectRevision *int64
+	if subject != "" {
+		revision := int64(0)
+		if cached, ok := r.cachedConsentSnapshot(subject); ok {
+			revision = cached.revision
+		}
+		subjectRevision = &revision
+	}
 	effectiveConsentMode := mode
 	if mode == FeedbackAskOnce && subject == "" {
 		effectiveConsentMode = FeedbackAskAlways
@@ -515,6 +540,7 @@ func (r *Runtime) prepare(now time.Time, consent ...string) (preparedInteraction
 		V: 1, I: interactionID, IAT: issued, EXP: expires,
 		N: base64.RawURLEncoding.EncodeToString(nonce),
 		S: subject,
+		R: subjectRevision,
 	})
 	if err != nil {
 		return preparedInteraction{}, err
@@ -672,7 +698,7 @@ drain:
 	headers := http.Header{
 		"Authorization": []string{"Bearer " + r.options.APIKey},
 		"Content-Type":  []string{"application/json"},
-		"User-Agent":    []string{"agent-feedback-go/0.2.1"},
+		"User-Agent":    []string{"agent-feedback-go/0.2.2"},
 	}
 	url := r.options.Endpoint + "/api/v2/telemetry/batches"
 	var deliveryError error
@@ -744,17 +770,21 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 }
 
 type captureWriter struct {
-	target      http.ResponseWriter
-	header      http.Header
-	status      int
-	body        bytes.Buffer
-	limit       int
-	wroteHeader bool
-	streamed    bool
+	target       http.ResponseWriter
+	header       http.Header
+	status       int
+	body         bytes.Buffer
+	limit        int
+	wroteHeader  bool
+	streamed     bool
+	varyOnCommit bool
 }
 
-func newCaptureWriter(target http.ResponseWriter, limit int) *captureWriter {
-	return &captureWriter{target: target, header: make(http.Header), status: http.StatusOK, limit: limit}
+func newCaptureWriter(target http.ResponseWriter, limit int, varyOnCommit bool) *captureWriter {
+	return &captureWriter{
+		target: target, header: make(http.Header), status: http.StatusOK, limit: limit,
+		varyOnCommit: varyOnCommit,
+	}
 }
 
 func (writer *captureWriter) Header() http.Header { return writer.header }
@@ -786,6 +816,9 @@ func (writer *captureWriter) Write(value []byte) (int, error) {
 func (writer *captureWriter) commit() error {
 	if !writer.streamed {
 		writer.streamed = true
+		if writer.varyOnCommit && !hasNonIdentityContentEncoding(writer.header) {
+			ensureRequestVary(writer.header)
+		}
 		copyHeaders(writer.target.Header(), writer.header)
 		writer.target.WriteHeader(writer.status)
 		if writer.body.Len() > 0 {
@@ -834,6 +867,18 @@ func ensureRequestVary(header http.Header) {
 	header.Add("Vary", "Agent-Feedback-Request")
 }
 
+func hasNonIdentityContentEncoding(header http.Header) bool {
+	for _, value := range header.Values("Content-Encoding") {
+		for _, token := range strings.Split(value, ",") {
+			token = strings.TrimSpace(token)
+			if token != "" && !strings.EqualFold(token, "identity") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func requestDiscoveryLink(request *http.Request) string {
 	path := request.URL.EscapedPath()
 	if path == "" {
@@ -871,28 +916,29 @@ func (r *Runtime) Middleware(next http.Handler) http.Handler {
 			}
 		}
 		started := time.Now()
-		customerRef := ""
-		if r.options.CustomerRef != nil {
-			customerRef = strings.TrimSpace(r.options.CustomerRef(request))
-		}
-		consentState := r.cachedConsent(customerRef)
-		captured := newCaptureWriter(response, r.options.MaxResponseBodyBytes)
-		if r.options.CacheMode == CacheRequest {
-			ensureRequestVary(captured.header)
-		}
+		captured := newCaptureWriter(
+			response, r.options.MaxResponseBodyBytes, r.options.CacheMode == CacheRequest,
+		)
 		next.ServeHTTP(captured, request)
-		if r.options.CacheMode == CacheRequest {
-			ensureRequestVary(captured.header)
-		}
 		if captured.streamed {
 			return
 		}
+		nonIdentityEncoding := hasNonIdentityContentEncoding(captured.header)
+		if r.options.CacheMode == CacheRequest && !nonIdentityEncoding {
+			ensureRequestVary(captured.header)
+		}
 		body := captured.body.Bytes()
 		status := captured.status
+		if nonIdentityEncoding {
+			copyHeaders(response.Header(), captured.header)
+			response.WriteHeader(status)
+			_, _ = response.Write(body)
+			return
+		}
 		contentType := captured.header.Get("Content-Type")
 		supported := strings.Contains(contentType, "application/json") || strings.Contains(contentType, "text/html")
 		if r.options.CacheMode == CacheRequest && !requestOptIn {
-			if status >= 200 && status < 300 && supported && (request.Method == http.MethodGet || request.Method == http.MethodHead) {
+			if completeSuccess(status, captured.header) && supported && (request.Method == http.MethodGet || request.Method == http.MethodHead) {
 				if link := requestDiscoveryLink(request); link != "" {
 					captured.header.Add("Link", link)
 				}
@@ -902,7 +948,7 @@ func (r *Runtime) Middleware(next http.Handler) http.Handler {
 			_, _ = response.Write(body)
 			return
 		}
-		if status < 200 || status >= 300 {
+		if !completeSuccess(status, captured.header) {
 			copyHeaders(response.Header(), captured.header)
 			response.WriteHeader(status)
 			_, _ = response.Write(body)
@@ -915,6 +961,11 @@ func (r *Runtime) Middleware(next http.Handler) http.Handler {
 				_, _ = response.Write(body)
 				return
 			}
+			customerRef := ""
+			if r.options.CustomerRef != nil {
+				customerRef = strings.TrimSpace(r.options.CustomerRef(request))
+			}
+			consentState := r.cachedConsent(customerRef)
 			prepared, err := r.prepare(time.Now(), customerRef, consentState)
 			if err != nil || prepared.Envelope == nil {
 				copyHeaders(response.Header(), captured.header)
@@ -925,7 +976,7 @@ func (r *Runtime) Middleware(next http.Handler) http.Handler {
 			encoded, _ := json.Marshal(prepared.Envelope)
 			captured.header.Set("Agent-Feedback", base64.RawURLEncoding.EncodeToString(encoded))
 			captured.header.Add("Link", fmt.Sprintf(`<%s/.well-known/agent-feedback-v1.json>; rel="agent-feedback"; type="application/json"`, r.options.Endpoint))
-			captured.header.Set("Cache-Control", "private, no-store")
+			makeResponsePrivate(captured.header)
 			copyHeaders(response.Header(), captured.header)
 			response.WriteHeader(status)
 			_, _ = response.Write(body)
@@ -952,12 +1003,51 @@ func (r *Runtime) Middleware(next http.Handler) http.Handler {
 			r.warmConsent(customerRef)
 			return
 		}
-		if r.options.CacheMode == CacheSafe && sharedCacheControl(strings.Join(captured.header.Values("Cache-Control"), ",")) {
+		if r.options.CacheMode == CacheSafe && hasSharedCachePolicy(captured.header) {
 			copyHeaders(response.Header(), captured.header)
 			response.WriteHeader(status)
 			_, _ = response.Write(body)
 			return
 		}
+		var jsonObject map[string]any
+		surface := ""
+		if strings.Contains(contentType, "application/json") {
+			var value any
+			if json.Unmarshal(body, &value) != nil {
+				copyHeaders(response.Header(), captured.header)
+				response.WriteHeader(status)
+				_, _ = response.Write(body)
+				return
+			}
+			if object, ok := value.(map[string]any); ok {
+				if _, exists := object["_agentFeedback"]; exists {
+					copyHeaders(response.Header(), captured.header)
+					response.WriteHeader(status)
+					_, _ = response.Write(body)
+					return
+				}
+				jsonObject = object
+				surface = "http_json"
+			} else {
+				surface = "http_headers"
+			}
+		} else if strings.Contains(contentType, "text/html") {
+			if hasAgentFeedbackMarker(string(body)) {
+				surface = "http_headers"
+			} else {
+				surface = "http_html"
+			}
+		} else {
+			copyHeaders(response.Header(), captured.header)
+			response.WriteHeader(status)
+			_, _ = response.Write(body)
+			return
+		}
+		customerRef := ""
+		if r.options.CustomerRef != nil {
+			customerRef = strings.TrimSpace(r.options.CustomerRef(request))
+		}
+		consentState := r.cachedConsent(customerRef)
 		prepared, err := r.prepare(time.Now(), customerRef, consentState)
 		if err != nil {
 			copyHeaders(response.Header(), captured.header)
@@ -972,39 +1062,18 @@ func (r *Runtime) Middleware(next http.Handler) http.Handler {
 			return
 		}
 		output := body
-		surface := ""
-		if strings.Contains(contentType, "application/json") {
-			var value any
-			if json.Unmarshal(body, &value) == nil {
-				if object, ok := value.(map[string]any); ok {
-					if _, exists := object["_agentFeedback"]; !exists {
-						if prepared.Envelope != nil {
-							object["_agentFeedback"] = prepared.Envelope
-						}
-						output, _ = json.Marshal(object)
-						surface = "http_json"
-					}
-				} else {
-					surface = "http_headers"
-				}
-			}
-		} else if strings.Contains(contentType, "text/html") {
-			if prepared.Envelope != nil {
-				output = []byte(injectHTML(string(body), prepared.Envelope))
-			}
-			surface = "http_html"
+		if surface == "http_json" {
+			jsonObject["_agentFeedback"] = prepared.Envelope
+			output, _ = json.Marshal(jsonObject)
+		} else if surface == "http_html" {
+			output = []byte(injectHTML(string(body), prepared.Envelope))
 		}
-		if surface == "" {
-			copyHeaders(response.Header(), captured.header)
-			response.WriteHeader(status)
-			_, _ = response.Write(body)
-			return
+		makeResponsePrivate(captured.header)
+		if surface != "http_headers" {
+			captured.header.Set("Content-Length", strconv.Itoa(len(output)))
+			stripBodyValidators(captured.header)
 		}
-		if prepared.Envelope != nil {
-			captured.header.Set("Cache-Control", "private, no-store")
-		}
-		captured.header.Set("Content-Length", strconv.Itoa(len(output)))
-		if surface == "http_headers" && prepared.Envelope != nil {
+		if surface == "http_headers" {
 			encoded, _ := json.Marshal(prepared.Envelope)
 			captured.header.Set("Agent-Feedback", base64.RawURLEncoding.EncodeToString(encoded))
 			captured.header.Add("Link", fmt.Sprintf(`<%s/.well-known/agent-feedback-v1.json>; rel="agent-feedback"; type="application/json"`, r.options.Endpoint))
@@ -1012,9 +1081,22 @@ func (r *Runtime) Middleware(next http.Handler) http.Handler {
 		copyHeaders(response.Header(), captured.header)
 		response.WriteHeader(status)
 		_, _ = response.Write(output)
+		operation := strings.TrimSpace(request.Pattern)
+		if r.options.Operation != nil {
+			operation = strings.TrimSpace(r.options.Operation(request))
+		}
+		if separator := strings.IndexByte(operation, ' '); separator >= 0 {
+			operation = strings.TrimSpace(operation[separator+1:])
+		}
+		if pathStart := strings.IndexByte(operation, '/'); pathStart > 0 {
+			operation = operation[pathStart:]
+		}
+		if operation == "" {
+			operation = request.URL.Path
+		}
 		event := TelemetryEvent{
 			InteractionID: prepared.InteractionID,
-			Surface:       surface, Operation: NormalizeOperation(request.URL.Path),
+			Surface:       surface, Operation: NormalizeOperation(operation),
 			StatusCode: status, DurationMS: time.Since(started).Milliseconds(),
 			Classification: "unclassified", OccurredAt: prepared.OccurredAt,
 		}
@@ -1037,21 +1119,219 @@ func (r *Runtime) Middleware(next http.Handler) http.Handler {
 }
 
 var sharedCacheDirective = regexp.MustCompile(`(?i)(?:^|,)\s*(?:public|s-maxage\s*=|max-age\s*=|immutable|stale-while-revalidate\s*=)`)
+var agentFeedbackMarker = regexp.MustCompile(`(?i)(?:^|[\s<])id\s*=\s*(?:["']agent-feedback["']|agent-feedback(?:[\s>/]|$))`)
+
+var sharedCacheHeaderNames = []string{
+	"Cache-Control",
+	"CDN-Cache-Control",
+	"Cloudflare-CDN-Cache-Control",
+	"Surrogate-Control",
+}
+
+func completeSuccess(status int, header http.Header) bool {
+	_, hasContentRange := header[http.CanonicalHeaderKey("Content-Range")]
+	return status >= 200 && status < 300 &&
+		status != http.StatusNoContent &&
+		status != http.StatusResetContent &&
+		status != http.StatusPartialContent &&
+		!hasContentRange
+}
+
+func stripBodyValidators(header http.Header) {
+	for _, name := range []string{
+		"ETag",
+		"Content-MD5",
+		"Digest",
+		"Content-Digest",
+		"Repr-Digest",
+		"Content-Range",
+		"Accept-Ranges",
+	} {
+		header.Del(name)
+	}
+}
 
 func sharedCacheControl(value string) bool {
 	return sharedCacheDirective.MatchString(value)
 }
 
+func hasSharedCachePolicy(header http.Header) bool {
+	for name, values := range header {
+		sharedHeader := false
+		for _, candidate := range sharedCacheHeaderNames {
+			if strings.EqualFold(name, candidate) {
+				sharedHeader = true
+				break
+			}
+		}
+		if !sharedHeader {
+			continue
+		}
+		for _, value := range values {
+			if sharedCacheControl(value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func makeResponsePrivate(header http.Header) {
+	for name := range header {
+		for _, cacheHeader := range sharedCacheHeaderNames {
+			if strings.EqualFold(name, cacheHeader) {
+				delete(header, name)
+				break
+			}
+		}
+	}
+	header.Set("Cache-Control", "private, no-store")
+}
+
 func injectHTML(html string, envelope *Envelope) string {
 	data, _ := json.Marshal(envelope)
 	tag := `<script id="agent-feedback" type="application/json">` + strings.ReplaceAll(string(data), "<", `\u003c`) + `</script>`
-	head := regexp.MustCompile(`(?i)</head>`)
-	if head.MatchString(html) {
-		return head.ReplaceAllString(html, tag+"</head>")
+	index := htmlInjectionBoundary(html)
+	return html[:index] + tag + html[index:]
+}
+
+func htmlInjectionBoundary(html string) int {
+	bodyBoundary := -1
+	for index := 0; index < len(html); {
+		if html[index] != '<' {
+			index++
+			continue
+		}
+		if strings.HasPrefix(html[index:], "<!--") {
+			end := strings.Index(html[index+4:], "-->")
+			if end < 0 {
+				if bodyBoundary >= 0 {
+					return bodyBoundary
+				}
+				return index
+			}
+			index += 4 + end + 3
+			continue
+		}
+
+		cursor := index + 1
+		closing := false
+		if cursor < len(html) && html[cursor] == '/' {
+			closing = true
+			cursor++
+		}
+		if cursor >= len(html) || !isHTMLTagNameByte(html[cursor]) {
+			if cursor < len(html) && (html[cursor] == '!' || html[cursor] == '?') {
+				end, ok := htmlTagEnd(html, cursor+1)
+				if !ok {
+					if bodyBoundary >= 0 {
+						return bodyBoundary
+					}
+					return index
+				}
+				index = end + 1
+				continue
+			}
+			index++
+			continue
+		}
+
+		nameStart := cursor
+		for cursor < len(html) && isHTMLTagNameByte(html[cursor]) {
+			cursor++
+		}
+		name := html[nameStart:cursor]
+		end, ok := htmlTagEnd(html, cursor)
+		if !ok {
+			if bodyBoundary >= 0 {
+				return bodyBoundary
+			}
+			return index
+		}
+
+		if closing {
+			switch {
+			case strings.EqualFold(name, "head"):
+				return index
+			case strings.EqualFold(name, "body") && bodyBoundary < 0:
+				bodyBoundary = index
+			}
+			index = end + 1
+			continue
+		}
+
+		if strings.EqualFold(name, "script") || strings.EqualFold(name, "style") {
+			rawEnd, ok := htmlRawTextEnd(html, end+1, name)
+			if !ok {
+				if bodyBoundary >= 0 {
+					return bodyBoundary
+				}
+				return index
+			}
+			index = rawEnd
+			continue
+		}
+		index = end + 1
 	}
-	body := regexp.MustCompile(`(?i)</body>`)
-	if body.MatchString(html) {
-		return body.ReplaceAllString(html, tag+"</body>")
+	if bodyBoundary >= 0 {
+		return bodyBoundary
 	}
-	return html + tag
+	return len(html)
+}
+
+func htmlTagEnd(html string, start int) (int, bool) {
+	var quote byte
+	for index := start; index < len(html); index++ {
+		byteValue := html[index]
+		if quote != 0 {
+			if byteValue == quote {
+				quote = 0
+			}
+			continue
+		}
+		if byteValue == '\'' || byteValue == '"' {
+			quote = byteValue
+			continue
+		}
+		if byteValue == '>' {
+			return index, true
+		}
+	}
+	return 0, false
+}
+
+func htmlRawTextEnd(html string, start int, name string) (int, bool) {
+	for index := start; index < len(html); {
+		relative := strings.IndexByte(html[index:], '<')
+		if relative < 0 {
+			return 0, false
+		}
+		index += relative
+		nameStart := index + 2
+		nameEnd := nameStart + len(name)
+		if index+1 < len(html) && html[index+1] == '/' && nameEnd <= len(html) &&
+			strings.EqualFold(html[nameStart:nameEnd], name) &&
+			(nameEnd == len(html) || isHTMLTagBoundary(html[nameEnd])) {
+			end, ok := htmlTagEnd(html, nameEnd)
+			if !ok {
+				return 0, false
+			}
+			return end + 1, true
+		}
+		index++
+	}
+	return 0, false
+}
+
+func isHTMLTagNameByte(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' ||
+		value >= '0' && value <= '9' || value == '-' || value == ':' || value == '_'
+}
+
+func isHTMLTagBoundary(value byte) bool {
+	return value == '>' || value == '/' || value == ' ' || value == '\t' || value == '\n' || value == '\r' || value == '\f'
+}
+
+func hasAgentFeedbackMarker(html string) bool {
+	return agentFeedbackMarker.MatchString(html)
 }

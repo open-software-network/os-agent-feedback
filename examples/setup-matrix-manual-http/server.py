@@ -28,9 +28,29 @@ CONSENT_WARM_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_CONSENT_WARMS)
 TELEMETRY_QUEUE = queue.Queue(maxsize=1_000)
 TELEMETRY_DROP_WARNED = False
 TELEMETRY_DROP_LOCK = threading.Lock()
+PRODUCT_AUTH_SECRET = os.environ.get("SETUP_MATRIX_PRODUCT_AUTH_SECRET", "").encode()
 
 def b64(value):
     return base64.urlsafe_b64encode(value).decode().rstrip("=")
+
+def verified_customer_ref(headers):
+    authorization = headers.get("authorization", "")
+    token = authorization.removeprefix("Bearer ")
+    try:
+        payload, signature = token.split(".", 1)
+        supplied = base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
+        customer_ref = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)).decode()
+    except Exception:
+        return None
+    expected = hmac.new(PRODUCT_AUTH_SECRET, payload.encode(), hashlib.sha256).digest()
+    if not hmac.compare_digest(supplied, expected):
+        return None
+    if not 1 <= len(customer_ref) <= 160 or not all(
+        character.isascii() and (character.isalnum() or character in "_.:-")
+        for character in customer_ref
+    ):
+        return None
+    return customer_ref
 
 def consent_subject(customer_ref):
     consent_key = hashlib.sha256(f"epode-consent-scope:{CONSENT_SCOPE.lower()}".encode()).digest()
@@ -47,7 +67,7 @@ def cached_consent(subject):
         cached = CONSENT_CACHE.get(subject)
         if not cached:
             return "unknown"
-        if cached[1] > now:
+        if cached[2] > now:
             return cached[0]
         del CONSENT_CACHE[subject]
     return "unknown"
@@ -65,13 +85,19 @@ def lookup_consent(subject):
     )
     try:
         timeout = float(os.environ.get("AGENT_FEEDBACK_CONSENT_TIMEOUT_MS", "750")) / 1_000
-        state = json.loads(urllib.request.urlopen(request, timeout=timeout).read()).get("state")
+        response = json.loads(urllib.request.urlopen(request, timeout=timeout).read())
+        state = response.get("state")
+        revision = response.get("revision")
         if state not in {"unknown", "approved", "declined"}:
+            return "unavailable"
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+            return "unavailable"
+        if (state == "unknown" and revision != 0) or (state != "unknown" and revision == 0):
             return "unavailable"
         if state != "unknown":
             ttl = float(os.environ.get("AGENT_FEEDBACK_CONSENT_CACHE_TTL_MS", "300000")) / 1_000
             with CONSENT_LOCK:
-                CONSENT_CACHE[subject] = (state, time.monotonic() + ttl)
+                CONSENT_CACHE[subject] = (state, revision, time.monotonic() + ttl)
         return state
     except Exception as error:
         print(f"[epode] consent state lookup failed: {error}", file=sys.stderr, flush=True)
@@ -107,6 +133,8 @@ def warm_consent(customer_ref):
             CONSENT_WARM_SLOTS.release()
 
 def prepared(customer_ref=None):
+    if MODE == "off":
+        return None, None, None
     global SEQUENCE
     interaction_id = str(uuid.uuid4())
     with SEQUENCE_LOCK:
@@ -116,7 +144,13 @@ def prepared(customer_ref=None):
     expires = issued + 7200
     subject = consent_subject(customer_ref) if MODE == "ask_once" and customer_ref else None
     state = cached_consent(subject)
-    claims = {"v": 1, "i": interaction_id, "iat": issued, "exp": expires, "n": b64(secrets.token_bytes(18)), **({"s": subject} if subject else {})}
+    revision = 0
+    if subject:
+        with CONSENT_LOCK:
+            cached = CONSENT_CACHE.get(subject)
+            if cached and cached[2] > time.monotonic():
+                revision = cached[1]
+    claims = {"v": 1, "i": interaction_id, "iat": issued, "exp": expires, "n": b64(secrets.token_bytes(18)), **({"s": subject, "r": revision} if subject else {})}
     payload = b64(json.dumps(claims, separators=(",", ":")).encode())
     signing_input = f"afr2_{KEY_ID}.{payload}"
     signing_key = hashlib.sha256(API_KEY.encode()).digest()
@@ -178,7 +212,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200); self.end_headers(); self.wfile.write(b"ok"); return
         if self.path not in {"/search", "/docs/test"}:
             self.send_response(404); self.end_headers(); return
-        customer_ref = self.headers.get("x-customer-ref")
+        customer_ref = verified_customer_ref(self.headers)
+        if customer_ref is None:
+            payload = b'{"error":"unauthorized"}'
+            self.send_response(401)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers(); self.wfile.write(payload); return
         interaction_id, sequence, envelope = prepared(customer_ref)
         if self.path == "/search":
             value = {"stack": "manual-http", "answer": "manual-http-result"}
@@ -196,8 +236,9 @@ class Handler(BaseHTTPRequestHandler):
         if envelope:
             self.send_header("cache-control", "private, no-store")
         self.end_headers(); self.wfile.write(payload)
-        queue_telemetry(interaction_id, sequence, surface, self.path, customer_ref)
-        warm_consent(customer_ref)
+        if interaction_id is not None:
+            queue_telemetry(interaction_id, sequence, surface, self.path, customer_ref)
+            warm_consent(customer_ref)
 
     def log_message(self, *_args): pass
 

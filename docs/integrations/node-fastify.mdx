@@ -6,7 +6,7 @@ description: "Instrument selected Fastify JSON and HTML responses with one regis
 ## Install
 
 ```bash
-npm install https://app.epode.ai/static/agent-feedback-node-0.2.1.tgz fastify
+npm install https://app.epode.ai/static/agent-feedback-node-0.2.2.tgz fastify
 ```
 
 ## Configure once
@@ -16,6 +16,11 @@ import Fastify from "fastify";
 import { agentFeedback } from "@agent-feedback/node/fastify";
 
 const app = Fastify();
+
+// These hooks must verify the caller and authorize the selected tenant before
+// Agent Feedback reads req.user. Do not populate req.user from request headers.
+app.addHook("preHandler", authenticateProductRequest);
+app.addHook("preHandler", selectAuthorizedTenant);
 
 await app.register(agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
@@ -41,9 +46,12 @@ await app.register(agentFeedback({
   shouldInstrument: (_request, response) =>
     response.body?.status === "completed",
   customerRef: request => request.user?.teamId,
-  sessionRef: request => request.headers["x-agent-run-id"],
+  sessionRef: request => request.params.id, // product-issued crawl/job ID
 }));
 ```
+
+The authentication and tenant-authorization hooks from the first example must remain global and run first.
+Use a product-issued job identifier for `sessionRef`; never accept an arbitrary grouping handle from a caller.
 
 The default `cacheMode: "safe"` skips explicitly shared-cacheable responses instead of overwriting their
 cache policy. Use `cacheMode: "request"` when only callers sending `Agent-Feedback-Request: 1` should be

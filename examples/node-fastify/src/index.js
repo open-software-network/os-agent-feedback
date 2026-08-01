@@ -10,7 +10,8 @@ await app.register(agentFeedback({
   apiKey,
   endpoint: process.env.AGENT_FEEDBACK_URL,
   include: ["/agent-docs", "/api/search"],
-  customerRef: (request) => request.headers["x-customer-ref"],
+  // This public example is anonymous. Add customerRef only from identity that
+  // product authentication has verified; never trust an account header here.
   runtimeHint: (request) => request.headers["user-agent"],
 }));
 
@@ -41,3 +42,6 @@ app.post("/api/search", async (request) => ({
 }));
 
 await app.listen({ port: Number(process.env.PORT || 3001), host: "0.0.0.0" });
+const shutdown = async () => app.close();
+process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
+process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));

@@ -1,12 +1,12 @@
 ---
 title: "Python WSGI"
-description: "Add the conservative header-based handoff to Flask, Django WSGI, Bottle, or Pyramid."
+description: "Instrument finite Flask, Django WSGI, Bottle, or Pyramid responses."
 ---
 
 ## Install
 
 ```bash
-python -m pip install https://app.epode.ai/static/agent_feedback-0.2.1-py3-none-any.whl
+python -m pip install https://app.epode.ai/static/agent_feedback-0.2.2-py3-none-any.whl
 ```
 
 ## Configure once
@@ -22,16 +22,23 @@ app = Flask(__name__)
 def search_endpoint():
     return jsonify(results=search(request.args.get("q", "")))
 
-app.wsgi_app = AgentFeedbackWSGI(
+instrumented_app = AgentFeedbackWSGI(
     app.wsgi_app,
     api_key=os.environ["AGENT_FEEDBACK_KEY"],
     include=("/search", "/docs/*"),
     customer_ref=lambda environ: environ.get("account_id"),  # required for durable Ask once; optional otherwise
 )
+app.wsgi_app = ProductTenantAuthMiddleware(instrumented_app)
 ```
 
-The conservative WSGI adapter uses the `Agent-Feedback` response header for finite responses. It does
-not buffer or mutate the application body.
+The authentication wrapper is intentionally outermost so it establishes the verified account or
+tenant before Epode resolves `customer_ref`.
+
+The WSGI adapter buffers only responses with a declared size of at most 1 MiB. JSON objects receive
+`_agentFeedback`, HTML receives a machine-readable link, and arrays or scalar JSON use the
+`Agent-Feedback` response header. Unknown-size, oversized, write-callable, and streaming responses pass
+through without instrumentation. Lazy WSGI iterators that call `start_response` on first iteration are
+supported.
 
 With `cache_mode="request"`, only callers sending `Agent-Feedback-Request: 1` receive a contract. The
 middleware adds `Vary: Agent-Feedback-Request` to ordinary and opted-in responses so a shared cache cannot
@@ -41,8 +48,8 @@ authenticated Companion refetch; redirects and non-safe methods never advertise 
 
 ## Server-rendered HTML
 
-Included HTML pages use that same response-header handoff. The page body remains byte-for-byte unchanged,
-which is safer for WSGI applications that calculate content length or stream an iterable response.
+Included finite HTML pages receive the same machine-readable link as the other adapters, and Epode
+recalculates `Content-Length`. Streaming or unknown-size HTML remains byte-for-byte untouched.
 
 ## Verify
 

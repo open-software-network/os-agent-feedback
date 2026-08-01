@@ -819,6 +819,26 @@ describe("dashboard view behavior", () => {
     expect(screen.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
   });
 
+  it("explains the customer-agent step for HTTP without burdening MCP customers", () => {
+    renderWithQuery(
+      <SetupView
+        data={dashboardFixture()}
+        secrets={null}
+        rememberSecret={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        setNotice={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/Customer-agent step: none/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "HTTP API" }));
+    expect(screen.getByText(/generic HTTP and website agents are best effort/)).toBeVisible();
+    expect(screen.getByRole("link", { name: "customer-agent setup" })).toHaveAttribute(
+      "href",
+      "https://docs.epode.ai/quickstart#customer-agent-step",
+    );
+  });
+
   it("keeps setup status authoritative when key activity is outside the dashboard slice", () => {
     const data = dashboardFixture({ interactions: [], reports: [] });
     renderWithQuery(
@@ -1227,7 +1247,7 @@ describe("dashboard view behavior", () => {
     expect(await screen.findByText("No matching feedback")).toBeVisible();
   });
 
-  it("preserves the existing policy fields while changing feedback mode", async () => {
+  it("saves an exact custom retention period with feedback mode and explains deletion timing", async () => {
     const data = dashboardFixture();
     const fetchMock = vi.fn().mockResolvedValue(json({ environment: data.currentEnvironment }));
     vi.stubGlobal("fetch", fetchMock);
@@ -1235,6 +1255,14 @@ describe("dashboard view behavior", () => {
     render(
       <PolicyView data={data} refresh={vi.fn().mockResolvedValue(undefined)} setNotice={vi.fn()} />,
     );
+    const retentionInput = screen.getByLabelText("Retention days");
+    expect(retentionInput).toHaveAttribute("min", "1");
+    expect(retentionInput).toHaveAttribute("max", "365");
+    expect(screen.getByRole("button", { name: "7 days" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "365 days" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "30 days" }));
+    expect(retentionInput).toHaveValue(30);
+    fireEvent.change(retentionInput, { target: { value: "47" } });
     fireEvent.change(screen.getByLabelText("Feedback mode"), { target: { value: "ask_once" } });
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
@@ -1243,8 +1271,30 @@ describe("dashboard view behavior", () => {
       environmentId: data.currentEnvironment?.id,
       feedbackMode: "ask_once",
       collectEventSummaries: false,
-      retentionDays: 90,
+      retentionDays: 47,
     });
+    expect(screen.getByText(/Dashboard filtering changes immediately/)).toBeVisible();
+    expect(screen.getByText(/scheduled purge interval/)).toBeVisible();
+    expect(screen.getByText(/survives retention until/)).toBeVisible();
+  });
+
+  it("rejects retention periods outside 1 to 365 days before saving", async () => {
+    const data = dashboardFixture();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <PolicyView data={data} refresh={vi.fn().mockResolvedValue(undefined)} setNotice={vi.fn()} />,
+    );
+    fireEvent.change(screen.getByLabelText("Retention days"), { target: { value: "366" } });
+    const policyForm = screen.getByRole("button", { name: "Save changes" }).closest("form");
+    if (!policyForm) throw new Error("Policy form is missing");
+    fireEvent.submit(policyForm);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Retention must be between 1 and 365 days.",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("keeps team-management controls hidden from members", () => {

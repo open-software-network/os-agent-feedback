@@ -9,8 +9,8 @@ HTTP, JSON, UUIDs, SHA-256, HMAC-SHA256, and base64url encoding.
 ## Download the contract
 
 ```bash
-curl -fsSLO https://app.epode.ai/static/agent-feedback-protocol-v1.zip
-unzip agent-feedback-protocol-v1.zip
+curl -fsSLO https://app.epode.ai/static/agent-feedback-protocol-v1-0.2.2.zip
+unzip agent-feedback-protocol-v1-0.2.2.zip
 ```
 
 The archive contains the protocol guide, JSON Schemas, and a deterministic signing vector.
@@ -50,7 +50,9 @@ authentication. Never use a name, email address, prompt, or agent-supplied value
   <Step title="Sign a capability locally">
     Follow the compact claim order and signing vector in `protocol/v1/conformance.json`. The capability
     must expire within two hours. Append the derived subject as the optional `s` claim only for durable
-    Ask once; never include the raw customer reference or product content. The pseudonymous subject is
+    Ask once, followed by `r`, the non-negative consent revision returned by Epode. Use `0` when the
+    subject is unknown. A stale revision cannot overwrite a newer decision. Never include the raw
+    customer reference or product content. The pseudonymous subject is
     intentionally linkable within that product's consent scope. Without a cached decision, emit the
     cold `consent_required` stage rather than waiting on Epode.
   </Step>

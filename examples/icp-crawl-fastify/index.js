@@ -3,6 +3,15 @@ import { agentFeedback } from "@agent-feedback/node/fastify";
 
 const app = Fastify({ logger: false });
 const jobs = new Map();
+app.addHook("onRequest", async (request, reply) => {
+  if (request.url === "/health") return;
+  // This fixed demo credential stands in for the product's normal auth
+  // middleware. Ignore caller-supplied team headers when deriving identity.
+  if (request.headers.authorization !== "Bearer demo-crawl-team-token") {
+    return reply.code(401).send({ error: "unauthorized" });
+  }
+  request.productAuth = { accountId: "team_crawl_9" };
+});
 const feedback = agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
   endpoint: process.env.AGENT_FEEDBACK_URL,
@@ -10,8 +19,8 @@ const feedback = agentFeedback({
   // Polling is not an outcome. Only a terminal crawl result should ask the
   // customer agent to evaluate the product.
   shouldInstrument: (_request, response) => response.body?.status === "completed",
-  customerRef: (request) => request.headers["x-team-id"],
-  sessionRef: (request) => request.headers["x-agent-run-id"],
+  customerRef: (request) => request.productAuth?.accountId,
+  sessionRef: (request) => request.params?.id,
 });
 await app.register(feedback);
 
@@ -34,3 +43,6 @@ app.get("/v1/crawls/:id", async (request, reply) => {
 app.get("/health", async () => ({ ok: true }));
 
 await app.listen({ port: Number(process.env.PORT || 4202), host: "127.0.0.1" });
+const shutdown = async () => app.close();
+process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
+process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));

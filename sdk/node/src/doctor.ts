@@ -238,6 +238,11 @@ async function main(): Promise<void> {
   }
   console.log(`PASS product route HTTP ${response.status}`);
   if (envelope.state === "consent_required") {
+    if (envelope.configuredMode === "ask_once" && envelope.mode === "ask_always") {
+      fail(
+        "Ask once could not resolve customerRef for this eligible response. Run product authentication and authorized tenant selection before Agent Feedback, then rerun the doctor with a real authenticated request. If the route is intentionally anonymous, configure Ask every time instead.",
+      );
+    }
     const action = envelope.requiredAction;
     const validOnce =
       envelope.mode === "ask_once" &&
@@ -289,49 +294,45 @@ async function main(): Promise<void> {
   ) {
     fail("Response has an invalid Never ask feedback contract");
   }
-  const reportUrl = trustedActionUrl(envelope.submit.url, feedbackOrigin, "/api/v2/reports");
-  const report = await fetch(reportUrl, {
+  trustedActionUrl(envelope.submit.url, feedbackOrigin, "/api/v2/reports");
+  const inspectionUrl = new URL("/api/v2/capabilities/introspect", feedbackOrigin).toString();
+  const inspection = await fetch(inspectionUrl, {
     method: "POST",
     headers: {
       authorization: envelope.submit.authorization,
-      "content-type": envelope.submit.contentType || "application/json",
+      "content-type": "application/json",
     },
-    body: JSON.stringify({
-      summary: "The integration doctor verified this product response end to end.",
-      impact: "helped",
-      confidence: 1,
-      findings: [
-        {
-          kind: "strength",
-          topic: "integration",
-          detail: "Response discovery and feedback submission both worked.",
-        },
-      ],
-      workaround: { used: false },
-    }),
+    body: "{}",
     signal: AbortSignal.timeout(10_000),
   });
-  if (report.status === 401) {
-    fail("Synthetic report returned HTTP 401. The feedback capability is invalid or expired");
+  if (inspection.status === 401) {
+    fail("Capability inspection returned HTTP 401. The feedback capability is invalid or expired");
   }
-  if (report.status === 403) {
-    fail("Synthetic report returned HTTP 403. The product policy requires consent");
+  if (inspection.status === 410) {
+    fail("Capability inspection returned HTTP 410. Feedback collection is disabled");
   }
-  if (report.status === 409) {
-    fail(
-      "Synthetic report returned HTTP 409. The capability belongs to another product environment",
-    );
+  if (!inspection.ok) fail(`Capability inspection returned HTTP ${inspection.status}`);
+  const verified = (await inspection.json()) as {
+    state?: string;
+    configuredMode?: string;
+    productName?: string;
+    expiresAt?: string;
+  };
+  if (
+    verified.state !== "feedback_ready" ||
+    typeof verified.configuredMode !== "string" ||
+    typeof verified.productName !== "string" ||
+    typeof verified.expiresAt !== "string"
+  ) {
+    fail("Capability inspection returned an incomplete verified contract");
   }
-  if (report.status === 410) {
-    fail("Synthetic report returned HTTP 410. Feedback collection is disabled");
-  }
-  if (!report.ok) fail(`Synthetic report returned HTTP ${report.status}`);
-  const accepted = (await report.json()) as { interactionId?: string };
   console.log(`PASS response injection`);
   console.log(`PASS trusted Epode submission origin`);
-  console.log(`PASS scoped direct submission`);
-  console.log(`PASS synthetic report ${accepted.interactionId || "accepted"}`);
-  console.log("PASS first confirmed interaction and first report; check Setup for activation");
+  console.log(`PASS scoped capability inspection for ${verified.productName}`);
+  console.log("PASS company-side opportunity handoff; no feedback report was created");
+  console.log(
+    "NEXT use a real feedback-aware customer-agent task to prove confirmation and reporting",
+  );
 }
 
 main().catch((error) => fail(error instanceof Error ? error.message : String(error)));

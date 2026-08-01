@@ -23,7 +23,7 @@ For each eligible product response:
 
 1. Generate a UUID interaction ID and an 18-byte cryptographically random nonce.
 2. Set `iat` to the current Unix timestamp and `exp` to no more than two hours later.
-3. Serialize the claims in this compact order: `v`, `i`, `iat`, `exp`, `n`, followed by optional `s` for a durable Ask once consent subject.
+3. Serialize the claims in this compact order: `v`, `i`, `iat`, `exp`, `n`, followed by optional `s` for a durable Ask once consent subject and `r` for the non-negative consent revision observed by the signer. A missing subject has no revision. A first-use subject has revision `0`.
 4. Base64url-encode the UTF-8 JSON without padding.
 5. Create `signing_input = "afr2_" + key_id + "." + payload`.
 6. Create `signing_key = SHA256(full_product_key)`.
@@ -31,7 +31,7 @@ For each eligible product response:
 8. For Ask once, derive `subject = "afsub1_" + base64url(HMAC-SHA256(SHA256("epode-consent-scope:" + consent_scope), "customer-ref:" + customerRef))`. This keeps the subject stable across product-key rotation without exposing the raw customer reference.
 9. Return `signing_input + "." + signature`.
 
-The capability contains no raw customer reference, prompt, product payload, or personal data. Ask once capabilities may contain only the opaque derived subject. See `conformance.json` for a deterministic signing vector. Older conformance keys without an explicit consent scope use the key ID as their scope.
+The capability contains no raw customer reference, prompt, product payload, or personal data. Ask once capabilities contain only the opaque derived subject and its non-negative revision. See `conformance.json` for a deterministic signing vector. Older conformance keys without an explicit consent scope use the key ID as their scope.
 
 ## HTTP response contract
 
@@ -113,8 +113,10 @@ clients can still use the HTTPS contracts.
 An Ask-once decline emits a non-requesting `feedback_disabled` management envelope rather than a
 new prompt. Only an explicit user request can use `manageConsent` to change the choice. Approved
 Ask-once responses also expose the same management action so the user can revoke permission. The
-backend orders changes by signed capability issuance time, preventing an older conversation from
-overwriting a newer decision.
+backend accepts a subject decision only when the signed `r` claim matches the subject's current
+revision, then increments that revision atomically. A revision-0 or legacy handle may create an
+absent subject but cannot change an existing one. This prevents delayed, replayed, concurrent, and
+approve-decline-approve (ABA) handles from overwriting a newer decision.
 
 Ask once copy is deliberately concrete about its continuing scope, and is used only when the SDK
 has a stable opaque `customerRef` from existing product authentication:
@@ -216,7 +218,7 @@ MCP servers implement the Epode feedback contract on top of the current stateles
 - Require `io.modelcontextprotocol/protocolVersion` and `io.modelcontextprotocol/clientCapabilities` in each request's `params._meta`.
 - Return `resultType: "complete"` on completed results and server identity in `_meta.io.modelcontextprotocol/serverInfo`.
 - Return deterministic `tools/list` results with `ttlMs` and `cacheScope`.
-- Register `record_product_feedback_consent` and `report_product_feedback`, decorate product-tool results with `_agentFeedback`, and emit confirmed MCP telemetry for the product tool call.
+- Register `record_product_feedback_consent` and `report_product_feedback`, decorate schema-less object results at `structuredContent._agentFeedback`, and emit confirmed MCP telemetry for the product tool call. If a business tool declares `outputSchema`, preserve its structured result exactly and put `{"_agentFeedback": {...}}` in a standalone JSON `TextContent` block instead.
 - In either ask mode, expose only the consent tool and question with the product result. The agent answers the product task first, then shows the question once. On approval, that tool returns the report action. On refusal, ambiguity, or silence, never call the report tool.
 - Do not rely on MCP MRTR `input_required` as the only consent path until the deployed client demonstrably surfaces and resumes elicitation.
 - Use an explicit product-supplied handle when application-level continuity is required. Never use a transport session as agent identity or product-session proof.

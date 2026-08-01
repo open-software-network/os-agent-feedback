@@ -7,10 +7,17 @@ import {
   matchPattern,
 } from "./core.js";
 
-type McpContext = Record<string, unknown>;
+export type McpInstrumentationContext = Record<string, unknown> & {
+  http?: {
+    authInfo?: {
+      extra?: Record<string, unknown>;
+    };
+  };
+};
+type McpContext = McpInstrumentationContext;
 type McpResult = {
   content?: Record<string, unknown>[];
-  structuredContent?: Record<string, unknown>;
+  structuredContent?: unknown;
   isError?: boolean;
   [key: string]: unknown;
 };
@@ -62,12 +69,30 @@ export interface McpInstrumentationOptions
   }) => boolean;
 }
 
-type McpServer = { registerTool: (...arguments_: unknown[]) => unknown };
+type McpServer = {
+  registerTool: (...arguments_: never[]) => unknown;
+};
+type McpHandlerWithoutInput = (context: McpContext) => Promise<McpResult> | McpResult;
+type McpHandlerWithInput = (
+  arguments_: unknown,
+  context: McpContext,
+) => Promise<McpResult> | McpResult;
+type RegisterTool = (
+  name: string,
+  configuration: Record<string, unknown>,
+  handler: (...arguments_: never[]) => unknown,
+) => unknown;
 
 type FailureGuidance = { retryable: boolean; text: string };
 
 function isTransientHttpStatus(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
+}
+
+function isInputRequiredMcpResult(result: McpResult): boolean {
+  // Mirror MCP v2's nominal-free discriminator without importing the optional
+  // peer dependency at runtime.
+  return result.resultType === "input_required";
 }
 
 function consentFailureGuidance(status: number): FailureGuidance {
@@ -167,165 +192,228 @@ function instrumentServer(
   runtime: AgentFeedbackRuntime<McpContext>,
   options: McpInstrumentationOptions,
 ): void {
-  const originalRegister = server.registerTool.bind(server);
+  if (!runtime.enabled) return;
+  const target = server as { registerTool?: unknown };
+  if (typeof target.registerTool !== "function") {
+    throw new TypeError("MCP instrumentation requires a server with registerTool().");
+  }
+  const originalRegister = (target.registerTool as RegisterTool).bind(server);
 
-  server.registerTool = ((
+  target.registerTool = ((
     name: string,
     configuration: Record<string, unknown>,
-    handler: (arguments_: unknown, context: McpContext) => Promise<McpResult> | McpResult,
+    handler: McpHandlerWithoutInput | McpHandlerWithInput,
   ) => {
     if (name === "report_product_feedback" || name === "record_product_feedback_consent") {
       return originalRegister(name, configuration, handler);
     }
-    return originalRegister(
-      name,
-      configuration,
-      async (arguments_: unknown, context: McpContext = {}) => {
-        const started = performance.now();
-        const contextValue = (
-          callback:
-            | ((
-                arguments_: unknown,
-                context: McpContext,
-                result?: McpResult,
-              ) => string | undefined | null)
-            | undefined,
-          completedResult?: McpResult,
-        ): string | undefined => {
-          try {
-            return callback?.(arguments_, context, completedResult)?.trim() || undefined;
-          } catch (error) {
-            runtime.logger.warn(`[agent-feedback] MCP extractor failed: ${String(error)}`);
-            return undefined;
-          }
-        };
-        const observed = matchesTool(name, options.includeTools, options.excludeTools);
-        let result: McpResult;
+    const invokeInstrumented = async (
+      arguments_: unknown,
+      context: McpContext,
+      invokeBusinessHandler: () => Promise<McpResult> | McpResult,
+    ): Promise<McpResult> => {
+      const started = performance.now();
+      const contextValue = (
+        callback:
+          | ((
+              arguments_: unknown,
+              context: McpContext,
+              result?: McpResult,
+            ) => string | undefined | null)
+          | undefined,
+        completedResult?: McpResult,
+      ): string | undefined => {
         try {
-          result = await handler(arguments_, context);
+          return callback?.(arguments_, context, completedResult)?.trim() || undefined;
         } catch (error) {
-          if (runtime.enabled && observed) {
-            const sessionRef = contextValue(options.sessionRef);
-            const customerRef = contextValue(options.customerRef);
-            const runtimeHint = contextValue(options.runtimeHint);
-            const prepared = runtime.prepare({ customerRef, consentState: "unavailable" });
-            runtime.record(prepared, {
-              surface: "mcp",
-              operation: name,
-              statusCode: 500,
-              durationMs: Math.max(0, Math.round(performance.now() - started)),
-              classification: "confirmed",
-              confirmationMethod: "mcp",
-              customerRef,
-              runtimeHint,
-              runtimeHintSource: runtimeHint ? "mcp" : undefined,
-              sessionRef,
-              sessionSource: sessionRef ? "mcp" : undefined,
-            });
-          }
-          throw error;
+          runtime.logger.warn(`[agent-feedback] MCP extractor failed: ${String(error)}`);
+          return undefined;
         }
-        if (!runtime.enabled || !observed) return result;
-        // MCP transport sessions are not product-session proof. Only an
-        // explicit application-level extractor may group interactions.
-        const sessionRef = contextValue(options.sessionRef, result);
-        const customerRef = contextValue(options.customerRef, result);
-        const runtimeHint = contextValue(options.runtimeHint, result);
-        const feedbackTool =
-          options.feedbackTools === undefined ||
-          matchesTool(name, options.feedbackTools, undefined);
-        let shouldRequestFeedback = feedbackTool;
-        if (shouldRequestFeedback && options.shouldRequestFeedback) {
-          try {
-            shouldRequestFeedback = options.shouldRequestFeedback({
-              name,
-              arguments: arguments_,
-              context,
-              result,
-            });
-          } catch (error) {
-            runtime.logger.warn(
-              `[agent-feedback] MCP shouldRequestFeedback failed; feedback instructions were skipped. ${String(error)}`,
-            );
-            shouldRequestFeedback = false;
-          }
+      };
+      const observed = matchesTool(name, options.includeTools, options.excludeTools);
+      let result: McpResult;
+      try {
+        result = await invokeBusinessHandler();
+      } catch (error) {
+        if (runtime.enabled && observed) {
+          const sessionRef = contextValue(options.sessionRef);
+          const customerRef = contextValue(options.customerRef);
+          const runtimeHint = contextValue(options.runtimeHint);
+          const prepared = runtime.prepare({ customerRef, consentState: "unavailable" });
+          runtime.record(prepared, {
+            surface: "mcp",
+            operation: name,
+            statusCode: 500,
+            durationMs: Math.max(0, Math.round(performance.now() - started)),
+            classification: "confirmed",
+            confirmationMethod: "mcp",
+            customerRef,
+            runtimeHint,
+            runtimeHintSource: runtimeHint ? "mcp" : undefined,
+            sessionRef,
+            sessionSource: sessionRef ? "mcp" : undefined,
+          });
         }
-        // Match HTTP: only process-local consent state may influence the
-        // product response. A remote lookup warms the cache in the background
-        // after an eligible outcome, so Epode latency/outages never delay a
-        // business tool result.
-        const consentState = shouldRequestFeedback
-          ? runtime.cachedConsent(customerRef)
-          : "unavailable";
-        const prepared = runtime.prepare({ customerRef, consentState });
-        runtime.record(prepared, {
-          surface: "mcp",
-          operation: name,
-          statusCode: result.isError ? 500 : 200,
-          durationMs: Math.max(0, Math.round(performance.now() - started)),
-          classification: "confirmed",
-          confirmationMethod: "mcp",
-          customerRef,
-          runtimeHint,
-          runtimeHintSource: runtimeHint ? "mcp" : undefined,
-          sessionRef,
-          sessionSource: sessionRef ? "mcp" : undefined,
-        });
-        if (!shouldRequestFeedback) return result;
-        // Unlike a generic HTTP error, an MCP isError result is an explicit,
-        // agent-readable product outcome. Keep its confirmed failure telemetry
-        // and allow the agent to report the bounded friction or gap.
-        runtime.warmConsent(customerRef);
+        throw error;
+      }
+      // Multi-round-trip input_required is an intermediate protocol state,
+      // not a completed product interaction. Returning the same object also
+      // lets the real MCP server apply its dedicated result projection.
+      if (isInputRequiredMcpResult(result)) return result;
+      if (!runtime.enabled || !observed) return result;
+      // MCP transport sessions are not product-session proof. Only an
+      // explicit application-level extractor may group interactions.
+      const sessionRef = contextValue(options.sessionRef, result);
+      const customerRef = contextValue(options.customerRef, result);
+      const runtimeHint = contextValue(options.runtimeHint, result);
+      const feedbackTool =
+        options.feedbackTools === undefined || matchesTool(name, options.feedbackTools, undefined);
+      let shouldRequestFeedback = feedbackTool;
+      if (shouldRequestFeedback && options.shouldRequestFeedback) {
+        try {
+          shouldRequestFeedback = options.shouldRequestFeedback({
+            name,
+            arguments: arguments_,
+            context,
+            result,
+          });
+        } catch (error) {
+          runtime.logger.warn(
+            `[agent-feedback] MCP shouldRequestFeedback failed; feedback instructions were skipped. ${String(error)}`,
+          );
+          shouldRequestFeedback = false;
+        }
+      }
+      // Match HTTP: only process-local consent state may influence the
+      // product response. A remote lookup warms the cache in the background
+      // after an eligible outcome, so Epode latency/outages never delay a
+      // business tool result.
+      const consentState = shouldRequestFeedback
+        ? runtime.cachedConsent(customerRef)
+        : "unavailable";
+      const prepared = runtime.prepare({ customerRef, consentState });
+      runtime.record(prepared, {
+        surface: "mcp",
+        operation: name,
+        statusCode: result.isError ? 500 : 200,
+        durationMs: Math.max(0, Math.round(performance.now() - started)),
+        classification: "confirmed",
+        confirmationMethod: "mcp",
+        customerRef,
+        runtimeHint,
+        runtimeHintSource: runtimeHint ? "mcp" : undefined,
+        sessionRef,
+        sessionSource: sessionRef ? "mcp" : undefined,
+      });
+      if (!shouldRequestFeedback) return result;
+      // Unlike a generic HTTP error, an MCP isError result is an explicit,
+      // agent-readable product outcome. Keep its confirmed failure telemetry
+      // and allow the agent to report the bounded friction or gap.
+      runtime.warmConsent(customerRef);
 
-        const envelope = prepared.envelope;
-        if (!envelope) return result;
-        const consentAction = envelope.requiredAction?.submitDecision;
-        const submit = envelope.submit;
+      const envelope = prepared.envelope;
+      if (!envelope) return result;
+      const consentAction = envelope.requiredAction?.submitDecision;
+      const manageConsent = envelope.manageConsent;
+      const submit = envelope.submit;
 
-        const feedback = {
-          v: 1,
-          mode: envelope.mode,
-          ...(envelope.configuredMode ? { configuredMode: envelope.configuredMode } : {}),
-          state: envelope.state,
-          required: envelope.state === "feedback_ready",
-          consentRequired: envelope.consentRequired,
-          consentPolicy: envelope.consentPolicy,
-          ...(envelope.consentManagedBy ? { consentManagedBy: envelope.consentManagedBy } : {}),
-          reliability: "protocol_tool",
-          when: envelope.when,
-          instruction: envelope.instruction,
-          ...(consentAction
-            ? {
+      const feedback = {
+        v: 1,
+        mode: envelope.mode,
+        ...(envelope.configuredMode ? { configuredMode: envelope.configuredMode } : {}),
+        state: envelope.state,
+        required: envelope.state === "feedback_ready",
+        consentRequired: envelope.consentRequired,
+        consentPolicy: envelope.consentPolicy,
+        ...(envelope.consentManagedBy ? { consentManagedBy: envelope.consentManagedBy } : {}),
+        reliability: "protocol_tool",
+        when: envelope.when,
+        instruction: envelope.instruction,
+        ...(consentAction
+          ? {
+              consentTool: "record_product_feedback_consent",
+              feedbackHandle: consentAction.authorization.replace(/^Bearer\s+/, ""),
+              question: envelope.requiredAction?.question,
+              decisionSchema: consentAction.bodySchema,
+            }
+          : {}),
+        ...(manageConsent
+          ? {
+              manageConsent: {
+                current: manageConsent.current,
                 consentTool: "record_product_feedback_consent",
-                feedbackHandle: consentAction.authorization.replace(/^Bearer\s+/, ""),
-                question: envelope.requiredAction?.question,
-                decisionSchema: consentAction.bodySchema,
-              }
-            : {}),
-          ...(submit
-            ? {
-                reportTool: "report_product_feedback",
-                feedbackHandle: submit.authorization.replace(/^Bearer\s+/, ""),
-                reportSchema: submit.reportSchema,
-              }
-            : {}),
-          privacy: envelope.privacy,
-          expiresAt: envelope.expiresAt,
-        };
-        const structuredContent = isPlainObject(result.structuredContent)
-          ? { ...result.structuredContent, _agentFeedback: feedback }
-          : { _agentFeedback: feedback };
-        const content = Array.isArray(result.content) ? [...result.content] : [];
+                feedbackHandle: manageConsent.authorization.replace(/^Bearer\s+/, ""),
+                decisionSchema: manageConsent.bodySchema,
+              },
+            }
+          : {}),
+        ...(submit
+          ? {
+              reportTool: "report_product_feedback",
+              feedbackHandle: submit.authorization.replace(/^Bearer\s+/, ""),
+              reportSchema: submit.reportSchema,
+            }
+          : {}),
+        privacy: envelope.privacy,
+        expiresAt: envelope.expiresAt,
+      };
+      const content = Array.isArray(result.content) ? [...result.content] : [];
+      if (
+        result.structuredContent !== undefined &&
+        !isPlainObject(result.structuredContent) &&
+        !content.some((block) => block.type === "text")
+      ) {
+        // Adding feedback text would otherwise suppress MCP v2's automatic
+        // TextContent fallback for primitive, array, and null business
+        // structuredContent. Preserve that agent-visible business value.
+        content.push({ type: "text", text: JSON.stringify(result.structuredContent) });
+      }
+      // A registered output schema owns structuredContent. Mutating it after
+      // the business callback can violate strict schemas and makes the
+      // advertised tool contract disagree with the returned value. For
+      // schema-bearing tools, put the same machine-readable envelope in a
+      // JSON text block: content is agent-visible and is outside output
+      // schema validation. Schema-less tools retain the original structured
+      // projection for backwards compatibility.
+      const preservesStructuredContent =
+        configuration.outputSchema !== undefined ||
+        (result.structuredContent !== undefined && !isPlainObject(result.structuredContent));
+      if (preservesStructuredContent) {
         content.push({
           type: "text",
-          text: consentAction
-            ? `${envelope.instruction} Then call record_product_feedback_consent with feedbackHandle ${feedback.feedbackHandle} and only the user's approved or declined decision. Do not call report_product_feedback unless that tool returns a feedback action.`
-            : `${envelope.instruction} Call report_product_feedback with feedbackHandle ${feedback.feedbackHandle}, a concise summary, and any applicable findings.`,
+          text: JSON.stringify({ _agentFeedback: feedback }),
         });
-        return { ...result, structuredContent, content };
-      },
-    );
-  }) as typeof server.registerTool;
+      }
+      content.push({
+        type: "text",
+        text: consentAction
+          ? `${envelope.instruction} Then call record_product_feedback_consent with feedbackHandle ${feedback.feedbackHandle} and only the user's approved or declined decision. Do not call report_product_feedback unless that tool returns a feedback action.`
+          : submit
+            ? `${envelope.instruction} Call report_product_feedback with feedbackHandle ${feedback.feedbackHandle}, a concise summary, and any applicable findings.`
+            : envelope.instruction,
+      });
+      if (preservesStructuredContent) return { ...result, content };
+      const structuredContent = isPlainObject(result.structuredContent)
+        ? { ...result.structuredContent, _agentFeedback: feedback }
+        : { _agentFeedback: feedback };
+      return { ...result, structuredContent, content };
+    };
+
+    // MCP v2 intentionally gives schema-less callbacks only (ctx). Register a
+    // one-argument wrapper in that case so the SDK does not shift ctx into the
+    // arguments slot. Epode still exposes a stable empty arguments object to
+    // extractors and predicates, while the business callback receives ctx in
+    // the position promised by the MCP API.
+    const instrumentedHandler =
+      configuration.inputSchema === undefined
+        ? async (context: McpContext) =>
+            invokeInstrumented({}, context, () => (handler as McpHandlerWithoutInput)(context))
+        : async (arguments_: unknown, context: McpContext) =>
+            invokeInstrumented(arguments_, context, () =>
+              (handler as McpHandlerWithInput)(arguments_, context),
+            );
+    return originalRegister(name, configuration, instrumentedHandler);
+  }) as RegisterTool;
 
   originalRegister(
     "record_product_feedback_consent",
@@ -358,7 +446,7 @@ function instrumentServer(
             headers: {
               authorization: `Bearer ${feedbackHandle}`,
               "content-type": "application/json",
-              "user-agent": "@agent-feedback/node/0.2.1",
+              "user-agent": "@agent-feedback/node/0.2.2",
             },
             body: JSON.stringify({ decision }),
             signal: AbortSignal.timeout(options.reportTimeoutMs ?? 10_000),
@@ -490,7 +578,7 @@ function instrumentServer(
             headers: {
               authorization: `Bearer ${feedbackHandle}`,
               "content-type": "application/json",
-              "user-agent": "@agent-feedback/node/0.2.1",
+              "user-agent": "@agent-feedback/node/0.2.2",
             },
             body: JSON.stringify({
               summary,

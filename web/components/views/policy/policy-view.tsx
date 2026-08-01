@@ -12,6 +12,7 @@ import {
   StatusMessage,
 } from "@/components/dashboard/view-primitives";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { apiRequest } from "@/lib/api/client";
 import type { DashboardData, EnvironmentResponse, PolicyInput } from "@/lib/api/dashboard";
@@ -19,7 +20,14 @@ import { isEditor } from "@/lib/dashboard/format";
 
 const policySchema = z.object({
   feedbackMode: z.enum(["never_ask", "ask_once", "ask_always", "off"]),
+  retentionDays: z
+    .number()
+    .int("Retention must be a whole number of days.")
+    .min(1, "Retention must be between 1 and 365 days.")
+    .max(365, "Retention must be between 1 and 365 days."),
 });
+
+const retentionPresets = [7, 30, 90, 180, 365] as const;
 
 export function PolicyView({
   data,
@@ -36,11 +44,17 @@ export function PolicyView({
   const environment = data.currentEnvironment;
   const form = useForm<z.infer<typeof policySchema>>({
     resolver: zodResolver(policySchema),
-    defaultValues: { feedbackMode: mode(environment?.feedbackMode) },
+    defaultValues: {
+      feedbackMode: mode(environment?.feedbackMode),
+      retentionDays: retention(environment?.retentionDays),
+    },
   });
 
   useEffect(() => {
-    form.reset({ feedbackMode: mode(environment?.feedbackMode) });
+    form.reset({
+      feedbackMode: mode(environment?.feedbackMode),
+      retentionDays: retention(environment?.retentionDays),
+    });
   }, [environment, form]);
 
   if (!environment || !data.currentProduct) {
@@ -58,14 +72,16 @@ export function PolicyView({
         environmentId: environment.id,
         feedbackMode: values.feedbackMode,
         collectEventSummaries: false,
-        retentionDays: environment.retentionDays,
+        retentionDays: values.retentionDays,
       };
       await apiRequest<EnvironmentResponse>("/api/settings/policy", {
         method: "POST",
         workspaceId: data.workspace.id,
         body: JSON.stringify(input),
       });
-      setNotice("Collection policy saved.");
+      setNotice(
+        `Collection policy saved. Set AGENT_FEEDBACK_MODE=${values.feedbackMode} in the product and redeploy to align its response instructions.`,
+      );
       await refresh();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not save collection policy");
@@ -103,6 +119,66 @@ export function PolicyView({
             consent modes depend on the client surfacing and resuming permission, so verify the
             exact client versions before enabling them.
           </p>
+          <p className="max-w-3xl text-sm text-muted-foreground">
+            Epode enforces this policy when consent or a report reaches the service. Your product
+            signs the initial response action locally, so changing modes also requires updating
+            AGENT_FEEDBACK_MODE in the product and redeploying it. Setup always shows the current
+            value to deploy.
+          </p>
+        </Panel>
+        <Panel title="Data retention">
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="retention-days">Retention days</Label>
+            <fieldset className="flex flex-wrap gap-2">
+              <legend className="sr-only">Retention presets</legend>
+              {retentionPresets.map((days) => (
+                <Button
+                  key={days}
+                  type="button"
+                  size="sm"
+                  variant={form.watch("retentionDays") === days ? "secondary" : "outline"}
+                  onClick={() =>
+                    form.setValue("retentionDays", days, {
+                      shouldDirty: true,
+                      shouldValidate: true,
+                    })
+                  }
+                >
+                  {days} days
+                </Button>
+              ))}
+            </fieldset>
+            <Input
+              id="retention-days"
+              className="max-w-40"
+              type="number"
+              min={1}
+              max={365}
+              step={1}
+              aria-invalid={Boolean(form.formState.errors.retentionDays)}
+              aria-describedby={
+                form.formState.errors.retentionDays
+                  ? "retention-days-help retention-days-error"
+                  : "retention-days-help"
+              }
+              {...form.register("retentionDays", { valueAsNumber: true })}
+            />
+            {form.formState.errors.retentionDays ? (
+              <p id="retention-days-error" role="alert" className="text-sm text-destructive">
+                {form.formState.errors.retentionDays.message}
+              </p>
+            ) : null}
+          </div>
+          <p id="retention-days-help" className="max-w-3xl text-sm text-muted-foreground">
+            Dashboard filtering changes immediately. Feedback reports, interactions, and sessions
+            outside this window stop appearing right away. Physical deletion may take up to the
+            scheduled purge interval; expired feedback, interactions, and sessions are then
+            permanently removed.
+          </p>
+          <p className="max-w-3xl text-sm text-muted-foreground">
+            Durable Ask-once permission is a separate data control. It survives retention until the
+            permission is explicitly changed or the product is deleted.
+          </p>
         </Panel>
         <Panel title="Outside the feedback protocol">
           <p className="text-sm text-muted-foreground">
@@ -122,4 +198,11 @@ export function PolicyView({
 function mode(value: string | null | undefined): z.infer<typeof policySchema>["feedbackMode"] {
   if (value === "ask_once" || value === "ask_always" || value === "off") return value;
   return "never_ask";
+}
+
+function retention(value: number | null | undefined): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 365) {
+    return 30;
+  }
+  return value;
 }

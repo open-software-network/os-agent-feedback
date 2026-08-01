@@ -41,8 +41,13 @@ a public repository, or an MCP client configuration.
     Follow the dedicated page for your framework. For Express:
 
     ```bash
-    npm install https://app.epode.ai/static/agent-feedback-node-0.2.1.tgz
+    npm install https://app.epode.ai/static/agent-feedback-node-0.2.2.tgz
     ```
+
+    Hosted SDKs are pinned in the versioned
+    [integrity manifest](https://app.epode.ai/static/agent-feedback-integrations-0.2.2.json).
+    The dashboard's Setup agent prompt verifies the selected filename and SHA-256 before installing it;
+    package-manager lockfiles preserve that exact integrity afterward.
 
     ```ts
     import { agentFeedback } from "@agent-feedback/node/express";
@@ -85,8 +90,9 @@ a public repository, or an MCP client configuration.
     npx agent-feedback-doctor https://your-product.example/search?q=epode-test
     ```
 
-    In `never_ask` mode, the doctor submits a real synthetic report. In an ask mode, it validates
-    the contract but never impersonates user permission. MCP integrations should call `server/discover` and one
+    The doctor validates response injection, the trusted Epode origin, and the scoped capability without
+    creating feedback or pretending a customer agent used the product. In an ask mode, it validates
+    the consent contract but never impersonates user permission. MCP integrations should call `server/discover` and one
     normal product tool. For `consent_required`, ask the exact question and call
     `record_product_feedback_consent`; call `report_product_feedback` only from a `feedback_ready` action. If the
     report tool returns `retryable: true`, retry it exactly once with the same handle and report.
@@ -110,6 +116,7 @@ These are separate activation milestones. An HTTP opportunity proves the company
 prove that a customer agent followed the feedback action.
 
 <Note>
-The doctor's synthetic report proves your company-side connection. For HTTP and websites, also test one fresh
-Codex or Claude Code task with Epode Companion installed; that proves the real customer-agent handoff.
+The doctor proves only the company-side connection and first-opportunity handoff. For HTTP and websites, test one
+fresh Codex or Claude Code task with Epode Companion installed; only that real journey can prove confirmation and
+the first report.
 </Note>

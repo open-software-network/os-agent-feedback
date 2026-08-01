@@ -3,9 +3,6 @@ name: Build API
 on:
   push:
     branches: [main]
-    paths:
-      - "backend/**"
-      - ".github/workflows/build-api.yml"
   workflow_dispatch:
 
 permissions:

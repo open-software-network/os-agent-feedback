@@ -102,10 +102,21 @@ def _valid(value: Any) -> bool:
 
 
 def feedback_from_response(headers: Mapping[str, str], body: Any) -> dict[str, Any] | None:
+    encoded = next((v for k, v in headers.items() if k.lower() == "agent-feedback"), None)
+    if encoded:
+        try:
+            value = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+            if _valid(value):
+                return value
+        except Exception:
+            pass
     if isinstance(body, dict) and _valid(body.get("_agentFeedback")):
         return body["_agentFeedback"]
     if isinstance(body, (str, bytes)):
-        text = body.decode() if isinstance(body, bytes) else body
+        try:
+            text = body.decode() if isinstance(body, bytes) else body
+        except UnicodeDecodeError:
+            return None
         match = re.search(
             r'<script[^>]+id=["\']agent-feedback["\'][^>]*>([\s\S]*?)</script>',
             text,
@@ -118,14 +129,6 @@ def feedback_from_response(headers: Mapping[str, str], body: Any) -> dict[str, A
                     return value
             except json.JSONDecodeError:
                 pass
-    encoded = next((v for k, v in headers.items() if k.lower() == "agent-feedback"), None)
-    if encoded:
-        try:
-            value = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
-            if _valid(value):
-                return value
-        except Exception:
-            pass
     return None
 
 
@@ -160,7 +163,7 @@ def submit_feedback_consent(
     headers = {
         "authorization": str(action["authorization"]),
         "content-type": "application/json",
-        "user-agent": "agent-feedback-python-agent/0.2.1",
+        "user-agent": "agent-feedback-python-agent/0.2.2",
     }
     data = json.dumps({"decision": decision}, separators=(",", ":")).encode()
     if sender:
@@ -213,7 +216,7 @@ def submit_product_feedback(
     headers = {
         "authorization": str(feedback["submit"]["authorization"]),
         "content-type": "application/json",
-        "user-agent": "agent-feedback-python-agent/0.2.1",
+        "user-agent": "agent-feedback-python-agent/0.2.2",
     }
     body = {
         "summary": summary,

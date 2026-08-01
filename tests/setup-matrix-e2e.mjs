@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -17,11 +17,13 @@ const backendUrl = (process.env.SETUP_MATRIX_BACKEND_URL || "http://127.0.0.1:31
   /\/$/,
   "",
 );
+const publicBaseUrl = (process.env.SETUP_MATRIX_PUBLIC_BASE_URL || backendUrl).replace(/\/$/, "");
 const databaseEnvironment = process.env.SETUP_MATRIX_DB_ENVIRONMENT || "v2-canary";
 const localBackend = backendUrl === "http://127.0.0.1:3180";
 const scratch = await mkdtemp(join(tmpdir(), "epode-setup-matrix-"));
 const children = new Set();
 const expected = new Map();
+const productAuthSecret = randomBytes(32).toString("base64url");
 const selectedIntegrations = new Set(
   (process.env.SETUP_MATRIX_ONLY || "")
     .split(",")
@@ -49,6 +51,12 @@ function runWhich(command) {
 
 function selected(integration) {
   return selectedIntegrations.size === 0 || selectedIntegrations.has(integration);
+}
+
+function productAuthHeaders(customerRef = "setup-matrix-default") {
+  const payload = Buffer.from(customerRef, "utf8").toString("base64url");
+  const signature = createHmac("sha256", productAuthSecret).update(payload).digest("base64url");
+  return { authorization: `Bearer ${payload}.${signature}` };
 }
 
 function run(command, args, options = {}) {
@@ -206,7 +214,7 @@ function assertProtocolEnvelope(envelope) {
   assert.doesNotMatch(JSON.stringify(envelope), /af_live_/);
 }
 
-function assertFeedbackEnvelope(envelope, configuredMode) {
+function assertFeedbackEnvelope(envelope, configuredMode, expectedBaseUrl = backendUrl) {
   assertProtocolEnvelope(envelope);
   assert.equal(envelope.mode, "never_ask");
   assert.equal(envelope.state, "feedback_ready");
@@ -221,7 +229,7 @@ function assertFeedbackEnvelope(envelope, configuredMode) {
   assert.match(envelope.instruction, /topic:lowercase_slug/i);
   assert.match(envelope.instruction, /successful background report is routine bookkeeping/i);
   assert.match(envelope.instruction, /do not mention it in the final response/i);
-  assert.equal(envelope.submit.url, `${backendUrl}/api/v2/reports`);
+  assert.equal(envelope.submit.url, `${expectedBaseUrl}/api/v2/reports`);
   assert.equal(envelope.submit.method, "POST");
   assert.match(envelope.submit.authorization, /^Bearer afr2_/);
   assert.deepEqual(envelope.submit.reportSchema.required, ["summary"]);
@@ -261,8 +269,17 @@ function assertConsentEnvelope(envelope, mode) {
 }
 
 function assertDisabledEnvelope(envelope) {
+  const schemaEnvelope = localBackend
+    ? JSON.parse(
+        JSON.stringify(envelope, (_key, value) =>
+          typeof value === "string" && value.startsWith(`${backendUrl}/`)
+            ? `https://epode.test/${value.slice(backendUrl.length + 1)}`
+            : value,
+        ),
+      )
+    : envelope;
   assert.equal(
-    validateEnvelopeSchema(envelope),
+    validateEnvelopeSchema(schemaEnvelope),
     true,
     `invalid disabled envelope: ${JSON.stringify(validateEnvelopeSchema.errors)}`,
   );
@@ -284,7 +301,10 @@ async function decide(envelope, decision) {
   const action = envelope.requiredAction.submitDecision;
   const response = await fetch(action.url, {
     method: action.method,
-    headers: { authorization: action.authorization, "content-type": action.contentType },
+    headers: {
+      authorization: action.authorization,
+      "content-type": action.contentType,
+    },
     body: JSON.stringify({ decision }),
   });
   const body = await response.json();
@@ -292,7 +312,7 @@ async function decide(envelope, decision) {
   assert.equal(body.state, decision);
   if (decision === "approved") {
     assert.ok(body.feedback);
-    assertFeedbackEnvelope(body.feedback, envelope.configuredMode);
+    assertFeedbackEnvelope(body.feedback, envelope.configuredMode, publicBaseUrl);
   } else {
     assert.equal(body.feedback, null);
   }
@@ -336,11 +356,17 @@ async function submitAction(action, summary) {
         detail: "The agent performed one additional verification step.",
       },
     ],
-    workaround: { used: true, detail: "The agent verified the result through the setup harness." },
+    workaround: {
+      used: true,
+      detail: "The agent verified the result through the setup harness.",
+    },
   };
   const response = await fetch(action.url, {
     method: "POST",
-    headers: { authorization: action.authorization, "content-type": "application/json" },
+    headers: {
+      authorization: action.authorization,
+      "content-type": "application/json",
+    },
     body: JSON.stringify(report),
   });
   const body = await response.json();
@@ -351,8 +377,13 @@ async function submitAction(action, summary) {
   assert.equal(body.report.findings.length, 2);
   const duplicate = await fetch(action.url, {
     method: "POST",
-    headers: { authorization: action.authorization, "content-type": "application/json" },
-    body: JSON.stringify({ summary: "This duplicate report must not replace the first report." }),
+    headers: {
+      authorization: action.authorization,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      summary: "This duplicate report must not replace the first report.",
+    }),
   });
   const duplicateBody = await duplicate.json();
   assertResponseStatus(duplicate, 200, duplicateBody, "duplicate feedback replay");
@@ -370,7 +401,9 @@ async function testHttp(base, stack) {
     ["api", "/search", "http_json"],
     ["website", "/docs/test", "http_html"],
   ]) {
-    const response = await fetch(`${base}${path}`);
+    const response = await fetch(`${base}${path}`, {
+      headers: productAuthHeaders(`${stack}-${surfaceName}-never-ask`),
+    });
     const contentType = response.headers.get("content-type") || "";
     const body = contentType.includes("json") ? await response.json() : await response.text();
     assertResponseStatus(response, 200, body, `${stack}/${surfaceName} product response`);
@@ -389,9 +422,46 @@ async function testHttp(base, stack) {
   }
 }
 
+async function testHttpOff(base, stack) {
+  for (const [surfaceName, path] of [
+    ["api", "/search"],
+    ["website", "/docs/test"],
+  ]) {
+    const response = await fetch(`${base}${path}`, {
+      headers: productAuthHeaders(`${stack}-${surfaceName}-off`),
+    });
+    const contentType = response.headers.get("content-type") || "";
+    const body = contentType.includes("json") ? await response.json() : await response.text();
+    assertResponseStatus(response, 200, body, `${stack}/${surfaceName}/off product response`);
+    assert.equal(envelopeFrom(response, body), undefined);
+    assert.equal(response.headers.get("agent-feedback"), null);
+    assert.doesNotMatch(response.headers.get("link") || "", /agent-feedback/i);
+    if (surfaceName === "website") {
+      assert.doesNotMatch(body, /id=["']agent-feedback["']/i);
+      assert.doesNotMatch(body, /rel=["']agent-feedback["']/i);
+    }
+    console.log(`PASS ${stack}/${surfaceName}/off: product response untouched, no instructions`);
+  }
+}
+
+async function assertHttpAuthBoundary(base, stack) {
+  for (const headers of [
+    {},
+    {
+      authorization: "Bearer forged.invalid",
+      "x-customer-ref": "spoofed-tenant",
+    },
+  ]) {
+    const response = await fetch(`${base}/search`, { headers });
+    const body = await response.json();
+    assertResponseStatus(response, 401, body, `${stack} product authentication`);
+    assert.equal(envelopeFrom(response, body), undefined);
+  }
+}
+
 async function readHttpSurface(base, path, customerRef) {
   const response = await fetch(`${base}${path}`, {
-    headers: customerRef ? { "x-customer-ref": customerRef } : {},
+    headers: productAuthHeaders(customerRef || "setup-matrix-default"),
   });
   const contentType = response.headers.get("content-type") || "";
   const body = contentType.includes("json") ? await response.json() : await response.text();
@@ -526,6 +596,7 @@ async function mcpPost(url, body, { expectedStatus = 200, headerOverrides = {} }
       accept: "application/json, text/event-stream",
       "mcp-protocol-version": MCP_PROTOCOL_VERSION,
       "mcp-method": body.method,
+      ...productAuthHeaders("setup-matrix-mcp-default"),
       ...(name ? { "mcp-name": name } : {}),
       ...headerOverrides,
     },
@@ -542,6 +613,15 @@ async function mcpPost(url, body, { expectedStatus = 200, headerOverrides = {} }
 }
 
 async function testMcp(url, stack) {
+  const unauthorized = await mcpPost(url, modernMcpRequest(0, "server/discover"), {
+    expectedStatus: 401,
+    headerOverrides: {
+      authorization: "Bearer forged.invalid",
+      "x-customer-ref": "spoofed-tenant",
+    },
+  });
+  assert.equal(unauthorized.error.code, -32001);
+
   let payload = await mcpPost(url, modernMcpRequest(1, "server/discover"));
   assert.equal(payload.result.resultType, "complete");
   assert.ok(payload.result.supportedVersions.includes(MCP_PROTOCOL_VERSION));
@@ -577,14 +657,20 @@ async function testMcp(url, stack) {
 
   const mismatch = await mcpPost(
     url,
-    modernMcpRequest(3, "tools/call", { name: "search", arguments: { query: "setup" } }),
+    modernMcpRequest(3, "tools/call", {
+      name: "search",
+      arguments: { query: "setup" },
+    }),
     { expectedStatus: 400, headerOverrides: { "mcp-name": "wrong-tool" } },
   );
   assert.equal(mismatch.error.code, -32020);
 
   payload = await mcpPost(
     url,
-    modernMcpRequest(4, "tools/call", { name: "search", arguments: { query: "setup" } }),
+    modernMcpRequest(4, "tools/call", {
+      name: "search",
+      arguments: { query: "setup" },
+    }),
   );
   assert.equal(payload.result.resultType, "complete");
   const feedback = payload.result.structuredContent._agentFeedback;
@@ -611,7 +697,10 @@ async function testMcp(url, stack) {
         detail: "The agent performed one additional verification step.",
       },
     ],
-    workaround: { used: true, detail: "The agent verified the result through the setup harness." },
+    workaround: {
+      used: true,
+      detail: "The agent verified the result through the setup harness.",
+    },
   };
   ({ payload } = await submitMcpReportWithOneRetry({
     id: 5,
@@ -637,7 +726,11 @@ async function testMcp(url, stack) {
 
   const legacyResponse = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      ...productAuthHeaders("setup-matrix-mcp-default"),
+    },
     body: JSON.stringify({
       jsonrpc: "2.0",
       id: 102,
@@ -656,6 +749,27 @@ async function testMcp(url, stack) {
   console.log(
     `PASS ${stack}/mcp: 2026 discovery, stateless headers, cache hints, confirmed interaction, autonomous review`,
   );
+}
+
+async function testMcpOff(url, stack) {
+  let payload = await mcpPost(url, modernMcpRequest(300, "tools/list"));
+  const names = payload.result.tools.map((tool) => tool.name);
+  assert.ok(names.includes("search"));
+  assert.ok(!names.includes("report_product_feedback"));
+  assert.ok(!names.includes("record_product_feedback_consent"));
+
+  payload = await mcpPost(
+    url,
+    modernMcpRequest(301, "tools/call", {
+      name: "search",
+      arguments: { query: "setup" },
+    }),
+    { headerOverrides: productAuthHeaders(`${stack}-mcp-off`) },
+  );
+  assert.equal(payload.result.resultType, "complete");
+  assert.equal(payload.result.structuredContent?._agentFeedback, undefined);
+  assert.doesNotMatch(JSON.stringify(payload.result), /feedbackHandle|report_product_feedback/);
+  console.log(`PASS ${stack}/mcp/off: no feedback tools, metadata, or instructions`);
 }
 
 async function submitMcpReport(url, feedbackHandle, summary, id, headerOverrides = {}) {
@@ -677,7 +791,10 @@ async function submitMcpReport(url, feedbackHandle, summary, id, headerOverrides
         detail: "The agent performed one additional verification step.",
       },
     ],
-    workaround: { used: true, detail: "The agent verified the result through the setup harness." },
+    workaround: {
+      used: true,
+      detail: "The agent verified the result through the setup harness.",
+    },
   };
   const { payload, attempts } = await submitMcpReportWithOneRetry({
     id,
@@ -757,26 +874,33 @@ function assertMcpFeedbackDisabled(feedback) {
 async function callMcpSearch(url, id, customerRef) {
   const payload = await mcpPost(
     url,
-    modernMcpRequest(id, "tools/call", { name: "search", arguments: { query: "setup" } }),
-    { headerOverrides: { "x-customer-ref": customerRef } },
+    modernMcpRequest(id, "tools/call", {
+      name: "search",
+      arguments: { query: "setup" },
+    }),
+    { headerOverrides: productAuthHeaders(customerRef) },
   );
   return payload.result.structuredContent._agentFeedback;
 }
 
 async function testMcpConsent(url, stack, mode) {
-  const headers = { "x-customer-ref": `${stack}-${mode}-approved` };
-  let feedback = await callMcpSearch(url, 200, headers["x-customer-ref"]);
+  const approvedRef = `${stack}-${mode}-approved`;
+  const headers = productAuthHeaders(approvedRef);
+  let feedback = await callMcpSearch(url, 200, approvedRef);
   assertMcpConsent(feedback, mode);
 
   // A second product call without a recorded answer must still ask.
-  feedback = await callMcpSearch(url, 201, headers["x-customer-ref"]);
+  feedback = await callMcpSearch(url, 201, approvedRef);
   assertMcpConsent(feedback, mode);
 
   let payload = await mcpPost(
     url,
     modernMcpRequest(202, "tools/call", {
       name: "record_product_feedback_consent",
-      arguments: { feedbackHandle: feedback.feedbackHandle, decision: "approved" },
+      arguments: {
+        feedbackHandle: feedback.feedbackHandle,
+        decision: "approved",
+      },
     }),
     { headerOverrides: headers },
   );
@@ -798,7 +922,7 @@ async function testMcpConsent(url, stack, mode) {
     interactionId: report.interactionId,
   });
 
-  feedback = await callMcpSearch(url, 205, headers["x-customer-ref"]);
+  feedback = await callMcpSearch(url, 205, approvedRef);
   if (mode === "ask_once") {
     const rememberedSummary = `Epode ${stack} MCP remembered Ask once approval without asking again.`;
     if (feedback?.state === "feedback_ready") {
@@ -820,20 +944,24 @@ async function testMcpConsent(url, stack, mode) {
     assertMcpConsent(feedback, "ask_always");
   }
 
-  const declinedHeaders = { "x-customer-ref": `${stack}-${mode}-declined` };
-  feedback = await callMcpSearch(url, 208, declinedHeaders["x-customer-ref"]);
+  const declinedRef = `${stack}-${mode}-declined`;
+  const declinedHeaders = productAuthHeaders(declinedRef);
+  feedback = await callMcpSearch(url, 208, declinedRef);
   assertMcpConsent(feedback, mode);
   payload = await mcpPost(
     url,
     modernMcpRequest(209, "tools/call", {
       name: "record_product_feedback_consent",
-      arguments: { feedbackHandle: feedback.feedbackHandle, decision: "declined" },
+      arguments: {
+        feedbackHandle: feedback.feedbackHandle,
+        decision: "declined",
+      },
     }),
     { headerOverrides: declinedHeaders },
   );
   assert.equal(payload.result.structuredContent.state, "declined");
   assert.equal(payload.result.structuredContent.reportTool, undefined);
-  feedback = await callMcpSearch(url, 210, declinedHeaders["x-customer-ref"]);
+  feedback = await callMcpSearch(url, 210, declinedRef);
   if (mode === "ask_once") {
     if (feedback?.state === "feedback_disabled") {
       assertMcpFeedbackDisabled(feedback);
@@ -855,13 +983,37 @@ async function testMcpConsent(url, stack, mode) {
   );
 }
 
+function readObservations() {
+  const raw = database("read-observations")
+    .split("\n")
+    .findLast((line) => line.trim().startsWith("["));
+  return JSON.parse(raw || "[]");
+}
+
+async function stableObservationCount() {
+  let previous = -1;
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const count = readObservations().length;
+    if (count === previous) return count;
+    previous = count;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+  }
+  throw new Error("Setup observation count did not settle before the Off-mode assertion");
+}
+
+async function assertOffCreatedNoObservation(before, label) {
+  await new Promise((resolveWait) => setTimeout(resolveWait, 2_000));
+  const after = await stableObservationCount();
+  assert.equal(after, before, `${label}/off created ${after - before} unexpected interaction(s)`);
+}
+
 async function prepareNode(fixtureName) {
   const target = join(scratch, fixtureName);
   await cp(join(repo, "examples", fixtureName), target, { recursive: true });
   const manifestPath = join(target, "package.json");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   manifest.dependencies["@agent-feedback/node"] =
-    `${backendUrl}/static/agent-feedback-node-0.2.1.tgz`;
+    `${backendUrl}/static/agent-feedback-node-0.2.2.tgz`;
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   run("npm", ["install", "--ignore-scripts"], { cwd: target });
   return target;
@@ -886,7 +1038,9 @@ async function preparePython(fixtureName) {
 
 async function prepareGo() {
   const target = join(scratch, "setup-matrix-go");
-  await cp(join(repo, "examples", "setup-matrix-go"), target, { recursive: true });
+  await cp(join(repo, "examples", "setup-matrix-go"), target, {
+    recursive: true,
+  });
   await rm(join(target, "go.mod"));
   run("go", ["mod", "init", "setup-matrix-go"], { cwd: target });
   run(
@@ -899,7 +1053,7 @@ async function prepareGo() {
     ],
     { cwd: target },
   );
-  run("go", ["mod", "edit", "-require=github.com/open-software-network/os-epode/sdk/go@v0.2.1"], {
+  run("go", ["mod", "edit", "-require=github.com/open-software-network/os-epode/sdk/go@v0.2.2"], {
     cwd: target,
   });
   run("go", ["mod", "tidy"], { cwd: target });
@@ -909,8 +1063,13 @@ async function prepareGo() {
 
 async function prepareRust() {
   const target = join(scratch, "setup-matrix-rust");
-  await cp(join(repo, "examples", "setup-matrix-rust"), target, { recursive: true });
-  run("bash", ["prepare.sh"], { cwd: target, env: { EP0DE_ORIGIN: backendUrl } });
+  await cp(join(repo, "examples", "setup-matrix-rust"), target, {
+    recursive: true,
+  });
+  run("bash", ["prepare.sh"], {
+    cwd: target,
+    env: { EP0DE_ORIGIN: backendUrl },
+  });
   run("cargo", ["build", "--quiet"], { cwd: target });
   return target;
 }
@@ -920,7 +1079,7 @@ async function prepareManual(fixtureName) {
   await cp(join(repo, "examples", fixtureName), target, { recursive: true });
   run(
     "curl",
-    ["-fsS", "-o", "protocol.zip", `${backendUrl}/static/agent-feedback-protocol-v1.zip`],
+    ["-fsS", "-o", "protocol.zip", `${backendUrl}/static/agent-feedback-protocol-v1-0.2.2.zip`],
     { cwd: target },
   );
   run("unzip", ["-q", "protocol.zip"], { cwd: target });
@@ -934,6 +1093,7 @@ async function prepareManual(fixtureName) {
 
 async function runHttpApp(label, command, args, cwd, port, mode = "never_ask") {
   database("set-mode", mode);
+  const observationsBefore = mode === "off" ? await stableObservationCount() : undefined;
   await assertPortAvailable(port, `${label}/${mode}`);
   const child = start(command, args, {
     cwd,
@@ -943,22 +1103,28 @@ async function runHttpApp(label, command, args, cwd, port, mode = "never_ask") {
       AGENT_FEEDBACK_KEY: apiKey,
       AGENT_FEEDBACK_URL: backendUrl,
       AGENT_FEEDBACK_MODE: mode,
+      SETUP_MATRIX_PRODUCT_AUTH_SECRET: productAuthSecret,
       ...(localBackend ? { AGENT_FEEDBACK_CONSENT_TIMEOUT_MS: "5000" } : {}),
     },
   });
   await waitFor(`http://127.0.0.1:${port}/health`, child);
   try {
-    if (mode === "never_ask") await testHttp(`http://127.0.0.1:${port}`, label);
+    await assertHttpAuthBoundary(`http://127.0.0.1:${port}`, label);
+    if (mode === "off") await testHttpOff(`http://127.0.0.1:${port}`, label);
+    else if (mode === "never_ask") await testHttp(`http://127.0.0.1:${port}`, label);
     else await testHttpConsent(`http://127.0.0.1:${port}`, label, mode);
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.stack : error}${childLogTail()}`);
   }
   await waitForPersistedExpected();
+  if (observationsBefore !== undefined)
+    await assertOffCreatedNoObservation(observationsBefore, label);
   await stop(child);
 }
 
 async function runMcpApp(label, command, args, cwd, port, mode = "never_ask") {
   database("set-mode", mode);
+  const observationsBefore = mode === "off" ? await stableObservationCount() : undefined;
   await assertPortAvailable(port, `${label}/${mode}`);
   const child = start(command, args, {
     cwd,
@@ -968,27 +1134,31 @@ async function runMcpApp(label, command, args, cwd, port, mode = "never_ask") {
       AGENT_FEEDBACK_KEY: apiKey,
       AGENT_FEEDBACK_URL: backendUrl,
       AGENT_FEEDBACK_MODE: mode,
+      SETUP_MATRIX_PRODUCT_AUTH_SECRET: productAuthSecret,
       ...(localBackend ? { AGENT_FEEDBACK_CONSENT_TIMEOUT_MS: "5000" } : {}),
     },
   });
   await waitFor(`http://127.0.0.1:${port}/health`, child);
   try {
-    if (mode === "never_ask") await testMcp(`http://127.0.0.1:${port}/mcp`, label);
+    if (mode === "off") await testMcpOff(`http://127.0.0.1:${port}/mcp`, label);
+    else if (mode === "never_ask") await testMcp(`http://127.0.0.1:${port}/mcp`, label);
     else await testMcpConsent(`http://127.0.0.1:${port}/mcp`, label, mode);
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.stack : error}${childLogTail()}`);
   }
   await waitForPersistedExpected();
+  if (observationsBefore !== undefined)
+    await assertOffCreatedNoObservation(observationsBefore, label);
   await stop(child);
 }
 
 async function runAllHttpModes(label, command, args, cwd, port) {
-  for (const mode of ["never_ask", "ask_once", "ask_always"])
+  for (const mode of ["never_ask", "ask_once", "ask_always", "off"])
     await runHttpApp(label, command, args, cwd, port, mode);
 }
 
 async function runAllMcpModes(label, command, args, cwd, port) {
-  for (const mode of ["never_ask", "ask_once", "ask_always"])
+  for (const mode of ["never_ask", "ask_once", "ask_always", "off"])
     await runMcpApp(label, command, args, cwd, port, mode);
 }
 
@@ -1165,7 +1335,7 @@ try {
       selectedIntegrations.size === 0
         ? "7 API + 7 website + 2 MCP integrations"
         : [...selectedIntegrations].sort().join(", ")
-    } across Never ask, Ask once, and Ask always`,
+    } across Never ask, Ask once, Ask always, and Off`,
   );
 } finally {
   for (const child of children) await stop(child);

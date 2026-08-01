@@ -34,6 +34,7 @@ const MAX_CONCURRENT_CONSENT_LOOKUPS: usize = 8;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 type Extractor = Arc<dyn Fn(&Request<Body>) -> Option<String> + Send + Sync>;
+type CachedConsentEntry = (String, u64, Instant);
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -67,6 +68,7 @@ pub struct Options {
     pub customer_ref: Option<Extractor>,
     pub session_ref: Option<Extractor>,
     pub runtime_hint: Option<Extractor>,
+    pub operation: Option<Extractor>,
     pub flush_interval: Duration,
     pub max_queue_size: usize,
     pub consent_timeout: Duration,
@@ -103,6 +105,7 @@ impl Options {
             customer_ref: None,
             session_ref: None,
             runtime_hint: None,
+            operation: None,
             flush_interval: Duration::from_millis(500),
             max_queue_size: 1_000,
             consent_timeout,
@@ -156,6 +159,16 @@ impl Options {
         extractor: impl Fn(&Request<Body>) -> Option<String> + Send + Sync + 'static,
     ) -> Self {
         self.runtime_hint = Some(Arc::new(extractor));
+        self
+    }
+
+    /// Extract a product-owned normalized route template. With Axum, mount
+    /// this layer after route matching and read `MatchedPath` from extensions.
+    pub fn operation(
+        mut self,
+        extractor: impl Fn(&Request<Body>) -> Option<String> + Send + Sync + 'static,
+    ) -> Self {
+        self.operation = Some(Arc::new(extractor));
         self
     }
 }
@@ -251,6 +264,14 @@ struct Claims<'a> {
     n: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     s: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    r: Option<u64>,
+}
+
+#[derive(Clone, Copy)]
+struct ConsentSnapshot {
+    state: &'static str,
+    revision: u64,
 }
 
 #[derive(Clone)]
@@ -289,8 +310,9 @@ struct Runtime {
     sender: mpsc::Sender<Box<TelemetryEvent>>,
     shutdown_sender: mpsc::Sender<oneshot::Sender<Result<(), ShutdownError>>>,
     stopping: Arc<AtomicBool>,
+    warned_missing_customer_ref: Arc<AtomicBool>,
     sequence: Arc<AtomicU64>,
-    consent_cache: Arc<Mutex<HashMap<String, (String, Instant)>>>,
+    consent_cache: Arc<Mutex<HashMap<String, CachedConsentEntry>>>,
     consent_lookups: Arc<Mutex<HashSet<String>>>,
     consent_slots: Arc<Semaphore>,
 }
@@ -323,6 +345,7 @@ impl Runtime {
             sender,
             shutdown_sender,
             stopping: Arc::new(AtomicBool::new(false)),
+            warned_missing_customer_ref: Arc::new(AtomicBool::new(false)),
             sequence: Arc::new(AtomicU64::new(0)),
             consent_cache: Arc::new(Mutex::new(HashMap::new())),
             consent_lookups: Arc::new(Mutex::new(HashSet::new())),
@@ -366,6 +389,18 @@ impl Runtime {
                 .any(|pattern| match_pattern(path, pattern))
     }
 
+    fn warn_missing_customer_ref(&self) {
+        if self.options.feedback_mode == FeedbackMode::AskOnce
+            && !self
+                .warned_missing_customer_ref
+                .swap(true, Ordering::Relaxed)
+        {
+            eprintln!(
+                "[agent-feedback] Ask once could not resolve customerRef for an eligible 2xx response. Authentication and authorized tenant selection must run before Agent Feedback. This response is using per-interaction permission and will not remember the choice. Run the integration doctor with a real authenticated request."
+            );
+        }
+    }
+
     fn consent_subject(&self, customer_ref: &str) -> Result<String, Error> {
         let (_, _, consent_key) = key_parts(&self.options.api_key)?;
         let mut mac =
@@ -379,35 +414,56 @@ impl Runtime {
 
     /// Return only process-local state so HTTP response instrumentation never
     /// waits for consent-state I/O.
-    async fn cached_consent(&self, customer_ref: Option<&str>) -> &'static str {
+    async fn cached_consent(&self, customer_ref: Option<&str>) -> ConsentSnapshot {
         if self.options.feedback_mode == FeedbackMode::NeverAsk {
-            return "approved";
+            return ConsentSnapshot {
+                state: "approved",
+                revision: 0,
+            };
         }
         if self.options.feedback_mode != FeedbackMode::AskOnce {
-            return "unknown";
+            return ConsentSnapshot {
+                state: "unknown",
+                revision: 0,
+            };
         }
         let Some(customer_ref) = customer_ref.filter(|value| !value.trim().is_empty()) else {
-            return "unknown";
+            return ConsentSnapshot {
+                state: "unknown",
+                revision: 0,
+            };
         };
         let Ok(subject) = self.consent_subject(customer_ref) else {
-            return "unknown";
+            return ConsentSnapshot {
+                state: "unknown",
+                revision: 0,
+            };
         };
         self.cached_consent_subject(&subject)
             .await
-            .unwrap_or("unknown")
+            .unwrap_or(ConsentSnapshot {
+                state: "unknown",
+                revision: 0,
+            })
     }
 
-    async fn cached_consent_subject(&self, subject: &str) -> Option<&'static str> {
+    async fn cached_consent_subject(&self, subject: &str) -> Option<ConsentSnapshot> {
         let now = Instant::now();
         let mut cache = self.consent_cache.lock().await;
-        let (state, expires_at) = cache.get(subject)?;
+        let (state, revision, expires_at) = cache.get(subject)?;
         if *expires_at <= now {
             cache.remove(subject);
             return None;
         }
         match state.as_str() {
-            "approved" => Some("approved"),
-            "declined" => Some("declined"),
+            "approved" => Some(ConsentSnapshot {
+                state: "approved",
+                revision: *revision,
+            }),
+            "declined" => Some(ConsentSnapshot {
+                state: "declined",
+                revision: *revision,
+            }),
             _ => None,
         }
     }
@@ -451,7 +507,7 @@ impl Runtime {
         });
     }
 
-    async fn lookup_consent_subject(&self, subject: String) -> &'static str {
+    async fn lookup_consent_subject(&self, subject: String) -> ConsentSnapshot {
         let client = reqwest::Client::builder()
             .timeout(self.options.consent_timeout)
             .build()
@@ -459,33 +515,69 @@ impl Runtime {
         let response = client
             .post(format!("{}/api/v2/consent/state", self.options.endpoint))
             .bearer_auth(&self.options.api_key)
-            .header("user-agent", "agent-feedback-rust/0.2.1")
+            .header("user-agent", "agent-feedback-rust/0.2.2")
             .json(&json!({ "subject": subject }))
             .send()
             .await;
         let Ok(response) = response.and_then(reqwest::Response::error_for_status) else {
-            return "unavailable";
+            return ConsentSnapshot {
+                state: "unavailable",
+                revision: 0,
+            };
         };
         let Ok(value) = response.json::<Value>().await else {
-            return "unavailable";
+            return ConsentSnapshot {
+                state: "unavailable",
+                revision: 0,
+            };
         };
         let Some(state) = value.get("state").and_then(Value::as_str) else {
-            return "unavailable";
+            return ConsentSnapshot {
+                state: "unavailable",
+                revision: 0,
+            };
         };
+        let Some(revision) = value.get("revision").and_then(Value::as_u64) else {
+            return ConsentSnapshot {
+                state: "unavailable",
+                revision: 0,
+            };
+        };
+        if (state == "unknown" && revision != 0)
+            || (matches!(state, "approved" | "declined") && revision == 0)
+        {
+            return ConsentSnapshot {
+                state: "unavailable",
+                revision: 0,
+            };
+        }
         if matches!(state, "approved" | "declined") {
             self.consent_cache.lock().await.insert(
                 subject,
                 (
                     state.to_string(),
+                    revision,
                     Instant::now() + self.options.consent_cache_ttl,
                 ),
             );
         }
         match state {
-            "approved" => "approved",
-            "declined" => "declined",
-            "unknown" => "unknown",
-            _ => "unavailable",
+            "approved" => ConsentSnapshot {
+                state: "approved",
+                revision,
+            },
+            "declined" => ConsentSnapshot {
+                state: "declined",
+                revision,
+            },
+            "unknown" => ConsentSnapshot {
+                state: "unknown",
+                revision: 0,
+            },
+            _ => ConsentSnapshot {
+                state: "unavailable",
+                revision: 0,
+            },
         }
     }
 
@@ -499,12 +591,26 @@ impl Runtime {
         self.prepare_for(now, None, state)
     }
 
+    #[cfg(test)]
     fn prepare_for(
         &self,
         now: SystemTime,
         customer_ref: Option<&str>,
         consent_state: &str,
     ) -> Result<PreparedInteraction, Error> {
+        self.prepare_for_revision(now, customer_ref, consent_state, 0)
+    }
+
+    fn prepare_for_revision(
+        &self,
+        now: SystemTime,
+        customer_ref: Option<&str>,
+        consent_state: &str,
+        consent_revision: u64,
+    ) -> Result<PreparedInteraction, Error> {
+        if self.options.feedback_mode == FeedbackMode::AskOnce && customer_ref.is_none() {
+            self.warn_missing_customer_ref();
+        }
         let interaction_id = Uuid::new_v4();
         let interaction_id_text = interaction_id.to_string();
         let issued = now.duration_since(UNIX_EPOCH)?.as_secs();
@@ -536,6 +642,7 @@ impl Runtime {
             exp: expires,
             n: &nonce,
             s: subject.as_deref(),
+            r: subject.as_ref().map(|_| consent_revision),
         };
         let token = sign_capability(&self.options.api_key, &claims)?;
         let report_shape = "Body schema: {summary:string, impact?:one of submit.reportSchema.impacts, confidence?:number 0..1, findings?:[{kind:one of submit.reportSchema.findingKinds, topic:lowercase_slug, severity?:one of submit.reportSchema.findingSeverities, detail:string}], workaround?:{used:boolean, detail?:string}}. Omit any optional field you cannot form exactly.";
@@ -745,7 +852,7 @@ async fn flush_events(
     let delivered = client
         .post(format!("{}/api/v2/telemetry/batches", options.endpoint))
         .bearer_auth(&options.api_key)
-        .header("user-agent", "agent-feedback-rust/0.2.1")
+        .header("user-agent", "agent-feedback-rust/0.2.2")
         .json(&json!({ "events": &events }))
         .send()
         .await
@@ -827,27 +934,23 @@ where
                 .is_some_and(|value| value.trim() == "1");
             if runtime.options.cache_mode == HttpCacheMode::Request && !request_opt_in {
                 let mut response = inner.call(request).await?;
-                ensure_request_vary(response.headers_mut());
-                add_request_discovery(&mut response, &method, &request_target);
+                if !has_non_identity_content_encoding(response.headers()) {
+                    ensure_request_vary(response.headers_mut());
+                    add_request_discovery(&mut response, &method, &request_target);
+                }
                 return Ok(response);
             }
-            let customer_ref = extract(&runtime.options.customer_ref, &request);
-            let session_ref = extract(&runtime.options.session_ref, &request);
-            let runtime_hint = extract(&runtime.options.runtime_hint, &request);
+            let (parts, body) = request.into_parts();
+            let extractor_request = Request::from_parts(parts.clone(), Body::empty());
+            let request = Request::from_parts(parts, body);
             let started = Instant::now();
             let response = inner.call(request).await?;
-            let mut response = instrument_response(
-                &runtime,
-                response,
-                method,
-                path,
-                started,
-                customer_ref,
-                session_ref,
-                runtime_hint,
-            )
-            .await;
-            if runtime.options.cache_mode == HttpCacheMode::Request {
+            let mut response =
+                instrument_response(&runtime, response, method, path, started, extractor_request)
+                    .await;
+            if runtime.options.cache_mode == HttpCacheMode::Request
+                && !has_non_identity_content_encoding(response.headers())
+            {
                 ensure_request_vary(response.headers_mut());
             }
             Ok(response)
@@ -859,7 +962,7 @@ fn add_request_discovery(response: &mut Response, method: &Method, request_targe
     if !request_target.starts_with('/')
         || request_target.starts_with("//")
         || (*method != Method::GET && *method != Method::HEAD)
-        || !response.status().is_success()
+        || !is_complete_success(response)
         || response
             .body()
             .size_hint()
@@ -907,6 +1010,17 @@ fn ensure_request_vary(headers: &mut HeaderMap) {
     }
 }
 
+fn has_non_identity_content_encoding(headers: &HeaderMap) -> bool {
+    headers.get_all("content-encoding").iter().any(|value| {
+        value.to_str().map_or(true, |value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .any(|token| !token.is_empty() && !token.eq_ignore_ascii_case("identity"))
+        })
+    })
+}
+
 fn extract(extractor: &Option<Extractor>, request: &Request<Body>) -> Option<String> {
     extractor
         .as_ref()
@@ -922,17 +1036,18 @@ async fn instrument_response(
     method: Method,
     path: String,
     started: Instant,
-    customer_ref: Option<String>,
-    session_ref: Option<String>,
-    runtime_hint: Option<String>,
+    extractor_request: Request<Body>,
 ) -> Response {
-    if !response.status().is_success()
+    if !is_complete_success(&response)
         || response
             .body()
             .size_hint()
             .exact()
             .is_none_or(|size| size > MAX_BODY_BYTES as u64)
     {
+        return response;
+    }
+    if has_non_identity_content_encoding(response.headers()) {
         return response;
     }
     if runtime.options.cache_mode == HttpCacheMode::Safe
@@ -953,10 +1068,18 @@ async fn instrument_response(
         if runtime.options.cache_mode != HttpCacheMode::Request {
             return response;
         }
+        let customer_ref = extract(&runtime.options.customer_ref, &extractor_request);
+        let session_ref = extract(&runtime.options.session_ref, &extractor_request);
+        let runtime_hint = extract(&runtime.options.runtime_hint, &extractor_request);
+        let operation =
+            extract(&runtime.options.operation, &extractor_request).unwrap_or_else(|| path.clone());
         let consent_state = runtime.cached_consent(customer_ref.as_deref()).await;
-        let Ok(prepared) =
-            runtime.prepare_for(SystemTime::now(), customer_ref.as_deref(), consent_state)
-        else {
+        let Ok(prepared) = runtime.prepare_for_revision(
+            SystemTime::now(),
+            customer_ref.as_deref(),
+            consent_state.state,
+            consent_state.revision,
+        ) else {
             return response;
         };
         let Some(envelope) = prepared.envelope.as_ref() else {
@@ -973,15 +1096,13 @@ async fn instrument_response(
         )) {
             response.headers_mut().append(LINK, value);
         }
-        response
-            .headers_mut()
-            .insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+        make_response_private(response.headers_mut());
         let consent_customer_ref = customer_ref.clone();
         runtime.record(TelemetryEvent {
             interaction_id: prepared.interaction_id,
             sequence: 0,
             surface: "http_headers".into(),
-            operation: normalize_operation(&path),
+            operation: normalize_operation(&operation),
             status_code: response.status().as_u16(),
             duration_ms: started.elapsed().as_millis() as u64,
             classification: "unclassified",
@@ -1009,76 +1130,88 @@ async fn instrument_response(
             Body::from("response body could not be read by Agent Feedback middleware"),
         );
     };
-    let consent_state = runtime.cached_consent(customer_ref.as_deref()).await;
-    let Ok(prepared) =
-        runtime.prepare_for(SystemTime::now(), customer_ref.as_deref(), consent_state)
-    else {
-        return Response::from_parts(parts, Body::from(bytes));
-    };
-    if prepared.envelope.is_none() {
-        return Response::from_parts(parts, Body::from(bytes));
-    }
-    let (output, surface) = if content_type.contains("application/json") {
+    let mut json_object = None;
+    let mut html = None;
+    let surface = if content_type.contains("application/json") {
         match serde_json::from_slice::<Value>(&bytes) {
-            Ok(Value::Object(mut object)) if !object.contains_key("_agentFeedback") => {
-                if let Some(envelope) = prepared.envelope.as_ref() {
-                    object.insert(
-                        "_agentFeedback".into(),
-                        serde_json::to_value(envelope).unwrap_or(Value::Null),
-                    );
-                }
-                (
-                    serde_json::to_vec(&Value::Object(object)).unwrap_or_else(|_| bytes.to_vec()),
-                    "http_json",
-                )
+            Ok(Value::Object(object)) if !object.contains_key("_agentFeedback") => {
+                json_object = Some(object);
+                "http_json"
             }
             Ok(Value::Object(_)) | Err(_) => {
                 return Response::from_parts(parts, Body::from(bytes));
             }
-            Ok(_) => {
-                if let Some(envelope) = prepared.envelope.as_ref() {
-                    let encoded =
-                        URL_SAFE_NO_PAD.encode(serde_json::to_vec(envelope).unwrap_or_default());
-                    if let Ok(value) = HeaderValue::from_str(&encoded) {
-                        parts.headers.insert("agent-feedback", value);
-                    }
-                    if let Ok(value) = HeaderValue::from_str(&format!(
-                        "<{}/.well-known/agent-feedback-v1.json>; rel=\"agent-feedback\"; type=\"application/json\"",
-                        runtime.options.endpoint
-                    )) {
-                        parts.headers.append(LINK, value);
-                    }
-                }
-                (bytes.to_vec(), "http_headers")
-            }
+            Ok(_) => "http_headers",
         }
     } else {
-        let Ok(html) = String::from_utf8(bytes.to_vec()) else {
+        let Ok(decoded) = String::from_utf8(bytes.to_vec()) else {
             return Response::from_parts(parts, Body::from(bytes));
         };
-        (
-            prepared
-                .envelope
-                .as_ref()
-                .map_or_else(|| html.clone(), |envelope| inject_html(&html, envelope))
-                .into_bytes(),
-            "http_html",
-        )
+        if has_agent_feedback_marker(&decoded) {
+            "http_headers"
+        } else {
+            html = Some(decoded);
+            "http_html"
+        }
     };
-    if prepared.envelope.is_some() {
-        parts
-            .headers
-            .insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
-    }
-    if let Ok(value) = HeaderValue::from_str(&output.len().to_string()) {
-        parts.headers.insert(CONTENT_LENGTH, value);
+    let customer_ref = extract(&runtime.options.customer_ref, &extractor_request);
+    let session_ref = extract(&runtime.options.session_ref, &extractor_request);
+    let runtime_hint = extract(&runtime.options.runtime_hint, &extractor_request);
+    let operation =
+        extract(&runtime.options.operation, &extractor_request).unwrap_or_else(|| path.clone());
+    let consent_state = runtime.cached_consent(customer_ref.as_deref()).await;
+    let Ok(prepared) = runtime.prepare_for_revision(
+        SystemTime::now(),
+        customer_ref.as_deref(),
+        consent_state.state,
+        consent_state.revision,
+    ) else {
+        return Response::from_parts(parts, Body::from(bytes));
+    };
+    let Some(envelope) = prepared.envelope.as_ref() else {
+        return Response::from_parts(parts, Body::from(bytes));
+    };
+    let output = match surface {
+        "http_json" => {
+            let mut object = json_object.expect("JSON surface must retain its object");
+            object.insert(
+                "_agentFeedback".into(),
+                serde_json::to_value(envelope).unwrap_or(Value::Null),
+            );
+            serde_json::to_vec(&Value::Object(object)).unwrap_or_else(|_| bytes.to_vec())
+        }
+        "http_html" => inject_html(
+            html.as_deref().expect("HTML surface must retain its text"),
+            envelope,
+        )
+        .into_bytes(),
+        _ => {
+            let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(envelope).unwrap_or_default());
+            if let Ok(value) = HeaderValue::from_str(&encoded) {
+                parts.headers.insert("agent-feedback", value);
+            }
+            if let Ok(value) = HeaderValue::from_str(&format!(
+                "<{}/.well-known/agent-feedback-v1.json>; rel=\"agent-feedback\"; type=\"application/json\"",
+                runtime.options.endpoint
+            )) {
+                parts.headers.append(LINK, value);
+            }
+            bytes.to_vec()
+        }
+    };
+    make_response_private(&mut parts.headers);
+    if surface != "http_headers" {
+        if let Ok(value) = HeaderValue::from_str(&output.len().to_string()) {
+            parts.headers.insert(CONTENT_LENGTH, value);
+        }
+        strip_body_validators(&mut parts.headers);
     }
     let consent_customer_ref = customer_ref.clone();
     runtime.record(TelemetryEvent {
         interaction_id: prepared.interaction_id,
         sequence: 0,
         surface: surface.into(),
-        operation: normalize_operation(&path),
+        operation: normalize_operation(&operation),
         status_code: status.as_u16(),
         duration_ms: started.elapsed().as_millis() as u64,
         customer_ref,
@@ -1094,21 +1227,63 @@ async fn instrument_response(
 }
 
 fn has_shared_cache_policy(headers: &HeaderMap) -> bool {
-    headers
-        .get_all(CACHE_CONTROL)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .any(|directive| {
-            let directive = directive.trim().to_ascii_lowercase();
-            let name = directive
-                .split_once('=')
-                .map_or(directive.as_str(), |(name, _)| name.trim());
-            matches!(
-                name,
-                "public" | "s-maxage" | "max-age" | "immutable" | "stale-while-revalidate"
-            )
-        })
+    [
+        "cache-control",
+        "cdn-cache-control",
+        "cloudflare-cdn-cache-control",
+        "surrogate-control",
+    ]
+    .into_iter()
+    .any(|header_name| {
+        headers
+            .get_all(header_name)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .any(|directive| {
+                let directive = directive.trim().to_ascii_lowercase();
+                let name = directive
+                    .split_once('=')
+                    .map_or(directive.as_str(), |(name, _)| name.trim());
+                matches!(
+                    name,
+                    "public" | "s-maxage" | "max-age" | "immutable" | "stale-while-revalidate"
+                )
+            })
+    })
+}
+
+fn make_response_private(headers: &mut HeaderMap) {
+    for header_name in [
+        "cdn-cache-control",
+        "cloudflare-cdn-cache-control",
+        "surrogate-control",
+    ] {
+        headers.remove(header_name);
+    }
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+}
+
+fn is_complete_success(response: &Response) -> bool {
+    response.status().is_success()
+        && response.status() != http::StatusCode::NO_CONTENT
+        && response.status() != http::StatusCode::RESET_CONTENT
+        && response.status() != http::StatusCode::PARTIAL_CONTENT
+        && !response.headers().contains_key("content-range")
+}
+
+fn strip_body_validators(headers: &mut HeaderMap) {
+    for name in [
+        "etag",
+        "content-md5",
+        "digest",
+        "content-digest",
+        "repr-digest",
+        "content-range",
+        "accept-ranges",
+    ] {
+        headers.remove(name);
+    }
 }
 
 fn inject_html(html: &str, envelope: &Envelope) -> String {
@@ -1116,13 +1291,171 @@ fn inject_html(html: &str, envelope: &Envelope) -> String {
         .unwrap_or_default()
         .replace('<', "\\u003c");
     let tag = format!(r#"<script id="agent-feedback" type="application/json">{data}</script>"#);
-    if let Some(index) = html.to_ascii_lowercase().find("</head>") {
-        return format!("{}{}{}", &html[..index], tag, &html[index..]);
+    let index = html_injection_boundary(html);
+    format!("{}{}{}", &html[..index], tag, &html[index..])
+}
+
+fn html_injection_boundary(html: &str) -> usize {
+    let bytes = html.as_bytes();
+    let mut body_boundary = None;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'<' {
+            index += 1;
+            continue;
+        }
+        if bytes[index..].starts_with(b"<!--") {
+            let Some(relative_end) = html[index + 4..].find("-->") else {
+                return body_boundary.unwrap_or(index);
+            };
+            index += 4 + relative_end + 3;
+            continue;
+        }
+
+        let mut cursor = index + 1;
+        let closing = cursor < bytes.len() && bytes[cursor] == b'/';
+        if closing {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() || !is_html_tag_name_byte(bytes[cursor]) {
+            if cursor < bytes.len() && matches!(bytes[cursor], b'!' | b'?') {
+                let Some(end) = html_tag_end(bytes, cursor + 1) else {
+                    return body_boundary.unwrap_or(index);
+                };
+                index = end + 1;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+
+        let name_start = cursor;
+        while cursor < bytes.len() && is_html_tag_name_byte(bytes[cursor]) {
+            cursor += 1;
+        }
+        let name = &bytes[name_start..cursor];
+        let Some(end) = html_tag_end(bytes, cursor) else {
+            return body_boundary.unwrap_or(index);
+        };
+
+        if closing {
+            if name.eq_ignore_ascii_case(b"head") {
+                return index;
+            }
+            if name.eq_ignore_ascii_case(b"body") && body_boundary.is_none() {
+                body_boundary = Some(index);
+            }
+            index = end + 1;
+            continue;
+        }
+
+        if name.eq_ignore_ascii_case(b"script") || name.eq_ignore_ascii_case(b"style") {
+            let Some(raw_end) = html_raw_text_end(bytes, end + 1, name) else {
+                return body_boundary.unwrap_or(index);
+            };
+            index = raw_end;
+            continue;
+        }
+        index = end + 1;
     }
-    if let Some(index) = html.to_ascii_lowercase().find("</body>") {
-        return format!("{}{}{}", &html[..index], tag, &html[index..]);
+    body_boundary.unwrap_or(bytes.len())
+}
+
+fn html_tag_end(html: &[u8], start: usize) -> Option<usize> {
+    let mut quote = None;
+    for (index, &byte) in html.iter().enumerate().skip(start) {
+        if let Some(expected) = quote {
+            if byte == expected {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"') {
+            quote = Some(byte);
+        } else if byte == b'>' {
+            return Some(index);
+        }
     }
-    format!("{html}{tag}")
+    None
+}
+
+fn html_raw_text_end(html: &[u8], start: usize, name: &[u8]) -> Option<usize> {
+    let mut index = start;
+    while index < html.len() {
+        if html[index] != b'<' {
+            index += 1;
+            continue;
+        }
+        let name_start = index + 2;
+        let name_end = name_start + name.len();
+        if index + 1 < html.len()
+            && html[index + 1] == b'/'
+            && name_end <= html.len()
+            && html[name_start..name_end].eq_ignore_ascii_case(name)
+            && (name_end == html.len() || is_html_tag_boundary(html[name_end]))
+        {
+            return html_tag_end(html, name_end).map(|end| end + 1);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn is_html_tag_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b':' | b'_')
+}
+
+fn is_html_tag_boundary(byte: u8) -> bool {
+    byte == b'>' || byte == b'/' || byte.is_ascii_whitespace()
+}
+
+fn has_agent_feedback_marker(html: &str) -> bool {
+    let bytes = html.as_bytes();
+    let mut index = 0;
+    while index + 2 <= bytes.len() {
+        if !bytes[index..index + 2].eq_ignore_ascii_case(b"id")
+            || (index > 0
+                && !bytes[index - 1].is_ascii_whitespace()
+                && !matches!(bytes[index - 1], b'<' | b'/'))
+        {
+            index += 1;
+            continue;
+        }
+        let mut cursor = index + 2;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b'=') {
+            index += 2;
+            continue;
+        }
+        cursor += 1;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if let Some(&quote @ (b'\'' | b'"')) = bytes.get(cursor) {
+            cursor += 1;
+            let end = cursor + b"agent-feedback".len();
+            if end < bytes.len()
+                && bytes[cursor..end].eq_ignore_ascii_case(b"agent-feedback")
+                && bytes[end] == quote
+            {
+                return true;
+            }
+        } else {
+            let end = cursor + b"agent-feedback".len();
+            if end <= bytes.len()
+                && bytes[cursor..end].eq_ignore_ascii_case(b"agent-feedback")
+                && (end == bytes.len()
+                    || bytes[end].is_ascii_whitespace()
+                    || matches!(bytes[end], b'>' | b'/'))
+            {
+                return true;
+            }
+        }
+        index += 2;
+    }
+    false
 }
 
 pub fn normalize_operation(path: &str) -> String {
@@ -1360,6 +1693,15 @@ pub fn feedback_consent_action(envelope: &Envelope) -> FeedbackConsentAction {
 }
 
 pub fn feedback_from_response(headers: &HeaderMap, body: &[u8]) -> Option<Envelope> {
+    if let Some(envelope) = headers
+        .get("agent-feedback")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| URL_SAFE_NO_PAD.decode(value).ok())
+        .and_then(|value| serde_json::from_slice::<Envelope>(&value).ok())
+        .filter(valid_envelope)
+    {
+        return Some(envelope);
+    }
     if let Ok(Value::Object(object)) = serde_json::from_slice::<Value>(body)
         && let Some(value) = object.get("_agentFeedback")
         && let Ok(envelope) = serde_json::from_value::<Envelope>(value.clone())
@@ -1380,12 +1722,7 @@ pub fn feedback_from_response(headers: &HeaderMap, body: &[u8]) -> Option<Envelo
             return Some(envelope);
         }
     }
-    headers
-        .get("agent-feedback")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| URL_SAFE_NO_PAD.decode(value).ok())
-        .and_then(|value| serde_json::from_slice::<Envelope>(&value).ok())
-        .filter(valid_envelope)
+    None
 }
 
 fn valid_envelope(envelope: &Envelope) -> bool {
@@ -1534,7 +1871,7 @@ pub async fn submit_feedback_consent(
     Ok(client
         .post(destination)
         .header("authorization", &action.submit_decision.authorization)
-            .header("user-agent", "agent-feedback-rust-agent/0.2.1")
+        .header("user-agent", "agent-feedback-rust-agent/0.2.2")
         .json(&json!({ "decision": decision }))
         .send()
         .await?
@@ -1633,7 +1970,7 @@ pub async fn submit_product_feedback(
     Ok(client
         .post(submit)
         .header("authorization", &submit_contract.authorization)
-        .header("user-agent", "agent-feedback-rust-agent/0.2.1")
+        .header("user-agent", "agent-feedback-rust-agent/0.2.2")
         .json(&submission)
         .send()
         .await?
@@ -1706,7 +2043,11 @@ impl From<reqwest::Error> for SubmitError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Json, Router, routing::get};
+    use axum::{
+        Json, Router,
+        middleware::{self, Next},
+        routing::get,
+    };
     use http::Request;
     use std::{
         convert::Infallible,
@@ -1753,6 +2094,7 @@ mod tests {
             exp: 1_715_007_200,
             n: "AQIDBAUGBwgJCgsMDQ4PEBES",
             s: None,
+            r: None,
         };
         assert_eq!(sign_capability(KEY, &claims).unwrap(), TOKEN);
     }
@@ -1885,6 +2227,520 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn safe_cache_recognizes_cdn_shared_cache_headers_without_feedback_work() {
+        let identity_reads = Arc::new(AtomicUsize::new(0));
+        let reads = identity_reads.clone();
+        let layer = AgentFeedbackLayer::new(
+            Options::new(KEY)
+                .endpoint("http://127.0.0.1:9")
+                .feedback_mode(FeedbackMode::AskOnce)
+                .cache_mode(HttpCacheMode::Safe)
+                .customer_ref(move |_| {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    Some("acct_cached".into())
+                }),
+        )
+        .unwrap();
+        let body = " { \"answer\" : \"cached\" } ";
+        for (header_name, header_value) in [
+            ("cache-control", "public, max-age=60"),
+            ("cdn-cache-control", "public"),
+            ("cloudflare-cdn-cache-control", "s-maxage = 60"),
+            ("surrogate-control", "content=\"ESI/1.0\", max-age=60"),
+        ] {
+            let inner = service_fn(move |_request: Request<Body>| async move {
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .header(CONTENT_TYPE, "application/json")
+                        .header(header_name, header_value)
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+            });
+            let response = layer
+                .clone()
+                .layer(inner)
+                .oneshot(Request::get("/cached").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.headers()[header_name], header_value);
+            assert!(!response.headers().contains_key("agent-feedback"));
+            let output = to_bytes(response.into_body(), MAX_BODY_BYTES)
+                .await
+                .unwrap();
+            assert_eq!(output.as_ref(), body.as_bytes());
+            assert!(!String::from_utf8_lossy(&output).contains("_agentFeedback"));
+        }
+        assert_eq!(identity_reads.load(Ordering::SeqCst), 0);
+        assert!(layer.runtime.consent_lookups.lock().await.is_empty());
+        assert_eq!(layer.runtime.sequence.load(Ordering::Acquire), 0);
+        assert!(
+            !layer
+                .runtime
+                .warned_missing_customer_ref
+                .load(Ordering::Relaxed)
+        );
+        layer.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn instrumented_responses_remove_cdn_cache_overrides() {
+        for mode in [HttpCacheMode::Private, HttpCacheMode::Request] {
+            let (endpoint, batches) = telemetry_server(1);
+            let layer =
+                AgentFeedbackLayer::new(Options::new(KEY).endpoint(endpoint).cache_mode(mode))
+                    .unwrap();
+            let inner = service_fn(|_request: Request<Body>| async move {
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .header(CONTENT_TYPE, "application/json")
+                        .header(CACHE_CONTROL, "public, max-age=600")
+                        .header("cdn-cache-control", "public, max-age=600")
+                        .header("cloudflare-cdn-cache-control", "s-maxage=600")
+                        .header("surrogate-control", "max-age=600")
+                        .body(Body::from(r#"{"answer":"private"}"#))
+                        .unwrap(),
+                )
+            });
+            let mut request = Request::get("/private");
+            if mode == HttpCacheMode::Request {
+                request = request.header("agent-feedback-request", "1");
+            }
+            let response = layer
+                .layer(inner)
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.headers()[CACHE_CONTROL], "private, no-store");
+            for header_name in [
+                "cdn-cache-control",
+                "cloudflare-cdn-cache-control",
+                "surrogate-control",
+            ] {
+                assert!(
+                    !response.headers().contains_key(header_name),
+                    "instrumented response retained {header_name}"
+                );
+            }
+            let output = to_bytes(response.into_body(), MAX_BODY_BYTES)
+                .await
+                .unwrap();
+            assert!(String::from_utf8_lossy(&output).contains("_agentFeedback"));
+            layer.shutdown().await.unwrap();
+            assert_eq!(batches.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn axum_leaves_partial_and_ranged_responses_untouched_without_telemetry() {
+        struct Case {
+            path: &'static str,
+            status: http::StatusCode,
+            content_type: &'static str,
+            body: &'static str,
+            content_range: Option<&'static str>,
+        }
+        let cases = [
+            Case {
+                path: "/no-content",
+                status: http::StatusCode::NO_CONTENT,
+                content_type: "text/html",
+                body: "",
+                content_range: None,
+            },
+            Case {
+                path: "/reset-content",
+                status: http::StatusCode::RESET_CONTENT,
+                content_type: "text/html",
+                body: "",
+                content_range: None,
+            },
+            Case {
+                path: "/partial",
+                status: http::StatusCode::PARTIAL_CONTENT,
+                content_type: "application/json",
+                body: r#"{"answer":"partial"}"#,
+                content_range: None,
+            },
+            Case {
+                path: "/ranged-ok",
+                status: http::StatusCode::OK,
+                content_type: "application/json",
+                body: r#"{"answer":"range"}"#,
+                content_range: Some("bytes 0-17/36"),
+            },
+        ];
+        let mut options = Options::new(KEY).cache_mode(HttpCacheMode::Private);
+        options.flush_interval = Duration::from_secs(3600);
+        let layer = AgentFeedbackLayer::new(options).unwrap();
+        let inner = service_fn(|request: Request<Body>| async move {
+            let (status, content_type, body, content_range) = match request.uri().path() {
+                "/no-content" => (http::StatusCode::NO_CONTENT, "text/html", "", None),
+                "/reset-content" => (http::StatusCode::RESET_CONTENT, "text/html", "", None),
+                "/partial" => (
+                    http::StatusCode::PARTIAL_CONTENT,
+                    "application/json",
+                    r#"{"answer":"partial"}"#,
+                    None,
+                ),
+                "/ranged-ok" => (
+                    http::StatusCode::OK,
+                    "application/json",
+                    r#"{"answer":"range"}"#,
+                    Some("bytes 0-17/36"),
+                ),
+                _ => unreachable!(),
+            };
+            let mut response = Response::builder()
+                .status(status)
+                .header(CONTENT_TYPE, content_type)
+                .header(CONTENT_LENGTH, body.len().to_string())
+                .header(CACHE_CONTROL, "public, max-age=60")
+                .header("etag", "\"product-etag\"")
+                .body(Body::from(body))
+                .unwrap();
+            if let Some(value) = content_range {
+                response
+                    .headers_mut()
+                    .insert("content-range", HeaderValue::from_static(value));
+            }
+            Ok::<_, Infallible>(response)
+        });
+        let app = layer.layer(inner);
+
+        for case in cases {
+            let response = app
+                .clone()
+                .oneshot(Request::get(case.path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let mut expected_headers = HeaderMap::new();
+            expected_headers.insert(CONTENT_TYPE, HeaderValue::from_static(case.content_type));
+            expected_headers.insert(
+                CONTENT_LENGTH,
+                HeaderValue::from_str(&case.body.len().to_string()).unwrap(),
+            );
+            expected_headers.insert(
+                CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=60"),
+            );
+            expected_headers.insert("etag", HeaderValue::from_static("\"product-etag\""));
+            if let Some(value) = case.content_range {
+                expected_headers.insert("content-range", HeaderValue::from_static(value));
+            }
+            assert_eq!(
+                response.status(),
+                case.status,
+                "{} status changed",
+                case.path
+            );
+            assert_eq!(
+                response.headers(),
+                &expected_headers,
+                "{} headers changed",
+                case.path
+            );
+            let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+                .await
+                .unwrap();
+            assert_eq!(
+                body.as_ref(),
+                case.body.as_bytes(),
+                "{} body changed",
+                case.path
+            );
+        }
+        assert_eq!(
+            layer.runtime.sequence.load(Ordering::Acquire),
+            0,
+            "partial or ranged responses queued telemetry"
+        );
+        layer.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn axum_body_rewrites_strip_stale_validators() {
+        let stale_validators = [
+            ("etag", "\"product-etag\""),
+            ("content-md5", "deadbeef"),
+            ("digest", "sha-256=deadbeef"),
+            ("content-digest", "sha-256=:deadbeef:"),
+            ("repr-digest", "sha-256=:deadbeef:"),
+            ("accept-ranges", "bytes"),
+        ];
+        let cases = [
+            (
+                "/json",
+                "application/json",
+                r#"{"answer":"available"}"#,
+                true,
+            ),
+            (
+                "/html",
+                "text/html",
+                "<html><body>available</body></html>",
+                true,
+            ),
+            ("/array", "application/json", r#"["available"]"#, false),
+        ];
+        let (endpoint, batches) = telemetry_server(1);
+        let mut options = Options::new(KEY)
+            .endpoint(endpoint)
+            .cache_mode(HttpCacheMode::Private);
+        options.flush_interval = Duration::from_secs(3600);
+        let layer = AgentFeedbackLayer::new(options).unwrap();
+        let inner = service_fn(|request: Request<Body>| async move {
+            let (content_type, body) = match request.uri().path() {
+                "/json" => ("application/json", r#"{"answer":"available"}"#),
+                "/html" => ("text/html", "<html><body>available</body></html>"),
+                "/array" => ("application/json", r#"["available"]"#),
+                _ => unreachable!(),
+            };
+            let mut response = Response::builder()
+                .header(CONTENT_TYPE, content_type)
+                .header(CONTENT_LENGTH, body.len().to_string())
+                .body(Body::from(body))
+                .unwrap();
+            for (name, value) in [
+                ("etag", "\"product-etag\""),
+                ("content-md5", "deadbeef"),
+                ("digest", "sha-256=deadbeef"),
+                ("content-digest", "sha-256=:deadbeef:"),
+                ("repr-digest", "sha-256=:deadbeef:"),
+                ("accept-ranges", "bytes"),
+            ] {
+                response
+                    .headers_mut()
+                    .insert(name, HeaderValue::from_static(value));
+            }
+            Ok::<_, Infallible>(response)
+        });
+        let app = layer.layer(inner);
+
+        for (path, _content_type, original, rewritten) in cases {
+            let response = app
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let headers = response.headers().clone();
+            let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+                .await
+                .unwrap();
+            assert_eq!(
+                headers[CONTENT_LENGTH].to_str().unwrap(),
+                body.len().to_string()
+            );
+            if rewritten {
+                assert_ne!(
+                    body.as_ref(),
+                    original.as_bytes(),
+                    "{path} was not rewritten"
+                );
+                for (name, _) in stale_validators {
+                    assert!(
+                        !headers.contains_key(name),
+                        "rewritten {path} retained {name}"
+                    );
+                }
+                assert_eq!(headers[CACHE_CONTROL], "private, no-store");
+            } else {
+                assert_eq!(
+                    body.as_ref(),
+                    original.as_bytes(),
+                    "header fallback changed body"
+                );
+                for (name, value) in stale_validators {
+                    assert_eq!(headers[name], value, "header fallback changed {name}");
+                }
+                assert!(headers.contains_key("agent-feedback"));
+            }
+        }
+        layer.shutdown().await.unwrap();
+        assert_eq!(batches.recv_timeout(Duration::from_secs(1)).unwrap(), 3);
+    }
+
+    #[test]
+    fn strip_body_validators_removes_complete_denylist() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        for name in [
+            "etag",
+            "content-md5",
+            "digest",
+            "content-digest",
+            "repr-digest",
+            "content-range",
+            "accept-ranges",
+        ] {
+            headers.insert(name, HeaderValue::from_static("stale"));
+        }
+        strip_body_validators(&mut headers);
+        assert_eq!(
+            headers.len(),
+            1,
+            "stale body validators remain: {headers:?}"
+        );
+        assert_eq!(headers[CONTENT_TYPE], "application/json");
+    }
+
+    #[tokio::test]
+    async fn axum_skips_non_identity_content_encoding_without_feedback_work() {
+        let identity_reads = Arc::new(AtomicUsize::new(0));
+        let reads = identity_reads.clone();
+        let layer = AgentFeedbackLayer::new(
+            Options::new(KEY)
+                .feedback_mode(FeedbackMode::AskOnce)
+                .cache_mode(HttpCacheMode::Request)
+                .customer_ref(move |_| {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    Some("acct_encoded".into())
+                }),
+        )
+        .unwrap();
+        let body = "\u{1f}\u{8b}encoded-product-body";
+        let inner = service_fn(move |request: Request<Body>| {
+            let encoding = request.headers().get("x-test-encoding").unwrap().clone();
+            async move {
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .header(CONTENT_TYPE, "text/html")
+                        .header("content-encoding", encoding)
+                        .header(CONTENT_LENGTH, body.len().to_string())
+                        .header("etag", "\"product\"")
+                        .header("agent-feedback", "product-owned")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+            }
+        });
+        let app = layer.layer(inner);
+        for encoding in ["gzip", "br", "identity, GZip"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get("/status")
+                        .header("agent-feedback-request", "1")
+                        .header("x-test-encoding", encoding)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.headers()["content-encoding"], encoding);
+            assert_eq!(response.headers()["etag"], "\"product\"");
+            assert_eq!(response.headers()["agent-feedback"], "product-owned");
+            assert!(!response.headers().contains_key(VARY));
+            let output = to_bytes(response.into_body(), MAX_BODY_BYTES)
+                .await
+                .unwrap();
+            assert_eq!(output.as_ref(), body.as_bytes());
+        }
+        assert_eq!(identity_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(layer.runtime.sequence.load(Ordering::Acquire), 0);
+        layer.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn axum_html_marker_uses_fresh_header_and_safe_boundary_insertion() {
+        let (endpoint, batches) = telemetry_server(1);
+        let layer = AgentFeedbackLayer::new(
+            Options::new(KEY)
+                .endpoint(endpoint)
+                .cache_mode(HttpCacheMode::Private),
+        )
+        .unwrap();
+        let old = layer
+            .runtime
+            .prepare_for(SystemTime::now(), None, "unknown")
+            .unwrap()
+            .envelope
+            .unwrap();
+        let body = format!(
+            r#"<html><head></head><body><script ID = "AGENT-FEEDBACK" type="application/json">{}</script></body></html>"#,
+            serde_json::to_string(&old).unwrap()
+        );
+        let app_body = body.clone();
+        let inner = service_fn(move |_request: Request<Body>| {
+            let body = app_body.clone();
+            async move {
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .header(CONTENT_TYPE, "text/html")
+                        .header(CONTENT_LENGTH, body.len().to_string())
+                        .header("etag", "\"product\"")
+                        .header("agent-feedback", "stale")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+            }
+        });
+        let response = layer
+            .layer(inner)
+            .oneshot(Request::get("/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let headers = response.headers().clone();
+        let output = to_bytes(response.into_body(), MAX_BODY_BYTES)
+            .await
+            .unwrap();
+        assert_eq!(output.as_ref(), body.as_bytes());
+        assert_eq!(
+            headers[CONTENT_LENGTH].to_str().unwrap(),
+            body.len().to_string()
+        );
+        assert_eq!(headers["etag"], "\"product\"");
+        assert_ne!(headers["agent-feedback"], "stale");
+        let parsed = feedback_from_response(&headers, body.as_bytes()).unwrap();
+        assert_ne!(
+            parsed.submit.as_ref().unwrap().authorization,
+            old.submit.as_ref().unwrap().authorization,
+            "reader did not prefer fresh header"
+        );
+        let before = r#"<html><head><!-- </head> --><meta content='</head>'><script data-value=">">const fake = "</head>";</script><style>p::after{content:"</head>"}</style></head><body>ok</body></html>"#;
+        let after = r#"<html><head><title>ok</title></head><body><script data-value="</head>">const fake = "</head>";</script><style>p::after{content:"</head>"}</style><!-- </head> --></body></html>"#;
+        let body_fallback = r#"<html><body><script>const fake = "</body>";</script><style>p::after{content:"</body>"}</style></body></html>"#;
+        let unclosed_raw_text = r#"<html><body><script>const fake = "</head>";"#;
+        for (name, html, boundary) in [
+            (
+                "fake head boundaries before the real boundary",
+                before,
+                before.find("</style></head>").unwrap() + "</style>".len(),
+            ),
+            (
+                "fake head boundaries after the real boundary",
+                after,
+                after.find("</head><body>").unwrap(),
+            ),
+            (
+                "body fallback ignores raw text",
+                body_fallback,
+                body_fallback.find("</style></body>").unwrap() + "</style>".len(),
+            ),
+            (
+                "unclosed raw text inserts before the element",
+                unclosed_raw_text,
+                unclosed_raw_text.find("<script>").unwrap(),
+            ),
+        ] {
+            let injected = inject_html(html, &parsed);
+            let marker = injected.find(r#"id="agent-feedback""#).unwrap();
+            assert_eq!(
+                injected.matches(r#"id="agent-feedback""#).count(),
+                1,
+                "{name}"
+            );
+            assert_eq!(
+                injected[..marker].rfind("<script").unwrap(),
+                boundary,
+                "{name}"
+            );
+        }
+        layer.shutdown().await.unwrap();
+        assert_eq!(batches.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
+    }
+
+    #[tokio::test]
     async fn request_cache_discovery_uses_headers_for_head() {
         let (endpoint, batches) = telemetry_server(1);
         let layer = AgentFeedbackLayer::new(
@@ -1933,6 +2789,55 @@ mod tests {
             .unwrap();
         assert!(requested.headers().contains_key("agent-feedback"));
         assert_eq!(requested.headers()[CACHE_CONTROL], "private, no-store");
+        layer.shutdown().await.unwrap();
+        assert_eq!(batches.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn axum_ask_once_uses_identity_established_by_outer_authentication() {
+        #[derive(Clone)]
+        struct AccountId(String);
+
+        async fn authenticate(mut request: Request<Body>, next: Next) -> Response {
+            request
+                .extensions_mut()
+                .insert(AccountId("acct_verified".into()));
+            next.run(request).await
+        }
+
+        let (endpoint, batches) = telemetry_server(1);
+        let layer = AgentFeedbackLayer::new(
+            Options::new(KEY)
+                .endpoint(endpoint)
+                .include(["/search"])
+                .feedback_mode(FeedbackMode::AskOnce)
+                .customer_ref(|request| {
+                    request
+                        .extensions()
+                        .get::<AccountId>()
+                        .map(|account| account.0.clone())
+                }),
+        )
+        .unwrap();
+        let app = Router::new()
+            .route(
+                "/search",
+                get(|| async { Json(json!({ "answer": "found" })) }),
+            )
+            .layer(layer.clone())
+            .layer(middleware::from_fn(authenticate));
+
+        let response = app
+            .oneshot(Request::get("/search").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["_agentFeedback"]["mode"], "ask_once");
+        assert_eq!(value["_agentFeedback"]["consentPolicy"], "once");
+        assert!(!String::from_utf8_lossy(&body).contains("acct_verified"));
         layer.shutdown().await.unwrap();
         assert_eq!(batches.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
     }
@@ -2278,6 +3183,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn operation_extractor_accepts_product_owned_route_templates() {
+        let options = Options::new(KEY).operation(|_| Some("/accounts/{account}".into()));
+        let request = Request::builder()
+            .uri("/accounts/alice@example.com")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            extract(&options.operation, &request).as_deref(),
+            Some("/accounts/{account}")
+        );
+    }
+
     #[tokio::test]
     async fn ask_modes_have_distinct_consent_policies() {
         let mut options = Options::new(KEY);
@@ -2316,6 +3234,19 @@ mod tests {
                 .question
                 .contains("future uses without asking again")
         );
+        let authorization = &envelope
+            .required_action
+            .as_ref()
+            .unwrap()
+            .submit_decision
+            .authorization;
+        let payload = authorization
+            .trim_start_matches("Bearer ")
+            .split('.')
+            .nth(1)
+            .unwrap();
+        let claims: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
+        assert_eq!(claims.get("r").and_then(Value::as_u64), Some(0));
         let per_use = runtime
             .prepare(UNIX_EPOCH + Duration::from_secs(1_715_000_000))
             .unwrap();
@@ -2330,6 +3261,7 @@ mod tests {
         assert!(!per_use_question.contains("future uses"));
         assert!(per_use_question.contains("about this use"));
         let per_use_envelope = per_use.envelope.as_ref().unwrap();
+        assert!(runtime.warned_missing_customer_ref.load(Ordering::Relaxed));
         assert_eq!(per_use_envelope.mode, FeedbackMode::AskAlways);
         assert_eq!(
             per_use_envelope.configured_mode,

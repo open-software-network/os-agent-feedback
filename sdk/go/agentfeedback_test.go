@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -20,6 +21,12 @@ import (
 
 const conformanceKey = "af_live_0123456789abcdef0123456789abcdef_conformance_secret_0123456789abcdef"
 const conformanceToken = "afr2_0123456789abcdef0123456789abcdef.eyJ2IjoxLCJpIjoiMDE4ZjFmMmUtN2I0YS03YzEyLTljOGQtMTIzNDU2Nzg5YWJjIiwiaWF0IjoxNzE1MDAwMDAwLCJleHAiOjE3MTUwMDcyMDAsIm4iOiJBUUlEQkFVR0J3Z0pDZ3NNRFE0UEVCRVMifQ.wxJ0YGS21x9eW-Cn33t9V1INhyGNj1_U3qoQns3vdWA"
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
 
 type blockingConsentTransport struct {
 	calls   atomic.Int32
@@ -131,9 +138,70 @@ func TestAskOnceWithoutCustomerRefWarnsOnce(t *testing.T) {
 	if state := runtime.resolveConsent(" "); state != "unknown" {
 		t.Fatalf("expected unknown consent, got %q", state)
 	}
-	warnings := strings.Count(buffer.String(), "per-interaction permission question")
+	warnings := strings.Count(buffer.String(), "using per-interaction permission")
 	if warnings != 1 {
 		t.Fatalf("expected exactly one warning, got %d in %q", warnings, buffer.String())
+	}
+}
+
+func TestAskOnceUsesIdentityEstablishedByOuterAuthentication(t *testing.T) {
+	type accountKey struct{}
+	const customerRef = "acct_verified"
+	var telemetry map[string]any
+	runtime, err := New(Options{
+		APIKey:       conformanceKey,
+		Endpoint:     "https://feedback.test",
+		FeedbackMode: FeedbackAskOnce,
+		Include:      []string{"/search"},
+		CustomerRef: func(request *http.Request) string {
+			value, _ := request.Context().Value(accountKey{}).(string)
+			return value
+		},
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"state":"unknown"}`)),
+			}, nil
+		})},
+		FlushInterval: time.Hour,
+		Sender: func(_ context.Context, _ string, _ http.Header, body []byte) error {
+			return json.Unmarshal(body, &telemetry)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	product := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{"answer":"found"}`))
+	})
+	authenticate := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			ctx := context.WithValue(request.Context(), accountKey{}, customerRef)
+			next.ServeHTTP(response, request.WithContext(ctx))
+		})
+	}
+	handler := authenticate(runtime.Middleware(product))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/search", nil))
+	var body map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	envelope := body["_agentFeedback"].(map[string]any)
+	if envelope["mode"] != "ask_once" || envelope["consentPolicy"] != "once" {
+		t.Fatalf("verified auth did not produce durable Ask once: %#v", envelope)
+	}
+	if strings.Contains(response.Body.String(), customerRef) {
+		t.Fatal("raw customerRef leaked into the response envelope")
+	}
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	events := telemetry["events"].([]any)
+	if events[0].(map[string]any)["customerRef"] != customerRef {
+		t.Fatalf("telemetry lost verified customerRef: %#v", telemetry)
 	}
 }
 
@@ -206,6 +274,337 @@ func TestMiddlewareCacheModesPreservePublicResponsesUnlessExplicit(t *testing.T)
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestSafeCacheRecognizesCDNSharedCacheHeadersWithoutFeedbackWork(t *testing.T) {
+	var identityReads atomic.Int32
+	var consentRequests atomic.Int32
+	var telemetryBatches atomic.Int32
+	runtime, err := New(Options{
+		APIKey:       conformanceKey,
+		Endpoint:     "https://feedback.test",
+		FeedbackMode: FeedbackAskOnce,
+		CacheMode:    CacheSafe,
+		CustomerRef: func(*http.Request) string {
+			identityReads.Add(1)
+			return "acct_cached"
+		},
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			consentRequests.Add(1)
+			return nil, errors.New("unexpected consent request")
+		})},
+		FlushInterval: time.Hour,
+		Sender: func(context.Context, string, http.Header, []byte) error {
+			telemetryBatches.Add(1)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(" { \"answer\" : \"cached\" } ")
+	handler := runtime.Middleware(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		response.Header().Set(request.Header.Get("X-Response-Cache-Header"), request.Header.Get("X-Response-Cache-Value"))
+		_, _ = response.Write(body)
+	}))
+	for _, test := range []struct {
+		header string
+		value  string
+	}{
+		{header: "Cache-Control", value: "public, max-age=60"},
+		{header: "CDN-Cache-Control", value: "public"},
+		{header: "Cloudflare-CDN-Cache-Control", value: "s-maxage = 60"},
+		{header: "Surrogate-Control", value: `content="ESI/1.0", max-age=60`},
+	} {
+		t.Run(test.header, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/cached", nil)
+			request.Header.Set("X-Response-Cache-Header", test.header)
+			request.Header.Set("X-Response-Cache-Value", test.value)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if !bytes.Equal(response.Body.Bytes(), body) {
+				t.Fatalf("body changed: %q", response.Body.String())
+			}
+			if got := response.Header().Get(test.header); got != test.value {
+				t.Fatalf("%s = %q, want %q", test.header, got, test.value)
+			}
+			if response.Header().Get("Agent-Feedback") != "" || strings.Contains(response.Body.String(), "_agentFeedback") {
+				t.Fatal("shared-cache response was instrumented")
+			}
+		})
+	}
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if identityReads.Load() != 0 || consentRequests.Load() != 0 || telemetryBatches.Load() != 0 {
+		t.Fatalf("shared-cache response did feedback work: identity=%d consent=%d telemetry=%d", identityReads.Load(), consentRequests.Load(), telemetryBatches.Load())
+	}
+}
+
+func TestInstrumentedResponsesRemoveCDNCacheOverrides(t *testing.T) {
+	for _, mode := range []HTTPCacheMode{CachePrivate, CacheRequest} {
+		t.Run(string(mode), func(t *testing.T) {
+			runtime, err := New(Options{
+				APIKey: conformanceKey, Endpoint: "https://feedback.test", CacheMode: mode,
+				FlushInterval: time.Hour,
+				Sender:        func(context.Context, string, http.Header, []byte) error { return nil },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			handler := runtime.Middleware(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				response.Header().Set("Content-Type", "application/json")
+				response.Header().Set("Cache-Control", "public, max-age=600")
+				response.Header().Set("CDN-Cache-Control", "public, max-age=600")
+				response.Header().Set("Cloudflare-CDN-Cache-Control", "s-maxage=600")
+				response.Header().Set("Surrogate-Control", "max-age=600")
+				_, _ = response.Write([]byte(`{"answer":"private"}`))
+			}))
+			request := httptest.NewRequest(http.MethodGet, "/private", nil)
+			if mode == CacheRequest {
+				request.Header.Set("Agent-Feedback-Request", "1")
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Header().Get("Cache-Control") != "private, no-store" {
+				t.Fatalf("Cache-Control = %q", response.Header().Get("Cache-Control"))
+			}
+			for _, header := range []string{"CDN-Cache-Control", "Cloudflare-CDN-Cache-Control", "Surrogate-Control"} {
+				if got := response.Header().Get(header); got != "" {
+					t.Fatalf("instrumented response retained %s: %q", header, got)
+				}
+			}
+			if !strings.Contains(response.Body.String(), "_agentFeedback") {
+				t.Fatal("response was not instrumented")
+			}
+			if err := runtime.Shutdown(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestMiddlewareLeavesPartialRangedAndUnsupportedResponsesUntouchedWithoutFeedbackWork(t *testing.T) {
+	tests := []struct {
+		path         string
+		status       int
+		contentType  string
+		body         string
+		contentRange string
+	}{
+		{path: "/no-content", status: http.StatusNoContent, contentType: "text/html"},
+		{path: "/reset-content", status: http.StatusResetContent, contentType: "text/html"},
+		{path: "/partial", status: http.StatusPartialContent, contentType: "application/json", body: `{"answer":"partial"}`},
+		{path: "/ranged-ok", status: http.StatusOK, contentType: "application/json", body: `{"answer":"range"}`, contentRange: "bytes 0-17/36"},
+		{path: "/unsupported", status: http.StatusOK, contentType: "application/octet-stream", body: `{"answer":"raw"}`},
+		{path: "/malformed-json", status: http.StatusOK, contentType: "application/json", body: `{"answer":`},
+	}
+	var identityReads atomic.Int32
+	var consentRequests atomic.Int32
+	var telemetryBatches atomic.Int32
+	runtime, err := New(Options{
+		APIKey:       conformanceKey,
+		Endpoint:     "https://feedback.test",
+		FeedbackMode: FeedbackAskOnce,
+		CacheMode:    CachePrivate,
+		CustomerRef: func(*http.Request) string {
+			identityReads.Add(1)
+			return "acct_ineligible"
+		},
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			consentRequests.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"state":"unknown"}`)),
+			}, nil
+		})},
+		FlushInterval: time.Hour,
+		Sender: func(context.Context, string, http.Header, []byte) error {
+			telemetryBatches.Add(1)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := runtime.Middleware(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		for _, test := range tests {
+			if request.URL.Path != test.path {
+				continue
+			}
+			response.Header().Set("Content-Type", test.contentType)
+			response.Header().Set("Content-Length", strconv.Itoa(len(test.body)))
+			response.Header().Set("Cache-Control", "public, max-age=60")
+			response.Header().Set("ETag", `"product-etag"`)
+			if test.contentRange != "" {
+				response.Header().Set("Content-Range", test.contentRange)
+			}
+			response.WriteHeader(test.status)
+			_, _ = response.Write([]byte(test.body))
+			return
+		}
+		http.NotFound(response, request)
+	}))
+
+	for _, test := range tests {
+		t.Run(strings.TrimPrefix(test.path, "/"), func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, test.path, nil))
+			expectedHeaders := http.Header{
+				"Content-Type":   []string{test.contentType},
+				"Content-Length": []string{strconv.Itoa(len(test.body))},
+				"Cache-Control":  []string{"public, max-age=60"},
+				"Etag":           []string{`"product-etag"`},
+			}
+			if test.contentRange != "" {
+				expectedHeaders.Set("Content-Range", test.contentRange)
+			}
+			if response.Code != test.status {
+				t.Fatalf("status = %d, want %d", response.Code, test.status)
+			}
+			if response.Body.String() != test.body {
+				t.Fatalf("body changed: got %q, want %q", response.Body.String(), test.body)
+			}
+			if !reflect.DeepEqual(response.Header(), expectedHeaders) {
+				t.Fatalf("headers changed:\n got %#v\nwant %#v", response.Header(), expectedHeaders)
+			}
+		})
+	}
+	time.Sleep(20 * time.Millisecond)
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := identityReads.Load(); got != 0 {
+		t.Fatalf("ineligible responses resolved CustomerRef %d times", got)
+	}
+	if got := consentRequests.Load(); got != 0 {
+		t.Fatalf("ineligible responses made %d consent-state requests", got)
+	}
+	if got := telemetryBatches.Load(); got != 0 {
+		t.Fatalf("ineligible responses sent %d telemetry batches", got)
+	}
+}
+
+func TestMiddlewareBodyRewritesStripStaleValidators(t *testing.T) {
+	staleValidators := map[string]string{
+		"ETag":           `"product-etag"`,
+		"Content-MD5":    "deadbeef",
+		"Digest":         "sha-256=deadbeef",
+		"Content-Digest": "sha-256=:deadbeef:",
+		"Repr-Digest":    "sha-256=:deadbeef:",
+		"Accept-Ranges":  "bytes",
+	}
+	cases := []struct {
+		path        string
+		contentType string
+		body        string
+		rewritten   bool
+	}{
+		{path: "/json", contentType: "application/json", body: `{"answer":"available"}`, rewritten: true},
+		{path: "/html", contentType: "text/html", body: "<html><body>available</body></html>", rewritten: true},
+		{path: "/array", contentType: "application/json", body: `["available"]`},
+	}
+	var telemetryEvents atomic.Int32
+	runtime, err := New(Options{
+		APIKey:        conformanceKey,
+		Endpoint:      "https://feedback.test",
+		FeedbackMode:  FeedbackNeverAsk,
+		CacheMode:     CachePrivate,
+		FlushInterval: time.Hour,
+		Sender: func(_ context.Context, _ string, _ http.Header, body []byte) error {
+			var payload struct {
+				Events []json.RawMessage `json:"events"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				return err
+			}
+			telemetryEvents.Add(int32(len(payload.Events)))
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := runtime.Middleware(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		for _, test := range cases {
+			if request.URL.Path != test.path {
+				continue
+			}
+			response.Header().Set("Content-Type", test.contentType)
+			response.Header().Set("Content-Length", strconv.Itoa(len(test.body)))
+			for name, value := range staleValidators {
+				response.Header().Set(name, value)
+			}
+			_, _ = response.Write([]byte(test.body))
+			return
+		}
+		http.NotFound(response, request)
+	}))
+
+	for _, test := range cases {
+		t.Run(strings.TrimPrefix(test.path, "/"), func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, test.path, nil))
+			if response.Header().Get("Content-Length") != strconv.Itoa(response.Body.Len()) {
+				t.Fatalf("Content-Length = %q, body has %d bytes", response.Header().Get("Content-Length"), response.Body.Len())
+			}
+			if test.rewritten {
+				if response.Body.String() == test.body {
+					t.Fatal("eligible body was not rewritten")
+				}
+				for name := range staleValidators {
+					if values, present := response.Header()[http.CanonicalHeaderKey(name)]; present {
+						t.Fatalf("rewritten response retained %s: %q", name, values)
+					}
+				}
+				if response.Header().Get("Cache-Control") != "private, no-store" {
+					t.Fatalf("Cache-Control = %q", response.Header().Get("Cache-Control"))
+				}
+			} else {
+				if response.Body.String() != test.body {
+					t.Fatalf("header fallback changed body: %q", response.Body.String())
+				}
+				for name, value := range staleValidators {
+					if got := response.Header().Get(name); got != value {
+						t.Fatalf("header fallback %s = %q, want %q", name, got, value)
+					}
+				}
+				if response.Header().Get("Agent-Feedback") == "" {
+					t.Fatal("JSON array did not receive header fallback")
+				}
+			}
+		})
+	}
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := telemetryEvents.Load(); got != int32(len(cases)) {
+		t.Fatalf("telemetry events = %d, want %d", got, len(cases))
+	}
+}
+
+func TestStripBodyValidatorsRemovesCompleteDenylist(t *testing.T) {
+	headers := http.Header{"Content-Type": []string{"application/json"}}
+	for _, name := range []string{
+		"ETag",
+		"Content-MD5",
+		"Digest",
+		"Content-Digest",
+		"Repr-Digest",
+		"Content-Range",
+		"Accept-Ranges",
+	} {
+		headers.Set(name, "stale")
+	}
+	stripBodyValidators(headers)
+	if headers.Get("Content-Type") != "application/json" {
+		t.Fatalf("unrelated header changed: %#v", headers)
+	}
+	if len(headers) != 1 {
+		t.Fatalf("stale body validators remain: %#v", headers)
 	}
 }
 
@@ -309,6 +708,9 @@ func TestAskOnceMiddlewareDoesNotAwaitConsentAndKeepsSubjectBoundEnvelope(t *tes
 	var claims map[string]any
 	if json.Unmarshal(payload, &claims) != nil || !strings.HasPrefix(claims["s"].(string), "afsub1_") {
 		t.Fatalf("Ask-once capability was not subject-bound: %s", payload)
+	}
+	if claims["r"] != float64(0) {
+		t.Fatalf("Ask-once capability did not bind the observed revision: %s", payload)
 	}
 	select {
 	case <-transport.started:
@@ -488,6 +890,44 @@ func TestMiddlewarePreservesShapeAndQueuesOpportunity(t *testing.T) {
 		}
 		if event["sequence"] != float64(1) {
 			t.Fatalf("wrong client sequence: %#v", event["sequence"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("telemetry was not flushed")
+	}
+}
+
+func TestMiddlewarePrefersServeMuxPatternOverSensitiveRawPath(t *testing.T) {
+	telemetry := make(chan map[string]any, 1)
+	runtime, err := New(Options{
+		APIKey: conformanceKey, Endpoint: "https://feedback.test",
+		Include: []string{"/users/*"}, FlushInterval: time.Millisecond,
+		Sender: func(_ context.Context, _ string, _ http.Header, body []byte) error {
+			var value map[string]any
+			_ = json.Unmarshal(body, &value)
+			telemetry <- value
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Shutdown(context.Background())
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /users/{account}", func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{"available":true}`))
+	})
+	response := httptest.NewRecorder()
+	runtime.Middleware(mux).ServeHTTP(
+		response,
+		httptest.NewRequest(http.MethodGet, "/users/alice@example.com", nil),
+	)
+
+	select {
+	case batch := <-telemetry:
+		event := batch["events"].([]any)[0].(map[string]any)
+		if event["operation"] != "/users/{account}" {
+			t.Fatalf("operation leaked the raw path: %#v", event["operation"])
 		}
 	case <-time.After(time.Second):
 		t.Fatal("telemetry was not flushed")
@@ -825,5 +1265,169 @@ func TestTelemetrySenderReceivesBoundedContext(t *testing.T) {
 	deadline := <-deadlineSeen
 	if deadline <= 0 || deadline > telemetryAttemptTimeout {
 		t.Fatalf("unexpected telemetry deadline: %s", deadline)
+	}
+}
+
+func TestMiddlewareSkipsNonIdentityContentEncodingWithoutFeedbackWork(t *testing.T) {
+	var identityReads atomic.Int32
+	var consentRequests atomic.Int32
+	var telemetryBatches atomic.Int32
+	runtime, err := New(Options{
+		APIKey:       conformanceKey,
+		FeedbackMode: FeedbackAskOnce,
+		CacheMode:    CacheRequest,
+		CustomerRef: func(*http.Request) string {
+			identityReads.Add(1)
+			return "acct_encoded"
+		},
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			consentRequests.Add(1)
+			return nil, errors.New("unexpected consent request")
+		})},
+		FlushInterval: time.Hour,
+		Sender: func(context.Context, string, http.Header, []byte) error {
+			telemetryBatches.Add(1)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("\x1f\x8bencoded-product-body")
+	handler := runtime.Middleware(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/html")
+		response.Header().Set("Content-Encoding", request.Header.Get("X-Test-Encoding"))
+		response.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		response.Header().Set("ETag", `"product"`)
+		response.Header().Set("Agent-Feedback", "product-owned")
+		_, _ = response.Write(body)
+	}))
+	for _, encoding := range []string{"gzip", "br", "identity, GZip"} {
+		request := httptest.NewRequest(http.MethodGet, "/status", nil)
+		request.Header.Set("Agent-Feedback-Request", "1")
+		request.Header.Set("X-Test-Encoding", encoding)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		expected := http.Header{
+			"Content-Type":     []string{"text/html"},
+			"Content-Encoding": []string{encoding},
+			"Content-Length":   []string{strconv.Itoa(len(body))},
+			"Etag":             []string{`"product"`},
+			"Agent-Feedback":   []string{"product-owned"},
+		}
+		if !reflect.DeepEqual(response.Header(), expected) {
+			t.Fatalf("%s headers changed:\n got %#v\nwant %#v", encoding, response.Header(), expected)
+		}
+		if !bytes.Equal(response.Body.Bytes(), body) {
+			t.Fatalf("%s body changed", encoding)
+		}
+	}
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if identityReads.Load() != 0 || consentRequests.Load() != 0 || telemetryBatches.Load() != 0 {
+		t.Fatalf("encoded response did feedback work: identity=%d consent=%d telemetry=%d", identityReads.Load(), consentRequests.Load(), telemetryBatches.Load())
+	}
+}
+
+func TestHTMLMarkerFallbackReaderPrecedenceAndBoundaryInsertion(t *testing.T) {
+	runtime, err := New(Options{
+		APIKey: conformanceKey, Endpoint: "https://feedback.test", CacheMode: CachePrivate,
+		FlushInterval: time.Hour, Sender: func(context.Context, string, http.Header, []byte) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := runtime.prepare(time.Now(), "", "unknown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldJSON, _ := json.Marshal(old.Envelope)
+	body := []byte(`<html><head></head><body><script ID = "AGENT-FEEDBACK" type="application/json">` + string(oldJSON) + `</script></body></html>`)
+	handler := runtime.Middleware(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "text/html")
+		response.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		response.Header().Set("ETag", `"product"`)
+		response.Header().Set("Agent-Feedback", "stale")
+		_, _ = response.Write(body)
+	}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/status", nil))
+	if !bytes.Equal(response.Body.Bytes(), body) {
+		t.Fatal("existing HTML marker body changed")
+	}
+	if response.Header().Get("Content-Length") != strconv.Itoa(len(body)) || response.Header().Get("ETag") != `"product"` {
+		t.Fatalf("header fallback changed body metadata: %#v", response.Header())
+	}
+	if response.Header().Get("Agent-Feedback") == "stale" {
+		t.Fatal("existing HTML marker did not receive a fresh header")
+	}
+	parsed, err := FeedbackFromResponse(&http.Response{Header: response.Header()}, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Submit == nil || old.Envelope.Submit == nil || parsed.Submit.Authorization == old.Envelope.Submit.Authorization {
+		t.Fatal("reader did not prefer the fresh header envelope")
+	}
+	html := `<html><head><script>const x="</head>"</script><style>x{content:"</head>"}</style></head><body>ok</body></html>`
+	injected := injectHTML(html, old.Envelope)
+	if strings.Count(injected, `id="agent-feedback"`) != 1 {
+		t.Fatalf("injected %d markers", strings.Count(injected, `id="agent-feedback"`))
+	}
+	if strings.Index(injected, `id="agent-feedback"`) < strings.Index(injected, "</style>") {
+		t.Fatal("insertion corrupted a raw-text closing-head literal")
+	}
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHTMLInjectionBoundaryIgnoresAdversarialMarkup(t *testing.T) {
+	envelope := &Envelope{V: 1, State: "feedback_ready"}
+	for _, test := range []struct {
+		name     string
+		html     string
+		boundary func(string) int
+	}{
+		{
+			name: "fake head boundaries before the real boundary",
+			html: `<html><head><!-- </head> --><meta content='</head>'><script data-value=">">const fake = "</head>";</script><style>p::after{content:"</head>"}</style></head><body>ok</body></html>`,
+			boundary: func(html string) int {
+				return strings.Index(html, "</style></head>") + len("</style>")
+			},
+		},
+		{
+			name: "fake head boundaries after the real boundary",
+			html: `<html><head><title>ok</title></head><body><script data-value="</head>">const fake = "</head>";</script><style>p::after{content:"</head>"}</style><!-- </head> --></body></html>`,
+			boundary: func(html string) int {
+				return strings.Index(html, "</head><body>")
+			},
+		},
+		{
+			name: "body fallback ignores raw text",
+			html: `<html><body><script>const fake = "</body>";</script><style>p::after{content:"</body>"}</style></body></html>`,
+			boundary: func(html string) int {
+				return strings.Index(html, "</style></body>") + len("</style>")
+			},
+		},
+		{
+			name: "unclosed raw text inserts before the element",
+			html: `<html><body><script>const fake = "</head>";`,
+			boundary: func(html string) int {
+				return strings.Index(html, "<script>")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			injected := injectHTML(test.html, envelope)
+			marker := strings.Index(injected, `id="agent-feedback"`)
+			if marker < 0 || strings.Count(injected, `id="agent-feedback"`) != 1 {
+				t.Fatalf("expected exactly one marker: %s", injected)
+			}
+			openingTag := strings.LastIndex(injected[:marker], "<script")
+			if openingTag < 0 || openingTag != test.boundary(test.html) {
+				t.Fatalf("insertion starts at %d, want boundary %d", openingTag, test.boundary(test.html))
+			}
+		})
 	}
 }

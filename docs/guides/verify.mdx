@@ -38,8 +38,9 @@ For Node:
 npx agent-feedback-doctor https://your-product.example/search?q=epode-test
 ```
 
-The doctor sends a real synthetic report in Never ask, so use a dedicated test request and expect that labeled
-report in Epode. In an ask mode it validates the answer-first contract but never fabricates user approval.
+The doctor validates response injection, the trusted Epode origin, and the scoped capability without creating a
+report. It proves the company-side handoff only. In an ask mode it validates the answer-first contract but never
+fabricates user approval. Use a real customer-agent task to prove confirmation and the first report.
 
 For a request-mode cached route, inspect the opted-in variant explicitly:
 

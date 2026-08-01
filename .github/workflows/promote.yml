@@ -34,7 +34,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: promote-production
+  group: epode-release-mutation
   cancel-in-progress: false
 
 env:
@@ -46,6 +46,7 @@ jobs:
     name: Resolve complete production pair
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       packages: read
     outputs:
@@ -61,10 +62,16 @@ jobs:
       WEB_SHA: ${{ inputs.web_sha }}
       CONFIRM_ROLLBACK: ${{ inputs.confirm_rollback }}
       ROLLBACK_REASON: ${{ inputs.rollback_reason }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Validate operation inputs
         run: |
           set -euo pipefail
+          if [[ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]]; then
+            echo "::error::Production promotion and rollback workflows must run from protected ${DEFAULT_BRANCH}."
+            exit 1
+          fi
           if [[ "$OPERATION" == "rollback" ]]; then
             if [[ "$CONFIRM_ROLLBACK" != "true" ]]; then
               echo "::error::A rollback requires confirm_rollback."
@@ -78,6 +85,10 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
 
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -141,7 +152,35 @@ jobs:
               echo "- **Digest:** \`$digest\`"
               echo "- **Revision:** \`$revision\`"
             } >>"$GITHUB_STEP_SUMMARY"
+            printf -v "${artifact}_resolved_revision" '%s' "$revision"
           done
+
+          if [[ "$api_resolved_revision" != "$web_resolved_revision" ]]; then
+            echo "::error::Production changes require API and web images from one reviewed commit."
+            exit 1
+          fi
+          revision="$api_resolved_revision"
+          git fetch --no-tags origin "$DEFAULT_BRANCH"
+          if ! git merge-base --is-ancestor "$revision" "origin/$DEFAULT_BRANCH"; then
+            echo "::error::Production revision $revision is not an ancestor of protected $DEFAULT_BRANCH."
+            exit 1
+          fi
+          ci_conclusion="$(
+            gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${revision}&status=completed&per_page=20" \
+              --jq '.workflow_runs | map(select(.head_branch == env.DEFAULT_BRANCH and .event == "push")) | max_by(.run_number, .run_attempt) | .conclusion // empty'
+          )"
+          if [[ "$ci_conclusion" != "success" ]]; then
+            echo "::error::The exact production revision $revision has no successful completed CI workflow."
+            exit 1
+          fi
+
+      - name: Preserve every previously published hosted artifact
+        env:
+          API_REF: ${{ steps.resolve.outputs.api_ref }}
+          API_DIGEST: ${{ steps.resolve.outputs.api_digest }}
+        run: bash scripts/verify-image-artifact-ledger.sh "${API_REF}@${API_DIGEST}"
 
   deploy:
     name: ${{ inputs.operation == 'rollback' && 'Rollback' || 'Promote' }} API then web
@@ -196,7 +235,7 @@ jobs:
             exit 1
           }
           accounts_url="$(jq -r '.OS_ACCOUNTS_URL // empty' <<<"$api_variables")"
-          if [[ ! "$accounts_url" =~ ^https://[^/]+/?$ ]]; then
+          if [[ ! "$accounts_url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]]; then
             echo "::error::$API_SERVICE has no valid OS_ACCOUNTS_URL."
             exit 1
           fi
@@ -208,19 +247,29 @@ jobs:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           EXPECTED_API_REF: ${{ needs.plan.outputs.api_ref }}
           EXPECTED_API_DIGEST: ${{ needs.plan.outputs.api_digest }}
+          EXPECTED_REVISION: ${{ needs.plan.outputs.api_revision }}
           EXPECTED_WEB_REF: ${{ needs.plan.outputs.web_ref }}
           EXPECTED_WEB_DIGEST: ${{ needs.plan.outputs.web_digest }}
         run: |
           set -euo pipefail
           services="$(railway service list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --json)"
           attestation="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$API_SERVICE" --json)"
+          attested_api_deployment_id="$(jq -r '.EPODE_CANARY_API_DEPLOYMENT_ID // empty' <<<"$attestation")"
+          attested_web_deployment_id="$(jq -r '.EPODE_CANARY_WEB_DEPLOYMENT_ID // empty' <<<"$attestation")"
           jq -e \
             --arg api_ref "$EXPECTED_API_REF" \
             --arg api_digest "$EXPECTED_API_DIGEST" \
+            --arg revision "$EXPECTED_REVISION" \
             --arg web_ref "$EXPECTED_WEB_REF" \
             --arg web_digest "$EXPECTED_WEB_DIGEST" \
-            '.EPODE_CANARY_API_REF == $api_ref
+            '.EPODE_CANARY_STATUS == "verified"
+              and (.EPODE_CANARY_RUN_ID | type == "string" and length > 0)
+              and (.EPODE_CANARY_RUN_ATTEMPT | type == "string" and length > 0)
+              and (.EPODE_CANARY_API_DEPLOYMENT_ID | type == "string" and length > 0)
+              and (.EPODE_CANARY_WEB_DEPLOYMENT_ID | type == "string" and length > 0)
+              and .EPODE_CANARY_API_REF == $api_ref
               and .EPODE_CANARY_API_DIGEST == $api_digest
+              and .EPODE_CANARY_REVISION == $revision
               and .EPODE_CANARY_WEB_REF == $web_ref
               and .EPODE_CANARY_WEB_DIGEST == $web_digest' \
             <<<"$attestation" >/dev/null || {
@@ -233,10 +282,12 @@ jobs:
               service="$API_SERVICE"
               expected_ref="$EXPECTED_API_REF"
               expected_digest="$EXPECTED_API_DIGEST"
+              attested_deployment_id="$attested_api_deployment_id"
             else
               service="$WEB_SERVICE"
               expected_ref="$EXPECTED_WEB_REF"
               expected_digest="$EXPECTED_WEB_DIGEST"
+              attested_deployment_id="$attested_web_deployment_id"
             fi
             count="$(jq --arg service "$service" '[.[] | select(.name == $service)] | length' <<<"$services")"
             if [[ "$count" -ne 1 ]]; then
@@ -247,7 +298,8 @@ jobs:
             deployments="$(railway deployment list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$service" --limit 100 --json)"
             active_ref="$(jq -r --arg id "$active_id" 'first(.[] | select(.id == $id) | .meta.image) // empty' <<<"$deployments")"
             active_digest="$(jq -r --arg id "$active_id" 'first(.[] | select(.id == $id) | .meta.imageDigest) // empty' <<<"$deployments")"
-            if [[ "$active_ref" != "$expected_ref" || "$active_digest" != "$expected_digest" ]]; then
+            active_status="$(jq -r --arg id "$active_id" 'first(.[] | select(.id == $id) | .status) // empty' <<<"$deployments")"
+            if [[ "$active_id" != "$attested_deployment_id" || "$active_status" != "SUCCESS" || "$active_ref" != "$expected_ref" || "$active_digest" != "$expected_digest" ]]; then
               echo "::error::Active v2-canary $service does not match the requested, attested image."
               exit 1
             fi
@@ -302,6 +354,15 @@ jobs:
               echo "::error::Cannot safely restore $service: $previous_ref now resolves to ${registry_digest:-no digest}, not active digest $previous_digest."
               exit 1
             fi
+            production_ref="${expected_image}:production"
+            production_digest="$(
+              docker buildx imagetools inspect "$production_ref" \
+                --format '{{ json .Manifest }}' | jq -r '.digest // empty'
+            )"
+            if [[ "$production_digest" != "$previous_digest" ]]; then
+              echo "::error::$production_ref must identify the active, recoverable $service digest before a paired change."
+              exit 1
+            fi
             {
               echo "${artifact}_ref=$previous_ref"
               echo "${artifact}_digest=$previous_digest"
@@ -311,6 +372,7 @@ jobs:
       - name: Promote API
         id: promote_api
         if: inputs.operation == 'promote'
+        continue-on-error: true
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
@@ -323,6 +385,7 @@ jobs:
       - name: Roll back API
         id: rollback_api
         if: inputs.operation == 'rollback'
+        continue-on-error: true
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
@@ -334,7 +397,7 @@ jobs:
 
       - name: Promote web
         id: promote_web
-        if: inputs.operation == 'promote'
+        if: inputs.operation == 'promote' && steps.promote_api.outcome == 'success'
         continue-on-error: true
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
@@ -347,7 +410,7 @@ jobs:
 
       - name: Roll back web
         id: rollback_web
-        if: inputs.operation == 'rollback'
+        if: inputs.operation == 'rollback' && steps.rollback_api.outcome == 'success'
         continue-on-error: true
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
@@ -358,10 +421,14 @@ jobs:
             "${{ needs.plan.outputs.web_ref }}" \
             "${{ needs.plan.outputs.web_digest }}"
 
-      - name: Restore API after a failed web change
+      - name: Restore API after an incomplete paired change
+        id: restore_api_after_change
         if: >-
-          (inputs.operation == 'promote' && steps.promote_web.outcome == 'failure') ||
-          (inputs.operation == 'rollback' && steps.rollback_web.outcome == 'failure')
+          always() && (
+            (inputs.operation == 'promote' && (steps.promote_api.outcome == 'failure' || steps.promote_web.outcome == 'failure')) ||
+            (inputs.operation == 'rollback' && (steps.rollback_api.outcome == 'failure' || steps.rollback_web.outcome == 'failure'))
+          )
+        continue-on-error: true
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
@@ -371,58 +438,71 @@ jobs:
             "${{ steps.previous.outputs.api_ref }}" \
             "${{ steps.previous.outputs.api_digest }}"
 
+      - name: Restore web after a failed web change
+        id: restore_web_after_change
+        if: >-
+          always() && (
+            (inputs.operation == 'promote' && steps.promote_web.outcome == 'failure') ||
+            (inputs.operation == 'rollback' && steps.rollback_web.outcome == 'failure')
+          )
+        continue-on-error: true
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          bash scripts/railway-deploy-image.sh \
+            production \
+            "$WEB_SERVICE" \
+            "${{ steps.previous.outputs.web_ref }}" \
+            "${{ steps.previous.outputs.web_digest }}"
+
       - name: Fail an incomplete paired change
         if: >-
-          (inputs.operation == 'promote' && steps.promote_web.outcome == 'failure') ||
-          (inputs.operation == 'rollback' && steps.rollback_web.outcome == 'failure')
+          always() && (
+            (inputs.operation == 'promote' && (steps.promote_api.outcome == 'failure' || steps.promote_web.outcome == 'failure')) ||
+            (inputs.operation == 'rollback' && (steps.rollback_api.outcome == 'failure' || steps.rollback_web.outcome == 'failure'))
+          )
         run: |
-          echo "::error::The web change failed. The workflow restored the previous API image; production tags were not moved."
+          if [[ "${{ steps.restore_api_after_change.outcome }}" != "success" || ("${{ steps.restore_web_after_change.outcome }}" != "success" && "${{ steps.restore_web_after_change.outcome }}" != "skipped") ]]; then
+            echo "::error::The paired change failed and at least one independent restoration also failed. Immediate operator intervention is required."
+          else
+            echo "::error::The paired change failed. Every service that could have changed was restored independently; production tags were not moved."
+          fi
           exit 1
 
       - name: Verify production HTTP and authentication start
         id: production_smoke
         continue-on-error: true
+        env:
+          ACCOUNTS_URL: ${{ steps.routing.outputs.accounts_url }}
         run: |
           set -euo pipefail
-          curl --fail --silent --show-error --max-time 20 "$API_ORIGIN/api/health" >/dev/null
-          curl --fail --silent --show-error --max-time 20 "$WEB_ORIGIN/api/health" >/dev/null
-
-          headers="$(mktemp)"
-          trap 'rm -f "$headers"' EXIT
-          status="$(
-            curl --silent --show-error --max-time 20 \
-              --dump-header "$headers" \
-              --output /dev/null \
-              --write-out '%{http_code}' \
-              "$WEB_ORIGIN/auth/start"
-          )"
-          if [[ "$status" != "303" ]]; then
-            echo "::error::$WEB_ORIGIN/auth/start returned HTTP $status instead of 303."
+          api_status="$(curl --silent --show-error --max-time 20 --output /dev/null --write-out '%{http_code}' "$API_ORIGIN/api/health")"
+          if [[ "$api_status" != "200" ]]; then
+            echo "::error::$API_ORIGIN/api/health returned HTTP $api_status instead of 200."
             exit 1
           fi
-          location="$(awk 'BEGIN { IGNORECASE=1 } /^location:/ { sub(/^[^:]+:[[:space:]]*/, ""); sub(/\r$/, ""); print; exit }' "$headers")"
-          if [[ "$location" != "${{ steps.routing.outputs.accounts_url }}"/* ]]; then
-            echo "::error::Authentication start did not redirect to the configured accounts origin."
-            exit 1
-          fi
-          for cookie in af_oa_pkce af_oa_state; do
-            grep -Eiq "^set-cookie: ${cookie}=[^;]+;.*HttpOnly;.*SameSite=Lax;.*Secure" "$headers" || {
-              echo "::error::Authentication start did not set a secure ${cookie} cookie."
-              exit 1
-            }
-          done
+          bash scripts/verify-public-integration-surface.sh "$WEB_ORIGIN" "$ACCOUNTS_URL"
 
-      - name: Restore the previous pair after a failed production smoke
-        if: steps.production_smoke.outcome == 'failure'
+      - name: Restore the previous API after a failed production smoke
+        id: restore_api_after_smoke
+        if: always() && steps.production_smoke.outcome == 'failure'
+        continue-on-error: true
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          set -euo pipefail
           bash scripts/railway-deploy-image.sh \
             production \
             "$API_SERVICE" \
             "${{ steps.previous.outputs.api_ref }}" \
             "${{ steps.previous.outputs.api_digest }}"
+
+      - name: Restore the previous web after a failed production smoke
+        id: restore_web_after_smoke
+        if: always() && steps.production_smoke.outcome == 'failure'
+        continue-on-error: true
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
           bash scripts/railway-deploy-image.sh \
             production \
             "$WEB_SERVICE" \
@@ -430,23 +510,132 @@ jobs:
             "${{ steps.previous.outputs.web_digest }}"
 
       - name: Fail a production smoke that required restoration
-        if: steps.production_smoke.outcome == 'failure'
+        if: always() && steps.production_smoke.outcome == 'failure'
         run: |
-          echo "::error::Production health or authentication-start validation failed. The workflow restored the previous API and web pair; production tags were not moved."
+          if [[ "${{ steps.restore_api_after_smoke.outcome }}" != "success" || "${{ steps.restore_web_after_smoke.outcome }}" != "success" ]]; then
+            echo "::error::Production smoke failed and at least one independent restoration failed. Immediate operator intervention is required."
+          else
+            echo "::error::Production smoke failed. The previous API and web pair were independently restored; production tags were not moved."
+          fi
           exit 1
 
-      - name: Move production tags after both services succeed
+      - name: Move API production tag after both services succeed
+        id: tag_api
         if: steps.production_smoke.outcome == 'success'
+        continue-on-error: true
         run: |
           set -euo pipefail
           docker buildx imagetools create \
             --tag "${REGISTRY}/open-software-network/os-epode-api:production" \
             "${REGISTRY}/open-software-network/os-epode-api@${{ needs.plan.outputs.api_digest }}"
+
+      - name: Move web production tag after the API tag succeeds
+        id: tag_web
+        if: steps.production_smoke.outcome == 'success' && steps.tag_api.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
           docker buildx imagetools create \
             --tag "${REGISTRY}/open-software-network/os-epode-web:production" \
             "${REGISTRY}/open-software-network/os-epode-web@${{ needs.plan.outputs.web_digest }}"
 
+      - name: Verify both production tags by digest
+        id: tag_readback
+        if: steps.tag_api.outcome == 'success' && steps.tag_web.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          for artifact in api web; do
+            if [[ "$artifact" == "api" ]]; then
+              expected_digest="${{ needs.plan.outputs.api_digest }}"
+            else
+              expected_digest="${{ needs.plan.outputs.web_digest }}"
+            fi
+            production_ref="${REGISTRY}/open-software-network/os-epode-${artifact}:production"
+            actual_digest="$(
+              docker buildx imagetools inspect "$production_ref" \
+                --format '{{ json .Manifest }}' | jq -r '.digest // empty'
+            )"
+            if [[ "$actual_digest" != "$expected_digest" ]]; then
+              echo "::error::$production_ref resolved to ${actual_digest:-no digest}, not $expected_digest."
+              exit 1
+            fi
+          done
+
+      - name: Restore API production tag after incomplete tag movement
+        id: restore_api_tag
+        if: >-
+          always() && steps.production_smoke.outcome == 'success' && (
+            steps.tag_api.outcome != 'success' || steps.tag_web.outcome != 'success' || steps.tag_readback.outcome != 'success'
+          )
+        continue-on-error: true
+        run: |
+          docker buildx imagetools create \
+            --tag "${REGISTRY}/open-software-network/os-epode-api:production" \
+            "${REGISTRY}/open-software-network/os-epode-api@${{ steps.previous.outputs.api_digest }}"
+
+      - name: Restore web production tag after incomplete tag movement
+        id: restore_web_tag
+        if: >-
+          always() && steps.production_smoke.outcome == 'success' && (
+            steps.tag_api.outcome != 'success' || steps.tag_web.outcome != 'success' || steps.tag_readback.outcome != 'success'
+          )
+        continue-on-error: true
+        run: |
+          docker buildx imagetools create \
+            --tag "${REGISTRY}/open-software-network/os-epode-web:production" \
+            "${REGISTRY}/open-software-network/os-epode-web@${{ steps.previous.outputs.web_digest }}"
+
+      - name: Restore API service after incomplete tag movement
+        id: restore_api_after_tags
+        if: >-
+          always() && steps.production_smoke.outcome == 'success' && (
+            steps.tag_api.outcome != 'success' || steps.tag_web.outcome != 'success' || steps.tag_readback.outcome != 'success'
+          )
+        continue-on-error: true
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          bash scripts/railway-deploy-image.sh \
+            production \
+            "$API_SERVICE" \
+            "${{ steps.previous.outputs.api_ref }}" \
+            "${{ steps.previous.outputs.api_digest }}"
+
+      - name: Restore web service after incomplete tag movement
+        id: restore_web_after_tags
+        if: >-
+          always() && steps.production_smoke.outcome == 'success' && (
+            steps.tag_api.outcome != 'success' || steps.tag_web.outcome != 'success' || steps.tag_readback.outcome != 'success'
+          )
+        continue-on-error: true
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          bash scripts/railway-deploy-image.sh \
+            production \
+            "$WEB_SERVICE" \
+            "${{ steps.previous.outputs.web_ref }}" \
+            "${{ steps.previous.outputs.web_digest }}"
+
+      - name: Fail incomplete production tag movement
+        if: >-
+          always() && steps.production_smoke.outcome == 'success' && (
+            steps.tag_api.outcome != 'success' || steps.tag_web.outcome != 'success' || steps.tag_readback.outcome != 'success'
+          )
+        run: |
+          if [[ "${{ steps.restore_api_tag.outcome }}" != "success" \
+            || "${{ steps.restore_web_tag.outcome }}" != "success" \
+            || "${{ steps.restore_api_after_tags.outcome }}" != "success" \
+            || "${{ steps.restore_web_after_tags.outcome }}" != "success" ]]; then
+            echo "::error::Production tag movement failed and at least one independent tag or service restoration failed. Immediate operator intervention is required."
+          else
+            echo "::error::Production tag movement failed. The prior service pair and both production tags were restored."
+          fi
+          exit 1
+
       - name: Summarize production change
+        if: steps.tag_readback.outcome == 'success'
         env:
           OPERATION: ${{ inputs.operation }}
           ROLLBACK_REASON: ${{ inputs.rollback_reason }}

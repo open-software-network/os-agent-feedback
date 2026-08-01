@@ -46,6 +46,9 @@ jobs:
               - "sdk/**"
               - "protocol/**"
               - "docs/**"
+              - "scripts/hosted-artifact-ledger.json"
+              - "scripts/verify-image-artifact-ledger.sh"
+              - "scripts/verify-public-integration-surface.sh"
               - ".github/workflows/ci.yml"
             sdk-node:
               - "package.json"
@@ -95,6 +98,7 @@ jobs:
             workflows:
               - ".github/workflows/**"
               - "scripts/railway-deploy-image.sh"
+              - "scripts/verify-public-integration-surface.sh"
 
   backend:
     name: Backend
@@ -221,7 +225,7 @@ jobs:
             --no-save \
             --package-lock=false \
             wrangler@4.118.0 \
-            "$GITHUB_WORKSPACE/backend/public/agent-feedback-node-0.2.1.tgz"
+            "$GITHUB_WORKSPACE/backend/public/agent-feedback-node-0.2.2.tgz"
       - name: Check entry points
         run: |
           node --check examples/node-express/src/index.js
@@ -327,8 +331,12 @@ jobs:
           tar -xzf actionlint.tar.gz actionlint
       - name: Lint workflows
         run: ./actionlint -color
-      - name: Lint Railway deployment helper
-        run: shellcheck scripts/railway-deploy-image.sh
+      - name: Lint deployment and public-surface helpers
+        run: >-
+          shellcheck
+          scripts/railway-deploy-image.sh
+          scripts/verify-image-artifact-ledger.sh
+          scripts/verify-public-integration-surface.sh
 
   ci-ok:
     name: CI

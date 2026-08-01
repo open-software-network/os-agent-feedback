@@ -38,22 +38,35 @@ Ask once result uses:
 }
 ```
 
-An unresolved Ask once or Ask always result withholds the report action and schema:
+On a schema-less product tool, that object lives at `structuredContent._agentFeedback`. When a business tool
+declares `outputSchema`, its `structuredContent` remains untouched and schema-valid; the exact same object is
+instead carried by a standalone JSON `TextContent` block shaped as `{"_agentFeedback": {...}}`. Agents inspect
+both allowed locations and act on the one present. A following plain-text instruction is only a restatement, not
+a second action.
+
+An unresolved Ask once or Ask always result withholds the report action and schema. The question is
+mode-specific; never reuse the per-interaction question to collect continuing Ask-once permission:
 
 ```json
 {
   "_agentFeedback": {
     "state": "consent_required",
+    "configuredMode": "ask_once",
+    "consentPolicy": "once",
     "consentManagedBy": "epode",
     "consentTool": "record_product_feedback_consent",
     "feedbackHandle": "afr2_...",
-    "question": "May I send the product provider a short feedback report about how this product worked? Your prompt and task content will not be included.",
+    "question": "May I send this product's provider one short, privacy-safe outcome report after this use and future uses without asking again? Epode will remember your choice for this product. Your prompts and task content are never included; nothing is installed.",
     "decisionSchema": { "decision": ["approved", "declined"] }
   }
 }
 ```
 
-Ask the exact question and pass only the explicit answer to `record_product_feedback_consent`. Approval returns
+For Ask always, `configuredMode` and `mode` are `ask_always`, `consentPolicy` is `always`, and the
+question asks only about this use. Ask once without a stable verified `customerRef` intentionally falls
+back to that same per-use contract rather than pretending the answer can be remembered.
+
+Ask the exact returned question and pass only the explicit answer to `record_product_feedback_consent`. Approval returns
 a new `feedback_ready` action for the same interaction. Refusal returns no report action, and silence creates no
 decision. Never call `report_product_feedback` from a `consent_required` result.
 
@@ -65,9 +78,10 @@ action did not complete.
 The product-tool call is confirmed immediately with confirmation method `mcp`. The later report enriches that
 same interaction.
 
-Put the stage-aware outcome action near the start of the MCP server's `instructions`. Keep the two-value decision
-shape in the native consent tool and the full report shape in the native report tool. The result-local
-`_agentFeedback` block supplies the scoped handle and timing; it is not a substitute for registering both tools.
+Put the stage-aware outcome action near the start of the MCP server's `instructions`. Tell clients to look for
+`_agentFeedback` in structured content or a standalone JSON content block. Keep the two-value decision shape in
+the native consent tool and the full report shape in the native report tool. The result-local `_agentFeedback`
+block supplies the scoped handle and timing; it is not a substitute for registering both tools.
 
 Current Codex and Claude MCP clients reliably follow Never ask when the action appears in both server
 instructions and the product result. Ask once and Ask every time additionally depend on the client

@@ -26,6 +26,8 @@ pub(crate) struct CapabilityClaims {
     pub n: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub s: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +98,8 @@ pub(crate) fn verify_capability(
             .s
             .as_deref()
             .is_some_and(|subject| !valid_consent_subject(subject))
+        || parsed.claims.r.is_some_and(|revision| revision < 0)
+        || (parsed.claims.r.is_some() && parsed.claims.s.is_none())
         || issued_at > now + Duration::minutes(5)
         || expires_at <= now
         || expires_at - issued_at > Duration::hours(2)
@@ -217,6 +221,17 @@ mod tests {
 
     use super::*;
 
+    fn signed_capability(key_id: Uuid, key_hash: &[u8], claims: &CapabilityClaims) -> String {
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).unwrap());
+        let input = format!("afr2_{}.{payload}", key_id.simple());
+        let mut mac = HmacSha256::new_from_slice(key_hash).unwrap();
+        mac.update(input.as_bytes());
+        format!(
+            "{input}.{}",
+            URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+        )
+    }
+
     #[test]
     fn blocks_sensitive_payload_fields() {
         assert!(reject_sensitive_fields(&serde_json::json!({"prompt": "private"})).is_err());
@@ -238,21 +253,14 @@ mod tests {
             iat: now.timestamp(),
             exp: (now + Duration::hours(2)).timestamp(),
             n: "0123456789abcdef".into(),
-            s: None,
+            s: Some(format!("afsub1_{}", "a".repeat(43))),
+            r: Some(7),
         };
-        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
-        let input = format!("afr2_{}.{payload}", key_id.simple());
-        let mut mac = HmacSha256::new_from_slice(&key_hash).unwrap();
-        mac.update(input.as_bytes());
-        let token = format!(
-            "{input}.{}",
-            URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
-        );
+        let token = signed_capability(key_id, &key_hash, &claims);
         let parsed = parse_capability(&token).unwrap();
-        assert_eq!(
-            verify_capability(parsed, &key_hash, now).unwrap().i,
-            claims.i
-        );
+        let verified = verify_capability(parsed, &key_hash, now).unwrap();
+        assert_eq!(verified.i, claims.i);
+        assert_eq!(verified.r, Some(7));
 
         let mut tampered = token.into_bytes();
         let signature_start = tampered.iter().rposition(|value| *value == b'.').unwrap() + 1;
@@ -263,5 +271,28 @@ mod tests {
         };
         let tampered = String::from_utf8(tampered).unwrap();
         assert!(verify_capability(parse_capability(&tampered).unwrap(), &key_hash, now).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_subject_revision_claims() {
+        let key_id = Uuid::new_v4();
+        let key_hash = sha256("af_live_test");
+        let now = Utc::now();
+        let mut claims = CapabilityClaims {
+            v: 1,
+            i: Uuid::new_v4(),
+            iat: now.timestamp(),
+            exp: (now + Duration::hours(1)).timestamp(),
+            n: "0123456789abcdef".into(),
+            s: Some(format!("afsub1_{}", "a".repeat(43))),
+            r: Some(-1),
+        };
+        let negative = signed_capability(key_id, &key_hash, &claims);
+        assert!(verify_capability(parse_capability(&negative).unwrap(), &key_hash, now).is_err());
+
+        claims.s = None;
+        claims.r = Some(0);
+        let unscoped = signed_capability(key_id, &key_hash, &claims);
+        assert!(verify_capability(parse_capability(&unscoped).unwrap(), &key_hash, now).is_err());
     }
 }

@@ -115,6 +115,155 @@ test("Fastify preserves a server-owned HTML marker and falls back to the scoped 
   await app.close();
 });
 
+test("Fastify HTML injection ignores fake head boundaries around the real boundary", async () => {
+  const documents = new Map([
+    [
+      "/before",
+      [
+        '<!doctype html><html><head data-probe="> </head>">',
+        "<!-- decoy </head> -->",
+        '<script data-probe="> </head>">window.before = "</head>";</script>',
+        "<style data-probe='> </head>'>.before::after { content: \"</head>\"; }</style>",
+        "<title>real head</title></head><body>Ready</body></html>",
+      ].join(""),
+    ],
+    [
+      "/after",
+      [
+        "<!doctype html><html><head><title>real head</title></head>",
+        '<body data-probe="> </head>"><!-- decoy </head> -->',
+        '<script data-probe="> </head>">window.after = "</head>";</script>',
+        "<style data-probe='> </head>'>.after::after { content: \"</head>\"; }</style>",
+        "Ready</body></html>",
+      ].join(""),
+    ],
+  ]);
+  const app = Fastify();
+  const plugin = agentFeedback({
+    apiKey: key,
+    include: ["/**"],
+    fetch: async () => new Response("{}", { status: 202 }),
+  });
+  await app.register(plugin);
+  for (const [path, document] of documents) {
+    app.get(path, async (_request, reply) => {
+      reply.type("text/html");
+      return document;
+    });
+  }
+  const unclosedRawText =
+    '<!doctype html><html><head><title>unfinished</title><style>.probe::after { content: "</head>"; }';
+  app.get("/unclosed", async (_request, reply) => {
+    reply.type("text/html");
+    return unclosedRawText;
+  });
+  await app.ready();
+
+  for (const [path, document] of documents) {
+    const response = await app.inject({ method: "GET", url: path });
+    const realBoundary = document.indexOf("</head>", document.indexOf("<title>real head</title>"));
+    const markerStart = response.body.indexOf('<script id="agent-feedback"');
+    const markerEnd = response.body.indexOf("</script>", markerStart) + "</script>".length;
+    assert.equal([...response.body.matchAll(/id=["']agent-feedback["']/gi)].length, 1);
+    assert.equal(response.body.slice(0, markerStart), document.slice(0, realBoundary));
+    assert.equal(response.body.slice(markerEnd), document.slice(realBoundary));
+  }
+  const unclosedResponse = await app.inject({ method: "GET", url: "/unclosed" });
+  const unclosedMarker = unclosedResponse.body.indexOf('<script id="agent-feedback"');
+  const originalStyle = unclosedRawText.indexOf("<style>");
+  assert.equal([...unclosedResponse.body.matchAll(/id=["']agent-feedback["']/gi)].length, 1);
+  assert.equal(
+    unclosedResponse.body.slice(0, unclosedMarker),
+    unclosedRawText.slice(0, originalStyle),
+  );
+  assert.ok(unclosedResponse.body.endsWith(unclosedRawText.slice(originalStyle)));
+
+  await plugin.shutdown();
+  await app.close();
+});
+
+test("Fastify safe mode treats CDN cache controls as shared without resolving identity", async () => {
+  const policies = [
+    ["/cdn", "CDN-Cache-Control", "public, max-age=600"],
+    ["/cloudflare", "Cloudflare-CDN-Cache-Control", "s-maxage=600"],
+    ["/surrogate", "Surrogate-Control", "max-age=600, stale-while-revalidate=60"],
+  ];
+  let identityResolutions = 0;
+  let consentLookups = 0;
+  let telemetryBatches = 0;
+  const app = Fastify();
+  const plugin = agentFeedback({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    feedbackMode: "ask_once",
+    include: ["/**"],
+    customerRef: () => {
+      identityResolutions += 1;
+      return "acct_cached";
+    },
+    logger: { debug() {}, warn() {} },
+    fetch: async (url) => {
+      if (String(url).endsWith("/api/v2/consent/state")) consentLookups += 1;
+      if (String(url).endsWith("/api/v2/telemetry/batches")) telemetryBatches += 1;
+      return new Response("{}", { status: 202 });
+    },
+  });
+  await app.register(plugin);
+  for (const [path, header, value] of policies) {
+    app.get(path, async (_request, reply) => {
+      reply.header(header, value);
+      return { answer: "cached" };
+    });
+  }
+  await app.ready();
+
+  for (const [path, header, value] of policies) {
+    const response = await app.inject({ method: "GET", url: path });
+    assert.deepEqual(response.json(), { answer: "cached" });
+    assert.equal(response.headers[header.toLowerCase()], value);
+    assert.notEqual(response.headers["cache-control"], "private, no-store");
+  }
+  await plugin.shutdown();
+  assert.equal(identityResolutions, 0);
+  assert.equal(consentLookups, 0);
+  assert.equal(telemetryBatches, 0);
+  await app.close();
+});
+
+test("Fastify private and request instrumentation remove CDN cache overrides", async () => {
+  for (const cacheMode of ["private", "request"]) {
+    const app = Fastify();
+    const plugin = agentFeedback({
+      apiKey: key,
+      cacheMode,
+      include: ["/search"],
+      fetch: async () => new Response("{}", { status: 202 }),
+    });
+    await app.register(plugin);
+    app.get("/search", async (_request, reply) => {
+      reply.header("Cache-Control", "public, max-age=600");
+      reply.header("CDN-Cache-Control", "public, max-age=600");
+      reply.header("Cloudflare-CDN-Cache-Control", "s-maxage=600");
+      reply.header("Surrogate-Control", "max-age=600");
+      return { answer: "cached" };
+    });
+    await app.ready();
+    const response = await app.inject({
+      method: "GET",
+      url: "/search",
+      headers: cacheMode === "request" ? { "Agent-Feedback-Request": "1" } : {},
+    });
+
+    assert.equal(response.json()._agentFeedback.v, 1);
+    assert.equal(response.headers["cache-control"], "private, no-store");
+    assert.equal(response.headers["cdn-cache-control"], undefined);
+    assert.equal(response.headers["cloudflare-cdn-cache-control"], undefined);
+    assert.equal(response.headers["surrogate-control"], undefined);
+    await plugin.shutdown();
+    await app.close();
+  }
+});
+
 test("Fastify reads customer context after normal authentication hooks", async () => {
   const telemetry = [];
   const app = Fastify();
@@ -129,7 +278,7 @@ test("Fastify reads customer context after normal authentication hooks", async (
       if (String(url).endsWith("/api/v2/telemetry/batches")) {
         telemetry.push(JSON.parse(init.body));
       }
-      return new Response('{"state":"unknown"}', {
+      return new Response('{"state":"unknown","revision":0}', {
         status: String(url).endsWith("/api/v2/consent/state") ? 200 : 202,
         headers: { "content-type": "application/json" },
       });
@@ -319,7 +468,7 @@ test("Fastify Ask-once can use a decision warmed into the local cache", async ()
   const first = await app.inject({ method: "GET", url: "/api/search" });
   assert.equal(first.json()._agentFeedback.state, "consent_required");
   resolveLookup(
-    new Response('{"state":"approved"}', {
+    new Response('{"state":"approved","revision":1}', {
       status: 200,
       headers: { "content-type": "application/json" },
     }),

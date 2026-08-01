@@ -6,14 +6,15 @@ description: "Instrument selected Express JSON and HTML responses with one globa
 ## Install
 
 ```bash
-npm install https://app.epode.ai/static/agent-feedback-node-0.2.1.tgz express
+npm install https://app.epode.ai/static/agent-feedback-node-0.2.2.tgz express
 ```
 
 Node 20 or newer is required.
 
 ## Configure once
 
-Register Epode before the included route handlers:
+Run product authentication and authorized tenant selection first, then register Epode before the
+included route handlers. `customerRef` only reads identity your product already verified.
 
 ```ts
 import express from "express";
@@ -21,6 +22,8 @@ import { agentFeedback } from "@agent-feedback/node/express";
 
 const app = express();
 
+app.use(authenticateProductRequest);
+app.use(selectAuthorizedTenant);
 app.use(agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
   include: ["/search", "/docs/*"],
@@ -102,8 +105,9 @@ It does not change the visible page.
 npx agent-feedback-doctor https://your-product.example/search?q=epode-test
 ```
 
-The doctor checks shape preservation, the scoped capability, submission origin, and telemetry. In
-`never_ask`, it submits one synthetic review. In ask modes, it validates consent without claiming approval.
+The doctor checks shape preservation, the scoped capability, trusted submission origin, and the company-side
+opportunity without creating feedback. In ask modes, it validates consent without claiming approval. Use a real
+customer-agent task to prove confirmation and reporting.
 
 ## Serverless and edge-hosted Node
 

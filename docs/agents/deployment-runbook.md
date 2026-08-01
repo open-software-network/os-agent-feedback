@@ -41,6 +41,14 @@ database recovery:
 - Configure the npm, PyPI, and crates.io trusted publishers described in
   `sdk/RELEASE.md`. The `sdk-release` environment approval is the review gate
   for the exact uploaded release candidate.
+- For SDK releases, create the annotated `sdk/release/vX.Y.Z` marker first,
+  then push each annotated package tag in its own `git push` command. Never
+  push all four package tags together: GitHub suppresses tag-push workflow
+  events when a single push contains more than three tags.
+  then create each annotated `sdk/{node,python,rust,go}/vX.Y.Z` package tag at
+  that exact commit. Each package workflow validates the common marker before
+  publishing, so packages can retry independently without accepting a mixed
+  source revision.
 
 The canary workflow safely provisions only public routing values:
 `PUBLIC_BASE_URL`, `WEB_APP_URL`, and `API_URL`. It stages them without an
@@ -57,13 +65,14 @@ forwarding.
 
 ## Canary deployment
 
-Run `Deploy v2 canary` with the API and web commit SHAs. Each may be a 7-40
-character lowercase SHA because path-filtered build workflows can legitimately
-produce the two images from different commits. The workflow resolves both
-7-character tags and digests before entering the `v2-canary` environment. It
-then deploys API followed by web and verifies each Railway digest and public
-health endpoint. It also verifies that `/auth/start` redirects to the configured
-OS Accounts origin and sets secure PKCE and state cookies before recording the
+Run `Deploy v2 canary` with the same candidate commit SHA for API and web. Both
+images are built for every protected-main commit so a release always represents
+one source revision, including when only one application directory changed. The
+workflow resolves both 7-character tags and digests before entering the
+`v2-canary` environment. It then deploys API followed by web and verifies each
+Railway digest and public health endpoint. It also verifies that `/auth/start`
+redirects to the configured accounts origin, secure PKCE/state cookies, exact
+integration discovery, and typed downloadable artifacts before recording the
 pair as promotion-eligible. Floating `staging`, `latest`, and `production` tags
 are never accepted as deployment inputs.
 
@@ -78,10 +87,11 @@ production pair as a verified recovery point and deploys API followed by web.
 Production GHCR tags move only after both Railway deployments report the
 planned digests and the production health and OAuth-start smoke checks pass.
 
-If the web deployment fails, the workflow restores the API recovery image and
-leaves both `production` tags unchanged. A manual cancellation or external
+If either deployment, public smoke, or production-tag move fails, the workflow
+attempts both service restorations independently. Tag movement also restores
+both prior production tags before failing. A manual cancellation or external
 Railway mutation can still interrupt this recovery path; inspect both service
-deployment IDs and digests before retrying.
+deployment IDs, digests, and tags before retrying.
 
 ## Rollback
 

@@ -15,7 +15,7 @@ There are two reliability levels:
 Until the npm registry release is connected, install the signed build directly from the production service:
 
 ```sh
-npm install https://app.epode.ai/static/agent-feedback-node-0.2.1.tgz
+npm install https://app.epode.ai/static/agent-feedback-node-0.2.2.tgz
 ```
 
 ```ts
@@ -52,6 +52,11 @@ the product key in the edge runtime, leaves the upstream body byte-for-byte, pre
 and gives only an explicit `Agent-Feedback-Request: 1` refetch a private capability header. Reports still submit
 directly to Epode; the edge is not a feedback relay.
 
+The proxy is cross-origin and fail-closed: it forwards only safe representation/conditional headers, never caller
+credentials, cookies, origin/referrer, forwarding metadata, or hop-by-hop headers. It strips upstream cookies,
+authentication challenges, `Clear-Site-Data`, and hop-by-hop headers from every response and redirect. For a private
+origin, pass a separate edge-secret `upstreamAuthorization`; callers cannot override it.
+
 Bind the Worker only to dedicated public docs routes, never a hostname-wide catch-all. The `include` list is a
 second fail-closed boundary: unmatched paths return 404 and methods other than GET or HEAD return 405 without
 contacting the upstream origin.
@@ -66,6 +71,7 @@ export default {
     proxy ??= createStaticDocsProxy({
       apiKey: env.AGENT_FEEDBACK_KEY,
       upstreamOrigin: "https://docs-origin.example.com",
+      upstreamAuthorization: env.DOCS_UPSTREAM_AUTHORIZATION || undefined,
       include: ["/docs", "/docs/**"],
     });
     return proxy.fetch(request, context);
@@ -108,7 +114,7 @@ const handleMcp = toNodeHandler(mcp);
 app.all("/mcp", (req, res) => handleMcp(req, res, req.body));
 ```
 
-The official handler implements `server/discover`, per-request protocol metadata, `Mcp-Method`/`Mcp-Name` validation, cache hints, and the required `resultType` field. Its legacy fallback keeps 2025-era clients working without transport-session state. Business-tool results are decorated automatically and both feedback tools are registered for the customer agent. MCP tool use is a confirmed agent interaction.
+The official handler implements `server/discover`, per-request protocol metadata, `Mcp-Method`/`Mcp-Name` validation, cache hints, and the required `resultType` field. Its legacy fallback keeps 2025-era clients working without transport-session state. Business-tool results are decorated automatically and both feedback tools are registered for the customer agent. Schema-less object results use `structuredContent._agentFeedback`; tools with `outputSchema` keep their business `structuredContent` untouched and receive the same envelope in a standalone JSON `TextContent` block. MCP tool use is a confirmed agent interaction.
 
 `includeTools` controls which business tools become interactions. `feedbackTools` narrows feedback requests to meaningful outcome boundaries while retaining the whole journey in Sessions. `shouldRequestFeedback` can make that decision from the completed result. Extractors receive `(arguments, context, result?)`, which supports grouping a session-creation call by the ID it returns.
 

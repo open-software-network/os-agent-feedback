@@ -126,6 +126,7 @@ pub(crate) struct FeedbackDiscoveryResponse {
     pub classification: ClassificationDiscovery,
     pub mcp: McpDiscovery,
     pub integrations: IntegrationsDiscovery,
+    pub integrity_manifest: String,
     pub reliability: ReliabilityDiscovery,
     pub identity: String,
     pub privacy: String,
@@ -726,6 +727,7 @@ pub(crate) struct ConsentStateInput {
 #[derive(Debug, Serialize, ToSchema)]
 pub(crate) struct ConsentStateResponse {
     pub state: String,
+    pub revision: i64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

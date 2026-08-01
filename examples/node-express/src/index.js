@@ -5,8 +5,9 @@ import { agentFeedback } from "@agent-feedback/node/express";
 const apiKey = process.env.AGENT_FEEDBACK_KEY;
 if (!apiKey) throw new Error("AGENT_FEEDBACK_KEY is required");
 const feedbackMode = process.env.AGENT_FEEDBACK_MODE || "never_ask";
-if (!["never_ask", "ask_once", "ask_always"].includes(feedbackMode)) {
-  throw new Error("AGENT_FEEDBACK_MODE must be never_ask, ask_once, or ask_always");
+const experimentRefsEnabled = process.env.EPODE_EXAMPLE_ENABLE_EXPERIMENT_REFS === "1";
+if (!["never_ask", "ask_once", "ask_always", "off"].includes(feedbackMode)) {
+  throw new Error("AGENT_FEEDBACK_MODE must be never_ask, ask_once, ask_always, or off");
 }
 
 const app = express();
@@ -16,8 +17,10 @@ const feedback = agentFeedback({
   endpoint: process.env.AGENT_FEEDBACK_URL,
   feedbackMode,
   include: ["/api/status", "/api/recommendation"],
-  customerRef: (request) => request.header("x-customer-ref"),
-  sessionRef: (request) => request.header("x-agent-session"),
+  // This hosted playground is anonymous. A real product should add customerRef
+  // only after its authentication middleware has established a stable account.
+  // Never turn a caller-supplied header into durable Ask-once identity.
+  sessionRef: experimentRefsEnabled ? (request) => request.header("x-agent-session") : undefined,
   runtimeHint: (request) => request.header("user-agent"),
 });
 app.use(feedback);
@@ -87,8 +90,10 @@ app.get("/api/recommendation", (request, response) => {
 
 const server = app.listen(Number(process.env.PORT || 3000), "0.0.0.0");
 const shutdown = async () => {
-  server.close();
+  await new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
   await feedback.shutdown();
 };
-process.once("SIGTERM", shutdown);
-process.once("SIGINT", shutdown);
+process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
+process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));

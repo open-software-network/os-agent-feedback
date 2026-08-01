@@ -694,6 +694,8 @@ export interface components {
             subject: string;
         };
         ConsentStateResponse: {
+            /** Format: int64 */
+            revision: number;
             state: string;
         };
         CreateApiKeyInput: {
@@ -865,6 +867,7 @@ export interface components {
             feedbackSubmission: components["schemas"]["FeedbackSubmissionDiscovery"];
             identity: string;
             integrations: components["schemas"]["IntegrationsDiscovery"];
+            integrityManifest: string;
             mcp: components["schemas"]["McpDiscovery"];
             name: string;
             privacy: string;

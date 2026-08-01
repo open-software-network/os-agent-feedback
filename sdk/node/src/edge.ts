@@ -8,6 +8,41 @@ import {
 } from "./core.js";
 
 const DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024;
+const CDN_CACHE_CONTROL_HEADERS = [
+  "cdn-cache-control",
+  "cloudflare-cdn-cache-control",
+  "surrogate-control",
+] as const;
+const SAFE_UPSTREAM_REQUEST_HEADERS = new Set([
+  "accept",
+  "accept-charset",
+  "accept-encoding",
+  "accept-language",
+  "cache-control",
+  "if-match",
+  "if-modified-since",
+  "if-none-match",
+  "if-range",
+  "if-unmodified-since",
+  "pragma",
+  "range",
+]);
+const PRIVATE_UPSTREAM_RESPONSE_HEADERS = [
+  "authentication-info",
+  "clear-site-data",
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authentication-info",
+  "proxy-connection",
+  "set-cookie",
+  "set-cookie2",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "www-authenticate",
+] as const;
 
 export interface EdgeExecutionContext {
   waitUntil(promise: Promise<unknown>): void;
@@ -26,6 +61,11 @@ export interface StaticDocsProxyOptions
   exclude?: string[];
   /** Skip a response when its declared Content-Length is larger than this value. */
   maxResponseBytes?: number;
+  /**
+   * Optional server-side credential for a private docs origin. Caller
+   * credentials are never forwarded and cannot override this value.
+   */
+  upstreamAuthorization?: string;
 }
 
 export interface StaticDocsProxy {
@@ -47,6 +87,51 @@ function exactHttpsOrigin(value: string): string {
     throw new Error("upstreamOrigin must be an exact HTTPS origin without credentials or a path");
   }
   return url.origin;
+}
+
+function validatedUpstreamAuthorization(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (!value.trim() || value.length > 4096 || /[\0\r\n]/.test(value)) {
+    throw new Error("upstreamAuthorization must be a bounded single HTTP header value");
+  }
+  return value;
+}
+
+function validTraceparent(value: string): boolean {
+  const match = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/.exec(value);
+  if (!match) return false;
+  const traceId = match[1];
+  const parentId = match[2];
+  return Boolean(traceId && parentId && !/^0+$/.test(traceId) && !/^0+$/.test(parentId));
+}
+
+function safeUpstreamRequestHeaders(
+  source: Headers,
+  upstreamAuthorization: string | undefined,
+): Headers {
+  const headers = new Headers();
+  for (const [name, value] of source) {
+    const normalized = name.toLowerCase();
+    if (SAFE_UPSTREAM_REQUEST_HEADERS.has(normalized)) {
+      if (value.length <= 2048 && !/[\0\r\n]/.test(value)) headers.append(name, value);
+    } else if (normalized === "traceparent" && validTraceparent(value)) {
+      headers.set(name, value);
+    }
+  }
+  if (upstreamAuthorization) headers.set("authorization", upstreamAuthorization);
+  return headers;
+}
+
+function safeUpstreamResponseHeaders(source: Headers): Headers {
+  const headers = new Headers(source);
+  const connectionTokens = (headers.get("connection") || "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  for (const name of [...PRIVATE_UPSTREAM_RESPONSE_HEADERS, ...connectionTokens]) {
+    headers.delete(name);
+  }
+  return headers;
 }
 
 function requestOptedIn(request: Request): boolean {
@@ -78,8 +163,16 @@ function ensureRequestVary(headers: Headers): void {
   }
 }
 
+function makeResponsePrivate(headers: Headers): void {
+  for (const name of CDN_CACHE_CONTROL_HEADERS) headers.delete(name);
+  headers.set("cache-control", "private, no-store");
+}
+
 function finiteSupportedResponse(response: Response, maxResponseBytes: number): boolean {
-  if (response.status < 200 || response.status >= 300) return false;
+  // Partial/range responses describe only a fragment. Attaching a capability
+  // would falsely treat that fragment as a complete product outcome and can
+  // also break cache/range semantics.
+  if (response.status !== 200 || response.headers.has("content-range")) return false;
   if (response.headers.has("agent-feedback")) return false;
   const contentType = response.headers.get("content-type") || "";
   if (!contentType.toLowerCase().includes("text/html")) return false;
@@ -134,6 +227,7 @@ function rewriteSafeUpstreamRedirect(
 export function createStaticDocsProxy(options: StaticDocsProxyOptions): StaticDocsProxy {
   if (!options.include.length) throw new Error("include must contain at least one public path");
   const upstreamOrigin = exactHttpsOrigin(options.upstreamOrigin);
+  const upstreamAuthorization = validatedUpstreamAuthorization(options.upstreamAuthorization);
   const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
   if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes <= 0) {
     throw new Error("maxResponseBytes must be a positive integer");
@@ -156,17 +250,15 @@ export function createStaticDocsProxy(options: StaticDocsProxyOptions): StaticDo
     if (request.method !== "GET" && request.method !== "HEAD") return rejectedRoute(405);
 
     const upstreamUrl = new URL(`${publicUrl.pathname}${publicUrl.search}`, upstreamOrigin);
-    const upstreamHeaders = new Headers(request.headers);
-    upstreamHeaders.delete("agent-feedback-request");
-    upstreamHeaders.delete("host");
-    const upstreamRequest = new Request(upstreamUrl, request);
-    const cleanUpstreamRequest = new Request(upstreamRequest, {
-      headers: upstreamHeaders,
+    const cleanUpstreamRequest = new Request(upstreamUrl, {
+      method: request.method,
+      headers: safeUpstreamRequestHeaders(request.headers, upstreamAuthorization),
       redirect: "manual",
+      signal: request.signal,
     });
     const started = performance.now();
     const upstreamResponse = await fetchImplementation(cleanUpstreamRequest);
-    const headers = new Headers(upstreamResponse.headers);
+    const headers = safeUpstreamResponseHeaders(upstreamResponse.headers);
     rewriteSafeUpstreamRedirect(upstreamResponse, headers, upstreamOrigin, publicUrl.origin);
     if (!runtime.enabled) return relayResponse(upstreamResponse, headers);
 
@@ -189,7 +281,7 @@ export function createStaticDocsProxy(options: StaticDocsProxyOptions): StaticDo
         consentState: runtime.cachedConsent(requestContext.customerRef),
       });
       if (!prepared.envelope) return relayResponse(upstreamResponse, headers);
-      headers.set("cache-control", "private, no-store");
+      makeResponsePrivate(headers);
       headers.set("agent-feedback", encodedEnvelope(prepared.envelope));
       headers.append(
         "link",

@@ -62,6 +62,70 @@ function appendLink(
   }
 }
 
+function isCompleteSuccess(reply: {
+  statusCode: number;
+  getHeader(name: string): unknown;
+}): boolean {
+  return (
+    reply.statusCode >= 200 &&
+    reply.statusCode < 300 &&
+    reply.statusCode !== 204 &&
+    reply.statusCode !== 205 &&
+    reply.statusCode !== 206 &&
+    reply.getHeader("content-range") === undefined
+  );
+}
+
+function isStreamingOrBinary(payload: unknown): boolean {
+  if (payload === null || typeof payload !== "object") return false;
+  if (Buffer.isBuffer(payload) || ArrayBuffer.isView(payload)) return true;
+  const candidate = payload as {
+    pipe?: unknown;
+    getReader?: unknown;
+    [Symbol.asyncIterator]?: unknown;
+  };
+  return (
+    typeof candidate.pipe === "function" ||
+    typeof candidate.getReader === "function" ||
+    typeof candidate[Symbol.asyncIterator] === "function"
+  );
+}
+
+function stripBodyValidators(reply: { removeHeader(name: string): unknown }): void {
+  for (const name of [
+    "etag",
+    "content-md5",
+    "digest",
+    "content-digest",
+    "repr-digest",
+    "content-range",
+    "accept-ranges",
+  ]) {
+    reply.removeHeader(name);
+  }
+}
+
+const CDN_CACHE_CONTROL_HEADERS = [
+  "cdn-cache-control",
+  "cloudflare-cdn-cache-control",
+  "surrogate-control",
+] as const;
+
+function cacheControlValues(reply: { getHeader(name: string): unknown }): string[] {
+  return ["cache-control", ...CDN_CACHE_CONTROL_HEADERS]
+    .map((name) => reply.getHeader(name))
+    .filter((value) => value !== undefined)
+    .map(String);
+}
+
+function makeResponsePrivate(reply: {
+  header(name: string, value: string): unknown;
+  removeHeader(name: string): unknown;
+}): void {
+  for (const name of CDN_CACHE_CONTROL_HEADERS) reply.removeHeader(name);
+  reply.header("cache-control", "private, no-store");
+}
+
 export function agentFeedback(
   options: AgentFeedbackOptions<FastifyRequest>,
 ): AgentFeedbackFastifyPlugin {
@@ -84,6 +148,7 @@ export function agentFeedback(
         statusCode: number;
         header(name: string, value: string): unknown;
         getHeader(name: string): unknown;
+        removeHeader(name: string): unknown;
       },
       surface: ProductSurface,
       payload?: unknown,
@@ -92,8 +157,7 @@ export function agentFeedback(
       if (!state) return undefined;
       if (state.instrumentationSkipped) return undefined;
       if (
-        reply.statusCode < 200 ||
-        reply.statusCode >= 300 ||
+        !isCompleteSuccess(reply) ||
         (request.method === "HEAD" && surface !== "http_headers") ||
         !runtime.matches(request.url)
       ) {
@@ -107,7 +171,7 @@ export function agentFeedback(
           statusCode: reply.statusCode,
           body: payload,
           requestOptIn: request.headers["agent-feedback-request"] === "1",
-          cacheControl: String(reply.getHeader("cache-control") || ""),
+          cacheControls: cacheControlValues(reply),
         })
       ) {
         return undefined;
@@ -124,7 +188,7 @@ export function agentFeedback(
       });
       state.surface = surface;
       state.operation = normalizeOperation(request.routeOptions?.url || request.url);
-      reply.header("cache-control", "private, no-store");
+      makeResponsePrivate(reply);
       return state;
     };
 
@@ -144,6 +208,7 @@ export function agentFeedback(
     };
 
     app.addHook("preSerialization", async (request, reply, payload) => {
+      if (isStreamingOrBinary(payload)) return payload;
       if (isPlainObject(payload)) {
         if (Object.hasOwn(payload, "_agentFeedback")) {
           const state = states.get(request);
@@ -154,6 +219,7 @@ export function agentFeedback(
           return payload;
         }
         const prepared = attach(request, reply, "http_json", payload)?.prepared;
+        if (prepared?.envelope) stripBodyValidators(reply);
         return prepared?.envelope ? { ...payload, _agentFeedback: prepared.envelope } : payload;
       }
       // Strings need to reach onSend so HTML can receive its embedded handoff.
@@ -168,6 +234,7 @@ export function agentFeedback(
       if (runtime.cacheMode === "request" && runtime.matches(request.url)) {
         ensureRequestVary(reply);
       }
+      if (isStreamingOrBinary(payload)) return payload;
       const contentType = String(reply.getHeader("content-type") || "").toLowerCase();
       const supported =
         contentType.includes("application/json") || contentType.includes("text/html");
@@ -179,8 +246,7 @@ export function agentFeedback(
         !state?.instrumentationSkipped &&
         supported &&
         (request.method === "GET" || request.method === "HEAD") &&
-        reply.statusCode >= 200 &&
-        reply.statusCode < 300
+        isCompleteSuccess(reply)
       ) {
         const link = requestDiscoveryLink(request.raw.url || request.url);
         if (link) appendLink(reply, link);
@@ -198,6 +264,7 @@ export function agentFeedback(
           headers(reply, state.prepared);
           return payload;
         }
+        stripBodyValidators(reply);
         return injectHtml(payload, state.prepared.envelope);
       }
       if (
@@ -213,13 +280,7 @@ export function agentFeedback(
 
     app.addHook("onResponse", async (request, reply) => {
       const state = states.get(request);
-      if (
-        !state?.prepared ||
-        !state.surface ||
-        !state.operation ||
-        reply.statusCode < 200 ||
-        reply.statusCode >= 300
-      ) {
+      if (!state?.prepared || !state.surface || !state.operation || !isCompleteSuccess(reply)) {
         return;
       }
       runtime.record(state.prepared, {

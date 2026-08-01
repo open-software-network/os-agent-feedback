@@ -8,13 +8,42 @@ from urllib.parse import quote
 from .core import (
     AgentFeedback,
     AgentFeedbackOptions,
+    SHARED_CACHE_HEADER_NAMES,
     encoded_envelope,
+    has_agent_feedback_marker,
     inject_html,
     normalize_operation,
     request_discovery_link,
 )
 
 MAX_BODY_BYTES = 1024 * 1024
+
+
+def _operation(scope: dict[str, Any], runtime: AgentFeedback) -> str:
+    candidate = runtime.options.operation(scope) if runtime.options.operation else None
+    if not candidate:
+        candidate = scope.get("route_path")
+    if not candidate:
+        route = scope.get("route")
+        candidate = getattr(route, "path_format", None) or getattr(route, "path", None)
+    return normalize_operation(str(candidate or scope.get("path", "/")))
+
+
+def _has_non_identity_content_encoding(headers: list[tuple[bytes, bytes]]) -> bool:
+    return any(
+        token.strip().lower() not in {b"", b"identity"}
+        for name, value in headers
+        if name.lower() == b"content-encoding"
+        for token in value.split(b",")
+    )
+
+
+def _is_complete_success(status: int, headers: list[tuple[bytes, bytes]]) -> bool:
+    return (
+        200 <= status < 300
+        and status not in {204, 205, 206}
+        and not any(name.lower() == b"content-range" for name, _ in headers)
+    )
 
 
 def _with_request_vary(headers: list[tuple[bytes, bytes]]) -> list[tuple[bytes, bytes]]:
@@ -41,7 +70,9 @@ def _request_target(scope: dict[str, Any]) -> str:
 def _with_request_discovery(
     scope: dict[str, Any], status: int, headers: list[tuple[bytes, bytes]]
 ) -> list[tuple[bytes, bytes]]:
-    if scope.get("method") not in {"GET", "HEAD"} or not 200 <= status < 300:
+    if scope.get("method") not in {"GET", "HEAD"} or not _is_complete_success(
+        status, headers
+    ):
         return headers
     content_type = next(
         (value.decode("latin1") for name, value in headers if name.lower() == b"content-type"),
@@ -84,11 +115,15 @@ class AgentFeedbackASGI:
 
             async def send_with_request_vary(message: dict[str, Any]) -> None:
                 if message.get("type") == "http.response.start":
-                    headers = _with_request_vary(list(message.get("headers", [])))
-                    if not request_opt_in:
-                        headers = _with_request_discovery(
-                            scope, int(message.get("status", 200)), headers
-                        )
+                    original_headers = list(message.get("headers", []))
+                    if _has_non_identity_content_encoding(original_headers):
+                        headers = original_headers
+                    else:
+                        headers = _with_request_vary(original_headers)
+                        if not request_opt_in:
+                            headers = _with_request_discovery(
+                                scope, int(message.get("status", 200)), headers
+                            )
                     message = {
                         **message,
                         "headers": headers,
@@ -100,7 +135,6 @@ class AgentFeedbackASGI:
             await self.app(scope, receive, send)
             return
         started = time.perf_counter()
-        context = self.runtime.context(scope)
         start_message: dict[str, Any] | None = None
         streamed = False
 
@@ -125,7 +159,9 @@ class AgentFeedbackASGI:
             status = int(start_message.get("status", 200))
             headers = list(start_message.get("headers", []))
             method = str(scope.get("method", "GET"))
-            if status < 200 or status >= 300:
+            if _has_non_identity_content_encoding(headers) or not _is_complete_success(
+                status, headers
+            ):
                 await send(start_message)
                 await send(message)
                 return
@@ -136,7 +172,7 @@ class AgentFeedbackASGI:
             cache_control = ",".join(
                 value.decode("latin1")
                 for name, value in headers
-                if name.lower() == b"cache-control"
+                if name.decode("latin1").lower() in SHARED_CACHE_HEADER_NAMES
             )
             if not self.runtime.should_instrument_http(
                 request_opt_in=request_opt_in, cache_control=cache_control
@@ -153,6 +189,10 @@ class AgentFeedbackASGI:
                     await send(start_message)
                     await send(message)
                     return
+                # Resolve identity only after every eligibility check, and
+                # after the wrapped authentication middleware populated the
+                # original ASGI scope.
+                context = self.runtime.context(scope)
                 customer_ref = context.get("customerRef")
                 prepared = self.runtime.prepare(
                     customer_ref=customer_ref,
@@ -166,7 +206,8 @@ class AgentFeedbackASGI:
                 headers = [
                     (name, value)
                     for name, value in headers
-                    if name.lower() not in {b"cache-control", b"agent-feedback"}
+                    if name.decode("latin1").lower()
+                    not in {*SHARED_CACHE_HEADER_NAMES, "agent-feedback"}
                 ]
                 headers.extend(
                     [
@@ -184,7 +225,7 @@ class AgentFeedbackASGI:
                 self.runtime.record(
                     prepared,
                     surface="http_headers",
-                    operation=normalize_operation(scope.get("route_path") or scope.get("path", "/")),
+                    operation=_operation(scope, self.runtime),
                     status_code=status,
                     duration_ms=round((time.perf_counter() - started) * 1000),
                     context=context,
@@ -212,7 +253,11 @@ class AgentFeedbackASGI:
             elif "text/html" in content_type:
                 try:
                     html = body.decode()
-                    surface = "http_html"
+                    surface = (
+                        "http_headers"
+                        if has_agent_feedback_marker(html)
+                        else "http_html"
+                    )
                 except UnicodeDecodeError:
                     surface = None
 
@@ -221,6 +266,7 @@ class AgentFeedbackASGI:
                 await send(message)
                 return
 
+            context = self.runtime.context(scope)
             customer_ref = context.get("customerRef")
             prepared = self.runtime.prepare(
                 customer_ref=customer_ref,
@@ -232,15 +278,37 @@ class AgentFeedbackASGI:
                 payload["_agentFeedback"] = envelope
                 output = json.dumps(payload, separators=(",", ":")).encode()
             elif surface == "http_html" and envelope and html is not None:
-                output = inject_html(html, envelope).encode()
+                injected_html = inject_html(html, envelope)
+                if injected_html == html:
+                    surface = "http_headers"
+                else:
+                    output = injected_html.encode()
 
             if envelope:
+                removed_headers = {
+                    *(name.encode() for name in SHARED_CACHE_HEADER_NAMES),
+                    b"agent-feedback",
+                }
+                if surface != "http_headers":
+                    removed_headers.update(
+                        {
+                            b"content-length",
+                            b"etag",
+                            b"content-md5",
+                            b"digest",
+                            b"content-digest",
+                            b"repr-digest",
+                            b"content-range",
+                            b"accept-ranges",
+                        }
+                    )
                 headers = [
                     (name, value)
                     for name, value in headers
-                    if name.lower() not in {b"content-length", b"cache-control", b"agent-feedback"}
+                    if name.lower() not in removed_headers
                 ]
-                headers.append((b"content-length", str(len(output)).encode()))
+                if surface != "http_headers":
+                    headers.append((b"content-length", str(len(output)).encode()))
                 headers.append((b"cache-control", b"private, no-store"))
             if surface == "http_headers" and envelope:
                 headers.append((b"agent-feedback", encoded_envelope(prepared["envelope"]).encode()))
@@ -256,7 +324,7 @@ class AgentFeedbackASGI:
             self.runtime.record(
                 prepared,
                 surface=surface,
-                operation=normalize_operation(scope.get("route_path") or scope.get("path", "/")),
+                operation=_operation(scope, self.runtime),
                 status_code=status,
                 duration_ms=round((time.perf_counter() - started) * 1000),
                 context=context,

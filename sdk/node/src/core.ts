@@ -236,6 +236,7 @@ function capability(
   apiKey: string,
   interactionId: string,
   subject?: string,
+  subjectRevision?: number,
   now = new Date(),
 ): { token: string; expiresAt: Date } {
   const { keyId, signingKey } = apiKeyParts(apiKey);
@@ -247,6 +248,7 @@ function capability(
     exp: Math.floor(expiresAt.getTime() / 1000),
     n: randomBytes(18).toString("base64url"),
     ...(subject ? { s: subject } : {}),
+    ...(subject ? { r: subjectRevision ?? 0 } : {}),
   };
   const payload = Buffer.from(JSON.stringify(claims)).toString("base64url");
   const signingInput = `afr2_${keyId}.${payload}`;
@@ -351,7 +353,7 @@ class TelemetryQueue {
         headers: {
           authorization: `Bearer ${this.#apiKey}`,
           "content-type": "application/json",
-          "user-agent": "@agent-feedback/node/0.2.1",
+          "user-agent": "@agent-feedback/node/0.2.2",
         },
         body: JSON.stringify({ events: batch.map(({ event }) => event) }),
         signal: AbortSignal.timeout(
@@ -417,7 +419,11 @@ export class AgentFeedbackRuntime<Request = unknown> {
   readonly #queue: TelemetryQueue;
   readonly #consentCache = new Map<
     string,
-    { state: Extract<ConsentState, "approved" | "declined">; expiresAt: number }
+    {
+      state: Extract<ConsentState, "approved" | "declined">;
+      revision: number;
+      expiresAt: number;
+    }
   >();
   readonly #consentLookups = new Map<string, Promise<ConsentState>>();
   #backgroundConsentLookups = 0;
@@ -460,12 +466,15 @@ export class AgentFeedbackRuntime<Request = unknown> {
     body?: unknown;
     requestOptIn: boolean;
     cacheControl?: string;
+    cacheControls?: readonly string[];
   }): boolean {
     if (this.cacheMode === "request" && !options.requestOptIn) return false;
-    const sharedCache =
-      /(?:^|,)\s*(?:public|s-maxage\s*=|max-age\s*=|immutable|stale-while-revalidate\s*=)/i.test(
-        options.cacheControl || "",
-      );
+    const sharedCache = [options.cacheControl || "", ...(options.cacheControls || [])].some(
+      (value) =>
+        /(?:^|,)\s*(?:public|s-maxage\s*=|max-age\s*=|immutable|stale-while-revalidate\s*=)/i.test(
+          value,
+        ),
+    );
     if (this.cacheMode === "safe" && sharedCache) {
       if (!this.#warnedSharedCache) {
         this.logger.warn(
@@ -494,7 +503,7 @@ export class AgentFeedbackRuntime<Request = unknown> {
     if (!customerRef) {
       if (!this.#warnedMissingCustomerRef) {
         this.logger.warn(
-          "[agent-feedback] Ask once needs customerRef to remember a decision across interactions. This request will use a safe per-interaction permission question.",
+          "[agent-feedback] Ask once could not resolve customerRef for an eligible response. Authentication and authorized tenant selection must run before Agent Feedback. This response is using per-interaction permission and will not remember the choice. Run the integration doctor with a real authenticated request.",
         );
         this.#warnedMissingCustomerRef = true;
       }
@@ -503,17 +512,24 @@ export class AgentFeedbackRuntime<Request = unknown> {
     return consentSubject(this.options.apiKey, customerRef);
   }
 
-  #cachedConsent(subject: string): Extract<ConsentState, "approved" | "declined"> | undefined {
+  #cachedConsent(subject: string):
+    | {
+        state: Extract<ConsentState, "approved" | "declined">;
+        revision: number;
+      }
+    | undefined {
     const cached = this.#consentCache.get(subject);
     if (!cached) return undefined;
-    if (cached.expiresAt > Date.now()) return cached.state;
+    if (cached.expiresAt > Date.now()) {
+      return { state: cached.state, revision: cached.revision };
+    }
     this.#consentCache.delete(subject);
     return undefined;
   }
 
   async #resolveConsentSubject(subject: string): Promise<ConsentState> {
     const cached = this.#cachedConsent(subject);
-    if (cached) return cached;
+    if (cached) return cached.state;
     const active = this.#consentLookups.get(subject);
     if (active) return active;
     const lookup = this.#lookupConsent(subject).finally(() => {
@@ -534,7 +550,7 @@ export class AgentFeedbackRuntime<Request = unknown> {
           headers: {
             authorization: `Bearer ${this.options.apiKey}`,
             "content-type": "application/json",
-            "user-agent": "@agent-feedback/node/0.2.1",
+            "user-agent": "@agent-feedback/node/0.2.2",
           },
           body: JSON.stringify({ subject }),
           signal: AbortSignal.timeout(
@@ -545,13 +561,23 @@ export class AgentFeedbackRuntime<Request = unknown> {
         },
       );
       if (!response.ok) throw new Error(`consent state HTTP ${response.status}`);
-      const body = (await response.json()) as { state?: unknown };
+      const body = (await response.json()) as { state?: unknown; revision?: unknown };
       if (body.state !== "unknown" && body.state !== "approved" && body.state !== "declined") {
         throw new Error("invalid consent state response");
+      }
+      if (!Number.isSafeInteger(body.revision) || (body.revision as number) < 0) {
+        throw new Error("invalid consent revision response");
+      }
+      if (body.state === "unknown" && body.revision !== 0) {
+        throw new Error("unknown consent state must have revision 0");
+      }
+      if (body.state !== "unknown" && body.revision === 0) {
+        throw new Error("stored consent state must have a positive revision");
       }
       if (body.state !== "unknown") {
         this.#consentCache.set(subject, {
           state: body.state,
+          revision: body.revision as number,
           expiresAt: Date.now() + (this.options.consentCacheTtlMs ?? 300_000),
         });
       }
@@ -583,7 +609,7 @@ export class AgentFeedbackRuntime<Request = unknown> {
     if (this.feedbackMode === "never_ask") return "approved";
     if (this.feedbackMode !== "ask_once") return "unknown";
     const subject = this.#consentSubject(customerRef);
-    return subject ? this.#cachedConsent(subject) || "unknown" : "unknown";
+    return subject ? this.#cachedConsent(subject)?.state || "unknown" : "unknown";
   }
 
   /** Warm the process-local Ask once cache without joining the product response path. */
@@ -610,7 +636,14 @@ export class AgentFeedbackRuntime<Request = unknown> {
         ? consentSubject(this.options.apiKey, values.customerRef)
         : undefined;
     const effectiveConsentMode = mode === "ask_once" && !subject ? "ask_always" : mode;
-    const { token, expiresAt } = capability(this.options.apiKey, interactionId, subject, now);
+    const subjectRevision = subject ? (this.#cachedConsent(subject)?.revision ?? 0) : undefined;
+    const { token, expiresAt } = capability(
+      this.options.apiKey,
+      interactionId,
+      subject,
+      subjectRevision,
+      now,
+    );
     const consentState =
       effectiveConsentMode === "ask_once"
         ? values.consentState || "unknown"
@@ -839,12 +872,98 @@ export function hasEmbeddedFeedback(html: string): boolean {
   );
 }
 
+type HtmlTag = {
+  end: number;
+  name?: string;
+  closing: boolean;
+};
+
+function scanHtmlTag(html: string, start: number): HtmlTag | undefined {
+  if (html.startsWith("<!--", start)) {
+    const commentEnd = html.indexOf("-->", start + 4);
+    return commentEnd < 0 ? undefined : { end: commentEnd + 3, closing: false };
+  }
+
+  let cursor = start + 1;
+  let closing = false;
+  if (html[cursor] === "/") {
+    closing = true;
+    cursor += 1;
+  }
+  const first = html[cursor];
+  if (!first || (!/[A-Za-z]/.test(first) && first !== "!" && first !== "?")) {
+    return { end: start + 1, closing: false };
+  }
+  const nameStart = cursor;
+  while (cursor < html.length && /[A-Za-z0-9:-]/.test(html[cursor] || "")) cursor += 1;
+  const name = cursor > nameStart ? html.slice(nameStart, cursor).toLowerCase() : undefined;
+
+  let quote: '"' | "'" | undefined;
+  while (cursor < html.length) {
+    const character = html[cursor];
+    if (quote) {
+      if (character === quote) quote = undefined;
+    } else if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === ">") {
+      return { end: cursor + 1, name, closing };
+    }
+    cursor += 1;
+  }
+  return undefined;
+}
+
+function findRawTextEnd(
+  html: string,
+  lowerHtml: string,
+  start: number,
+  name: "script" | "style",
+): number | undefined {
+  let cursor = start;
+  const prefix = `</${name}`;
+  while (cursor < html.length) {
+    const candidate = lowerHtml.indexOf(prefix, cursor);
+    if (candidate < 0) return undefined;
+    const delimiter = html[candidate + prefix.length];
+    if (delimiter === undefined || /[\t\n\f\r />]/.test(delimiter)) {
+      const tag = scanHtmlTag(html, candidate);
+      return tag?.end;
+    }
+    cursor = candidate + prefix.length;
+  }
+  return undefined;
+}
+
+/** Find a real document boundary without treating raw text or tag attributes as markup. */
+function htmlInjectionBoundary(html: string): number {
+  let cursor = 0;
+  let bodyBoundary: number | undefined;
+  const lowerHtml = html.toLowerCase();
+  while (cursor < html.length) {
+    const start = html.indexOf("<", cursor);
+    if (start < 0) break;
+    const tag = scanHtmlTag(html, start);
+    if (!tag) return bodyBoundary ?? start;
+    if (tag.closing && tag.name === "head") return start;
+    if (tag.closing && tag.name === "body" && bodyBoundary === undefined) {
+      bodyBoundary = start;
+    }
+    if (!tag.closing && (tag.name === "script" || tag.name === "style")) {
+      const rawTextEnd = findRawTextEnd(html, lowerHtml, tag.end, tag.name);
+      if (rawTextEnd === undefined) return bodyBoundary ?? start;
+      cursor = rawTextEnd;
+    } else {
+      cursor = tag.end;
+    }
+  }
+  return bodyBoundary ?? html.length;
+}
+
 export function injectHtml(html: string, envelope: FeedbackEnvelope): string {
   const json = JSON.stringify(envelope).replace(/</g, "\\u003c");
   const tag = `<script id="agent-feedback" type="application/json">${json}</script>`;
-  if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, `${tag}</head>`);
-  if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, `${tag}</body>`);
-  return `${html}${tag}`;
+  const boundary = htmlInjectionBoundary(html);
+  return `${html.slice(0, boundary)}${tag}${html.slice(boundary)}`;
 }
 
 export function normalizeOperation(path: string): string {

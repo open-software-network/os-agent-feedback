@@ -21,7 +21,7 @@ Epode with a short-lived write-only capability.
 Install the Node SDK in the Worker project and enable the platform's Node compatibility mode:
 
 ```bash
-npm install https://app.epode.ai/static/agent-feedback-node-0.2.1.tgz
+npm install https://app.epode.ai/static/agent-feedback-node-0.2.2.tgz
 ```
 
 ```js
@@ -36,6 +36,9 @@ export default {
       apiKey: env.AGENT_FEEDBACK_KEY,
       feedbackMode: env.AGENT_FEEDBACK_MODE || "never_ask",
       upstreamOrigin: env.DOCS_UPSTREAM_ORIGIN,
+      // Optional private-origin credential from the edge secret manager.
+      // A customer's Authorization/Cookie headers are never forwarded.
+      upstreamAuthorization: env.DOCS_UPSTREAM_AUTHORIZATION || undefined,
       include: ["/docs", "/docs/**"],
     });
     return proxy.fetch(request, context);
@@ -47,6 +50,13 @@ The public route and `DOCS_UPSTREAM_ORIGIN` must be different HTTPS origins to p
 product key with the edge platform's secret manager, never in `wrangler.jsonc`, source control, client JavaScript,
 or the static site's build environment.
 
+The proxy forwards only bounded representation and conditional-request headers such as `Accept`, `Range`,
+`If-None-Match`, and a valid `traceparent`. It never forwards caller `Authorization`, `Cookie`,
+`Proxy-Authorization`, origin/referrer, forwarding/IP, baggage, or hop-by-hop headers to the different origin.
+It also removes upstream cookies, authentication challenges, `Clear-Site-Data`, and hop-by-hop headers before
+returning a response. If a private docs origin requires authentication, set `DOCS_UPSTREAM_AUTHORIZATION` as a
+separate edge secret; callers cannot supply or override it.
+
 ## Cache and routing behavior
 
 Ordinary HTML stays byte-for-byte identical and retains its public cache policy and content encoding. The proxy
@@ -54,10 +64,12 @@ adds `Vary: Agent-Feedback-Request` plus a same-public-URL discovery marker. The
 same body with a private `Agent-Feedback` capability header. Configure a CDN outside the proxy to honor `Vary` or
 include `Agent-Feedback-Request` in its cache key; otherwise leave that outer cache disabled for the proxied route.
 
-Static HTML with or without `Content-Length` is supported. Explicit transfer-encoded streams, attachments,
-declared bodies over 1 MiB, non-HTML bodies, errors, redirects, and pre-instrumented responses receive no feedback
-contract. Same-upstream redirects are rewritten to the public origin. Other redirects from the trusted upstream
-pass through unchanged to preserve existing login or download flows and may intentionally leave the proxy origin.
+Static HTML with or without `Content-Length` is supported. Partial or range responses (`206` or
+`Content-Range`), explicit transfer-encoded streams, attachments, declared bodies over 1 MiB, non-HTML bodies,
+errors, redirects, and pre-instrumented responses receive no feedback contract. A fragment is never treated as a
+completed product outcome. Same-upstream redirects are rewritten to the public origin. Other redirects from the
+trusted upstream pass through unchanged to preserve existing login or download flows and may intentionally leave
+the proxy origin.
 
 Epode telemetry is scheduled with the edge lifecycle hook. Epode timeout or outage may drop telemetry but never
 changes or delays the upstream response. The capability is signed locally; the product key is sent only to Epode's
@@ -74,7 +86,8 @@ curl -i -H 'Agent-Feedback-Request: 1' https://docs.example.com/docs/start
 
 The first response remains publicly cacheable and contains no `Agent-Feedback`, `afr2_`, or product key. The second
 has the identical body, `Cache-Control: private, no-store`, and an `Agent-Feedback` header. Then simulate an invalid
-Epode endpoint and confirm the docs response still succeeds.
+Epode endpoint and confirm the docs response still succeeds. Also send a dummy caller `Authorization` and `Cookie`,
+then verify neither reaches the origin and no origin `Set-Cookie` reaches the public response.
 
 [Run the complete trusted-edge example](https://github.com/open-software-network/os-epode/tree/main/examples/static-docs-edge)
 

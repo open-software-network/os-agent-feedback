@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { Readable } from "node:stream";
 import test from "node:test";
 
 import express from "express";
@@ -9,6 +10,11 @@ import { AgentFeedbackRuntime, consentSubject, matchPattern } from "../dist/core
 import { agentFeedback } from "../dist/express.js";
 
 const key = `af_live_0123456789abcdef0123456789abcdef_${"x".repeat(32)}`;
+
+function capabilityClaims(authorization) {
+  const payload = authorization.replace(/^Bearer /, "").split(".")[1];
+  return JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+}
 
 test("route globs distinguish one segment from nested documentation paths", () => {
   assert.equal(matchPattern("/docs/guide", "/docs/*"), true);
@@ -137,7 +143,7 @@ test("Express Ask-once emits an answer-first decision action for an unknown cust
     flushIntervalMs: 1,
     fetch: async (url) =>
       String(url).endsWith("/api/v2/consent/state")
-        ? new Response('{"state":"unknown"}', {
+        ? new Response('{"state":"unknown","revision":0}', {
             status: 200,
             headers: { "content-type": "application/json" },
           })
@@ -162,6 +168,7 @@ test("Express Ask-once emits an answer-first decision action for an unknown cust
     decision: ["approved", "declined"],
   });
   assert.equal(contract.when, "after_experience_known_and_consent_resolved");
+  assert.equal(capabilityClaims(contract.requiredAction.submitDecision.authorization).r, 0);
   assert.match(contract.requiredAction.question, /future uses without asking again/);
   assert.match(contract.requiredAction.question, /nothing is installed/);
   assert.match(contract.instruction, /^First complete the user's product task\./);
@@ -169,6 +176,45 @@ test("Express Ask-once emits an answer-first decision action for an unknown cust
   assert.match(contract.instruction, /silence, uncertainty, or ambiguity, submit nothing/);
   assert.doesNotMatch(contract.instruction, /reportSchema|summary:string/);
   await middleware.shutdown();
+  await server.close();
+});
+
+test("Express resolves verified identity established by downstream authentication", async () => {
+  const telemetry = [];
+  const middleware = agentFeedback({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    feedbackMode: "ask_once",
+    customerRef: (request) => request.user?.accountId,
+    include: ["/search"],
+    flushIntervalMs: 1,
+    fetch: async (url, init) => {
+      if (String(url).endsWith("/api/v2/consent/state")) {
+        return new Response('{"state":"unknown","revision":0}', {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (String(url).endsWith("/api/v2/telemetry/batches")) {
+        telemetry.push(JSON.parse(init.body));
+      }
+      return new Response("{}", { status: 202 });
+    },
+  });
+  const app = express();
+  app.use(middleware);
+  app.use((request, _response, next) => {
+    request.user = { accountId: "acct_after_feedback" };
+    next();
+  });
+  app.get("/search", (_request, response) => response.json({ answer: "found" }));
+  const server = await serve(app);
+
+  const body = await (await fetch(`${server.url}/search`)).json();
+  assert.equal(body._agentFeedback.mode, "ask_once");
+  assert.equal(body._agentFeedback.consentPolicy, "once");
+  await middleware.shutdown();
+  assert.equal(telemetry[0].events[0].customerRef, "acct_after_feedback");
   await server.close();
 });
 
@@ -282,7 +328,7 @@ test("Express Ask-once can use a decision warmed into the local cache", async ()
   const first = await (await fetch(`${server.url}/search`)).json();
   assert.equal(first._agentFeedback.state, "consent_required");
   resolveLookup(
-    new Response('{"state":"approved"}', {
+    new Response('{"state":"approved","revision":1}', {
       status: 200,
       headers: { "content-type": "application/json" },
     }),
@@ -292,6 +338,7 @@ test("Express Ask-once can use a decision warmed into the local cache", async ()
   const second = await (await fetch(`${server.url}/search`)).json();
   assert.equal(second._agentFeedback.state, "feedback_ready");
   assert.equal(second._agentFeedback.configuredMode, "ask_once");
+  assert.equal(capabilityClaims(second._agentFeedback.submit.authorization).r, 1);
   assert.equal(consentLookups, 1);
   await middleware.shutdown();
   await server.close();
@@ -316,7 +363,7 @@ test("Ask-once background warming has a strict per-runtime bound with no queue",
   assert.equal(pendingLookups.length, 8);
   for (const resolve of pendingLookups) {
     resolve(
-      new Response('{"state":"unknown"}', {
+      new Response('{"state":"unknown","revision":0}', {
         status: 200,
         headers: { "content-type": "application/json" },
       }),
@@ -510,6 +557,66 @@ test("Express preserves a server-owned HTML marker and uses the header fallback 
   await server.close();
 });
 
+test("Express HTML injection ignores fake head boundaries around the real boundary", async () => {
+  const documents = new Map([
+    [
+      "/before",
+      [
+        '<!doctype html><html><head data-probe="> </head>">',
+        "<!-- decoy </head> -->",
+        '<script data-probe="> </head>">window.before = "</head>";</script>',
+        "<style data-probe='> </head>'>.before::after { content: \"</head>\"; }</style>",
+        "<title>real head</title></head><body>Ready</body></html>",
+      ].join(""),
+    ],
+    [
+      "/after",
+      [
+        "<!doctype html><html><head><title>real head</title></head>",
+        '<body data-probe="> </head>"><!-- decoy </head> -->',
+        '<script data-probe="> </head>">window.after = "</head>";</script>',
+        "<style data-probe='> </head>'>.after::after { content: \"</head>\"; }</style>",
+        "Ready</body></html>",
+      ].join(""),
+    ],
+  ]);
+  const middleware = agentFeedback({
+    apiKey: key,
+    include: ["/**"],
+    fetch: async () => new Response("{}", { status: 202 }),
+  });
+  const app = express();
+  app.use(middleware);
+  for (const [path, document] of documents) {
+    app.get(path, (_request, response) => response.type("html").send(document));
+  }
+  const unclosedRawText =
+    '<!doctype html><html><head><title>unfinished</title><script>window.fake = "</head>";';
+  app.get("/unclosed", (_request, response) => response.type("html").send(unclosedRawText));
+  const server = await serve(app);
+
+  for (const [path, document] of documents) {
+    const response = await fetch(`${server.url}${path}`);
+    const injected = await response.text();
+    const realBoundary = document.indexOf("</head>", document.indexOf("<title>real head</title>"));
+    const markerStart = injected.indexOf('<script id="agent-feedback"');
+    const markerEnd = injected.indexOf("</script>", markerStart) + "</script>".length;
+    assert.equal([...injected.matchAll(/id=["']agent-feedback["']/gi)].length, 1);
+    assert.equal(injected.slice(0, markerStart), document.slice(0, realBoundary));
+    assert.equal(injected.slice(markerEnd), document.slice(realBoundary));
+  }
+  const unclosedResponse = await fetch(`${server.url}/unclosed`);
+  const unclosedInjected = await unclosedResponse.text();
+  const unclosedMarker = unclosedInjected.indexOf('<script id="agent-feedback"');
+  const originalScript = unclosedRawText.indexOf("<script>");
+  assert.equal([...unclosedInjected.matchAll(/id=["']agent-feedback["']/gi)].length, 1);
+  assert.equal(unclosedInjected.slice(0, unclosedMarker), unclosedRawText.slice(0, originalScript));
+  assert.ok(unclosedInjected.endsWith(unclosedRawText.slice(originalScript)));
+
+  await middleware.shutdown();
+  await server.close();
+});
+
 test("Express does not silently destroy an explicit shared cache policy", async () => {
   const warnings = [];
   const telemetry = [];
@@ -547,6 +654,86 @@ test("Express does not silently destroy an explicit shared cache policy", async 
   assert.equal(telemetry.length, 0);
   assert.equal(warnings.filter((message) => message.includes("cacheable response")).length, 1);
   await server.close();
+});
+
+test("Express safe mode treats CDN cache controls as shared without resolving identity", async () => {
+  const policies = [
+    ["/cdn", "CDN-Cache-Control", "public, max-age=600"],
+    ["/cloudflare", "Cloudflare-CDN-Cache-Control", "s-maxage=600"],
+    ["/surrogate", "Surrogate-Control", "max-age=600, stale-while-revalidate=60"],
+  ];
+  let identityResolutions = 0;
+  let consentLookups = 0;
+  let telemetryBatches = 0;
+  const middleware = agentFeedback({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    feedbackMode: "ask_once",
+    include: ["/**"],
+    customerRef: () => {
+      identityResolutions += 1;
+      return "acct_cached";
+    },
+    logger: { debug() {}, warn() {} },
+    fetch: async (url) => {
+      if (String(url).endsWith("/api/v2/consent/state")) consentLookups += 1;
+      if (String(url).endsWith("/api/v2/telemetry/batches")) telemetryBatches += 1;
+      return new Response("{}", { status: 202 });
+    },
+  });
+  const app = express();
+  app.use(middleware);
+  for (const [path, header, value] of policies) {
+    app.get(path, (_request, response) => response.set(header, value).json({ answer: "cached" }));
+  }
+  const server = await serve(app);
+
+  for (const [path, header, value] of policies) {
+    const response = await fetch(`${server.url}${path}`);
+    assert.deepEqual(await response.json(), { answer: "cached" });
+    assert.equal(response.headers.get(header), value);
+    assert.notEqual(response.headers.get("cache-control"), "private, no-store");
+  }
+  await middleware.shutdown();
+  assert.equal(identityResolutions, 0);
+  assert.equal(consentLookups, 0);
+  assert.equal(telemetryBatches, 0);
+  await server.close();
+});
+
+test("Express private and request instrumentation remove CDN cache overrides", async () => {
+  for (const cacheMode of ["private", "request"]) {
+    const middleware = agentFeedback({
+      apiKey: key,
+      cacheMode,
+      include: ["/search"],
+      fetch: async () => new Response("{}", { status: 202 }),
+    });
+    const app = express();
+    app.use(middleware);
+    app.get("/search", (_request, response) =>
+      response
+        .set({
+          "Cache-Control": "public, max-age=600",
+          "CDN-Cache-Control": "public, max-age=600",
+          "Cloudflare-CDN-Cache-Control": "s-maxage=600",
+          "Surrogate-Control": "max-age=600",
+        })
+        .json({ answer: "cached" }),
+    );
+    const server = await serve(app);
+    const response = await fetch(`${server.url}/search`, {
+      headers: cacheMode === "request" ? { "Agent-Feedback-Request": "1" } : {},
+    });
+
+    assert.equal((await response.json())._agentFeedback.v, 1);
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    assert.equal(response.headers.get("cdn-cache-control"), null);
+    assert.equal(response.headers.get("cloudflare-cdn-cache-control"), null);
+    assert.equal(response.headers.get("surrogate-control"), null);
+    await middleware.shutdown();
+    await server.close();
+  }
 });
 
 test("Express request cache mode instruments only explicit agent requests", async () => {
@@ -736,4 +923,90 @@ test("graceful shutdown has a hard telemetry deadline", async () => {
   assert.ok(performance.now() - started < 250);
   assert.ok(warnings.some((message) => message.includes("Telemetry delivery failed")));
   await server.close();
+});
+
+test("Express leaves no-content and partial representations completely untouched", async () => {
+  const telemetry = [];
+  const middleware = agentFeedback({
+    apiKey: key,
+    include: ["/**"],
+    flushIntervalMs: 1,
+    fetch: async (_url, init) => {
+      telemetry.push(JSON.parse(init.body));
+      return new Response("{}", { status: 202 });
+    },
+  });
+  const app = express();
+  app.use(middleware);
+  app.get("/empty", (_request, response) => response.status(204).end());
+  app.get("/reset", (_request, response) => response.status(205).end());
+  app.get("/partial", (_request, response) => {
+    response.status(206).set("Content-Range", "bytes 0-1/2").json({ ok: true });
+  });
+  const server = await serve(app);
+  for (const path of ["/empty", "/reset", "/partial"]) {
+    const response = await fetch(`${server.url}${path}`);
+    assert.equal(response.headers.get("agent-feedback"), null);
+    assert.notEqual(response.headers.get("cache-control"), "private, no-store");
+    if (path === "/partial") assert.deepEqual(await response.json(), { ok: true });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(telemetry.length, 0);
+  await middleware.shutdown();
+  await server.close();
+});
+
+test("Express removes stale entity validators only when it rewrites a body", async () => {
+  const middleware = agentFeedback({ apiKey: key, include: ["/**"] });
+  const app = express();
+  app.use(middleware);
+  const validators = {
+    ETag: '"product-etag"',
+    "Content-MD5": "deadbeef",
+    Digest: "sha-256=deadbeef",
+    "Content-Digest": "sha-256=:deadbeef:",
+  };
+  app.get("/json", (_request, response) => response.set(validators).json({ ok: true }));
+  app.get("/html", (_request, response) =>
+    response.type("html").set(validators).send("<!doctype html><p>ok</p>"),
+  );
+  const server = await serve(app);
+  for (const path of ["/json", "/html"]) {
+    const response = await fetch(`${server.url}${path}`);
+    assert.notEqual(response.headers.get("etag"), '"product-etag"');
+    assert.equal(response.headers.get("content-md5"), null);
+    assert.equal(response.headers.get("digest"), null);
+    assert.equal(response.headers.get("content-digest"), null);
+  }
+  await middleware.shutdown();
+  await server.close();
+});
+
+test("Fastify leaves JSON streams and their headers untouched", async () => {
+  const Fastify = (await import("fastify")).default;
+  const { agentFeedback: fastifyAgentFeedback } = await import("../dist/fastify.js");
+  const telemetry = [];
+  const plugin = fastifyAgentFeedback({
+    apiKey: key,
+    include: ["/stream"],
+    flushIntervalMs: 1,
+    fetch: async (_url, init) => {
+      telemetry.push(JSON.parse(init.body));
+      return new Response("{}", { status: 202 });
+    },
+  });
+  const app = Fastify();
+  await app.register(plugin);
+  app.get("/stream", (_request, reply) => {
+    reply.type("application/json").header("etag", '"stream-etag"');
+    return reply.send(Readable.from(['{"ok":true}']));
+  });
+  const response = await app.inject({ method: "GET", url: "/stream" });
+  assert.equal(response.body, '{"ok":true}');
+  assert.equal(response.headers["agent-feedback"], undefined);
+  assert.equal(response.headers["cache-control"], undefined);
+  assert.equal(response.headers.etag, '"stream-etag"');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(telemetry.length, 0);
+  await app.close();
 });

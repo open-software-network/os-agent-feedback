@@ -8,14 +8,17 @@ description: "Add Epode as a Tower layer around selected Axum routes."
 Until the crate registry release is available, vendor the production artifact:
 
 ```bash
-mkdir -p vendor/agent-feedback-rust
-curl -fsSL https://app.epode.ai/static/agent-feedback-rust-0.2.1.tar.gz \
-  | tar -xz -C vendor/agent-feedback-rust
+epode_artifact="$(mktemp -d)/agent-feedback-rust-0.2.2.tar.gz" &&
+curl -fsSL https://app.epode.ai/static/agent-feedback-rust-0.2.2.tar.gz -o "$epode_artifact" &&
+printf '%s  %s\n' 'f5bc42f38cea06b41449f0ae7b753b602d8e3a5dcf4a98fb3d8c21cd25fcfc62' "$epode_artifact" \
+  | shasum -a 256 -c - &&
+mkdir -p vendor/agent-feedback-rust-0.2.2 &&
+tar -xzf "$epode_artifact" -C vendor/agent-feedback-rust-0.2.2
 ```
 
 ```toml
 [dependencies]
-agent-feedback = { path = "vendor/agent-feedback-rust" }
+agent-feedback = { path = "vendor/agent-feedback-rust-0.2.2" }
 ```
 
 ## Configure once
@@ -24,7 +27,7 @@ Construct the layer inside a Tokio runtime:
 
 ```rust
 use agent_feedback::{AgentFeedbackLayer, Options};
-use axum::{routing::get, Router};
+use axum::{middleware, routing::get, Router};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,12 +39,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/search", get(search_handler))
-        .layer(feedback.clone());
+        .layer(feedback.clone())
+        .layer(middleware::from_fn(authenticate_product_request));
 
     // Start Axum, then call feedback.shutdown().await during graceful shutdown.
     Ok(())
 }
 ```
+
+The last Axum layer added executes first. Keep product authentication outermost so it inserts the
+verified account or tenant extension before the Epode layer resolves `customer_ref`.
 
 ## Server-rendered HTML
 

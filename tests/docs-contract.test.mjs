@@ -54,13 +54,13 @@ const httpIntegrations = [
   {
     id: "rust",
     page: "docs/integrations/rust-axum.mdx",
-    required: ["agent-feedback-rust-0.2.1.tar.gz", "AgentFeedbackLayer::new", ".include", "Tokio"],
+    required: ["agent-feedback-rust-0.2.2.tar.gz", "AgentFeedbackLayer::new", ".include", "Tokio"],
   },
   {
     id: "manual-http",
     page: "docs/integrations/manual-http.mdx",
     required: [
-      "agent-feedback-protocol-v1.zip",
+      "agent-feedback-protocol-v1-0.2.2.zip",
       "HMAC-SHA256",
       "_agentFeedback",
       "Cache-Control",
@@ -247,6 +247,59 @@ test("both MCP setup permutations document the stateless 2026 feedback-tool cont
   assert.equal(mcpIntegrations.length, 2);
 });
 
+test("Node MCP setup authenticates before dispatch and keeps hosted installs reproducible", async () => {
+  const content = await read("docs/integrations/node-mcp.mdx");
+  for (const expected of [
+    "requireBearerAuth",
+    "productTokenVerifier",
+    "requiredScopes",
+    "authenticatedAccountId",
+    "typeof accountId",
+    "standalone JSON text block",
+    "outputSchema",
+    ".epode/artifacts/agent-feedback-node-0.2.2.tgz",
+    "shasum -a 256 -c -",
+  ]) {
+    assert.ok(content.includes(expected), `Node MCP docs omit ${expected}`);
+  }
+  assert.ok(
+    content.indexOf('app.use("/mcp", requireBearerAuth') < content.indexOf('app.all("/mcp"'),
+    "Node MCP docs must authenticate before forwarding /mcp",
+  );
+  assert.doesNotMatch(content, /sessionRef:[\s\S]{0,160}\bargs\.[A-Za-z_$]/);
+  assert.match(content, /npm ci.*cache is cleared/i);
+
+  assert.match(
+    dashboard,
+    /npm install @modelcontextprotocol\/server @modelcontextprotocol\/node @modelcontextprotocol\/express zod/,
+  );
+  assert.ok(
+    dashboard.indexOf('app.use("/mcp", requireBearerAuth') < dashboard.indexOf('app.all("/mcp"'),
+    "legacy setup must authenticate before forwarding /mcp",
+  );
+  assert.match(dashboard, /record_product_feedback_consent/);
+  assert.match(dashboard, /report_product_feedback/);
+  assert.match(dashboard, /standalone JSON content block/);
+  assert.match(dashboard, /feedbackMode: env\.AGENT_FEEDBACK_MODE/);
+  assert.match(dashboard, /epode_artifact="\.epode\/artifacts\/agent-feedback-node-0\.2\.2\.tgz"/);
+  assert.doesNotMatch(
+    dashboard,
+    /nodeDownload = verifiedDownload\("agent-feedback-node-0\.2\.2\.tgz"/,
+  );
+});
+
+test("Fastify guidance authenticates before reading identity and uses product-proven journeys", async () => {
+  const content = await read("docs/integrations/node-fastify.mdx");
+  assert.ok(
+    content.indexOf('app.addHook("preHandler", authenticateProductRequest)') <
+      content.indexOf("await app.register(agentFeedback"),
+  );
+  assert.match(content, /authorize the selected tenant/i);
+  assert.match(content, /sessionRef: request => request\.params\.id/);
+  assert.doesNotMatch(content, /sessionRef: request => request\.headers/);
+  assert.match(content, /never accept an arbitrary grouping handle/i);
+});
+
 test("verification and reference docs preserve the two-stage consent workflow", async () => {
   const pages = await Promise.all([
     read("docs/quickstart.mdx"),
@@ -312,10 +365,10 @@ test("docs and dashboard publish the same install artifacts and feedback modes",
   ]);
   const joined = pages.join("\n");
   for (const artifact of [
-    "agent-feedback-node-0.2.1.tgz",
-    "agent_feedback-0.2.1-py3-none-any.whl",
-    "agent-feedback-rust-0.2.1.tar.gz",
-    "agent-feedback-protocol-v1.zip",
+    "agent-feedback-node-0.2.2.tgz",
+    "agent_feedback-0.2.2-py3-none-any.whl",
+    "agent-feedback-rust-0.2.2.tar.gz",
+    "agent-feedback-protocol-v1-0.2.2.zip",
   ]) {
     assert.ok(joined.includes(artifact), `docs omit ${artifact}`);
     assert.ok(dashboard.includes(artifact), `dashboard omits ${artifact}`);
@@ -323,6 +376,32 @@ test("docs and dashboard publish the same install artifacts and feedback modes",
   for (const mode of ["never_ask", "ask_once", "ask_always", "off"]) {
     assert.ok(joined.includes(mode), `docs omit ${mode}`);
     assert.ok(dashboard.includes(mode), `dashboard omits ${mode}`);
+  }
+});
+
+test("dashboard setup stops before install or extraction when artifact verification fails", () => {
+  assert.match(
+    dashboard,
+    /const verifiedDownload = .*curl -fsSL .* &&\\nprintf .*shasum -a 256 -c -`;/,
+  );
+  assert.match(
+    dashboard,
+    /const nodeDownload = .*curl -fsSL .* &&\\nprintf .*shasum -a 256 -c -`;/,
+  );
+  for (const failClosedInstall of [
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: this asserts a literal template interpolation in generated setup source.
+    'const nodeInstall = `${nodeDownload} &&\\nnpm install "$epode_artifact"`',
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: this asserts a literal template interpolation in generated setup source.
+    'install: `${pythonDownload} &&\\npip install "$epode_artifact"`',
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: this asserts a literal template interpolation in generated setup source.
+    "install: `${goDownload} &&\\nmkdir -p ",
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: this asserts a literal template interpolation in generated setup source.
+    "install: `${rustDownload} &&\\nmkdir -p ",
+  ]) {
+    assert.ok(
+      dashboard.includes(failClosedInstall),
+      `dashboard setup lost checksum-gated install contract: ${failClosedInstall}`,
+    );
   }
 });
 
@@ -343,6 +422,21 @@ test("company onboarding docs preserve key safety and the three activation miles
   assert.match(privacy, /deployment secret manager/i);
   assert.match(configuration, /`sessionRef` \/ `session_ref`/);
   assert.match(configuration, /omit it rather than infer continuity/i);
+});
+
+test("public privacy docs explain operable retention and durable Ask-once permission", async () => {
+  const [privacy, customers] = await Promise.all([
+    read("docs/reference/privacy-security.mdx"),
+    read("docs/concepts/customers-and-sessions.mdx"),
+  ]);
+  for (const content of [privacy, customers]) {
+    assert.match(content, /1 to 365 days/);
+    assert.match(content, /dashboard (?:filtering|queries).*immediately/is);
+    assert.match(content, /feedback(?: reports)?,\s*interactions, and sessions/is);
+    assert.match(content, /scheduled purge|one purge interval/i);
+    assert.match(content, /Ask-once permission/i);
+    assert.match(content, /explicitly\s+changed or the product is deleted/i);
+  }
 });
 
 test("the HTTP reference publishes the complete report shape", async () => {
@@ -374,7 +468,7 @@ test("every public docs page has a title and actionable description", async () =
 });
 
 test("the downloadable protocol bundle preserves the immutable v1 schema contract", async () => {
-  const bundle = new URL("../backend/public/agent-feedback-protocol-v1.zip", import.meta.url)
+  const bundle = new URL("../backend/public/agent-feedback-protocol-v1-0.2.2.zip", import.meta.url)
     .pathname;
   const schemaFiles = [
     "consent-decision.schema.json",
@@ -389,11 +483,7 @@ test("the downloadable protocol bundle preserves the immutable v1 schema contrac
     .sort();
   assert.deepEqual(
     listing,
-    [
-      "protocol/v1/",
-      "protocol/v1/README.md",
-      ...schemaFiles.map((file) => `protocol/v1/${file}`),
-    ].sort(),
+    ["protocol/v1/README.md", ...schemaFiles.map((file) => `protocol/v1/${file}`)].sort(),
   );
   for (const file of schemaFiles) {
     assert.equal(
@@ -405,7 +495,10 @@ test("the downloadable protocol bundle preserves the immutable v1 schema contrac
   const bundledReadme = execFileSync("unzip", ["-p", bundle, "protocol/v1/README.md"], {
     encoding: "utf8",
   });
+  assert.equal(bundledReadme, await read("protocol/v1/README.md"));
   assert.match(bundledReadme, /"state": "feedback_ready"/);
+  assert.match(bundledReadme, /silent background bookkeeping/);
+  assert.match(bundledReadme, /Agent-Feedback-Request: 1/);
   assert.doesNotMatch(bundledReadme, /"optional": \[[^\]]*"consent"/);
 });
 

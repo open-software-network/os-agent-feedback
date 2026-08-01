@@ -4127,7 +4127,8 @@ async fn resolve_v2_session(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     environment_id: Uuid,
-    session_ref: &str,
+    customer_scope_hash: &[u8],
+    session_ref_hash: &[u8],
     session_source: &str,
     occurred_at: DateTime<Utc>,
 ) -> Result<Uuid, ApiError> {
@@ -4135,9 +4136,10 @@ async fn resolve_v2_session(
     let ref_hint = format!("session-{}", &session_id.simple().to_string()[..8]);
     let resolved = sqlx::query_scalar::<_, Uuid>(
         r"INSERT INTO sessions_v2
-        (id, workspace_id, environment_id, source, ref_hash, ref_hint, started_at, last_seen_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
-        ON CONFLICT (environment_id, source, ref_hash) DO UPDATE
+        (id, workspace_id, environment_id, customer_scope_hash, source, ref_hash,
+         ref_hint, started_at, last_seen_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+        ON CONFLICT (environment_id, customer_scope_hash, source, ref_hash) DO UPDATE
         SET started_at = LEAST(sessions_v2.started_at, EXCLUDED.started_at),
             last_seen_at = GREATEST(sessions_v2.last_seen_at, EXCLUDED.last_seen_at)
         RETURNING id",
@@ -4145,13 +4147,21 @@ async fn resolve_v2_session(
     .bind(session_id)
     .bind(workspace_id)
     .bind(environment_id)
+    .bind(customer_scope_hash)
     .bind(session_source)
-    .bind(sha256(session_ref))
+    .bind(session_ref_hash)
     .bind(ref_hint)
     .bind(occurred_at)
     .fetch_one(&mut **tx)
     .await?;
     Ok(resolved)
+}
+
+fn customer_scope_hash(customer_ref: Option<&str>) -> Vec<u8> {
+    customer_ref.map_or_else(
+        || sha256("scope:anonymous"),
+        |customer_ref| sha256(&format!("scope:customer:{customer_ref}")),
+    )
 }
 
 fn validate_telemetry(input: &InteractionTelemetryInput) -> Result<(), ApiError> {
@@ -4422,9 +4432,11 @@ async fn ingest_telemetry_event(
 struct InteractionSessionState {
     interaction_id: Uuid,
     occurred_at: DateTime<Utc>,
+    customer_ref: Option<String>,
     session_id: Option<Uuid>,
     session_source: Option<String>,
     session_ref_hash: Option<Vec<u8>>,
+    session_customer_scope_hash: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -4432,8 +4444,11 @@ struct SessionCorrelationAction {
     interaction_id: Uuid,
     occurred_at: DateTime<Utc>,
     session_id: Option<Uuid>,
-    session_evidence: Option<(String, String)>,
+    session_source: String,
+    session_ref_hash: Vec<u8>,
+    customer_scope_hash: Vec<u8>,
     sort_source: String,
+    sort_customer_scope_hash: Vec<u8>,
     sort_ref_hash: Vec<u8>,
 }
 
@@ -4444,8 +4459,9 @@ async fn correlate_telemetry_sessions(
 ) -> Result<(), ApiError> {
     let interaction_ids = evidence_by_interaction.keys().copied().collect::<Vec<_>>();
     let states = sqlx::query_as::<_, InteractionSessionState>(
-        r"SELECT i.id AS interaction_id, i.occurred_at, i.session_id,
-          s.source AS session_source, s.ref_hash AS session_ref_hash
+        r"SELECT i.id AS interaction_id, i.occurred_at, i.customer_ref, i.session_id,
+          s.source AS session_source, s.ref_hash AS session_ref_hash,
+          s.customer_scope_hash AS session_customer_scope_hash
         FROM interactions_v2 i
         LEFT JOIN sessions_v2 s ON s.id = i.session_id
         WHERE i.id = ANY($1)",
@@ -4464,50 +4480,62 @@ async fn correlate_telemetry_sessions(
         let evidence = evidence_by_interaction
             .remove(&state.interaction_id)
             .flatten();
-        let (sort_source, sort_ref_hash) = if state.session_id.is_some() {
-            (
-                state.session_source.clone().ok_or_else(|| {
-                    ApiError::internal("linked telemetry interaction has no session source")
-                })?,
-                state.session_ref_hash.clone().ok_or_else(|| {
-                    ApiError::internal("linked telemetry interaction has no session ref hash")
-                })?,
-            )
+        let desired_customer_scope_hash = customer_scope_hash(state.customer_ref.as_deref());
+        let (session_source, session_ref_hash) = if state.session_id.is_some() {
+            let source = state.session_source.clone().ok_or_else(|| {
+                ApiError::internal("linked telemetry interaction has no session source")
+            })?;
+            let ref_hash = state.session_ref_hash.clone().ok_or_else(|| {
+                ApiError::internal("linked telemetry interaction has no session ref hash")
+            })?;
+            (source, ref_hash)
         } else if let Some((session_ref, session_source)) = evidence.as_ref() {
             (session_source.clone(), sha256(session_ref))
         } else {
             continue;
         };
+        let session_id = state.session_id.filter(|_| {
+            state.session_customer_scope_hash.as_deref()
+                == Some(desired_customer_scope_hash.as_slice())
+        });
         actions.push(SessionCorrelationAction {
             interaction_id: state.interaction_id,
             occurred_at: state.occurred_at,
-            session_id: state.session_id,
-            session_evidence: evidence,
-            sort_source,
-            sort_ref_hash,
+            session_id,
+            session_source: session_source.clone(),
+            session_ref_hash: session_ref_hash.clone(),
+            customer_scope_hash: desired_customer_scope_hash,
+            sort_source: session_source,
+            sort_customer_scope_hash: customer_scope_hash(state.customer_ref.as_deref()),
+            sort_ref_hash: session_ref_hash,
         });
     }
     actions.sort_by(|left, right| {
-        (&left.sort_source, &left.sort_ref_hash, left.interaction_id).cmp(&(
-            &right.sort_source,
-            &right.sort_ref_hash,
-            right.interaction_id,
-        ))
+        (
+            &left.sort_source,
+            &left.sort_customer_scope_hash,
+            &left.sort_ref_hash,
+            left.interaction_id,
+        )
+            .cmp(&(
+                &right.sort_source,
+                &right.sort_customer_scope_hash,
+                &right.sort_ref_hash,
+                right.interaction_id,
+            ))
     });
 
     for action in actions {
         let session_id = if let Some(session_id) = action.session_id {
             session_id
         } else {
-            let (session_ref, session_source) = action.session_evidence.ok_or_else(|| {
-                ApiError::internal("unlinked correlation action has no session evidence")
-            })?;
             let session_id = resolve_v2_session(
                 tx,
                 auth.workspace.id,
                 auth.environment.id,
-                &session_ref,
-                &session_source,
+                &action.customer_scope_hash,
+                &action.session_ref_hash,
+                &action.session_source,
                 action.occurred_at,
             )
             .await?;
@@ -4610,17 +4638,18 @@ pub(crate) async fn feedback_consent_state(
             } else {
                 "unknown".to_owned()
             },
+            revision: 0,
         });
     }
-    let state = sqlx::query_scalar::<_, String>(
-        "SELECT decision FROM feedback_consent_subjects WHERE environment_id = $1 AND subject = $2",
+    let state = sqlx::query_as::<_, (String, i64)>(
+        "SELECT decision, revision FROM feedback_consent_subjects WHERE environment_id = $1 AND subject = $2",
     )
     .bind(auth.environment.id)
     .bind(input.subject)
     .fetch_optional(pool)
-    .await?
-    .unwrap_or_else(|| "unknown".to_owned());
-    Ok(ConsentStateResponse { state })
+    .await?;
+    let (state, revision) = state.unwrap_or_else(|| ("unknown".to_owned(), 0));
+    Ok(ConsentStateResponse { state, revision })
 }
 
 pub(crate) async fn inspect_feedback_capability(
@@ -4713,6 +4742,10 @@ pub(crate) struct ConsentDecisionOutcome {
     /// True when this call recorded the standing decision, false when a prior
     /// decision already stood.
     pub(crate) changed: bool,
+    /// True only when this capability may expose the follow-on report action.
+    /// A stale Ask-once CAS can observe an approved current state without
+    /// inheriting that approval.
+    pub(crate) feedback_action_allowed: bool,
     /// True when the capability's interaction verifiably came through the MCP
     /// protocol-tool path (server-side telemetry confirmed the interaction
     /// with `surface = 'mcp'` and `confirmationMethod = 'mcp'`).
@@ -4774,85 +4807,169 @@ pub(crate) async fn record_feedback_consent_decision(
     .bind(&input.decision)
     .fetch_optional(&mut *tx)
     .await?;
-    let (decision, decided_at, changed, flipped_from) = if let Some((_, interaction_decided_at)) =
-        inserted
-    {
-        if key.1 == "ask_once"
-            && let Some(subject) = claims.s.as_deref()
-        {
-            let applied = sqlx::query_as::<_, (String, DateTime<Utc>, Option<String>)>(
-                r"INSERT INTO feedback_consent_subjects (environment_id, subject, decision, decided_at)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (environment_id, subject) DO UPDATE SET
-                  decision = EXCLUDED.decision,
-                  decided_at = EXCLUDED.decided_at,
-                  flipped_from = CASE
-                    WHEN feedback_consent_subjects.decision IS DISTINCT FROM EXCLUDED.decision
-                      THEN feedback_consent_subjects.decision
-                    ELSE feedback_consent_subjects.flipped_from
-                  END,
-                  updated_at = NOW()
-                WHERE feedback_consent_subjects.decided_at < EXCLUDED.decided_at
-                RETURNING decision, decided_at,
-                  CASE WHEN xmax <> 0 THEN flipped_from END AS flip_recorded",
-            )
-            .bind(key.2)
-            .bind(subject)
-            .bind(&input.decision)
-            // Order durable consent by when Epode accepted the user's
-            // decision, not by the capability's second-resolution issue time.
-            // Two interactions are routinely signed in the same second, and
-            // an explicit later choice must not be discarded as a timestamp
-            // tie. Per-interaction idempotency above still makes retries safe.
-            .bind(interaction_decided_at)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let changed = applied.is_some();
-            let (durable_decision, durable_decided_at, flipped_from) = if let Some((
-                decision,
-                decided_at,
-                flip,
-            )) = applied
+    let (decision, decided_at, changed, feedback_action_allowed, flipped_from) =
+        if let Some((_, interaction_decided_at)) = inserted {
+            if key.1 == "ask_once"
+                && let Some(subject) = claims.s.as_deref()
             {
-                // A flip is only reported when this call updated an
-                // existing row and left a different prior decision behind.
-                let flip = flip.filter(|prior| prior != &decision);
-                (decision, decided_at, flip)
-            } else {
-                let (decision, decided_at) = sqlx::query_as::<_, (String, DateTime<Utc>)>(
-                        "SELECT decision, decided_at FROM feedback_consent_subjects WHERE environment_id = $1 AND subject = $2",
+                let expected_revision = claims.r.unwrap_or_default();
+                let applied = if expected_revision == 0 {
+                    // Revision 0 (and legacy capabilities without `r`) means the
+                    // signer observed no subject row. Such a capability may create
+                    // revision 1, but ON CONFLICT deliberately cannot mutate a row
+                    // that appeared before this decision arrived.
+                    sqlx::query_as::<_, (String, DateTime<Utc>, i64, Option<String>)>(
+                        r"INSERT INTO feedback_consent_subjects
+                    (environment_id, subject, decision, decided_at, revision)
+                    VALUES ($1, $2, $3, $4, 1)
+                    ON CONFLICT (environment_id, subject) DO NOTHING
+                    RETURNING decision, decided_at, revision, flipped_from",
                     )
                     .bind(key.2)
                     .bind(subject)
-                    .fetch_one(&mut *tx)
+                    .bind(&input.decision)
+                    .bind(interaction_decided_at)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                } else {
+                    // The revision predicate is the compare-and-set. PostgreSQL's
+                    // row update lock makes concurrent decisions for one revision
+                    // serialize; after the winner increments it, every loser
+                    // affects zero rows.
+                    sqlx::query_as::<_, (String, DateTime<Utc>, i64, Option<String>)>(
+                        r"UPDATE feedback_consent_subjects
+                    SET decision = $3,
+                      decided_at = $4,
+                      flipped_from = CASE
+                        WHEN decision IS DISTINCT FROM $3 THEN decision
+                        ELSE NULL
+                      END,
+                      revision = revision + 1,
+                      updated_at = NOW()
+                    WHERE environment_id = $1 AND subject = $2 AND revision = $5
+                    RETURNING decision, decided_at, revision, flipped_from",
+                    )
+                    .bind(key.2)
+                    .bind(subject)
+                    .bind(&input.decision)
+                    .bind(interaction_decided_at)
+                    .bind(expected_revision)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                };
+
+                if let Some((decision, decided_at, revision, flipped_from)) = applied {
+                    sqlx::query(
+                        r"UPDATE feedback_consent_interactions
+                    SET applied_subject_revision = $3
+                    WHERE interaction_id = $1 AND environment_id = $2",
+                    )
+                    .bind(claims.i)
+                    .bind(key.2)
+                    .bind(revision)
+                    .execute(&mut *tx)
                     .await?;
-                (decision, decided_at, None)
-            };
-            sqlx::query(
-                "UPDATE feedback_consent_interactions SET decision = $3 WHERE interaction_id = $1 AND environment_id = $2",
-            )
-            .bind(claims.i)
-            .bind(key.2)
-            .bind(&durable_decision)
-            .execute(&mut *tx)
-            .await?;
-            (durable_decision, durable_decided_at, changed, flipped_from)
+                    let feedback_action_allowed = decision == "approved";
+                    (
+                        decision,
+                        decided_at,
+                        true,
+                        feedback_action_allowed,
+                        flipped_from,
+                    )
+                } else {
+                    // A failed CAS returns the current durable state, but the
+                    // losing capability must not gain a report action even when
+                    // that current state happens to be approved.
+                    let current =
+                        sqlx::query_as::<_, (String, DateTime<Utc>, i64, Option<String>)>(
+                            r"SELECT decision, decided_at, revision, flipped_from
+                    FROM feedback_consent_subjects
+                    WHERE environment_id = $1 AND subject = $2",
+                        )
+                        .bind(key.2)
+                        .bind(subject)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                    if let Some((decision, decided_at, _, _)) = current {
+                        (decision, decided_at, false, false, None)
+                    } else {
+                        (
+                            "unknown".to_owned(),
+                            interaction_decided_at,
+                            false,
+                            false,
+                            None,
+                        )
+                    }
+                }
+            } else {
+                let feedback_action_allowed = input.decision == "approved";
+                (
+                    input.decision.clone(),
+                    interaction_decided_at,
+                    true,
+                    feedback_action_allowed,
+                    None,
+                )
+            }
         } else {
-            (input.decision.clone(), interaction_decided_at, true, None)
-        }
-    } else {
-        let (decision, decided_at) = sqlx::query_as::<_, (String, DateTime<Utc>)>(
-            "SELECT decision, decided_at FROM feedback_consent_interactions WHERE interaction_id = $1 AND environment_id = $2",
-        )
-        .bind(claims.i)
-        .bind(key.2)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(|| {
-            ApiError::conflict("interactionId belongs to another product environment")
-        })?;
-        (decision, decided_at, false, None)
-    };
+            let (recorded_decision, interaction_decided_at, applied_subject_revision) =
+                sqlx::query_as::<_, (String, DateTime<Utc>, Option<i64>)>(
+                    r"SELECT decision, decided_at, applied_subject_revision
+            FROM feedback_consent_interactions
+            WHERE interaction_id = $1 AND environment_id = $2",
+                )
+                .bind(claims.i)
+                .bind(key.2)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| {
+                    ApiError::conflict("interactionId belongs to another product environment")
+                })?;
+            if key.1 == "ask_once"
+                && let Some(subject) = claims.s.as_deref()
+            {
+                let current = sqlx::query_as::<_, (String, DateTime<Utc>, i64, Option<String>)>(
+                    r"SELECT decision, decided_at, revision, flipped_from
+                FROM feedback_consent_subjects
+                WHERE environment_id = $1 AND subject = $2",
+                )
+                .bind(key.2)
+                .bind(subject)
+                .fetch_optional(&mut *tx)
+                .await?;
+                if let Some((decision, decided_at, revision, flipped_from)) = current {
+                    let still_applied = applied_subject_revision == Some(revision);
+                    let feedback_action_allowed =
+                        still_applied && recorded_decision == "approved" && decision == "approved";
+                    (
+                        decision,
+                        decided_at,
+                        false,
+                        feedback_action_allowed,
+                        still_applied.then_some(flipped_from).flatten(),
+                    )
+                } else {
+                    (
+                        "unknown".to_owned(),
+                        interaction_decided_at,
+                        false,
+                        false,
+                        None,
+                    )
+                }
+            } else {
+                let feedback_action_allowed = recorded_decision == "approved";
+                (
+                    recorded_decision,
+                    interaction_decided_at,
+                    false,
+                    feedback_action_allowed,
+                    None,
+                )
+            }
+        };
     // The protocol-tool path is only claimed when server-side telemetry
     // confirmed this interaction as an MCP tool call. Absence of telemetry is
     // indistinguishable from a plain HTTP interaction, so this stays false for
@@ -4875,6 +4992,7 @@ pub(crate) async fn record_feedback_consent_decision(
         expires_at: claims.exp,
         decided_at,
         changed,
+        feedback_action_allowed,
         protocol_tool,
         flipped_from,
     })
@@ -5577,20 +5695,32 @@ mod product_tests {
         interaction_id: Uuid,
         subject: Option<&str>,
     ) -> String {
-        test_capability_with_subject_issued_at(
-            secret,
-            key_id,
-            interaction_id,
-            subject,
-            Utc::now().timestamp(),
-        )
+        test_capability_with_subject_revision(secret, key_id, interaction_id, subject, None)
     }
 
-    fn test_capability_with_subject_issued_at(
+    fn test_capability_with_subject_revision(
         secret: &str,
         key_id: Uuid,
         interaction_id: Uuid,
         subject: Option<&str>,
+        revision: Option<i64>,
+    ) -> String {
+        test_capability_with_subject_revision_issued_at(
+            secret,
+            key_id,
+            interaction_id,
+            subject,
+            revision,
+            Utc::now().timestamp(),
+        )
+    }
+
+    fn test_capability_with_subject_revision_issued_at(
+        secret: &str,
+        key_id: Uuid,
+        interaction_id: Uuid,
+        subject: Option<&str>,
+        revision: Option<i64>,
         issued_at: i64,
     ) -> String {
         let claims = crate::security::CapabilityClaims {
@@ -5600,6 +5730,7 @@ mod product_tests {
             exp: issued_at + Duration::hours(1).num_seconds(),
             n: format!("nonce-{}", Uuid::new_v4().simple()),
             s: subject.map(str::to_owned),
+            r: revision,
         };
         let payload = URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&claims).expect("capability claims should serialize"));
@@ -8864,6 +8995,37 @@ mod product_tests {
             let different_ref_id = Uuid::new_v4();
             let missing_ref_id = Uuid::new_v4();
             let blank_ref_id = Uuid::new_v4();
+            let acme_interaction_id = Uuid::new_v4();
+            let acme_followup_id = Uuid::new_v4();
+            let globex_interaction_id = Uuid::new_v4();
+
+            let mut tenant_a = mcp_telemetry_event(
+                acme_interaction_id,
+                Some(9),
+                "tenant_a_start",
+                Some(canonical_ref),
+                Some("mcp"),
+                occurred_at,
+            );
+            tenant_a.customer_ref = Some("tenant-a".into());
+            let mut tenant_a_followup = mcp_telemetry_event(
+                acme_followup_id,
+                Some(10),
+                "tenant_a_followup",
+                Some(canonical_ref),
+                Some("mcp"),
+                occurred_at,
+            );
+            tenant_a_followup.customer_ref = Some("tenant-a".into());
+            let mut tenant_b = mcp_telemetry_event(
+                globex_interaction_id,
+                Some(11),
+                "tenant_b_start",
+                Some(canonical_ref),
+                Some("mcp"),
+                occurred_at,
+            );
+            tenant_b.customer_ref = Some("tenant-b".into());
 
             let primary = ingest_telemetry_batch(
                 &pool,
@@ -8934,12 +9096,15 @@ mod product_tests {
                             Some("mcp"),
                             occurred_at,
                         ),
+                        tenant_a,
+                        tenant_a_followup,
+                        tenant_b,
                     ],
                 },
             )
             .await
             .map_err(test_error)?;
-            anyhow::ensure!(primary.accepted == 8 && primary.dropped == 0);
+            anyhow::ensure!(primary.accepted == 11 && primary.dropped == 0);
 
             let isolated_id = Uuid::new_v4();
             ingest_telemetry_batch(
@@ -8978,6 +9143,17 @@ mod product_tests {
             );
             anyhow::ensure!(interaction_session(&pool, missing_ref_id).await?.is_none());
             anyhow::ensure!(interaction_session(&pool, blank_ref_id).await?.is_none());
+            let acme_session = interaction_session(&pool, acme_interaction_id)
+                .await?
+                .expect("tenant A proof should create a session");
+            let globex_session = interaction_session(&pool, globex_interaction_id)
+                .await?
+                .expect("tenant B proof should create a session");
+            anyhow::ensure!(
+                interaction_session(&pool, acme_followup_id).await? == Some(acme_session)
+            );
+            anyhow::ensure!(acme_session != globex_session);
+            anyhow::ensure!(acme_session != mcp_session && globex_session != mcp_session);
             anyhow::ensure!(
                 interaction_session(&pool, isolated_id)
                     .await?
@@ -9050,7 +9226,7 @@ mod product_tests {
                     .bind(workspace.id)
                     .fetch_one(&pool)
                     .await?;
-            anyhow::ensure!(session_count == 4);
+            anyhow::ensure!(session_count == 6);
             Ok::<(), anyhow::Error>(())
         }
         .await;
@@ -9947,21 +10123,22 @@ mod product_tests {
 
     #[tokio::test]
     #[ignore = "requires DATABASE_URL"]
-    async fn same_second_ask_once_decisions_follow_user_action_order() -> anyhow::Result<()> {
+    async fn ask_once_subject_revisions_reject_stale_replayed_and_concurrent_decisions()
+    -> anyhow::Result<()> {
         let database_url = std::env::var("DATABASE_URL")?;
         let pool = PgPoolOptions::new()
-            .max_connections(2)
+            .max_connections(4)
             .connect(&database_url)
             .await?;
         sqlx::migrate!().run(&pool).await?;
-        let workspace = telemetry_test_workspace(&pool, "Same-second consent ordering").await?;
+        let workspace = telemetry_test_workspace(&pool, "Revision consent ordering").await?;
 
         let result = async {
             let (_, environment) = create_product(
                 &pool,
                 workspace.id,
                 CreateProductInput {
-                    name: "Consent ordering product".into(),
+                    name: "Revision consent product".into(),
                 },
             )
             .await
@@ -9990,53 +10167,389 @@ mod product_tests {
             .map_err(test_error)?;
 
             let subject = format!("afsub1_{}", "z".repeat(43));
-            let issued_at = Utc::now().timestamp();
-            let approval = test_capability_with_subject_issued_at(
-                &write_secret,
-                write_key.id,
-                Uuid::new_v4(),
-                Some(&subject),
-                issued_at,
-            );
-            let decline = test_capability_with_subject_issued_at(
-                &write_secret,
-                write_key.id,
-                Uuid::new_v4(),
-                Some(&subject),
-                issued_at,
-            );
+            let auth = agent_product_auth(&pool, &api_key_headers(&write_secret)?)
+                .await
+                .map_err(test_error)?;
+            let unknown = feedback_consent_state(
+                &pool,
+                &auth,
+                ConsentStateInput {
+                    subject: subject.clone(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(unknown.state == "unknown" && unknown.revision == 0);
 
+            let revision_zero_approval = test_capability_with_subject_revision(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&subject),
+                Some(0),
+            );
             let approved = record_feedback_consent_decision(
                 &pool,
-                &approval,
+                &revision_zero_approval,
                 ConsentDecisionInput {
                     decision: "approved".into(),
                 },
             )
             .await
             .map_err(test_error)?;
-            anyhow::ensure!(approved.decision == "approved" && approved.changed);
-
-            let declined = record_feedback_consent_decision(
+            anyhow::ensure!(
+                approved.decision == "approved"
+                    && approved.changed
+                    && approved.feedback_action_allowed
+            );
+            let revision_one = feedback_consent_state(
                 &pool,
-                &decline,
+                &auth,
+                ConsentStateInput {
+                    subject: subject.clone(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(revision_one.state == "approved" && revision_one.revision == 1);
+
+            let replayed_approval = record_feedback_consent_decision(
+                &pool,
+                &revision_zero_approval,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                replayed_approval.decision == "approved"
+                    && !replayed_approval.changed
+                    && replayed_approval.feedback_action_allowed
+            );
+            let after_replay = feedback_consent_state(
+                &pool,
+                &auth,
+                ConsentStateInput {
+                    subject: subject.clone(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(after_replay.revision == 1);
+
+            let revision_one_issued_at = Utc::now().timestamp();
+            let revision_one_revoke = test_capability_with_subject_revision_issued_at(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&subject),
+                Some(1),
+                revision_one_issued_at,
+            );
+            let delayed_revision_one_approval = test_capability_with_subject_revision_issued_at(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&subject),
+                Some(1),
+                revision_one_issued_at,
+            );
+
+            let revoked = record_feedback_consent_decision(
+                &pool,
+                &revision_one_revoke,
                 ConsentDecisionInput {
                     decision: "declined".into(),
                 },
             )
             .await
             .map_err(test_error)?;
-            anyhow::ensure!(declined.decision == "declined" && declined.changed);
-            anyhow::ensure!(declined.flipped_from.as_deref() == Some("approved"));
-
-            let durable: String = sqlx::query_scalar(
-                "SELECT decision FROM feedback_consent_subjects WHERE environment_id = $1 AND subject = $2",
+            anyhow::ensure!(
+                revoked.decision == "declined"
+                    && revoked.changed
+                    && !revoked.feedback_action_allowed
+                    && revoked.flipped_from.as_deref() == Some("approved")
+            );
+            let revision_two = feedback_consent_state(
+                &pool,
+                &auth,
+                ConsentStateInput {
+                    subject: subject.clone(),
+                },
             )
-            .bind(environment.id)
-            .bind(&subject)
-            .fetch_one(&pool)
-            .await?;
-            anyhow::ensure!(durable == "declined");
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(revision_two.state == "declined" && revision_two.revision == 2);
+
+            let superseded_approval_replay = record_feedback_consent_decision(
+                &pool,
+                &revision_zero_approval,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                superseded_approval_replay.decision == "declined"
+                    && !superseded_approval_replay.changed
+                    && !superseded_approval_replay.feedback_action_allowed
+            );
+
+            let stale_approval = record_feedback_consent_decision(
+                &pool,
+                &delayed_revision_one_approval,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                stale_approval.decision == "declined"
+                    && !stale_approval.changed
+                    && !stale_approval.feedback_action_allowed
+            );
+            let after_stale = feedback_consent_state(
+                &pool,
+                &auth,
+                ConsentStateInput {
+                    subject: subject.clone(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(after_stale.state == "declined" && after_stale.revision == 2);
+
+            let fresh_revision_two_approval = test_capability_with_subject_revision(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&subject),
+                Some(2),
+            );
+            let reapproved = record_feedback_consent_decision(
+                &pool,
+                &fresh_revision_two_approval,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                reapproved.decision == "approved"
+                    && reapproved.changed
+                    && reapproved.feedback_action_allowed
+                    && reapproved.flipped_from.as_deref() == Some("declined")
+            );
+            let revision_three = feedback_consent_state(
+                &pool,
+                &auth,
+                ConsentStateInput {
+                    subject: subject.clone(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(revision_three.state == "approved" && revision_three.revision == 3);
+
+            // The same losing r1 handle remains rejected after the state has
+            // gone approved -> declined -> approved (the ABA case). It may
+            // observe the current state, but cannot reveal a report action.
+            let aba_replay = record_feedback_consent_decision(
+                &pool,
+                &delayed_revision_one_approval,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                aba_replay.decision == "approved"
+                    && !aba_replay.changed
+                    && !aba_replay.feedback_action_allowed
+            );
+
+            let replayed_fresh_approval = record_feedback_consent_decision(
+                &pool,
+                &fresh_revision_two_approval,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                replayed_fresh_approval.decision == "approved"
+                    && !replayed_fresh_approval.changed
+                    && replayed_fresh_approval.feedback_action_allowed
+            );
+            let after_fresh_replay = feedback_consent_state(
+                &pool,
+                &auth,
+                ConsentStateInput {
+                    subject: subject.clone(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(after_fresh_replay.revision == 3);
+
+            // Legacy handles have the same insert-only safety as explicit r0.
+            let legacy_subject = format!("afsub1_{}", "l".repeat(43));
+            let legacy_create = test_capability_with_subject(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&legacy_subject),
+            );
+            let legacy_approved = record_feedback_consent_decision(
+                &pool,
+                &legacy_create,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(legacy_approved.changed && legacy_approved.feedback_action_allowed);
+            let legacy_stale = test_capability_with_subject(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&legacy_subject),
+            );
+            let legacy_decline = record_feedback_consent_decision(
+                &pool,
+                &legacy_stale,
+                ConsentDecisionInput {
+                    decision: "declined".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                legacy_decline.decision == "approved"
+                    && !legacy_decline.changed
+                    && !legacy_decline.feedback_action_allowed
+            );
+            let legacy_current = feedback_consent_state(
+                &pool,
+                &auth,
+                ConsentStateInput {
+                    subject: legacy_subject,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(legacy_current.state == "approved" && legacy_current.revision == 1);
+
+            // Opposite r1 decisions race on a separate subject. The revision
+            // predicate guarantees exactly one winner regardless of arrival
+            // order, and replaying either handle cannot advance revision 2.
+            let concurrent_subject = format!("afsub1_{}", "c".repeat(43));
+            let concurrent_seed = test_capability_with_subject_revision(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&concurrent_subject),
+                Some(0),
+            );
+            record_feedback_consent_decision(
+                &pool,
+                &concurrent_seed,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let concurrent_approval = test_capability_with_subject_revision(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&concurrent_subject),
+                Some(1),
+            );
+            let concurrent_decline = test_capability_with_subject_revision(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&concurrent_subject),
+                Some(1),
+            );
+            let (approval_result, decline_result) = tokio::join!(
+                record_feedback_consent_decision(
+                    &pool,
+                    &concurrent_approval,
+                    ConsentDecisionInput {
+                        decision: "approved".into(),
+                    },
+                ),
+                record_feedback_consent_decision(
+                    &pool,
+                    &concurrent_decline,
+                    ConsentDecisionInput {
+                        decision: "declined".into(),
+                    },
+                ),
+            );
+            let approval_result = approval_result.map_err(test_error)?;
+            let decline_result = decline_result.map_err(test_error)?;
+            anyhow::ensure!(approval_result.changed ^ decline_result.changed);
+            let (winner, loser, winner_capability, winner_input) = if approval_result.changed {
+                (
+                    &approval_result,
+                    &decline_result,
+                    &concurrent_approval,
+                    "approved",
+                )
+            } else {
+                (
+                    &decline_result,
+                    &approval_result,
+                    &concurrent_decline,
+                    "declined",
+                )
+            };
+            anyhow::ensure!(loser.decision == winner.decision);
+            anyhow::ensure!(!loser.feedback_action_allowed);
+            let concurrent_state = feedback_consent_state(
+                &pool,
+                &auth,
+                ConsentStateInput {
+                    subject: concurrent_subject.clone(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                concurrent_state.state == winner.decision && concurrent_state.revision == 2
+            );
+            let winner_replay = record_feedback_consent_decision(
+                &pool,
+                winner_capability,
+                ConsentDecisionInput {
+                    decision: winner_input.into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(!winner_replay.changed);
+            anyhow::ensure!(winner_replay.feedback_action_allowed == (winner_input == "approved"));
+            let concurrent_after_replay = feedback_consent_state(
+                &pool,
+                &auth,
+                ConsentStateInput {
+                    subject: concurrent_subject,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(concurrent_after_replay.revision == 2);
             Ok::<(), anyhow::Error>(())
         }
         .await;

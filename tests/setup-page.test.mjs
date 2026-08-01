@@ -107,7 +107,7 @@ test("setup starts with the selected product integration", () => {
   assert.doesNotMatch(dashboardScript, /Run backend contract test/);
 });
 
-test("collection policy distinguishes Epode-managed once and per-report consent", () => {
+test("collection policy operates consent and bounded retention controls", () => {
   assert.match(dashboardScript, /Never ask — submit autonomously/);
   assert.doesNotMatch(dashboardScript, />Auto —/);
   assert.match(dashboardScript, /Ask once — Epode remembers the answer/);
@@ -124,11 +124,21 @@ test("collection policy distinguishes Epode-managed once and per-report consent"
     dashboardScript,
     /AGENT_FEEDBACK_MODE=\$\{dashboard\.currentEnvironment\?\.feedbackMode/,
   );
-  assert.doesNotMatch(
+  assert.match(dashboardScript, /<p class="eyebrow">RETENTION<\/p>/);
+  assert.match(dashboardScript, /name="retentionDays" type="number" min="1" max="365"/);
+  for (const days of [7, 30, 90, 180, 365]) {
+    assert.match(dashboardScript, new RegExp(`<option value="${days}">`));
+  }
+  assert.match(dashboardScript, /retentionDays = Number\(form\.get\("retentionDays"\)\)/);
+  assert.match(dashboardScript, /retentionDays < 1 \|\| retentionDays > 365/);
+  assert.match(dashboardScript, /collectEventSummaries: false, retentionDays \}/);
+  assert.match(dashboardScript, /Dashboard filtering changes immediately/);
+  assert.match(dashboardScript, /physical deletion may take up to the scheduled purge interval/i);
+  assert.match(dashboardScript, /Expired feedback, interactions, and sessions/);
+  assert.match(
     dashboardScript,
-    /<p class="eyebrow">RETENTION<\/p>|Data lifetime|Retention period|day retention/,
+    /survives retention until it is explicitly changed or the product is deleted/,
   );
-  assert.match(dashboardScript, /retentionDays: dashboard\.currentEnvironment\.retentionDays/);
 });
 
 test("setup offers one guided install with a manual fallback", () => {
@@ -230,10 +240,31 @@ test("read keys are created with a 90-day default expiry and an explicit never o
     /if \(expiresIn !== "never"\) payload\.expiresInSeconds = Number\(expiresIn\)/,
   );
   assert.match(dashboardScript, /Save this read key now/);
-  assert.match(
+  assert.match(dashboardScript, /readSecret = body\.secret/);
+});
+
+test("legacy setup keeps full write and read secrets out of Web Storage", () => {
+  assert.doesNotMatch(dashboardScript, /\bsessionStorage\b/);
+  assert.doesNotMatch(
     dashboardScript,
-    /rememberSetupSecret\(dashboard\.currentEnvironment\.id, body\.secret, "read"\)/,
+    /setupSecretKey|rememberSetupSecret|recalledSetupSecret|agent-feedback:(?:product|read)-key/,
   );
+  const storageCalls = [
+    ...dashboardScript.matchAll(
+      /\b(?:sessionStorage|localStorage)\?\.(?:getItem|setItem)\(([^)]*)\)/g,
+    ),
+  ];
+  assert.ok(storageCalls.length > 0, "expected the unrelated team preference storage calls");
+  for (const [, argumentsSource] of storageCalls) {
+    assert.doesNotMatch(
+      argumentsSource,
+      /apiSecret|readSecret|body\.secret|\bsecret\b|af_live_|af_read_/,
+    );
+  }
+  assert.match(dashboardScript, /stays only in page memory and disappears on reload/);
+  assert.match(dashboardScript, /does not save full keys in browser storage/);
+  assert.match(dashboardScript, /Full server-side key is hidden/);
+  assert.match(dashboardScript, /Full read key is hidden/);
 });
 
 test("read keys ship per-client MCP config snippets, not a server env variable", () => {
