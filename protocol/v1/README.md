@@ -129,12 +129,24 @@ promise that Epode will remember the choice.
 - Never overwrite an existing `_agentFeedback` field.
 - Exclude errors, redirects, health/metrics endpoints, assets, streams, binary bodies, and the Agent Feedback endpoints themselves.
 - Add `Cache-Control: private, no-store` to instrumented responses because every capability is unique.
+- In request cache mode, an otherwise eligible ordinary 2xx `GET` or `HEAD` response advertises one
+  same-resource opt-in using
+  `Link: </exact/path?query>; rel="agent-feedback"; request-header="Agent-Feedback-Request: 1"`.
+  The target is the origin-relative effective request target, never a value assembled from `Host` or
+  forwarded-host headers. Add `Vary: Agent-Feedback-Request` to both ordinary and opted-in variants.
+  The opted-in response carries the normal envelope and is `private, no-store`; errors, redirects,
+  unsupported bodies, and non-safe methods do not advertise discovery.
 - Product responses must never wait for telemetry or Ask-once consent-state delivery. The primary
   response path reads only process-local consent state; it never calls Epode. On an Ask-once cache
   miss, derive the opaque subject locally, include it in the capability, emit the
   `consent_required` envelope, and refresh consent state asynchronously after the response. A
   failed refresh leaves the cache unchanged: Epode unavailability must never fail the product
   response or omit its subject-bound capability and feedback instructions.
+
+A feedback-aware client may follow request discovery only once, only when the resolved Link target is
+the exact effective response URL, and only with the original `GET` or `HEAD` method and authentication
+context. It adds only `Agent-Feedback-Request: 1`, sends no body, and must stop rather than forward
+credentials through a redirect. Link parameters never authorize arbitrary headers or a different URL.
 
 ## Telemetry
 

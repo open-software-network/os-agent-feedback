@@ -214,16 +214,25 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         async def receive():
             return {"type": "http.request", "body": b"", "more_body": False}
 
-        async def invoke(cache_mode: str, opt_in: bool = False):
+        async def invoke(cache_mode: str, opt_in: bool = False, method: str = "GET"):
             middleware = AgentFeedbackASGI(
                 app, api_key=KEY, include=("/status",), cache_mode=cache_mode, sender=lambda *_: None
             )
             sent: list[dict] = []
             async def send(message):
                 sent.append(message)
-            headers = [(b"agent-feedback-request", b"1")] if opt_in else []
+            headers = [(b"authorization", b"Bearer customer-secret")]
+            if opt_in:
+                headers.append((b"agent-feedback-request", b"1"))
             await middleware(
-                {"type": "http", "method": "GET", "path": "/status", "headers": headers},
+                {
+                    "type": "http",
+                    "method": method,
+                    "path": "/status",
+                    "raw_path": b"/status",
+                    "query_string": b"scope=private",
+                    "headers": headers,
+                },
                 receive,
                 send,
             )
@@ -238,11 +247,24 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ordinary[1]["body"], original)
         self.assertEqual(dict(ordinary[0]["headers"])[b"cache-control"], b"public, s-maxage=600")
         self.assertEqual(dict(ordinary[0]["headers"])[b"vary"], b"Agent-Feedback-Request")
+        self.assertEqual(
+            dict(ordinary[0]["headers"])[b"link"],
+            b'</status?scope=private>; rel="agent-feedback"; request-header="Agent-Feedback-Request: 1"',
+        )
 
         requested = await invoke("request", True)
         self.assertIn("_agentFeedback", json.loads(requested[1]["body"]))
         self.assertEqual(dict(requested[0]["headers"])[b"cache-control"], b"private, no-store")
         self.assertEqual(dict(requested[0]["headers"])[b"vary"], b"Agent-Feedback-Request")
+        self.assertNotIn(b"link", dict(requested[0]["headers"]))
+
+        ordinary_head = await invoke("request", method="HEAD")
+        self.assertIn(b"request-header", dict(ordinary_head[0]["headers"])[b"link"])
+        requested_head = await invoke("request", True, "HEAD")
+        self.assertIn(b"agent-feedback", dict(requested_head[0]["headers"]))
+        self.assertEqual(
+            dict(requested_head[0]["headers"])[b"cache-control"], b"private, no-store"
+        )
 
         private = await invoke("private")
         self.assertIn("_agentFeedback", json.loads(private[1]["body"]))
@@ -424,12 +446,18 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
             ])
             return [original]
 
-        def invoke(cache_mode: str, opt_in: bool = False):
+        def invoke(cache_mode: str, opt_in: bool = False, method: str = "GET"):
             middleware = AgentFeedbackWSGI(
                 app, api_key=KEY, include=("/status",), cache_mode=cache_mode, sender=lambda *_: None
             )
             captured: dict = {}
-            environ = {"PATH_INFO": "/status", "REQUEST_METHOD": "GET", "wsgi.input": BytesIO()}
+            environ = {
+                "PATH_INFO": "/status",
+                "QUERY_STRING": "scope=private",
+                "REQUEST_METHOD": method,
+                "HTTP_AUTHORIZATION": "Bearer customer-secret",
+                "wsgi.input": BytesIO(),
+            }
             if opt_in:
                 environ["HTTP_AGENT_FEEDBACK_REQUEST"] = "1"
             output = b"".join(middleware(
@@ -445,6 +473,10 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(headers["Cache-Control"], "public, max-age=300")
             if cache_mode == "request":
                 self.assertEqual(headers["Vary"], "Agent-Feedback-Request")
+                self.assertEqual(
+                    headers["Link"],
+                    '</status?scope=private>; rel="agent-feedback"; request-header="Agent-Feedback-Request: 1"',
+                )
 
         for cache_mode, opt_in in (("request", True), ("private", False)):
             output, headers = invoke(cache_mode, opt_in)
@@ -452,6 +484,12 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(headers["Cache-Control"], "private, no-store")
             if cache_mode == "request":
                 self.assertEqual(headers["Vary"], "Agent-Feedback-Request")
+
+        _, ordinary_head_headers = invoke("request", method="HEAD")
+        self.assertIn("request-header", ordinary_head_headers["Link"])
+        _, requested_head_headers = invoke("request", True, "HEAD")
+        self.assertIn("Agent-Feedback", requested_head_headers)
+        self.assertEqual(requested_head_headers["Cache-Control"], "private, no-store")
 
     def test_wsgi_ineligible_responses_are_unchanged_without_consent_work(self) -> None:
         original = b'{"answer":"unchanged"}'

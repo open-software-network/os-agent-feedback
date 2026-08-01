@@ -87,6 +87,7 @@ test("Fastify Ask-once never awaits Epode and keeps consent_required through an 
 });
 
 test("Fastify request cache mode varies ordinary and agent responses", async () => {
+  const authorization = [];
   const app = Fastify();
   const plugin = agentFeedback({
     apiKey: key,
@@ -97,25 +98,49 @@ test("Fastify request cache mode varies ordinary and agent responses", async () 
     fetch: async () => new Response("{}", { status: 202 }),
   });
   await app.register(plugin);
-  app.get("/api/search", async (_request, reply) => {
+  app.get("/api/search", async (request, reply) => {
+    authorization.push(request.headers.authorization);
     reply.header("cache-control", "public, max-age=300");
     reply.header("vary", "Accept-Encoding");
     return { answer: "cached" };
   });
   await app.ready();
 
-  const ordinary = await app.inject({ method: "GET", url: "/api/search" });
+  const ordinary = await app.inject({
+    method: "GET",
+    url: "/api/search?scope=private",
+    headers: { authorization: "Bearer customer-secret" },
+  });
   assert.equal(ordinary.json()._agentFeedback, undefined);
   assert.match(ordinary.headers.vary, /Accept-Encoding/);
   assert.match(ordinary.headers.vary, /Agent-Feedback-Request/);
+  assert.equal(
+    ordinary.headers.link,
+    '</api/search?scope=private>; rel="agent-feedback"; request-header="Agent-Feedback-Request: 1"',
+  );
   const agent = await app.inject({
     method: "GET",
-    url: "/api/search",
-    headers: { "agent-feedback-request": "1" },
+    url: "/api/search?scope=private",
+    headers: {
+      authorization: "Bearer customer-secret",
+      "agent-feedback-request": "1",
+    },
   });
   assert.equal(agent.json()._agentFeedback.v, 1);
   assert.equal(agent.headers["cache-control"], "private, no-store");
   assert.match(agent.headers.vary, /Agent-Feedback-Request/);
+  assert.equal(agent.headers.link, undefined);
+  assert.deepEqual(authorization, ["Bearer customer-secret", "Bearer customer-secret"]);
+
+  const ordinaryHead = await app.inject({ method: "HEAD", url: "/api/search?scope=head" });
+  assert.match(ordinaryHead.headers.link, /request-header=/);
+  const agentHead = await app.inject({
+    method: "HEAD",
+    url: "/api/search?scope=head",
+    headers: { "agent-feedback-request": "1" },
+  });
+  assert.match(agentHead.headers["agent-feedback"], /^ey/);
+  assert.equal(agentHead.headers["cache-control"], "private, no-store");
   await plugin.flush();
   await app.close();
 });

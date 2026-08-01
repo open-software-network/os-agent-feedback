@@ -24,6 +24,10 @@ If ordinary traffic shares a CDN response, use `cacheMode: "request"`. A feedbac
 `Vary: Agent-Feedback-Request` to both variants. If a CDN strips `Vary`, configure the same cache-key rule at
 the edge or do not use request mode.
 
+Eligible ordinary 2xx `GET` and `HEAD` responses include a relative same-URL `Link` marker so Epode Companion
+can discover request mode and make one opt-in refetch. The refetch preserves the original authentication
+context, adds only `Agent-Feedback-Request: 1`, and stops on redirects; the public body is unchanged.
+
 [Run the search example](https://github.com/open-software-network/os-epode/tree/main/examples/icp-search-express)
 
 ## Async APIs

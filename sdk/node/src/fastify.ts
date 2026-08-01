@@ -10,6 +10,7 @@ import {
   normalizeOperation,
   type PreparedInteraction,
   type ProductSurface,
+  requestDiscoveryLink,
 } from "./core.js";
 
 type RequestState = {
@@ -41,6 +42,23 @@ function ensureRequestVary(reply: {
     tokens.push("Agent-Feedback-Request");
   }
   reply.header("vary", tokens.join(", "));
+}
+
+function appendLink(
+  reply: {
+    header(name: string, value: string | string[]): unknown;
+    getHeader(name: string): unknown;
+  },
+  value: string,
+): void {
+  const current = reply.getHeader("link");
+  if (Array.isArray(current)) {
+    reply.header("link", [...current.map(String), value]);
+  } else if (current !== undefined) {
+    reply.header("link", [String(current), value]);
+  } else {
+    reply.header("link", value);
+  }
 }
 
 export function agentFeedback(
@@ -77,7 +95,7 @@ export function agentFeedback(
       if (
         reply.statusCode < 200 ||
         reply.statusCode >= 300 ||
-        request.method === "HEAD" ||
+        (request.method === "HEAD" && surface !== "http_headers") ||
         !runtime.matches(request.url)
       ) {
         return undefined;
@@ -106,13 +124,16 @@ export function agentFeedback(
     };
 
     const headers = (
-      reply: { header(name: string, value: string): unknown },
+      reply: {
+        header(name: string, value: string | string[]): unknown;
+        getHeader(name: string): unknown;
+      },
       prepared: PreparedInteraction,
     ): void => {
       if (!prepared.envelope) return;
       reply.header("agent-feedback", encodedEnvelope(prepared.envelope));
-      reply.header(
-        "link",
+      appendLink(
+        reply,
         `<${runtime.endpoint}/.well-known/agent-feedback-v1.json>; rel="agent-feedback"; type="application/json"`,
       );
     };
@@ -140,11 +161,31 @@ export function agentFeedback(
         ensureRequestVary(reply);
       }
       const contentType = String(reply.getHeader("content-type") || "");
+      const supported =
+        contentType.includes("application/json") || contentType.includes("text/html");
+      const optedIn = request.headers["agent-feedback-request"] === "1";
+      const state = states.get(request);
+      if (
+        runtime.cacheMode === "request" &&
+        !optedIn &&
+        !state?.instrumentationSkipped &&
+        supported &&
+        (request.method === "GET" || request.method === "HEAD") &&
+        reply.statusCode >= 200 &&
+        reply.statusCode < 300
+      ) {
+        const link = requestDiscoveryLink(request.raw.url || request.url);
+        if (link) appendLink(reply, link);
+      }
+      if (request.method === "HEAD" && supported) {
+        const headState = attach(request, reply, "http_headers", payload);
+        if (headState?.prepared) headers(reply, headState.prepared);
+        return payload;
+      }
       if (typeof payload === "string" && contentType.includes("text/html")) {
         const prepared = attach(request, reply, "http_html", payload)?.prepared;
         return prepared?.envelope ? injectHtml(payload, prepared.envelope) : payload;
       }
-      const state = states.get(request);
       if (
         !state?.prepared &&
         !state?.instrumentationSkipped &&

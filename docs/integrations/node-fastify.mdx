@@ -49,6 +49,8 @@ The default `cacheMode: "safe"` skips explicitly shared-cacheable responses inst
 cache policy. Use `cacheMode: "request"` when only callers sending `Agent-Feedback-Request: 1` should be
 instrumented, or `cacheMode: "private"` when every included response is already private. Request mode adds
 `Vary: Agent-Feedback-Request` to both ordinary and opted-in responses so shared caches keep them separate.
+Eligible ordinary 2xx `GET` and `HEAD` responses also advertise a same-path-and-query `Link` for one
+authenticated Companion refetch; redirects and non-safe methods never advertise it.
 
 `*` matches one path segment. Use `**` when the route family can be nested more deeply.
 

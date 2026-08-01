@@ -62,6 +62,8 @@ responses that declare a shared cache policy (`public`, `max-age`, `s-maxage`, `
 `CachePrivate` only when replacing shared caching with `private, no-store` is intentional, or
 `CacheRequest` to instrument only requests that opt in with the `Agent-Feedback-Request: 1` header. Request
 mode adds `Vary: Agent-Feedback-Request` to both variants so shared caches keep them separate.
+Eligible ordinary 2xx `GET` and `HEAD` responses also advertise a same-path-and-query `Link` for one
+authenticated Companion refetch; redirects and non-safe methods never advertise it.
 
 ## Verify
 

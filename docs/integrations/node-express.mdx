@@ -59,6 +59,8 @@ The agent caller sends `Agent-Feedback-Request: 1`. Only that request receives f
 becomes `private, no-store`; the public response keeps its existing cache policy. The SDK also adds
 `Vary: Agent-Feedback-Request`, so a CDN cannot replay the ordinary cached body to an opted-in caller. Use
 `cacheMode: "private"` only when disabling shared caching on every included response is intentional.
+Eligible ordinary 2xx `GET` and `HEAD` responses also carry a same-path-and-query `Link` marker, allowing
+an installed Epode Companion to make one authenticated opt-in refetch without changing the public body.
 
 `*` matches one path segment (`/docs/*` matches `/docs/guide`). Use `**` for any depth
 (`/docs/**` also matches `/docs/platform/authentication`).

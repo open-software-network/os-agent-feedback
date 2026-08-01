@@ -36,6 +36,8 @@ not buffer or mutate the application body.
 With `cache_mode="request"`, only callers sending `Agent-Feedback-Request: 1` receive a contract. The
 middleware adds `Vary: Agent-Feedback-Request` to ordinary and opted-in responses so a shared cache cannot
 hide the opted-in request.
+Eligible finite ordinary 2xx `GET` and `HEAD` responses also advertise a same-path-and-query `Link` for one
+authenticated Companion refetch; redirects and non-safe methods never advertise it.
 
 ## Server-rendered HTML
 

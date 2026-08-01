@@ -126,6 +126,23 @@ local envelope looks unresolved. The endpoint is also listed in `/.well-known/ag
 - Instrumented responses use `Cache-Control: private, no-store` because every capability is unique.
 - An existing `_agentFeedback` field is never overwritten.
 
+## Request-mode discovery
+
+`cacheMode: "request"` keeps the ordinary shared-cacheable body unchanged while giving a feedback-aware
+caller a first-contact signal:
+
+```http
+Link: </v1/search?q=example>; rel="agent-feedback"; request-header="Agent-Feedback-Request: 1"
+Vary: Agent-Feedback-Request
+```
+
+The relative target is the exact effective request path and query, so SDKs do not trust proxy `Host` or
+forwarded-host headers. The Link appears only on eligible 2xx `GET` and `HEAD` responses. A compatible
+runtime resolves it against the effective URL, requires an exact same-origin URL match, and refetches at
+most once with the same safe method, authentication context, cookies, and headers while adding only
+`Agent-Feedback-Request: 1`. It sends no body and stops on a redirect. The opted-in response carries the
+normal envelope, remains varied by the request header, and becomes `private, no-store`.
+
 ## Feedback-aware runtimes
 
 A generic HTTP agent may ignore this second-action instruction. A runtime that explicitly supports Epode should:

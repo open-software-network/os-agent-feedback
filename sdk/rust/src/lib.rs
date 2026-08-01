@@ -812,6 +812,11 @@ where
         let runtime = self.runtime.clone();
         Box::pin(async move {
             let path = request.uri().path().to_string();
+            let request_target = request
+                .uri()
+                .path_and_query()
+                .map_or_else(|| path.clone(), |value| value.as_str().to_string());
+            let method = request.method().clone();
             if !runtime.matches(&path) {
                 return inner.call(request).await;
             }
@@ -823,9 +828,9 @@ where
             if runtime.options.cache_mode == HttpCacheMode::Request && !request_opt_in {
                 let mut response = inner.call(request).await?;
                 ensure_request_vary(response.headers_mut());
+                add_request_discovery(&mut response, &method, &request_target);
                 return Ok(response);
             }
-            let method = request.method().clone();
             let customer_ref = extract(&runtime.options.customer_ref, &request);
             let session_ref = extract(&runtime.options.session_ref, &request);
             let runtime_hint = extract(&runtime.options.runtime_hint, &request);
@@ -847,6 +852,45 @@ where
             }
             Ok(response)
         })
+    }
+}
+
+fn add_request_discovery(response: &mut Response, method: &Method, request_target: &str) {
+    if !request_target.starts_with('/')
+        || request_target.starts_with("//")
+        || (*method != Method::GET && *method != Method::HEAD)
+        || !response.status().is_success()
+        || response
+            .body()
+            .size_hint()
+            .exact()
+            .is_none_or(|size| size > MAX_BODY_BYTES as u64)
+    {
+        return;
+    }
+    let supported = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("application/json") || value.contains("text/html"));
+    if !supported {
+        return;
+    }
+    let mut safe_target = String::with_capacity(request_target.len());
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for byte in request_target.bytes() {
+        if byte <= 0x20 || byte >= 0x7f || matches!(byte, b'<' | b'>' | b'"' | b'#' | b'\\') {
+            safe_target.push('%');
+            safe_target.push(HEX[(byte >> 4) as usize] as char);
+            safe_target.push(HEX[(byte & 0x0f) as usize] as char);
+        } else {
+            safe_target.push(byte as char);
+        }
+    }
+    if let Ok(value) = HeaderValue::from_str(&format!(
+        "<{safe_target}>; rel=\"agent-feedback\"; request-header=\"Agent-Feedback-Request: 1\""
+    )) {
+        response.headers_mut().append(LINK, value);
     }
 }
 
@@ -882,8 +926,7 @@ async fn instrument_response(
     session_ref: Option<String>,
     runtime_hint: Option<String>,
 ) -> Response {
-    if method == Method::HEAD
-        || !response.status().is_success()
+    if !response.status().is_success()
         || response
             .body()
             .size_hint()
@@ -904,6 +947,52 @@ async fn instrument_response(
         .unwrap_or_default()
         .to_string();
     if !content_type.contains("application/json") && !content_type.contains("text/html") {
+        return response;
+    }
+    if method == Method::HEAD {
+        if runtime.options.cache_mode != HttpCacheMode::Request {
+            return response;
+        }
+        let consent_state = runtime.cached_consent(customer_ref.as_deref()).await;
+        let Ok(prepared) =
+            runtime.prepare_for(SystemTime::now(), customer_ref.as_deref(), consent_state)
+        else {
+            return response;
+        };
+        let Some(envelope) = prepared.envelope.as_ref() else {
+            return response;
+        };
+        let mut response = response;
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(envelope).unwrap_or_default());
+        if let Ok(value) = HeaderValue::from_str(&encoded) {
+            response.headers_mut().insert("agent-feedback", value);
+        }
+        if let Ok(value) = HeaderValue::from_str(&format!(
+            "<{}/.well-known/agent-feedback-v1.json>; rel=\"agent-feedback\"; type=\"application/json\"",
+            runtime.options.endpoint
+        )) {
+            response.headers_mut().append(LINK, value);
+        }
+        response
+            .headers_mut()
+            .insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+        let consent_customer_ref = customer_ref.clone();
+        runtime.record(TelemetryEvent {
+            interaction_id: prepared.interaction_id,
+            sequence: 0,
+            surface: "http_headers".into(),
+            operation: normalize_operation(&path),
+            status_code: response.status().as_u16(),
+            duration_ms: started.elapsed().as_millis() as u64,
+            classification: "unclassified",
+            occurred_at: prepared.occurred_at,
+            customer_ref,
+            session_ref: session_ref.clone(),
+            session_source: session_ref.map(|_| "customer"),
+            runtime_hint: runtime_hint.clone(),
+            runtime_hint_source: runtime_hint.map(|_| "http"),
+        });
+        runtime.warm_consent(consent_customer_ref.as_deref());
         return response;
     }
     let status = response.status();
@@ -1731,7 +1820,8 @@ mod tests {
                     }),
                 )
                 .layer(layer.clone());
-            let mut request = Request::get("/status");
+            let mut request = Request::get("/status?scope=private")
+                .header("authorization", "Bearer customer-secret");
             if opt_in {
                 request = request.header("Agent-Feedback-Request", "1");
             }
@@ -1753,6 +1843,13 @@ mod tests {
                 .filter_map(|value| value.to_str().ok())
                 .collect::<Vec<_>>()
                 .join(",");
+            let link = response
+                .headers()
+                .get_all(LINK)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .collect::<Vec<_>>()
+                .join(",");
             let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
                 .await
                 .unwrap();
@@ -1760,6 +1857,17 @@ mod tests {
             assert_eq!(value.get("_agentFeedback").is_some(), instrumented);
             if mode == HttpCacheMode::Request {
                 assert!(vary.contains("Agent-Feedback-Request"));
+                if opt_in {
+                    assert!(
+                        link.is_empty(),
+                        "opted response advertised discovery: {link}"
+                    );
+                } else {
+                    assert_eq!(
+                        link,
+                        "</status?scope=private>; rel=\"agent-feedback\"; request-header=\"Agent-Feedback-Request: 1\""
+                    );
+                }
             }
             assert_eq!(
                 cache_control,
@@ -1774,6 +1882,59 @@ mod tests {
                 assert_eq!(batches.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn request_cache_discovery_uses_headers_for_head() {
+        let (endpoint, batches) = telemetry_server(1);
+        let layer = AgentFeedbackLayer::new(
+            Options::new(KEY)
+                .endpoint(endpoint)
+                .include(["/status"])
+                .cache_mode(HttpCacheMode::Request),
+        )
+        .unwrap();
+        let app = Router::new()
+            .route(
+                "/status",
+                get(|| async { Json(json!({ "answer": "cached" })) }),
+            )
+            .layer(layer.clone());
+
+        let ordinary = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::HEAD)
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            ordinary
+                .headers()
+                .get(LINK)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.contains("request-header="))
+        );
+
+        let requested = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::HEAD)
+                    .uri("/status")
+                    .header("Agent-Feedback-Request", "1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(requested.headers().contains_key("agent-feedback"));
+        assert_eq!(requested.headers()[CACHE_CONTROL], "private, no-store");
+        layer.shutdown().await.unwrap();
+        assert_eq!(batches.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
     }
 
     #[tokio::test]

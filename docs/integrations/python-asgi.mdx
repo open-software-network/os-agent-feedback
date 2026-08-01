@@ -52,6 +52,8 @@ mirrors the Node SDK: the default `"safe"` skips responses that declare a shared
 replaces shared caching with `private, no-store` deliberately, and `"request"` instruments only requests
 that opt in with the `Agent-Feedback-Request: 1` header. Request mode adds
 `Vary: Agent-Feedback-Request` so shared caches keep ordinary and opted-in responses separate.
+Eligible ordinary 2xx `GET` and `HEAD` responses also advertise a same-path-and-query `Link` for one
+authenticated Companion refetch; redirects and non-safe methods never advertise it.
 
 ## Verify
 

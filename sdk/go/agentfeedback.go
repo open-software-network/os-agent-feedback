@@ -834,6 +834,29 @@ func ensureRequestVary(header http.Header) {
 	header.Add("Vary", "Agent-Feedback-Request")
 }
 
+func requestDiscoveryLink(request *http.Request) string {
+	path := request.URL.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	if strings.HasPrefix(path, "//") {
+		return ""
+	}
+	target := path
+	if request.URL.ForceQuery || request.URL.RawQuery != "" {
+		target += "?" + request.URL.RawQuery
+	}
+	var safe strings.Builder
+	for _, value := range []byte(target) {
+		if value <= 0x20 || value >= 0x7f || strings.ContainsRune("<>\"#\\", rune(value)) {
+			_, _ = fmt.Fprintf(&safe, "%%%02X", value)
+		} else {
+			safe.WriteByte(value)
+		}
+	}
+	return fmt.Sprintf(`<%s>; rel="agent-feedback"; request-header="Agent-Feedback-Request: 1"`, safe.String())
+}
+
 func (r *Runtime) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if !r.matches(request.URL.Path) {
@@ -847,13 +870,6 @@ func (r *Runtime) Middleware(next http.Handler) http.Handler {
 				break
 			}
 		}
-		if r.options.CacheMode == CacheRequest && !requestOptIn {
-			// The response differs when an agent opts in. Tell shared caches to
-			// forward that request to origin instead of replaying an ordinary body.
-			ensureRequestVary(response.Header())
-			next.ServeHTTP(response, request)
-			return
-		}
 		started := time.Now()
 		customerRef := ""
 		if r.options.CustomerRef != nil {
@@ -861,6 +877,9 @@ func (r *Runtime) Middleware(next http.Handler) http.Handler {
 		}
 		consentState := r.cachedConsent(customerRef)
 		captured := newCaptureWriter(response, r.options.MaxResponseBodyBytes)
+		if r.options.CacheMode == CacheRequest {
+			ensureRequestVary(captured.header)
+		}
 		next.ServeHTTP(captured, request)
 		if r.options.CacheMode == CacheRequest {
 			ensureRequestVary(captured.header)
@@ -870,10 +889,67 @@ func (r *Runtime) Middleware(next http.Handler) http.Handler {
 		}
 		body := captured.body.Bytes()
 		status := captured.status
-		if status < 200 || status >= 300 || request.Method == http.MethodHead {
+		contentType := captured.header.Get("Content-Type")
+		supported := strings.Contains(contentType, "application/json") || strings.Contains(contentType, "text/html")
+		if r.options.CacheMode == CacheRequest && !requestOptIn {
+			if status >= 200 && status < 300 && supported && (request.Method == http.MethodGet || request.Method == http.MethodHead) {
+				if link := requestDiscoveryLink(request); link != "" {
+					captured.header.Add("Link", link)
+				}
+			}
 			copyHeaders(response.Header(), captured.header)
 			response.WriteHeader(status)
 			_, _ = response.Write(body)
+			return
+		}
+		if status < 200 || status >= 300 {
+			copyHeaders(response.Header(), captured.header)
+			response.WriteHeader(status)
+			_, _ = response.Write(body)
+			return
+		}
+		if request.Method == http.MethodHead {
+			if r.options.CacheMode != CacheRequest || !requestOptIn || !supported {
+				copyHeaders(response.Header(), captured.header)
+				response.WriteHeader(status)
+				_, _ = response.Write(body)
+				return
+			}
+			prepared, err := r.prepare(time.Now(), customerRef, consentState)
+			if err != nil || prepared.Envelope == nil {
+				copyHeaders(response.Header(), captured.header)
+				response.WriteHeader(status)
+				_, _ = response.Write(body)
+				return
+			}
+			encoded, _ := json.Marshal(prepared.Envelope)
+			captured.header.Set("Agent-Feedback", base64.RawURLEncoding.EncodeToString(encoded))
+			captured.header.Add("Link", fmt.Sprintf(`<%s/.well-known/agent-feedback-v1.json>; rel="agent-feedback"; type="application/json"`, r.options.Endpoint))
+			captured.header.Set("Cache-Control", "private, no-store")
+			copyHeaders(response.Header(), captured.header)
+			response.WriteHeader(status)
+			_, _ = response.Write(body)
+			event := TelemetryEvent{
+				InteractionID: prepared.InteractionID,
+				Surface:       "http_headers", Operation: NormalizeOperation(request.URL.Path),
+				StatusCode: status, DurationMS: time.Since(started).Milliseconds(),
+				Classification: "unclassified", OccurredAt: prepared.OccurredAt,
+				CustomerRef: customerRef,
+			}
+			if r.options.SessionRef != nil {
+				event.SessionRef = strings.TrimSpace(r.options.SessionRef(request))
+				if event.SessionRef != "" {
+					event.SessionSource = "customer"
+				}
+			}
+			if r.options.RuntimeHint != nil {
+				event.RuntimeHint = strings.TrimSpace(r.options.RuntimeHint(request))
+				if event.RuntimeHint != "" {
+					event.RuntimeHintSource = "http"
+				}
+			}
+			r.record(event)
+			r.warmConsent(customerRef)
 			return
 		}
 		if r.options.CacheMode == CacheSafe && sharedCacheControl(strings.Join(captured.header.Values("Cache-Control"), ",")) {
@@ -895,7 +971,6 @@ func (r *Runtime) Middleware(next http.Handler) http.Handler {
 			_, _ = response.Write(body)
 			return
 		}
-		contentType := captured.header.Get("Content-Type")
 		output := body
 		surface := ""
 		if strings.Contains(contentType, "application/json") {

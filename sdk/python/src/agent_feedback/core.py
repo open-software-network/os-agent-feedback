@@ -11,9 +11,10 @@ import re
 import secrets
 import threading
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 import uuid
+from urllib.parse import quote, urlsplit
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
@@ -29,6 +30,27 @@ DEFAULT_EXCLUDE = (
     "/api/v2/reports",
     "/api/v2/consent/*",
 )
+
+REQUEST_DISCOVERY_PARAMETER = (
+    'rel="agent-feedback"; request-header="Agent-Feedback-Request: 1"'
+)
+
+
+def request_discovery_link(request_target: str) -> str | None:
+    """Build a same-origin Link target without trusting proxy host headers."""
+    try:
+        parsed = urlsplit(request_target)
+    except ValueError:
+        return None
+    if parsed.scheme or parsed.netloc or parsed.fragment or not parsed.path.startswith("/"):
+        return None
+    safe_target = quote(
+        parsed.path + (("?" + parsed.query) if parsed.query else ""),
+        safe="/%?:@-._~!$&'()*+,;=",
+    )
+    return f"<{safe_target}>; {REQUEST_DISCOVERY_PARAMETER}"
+
+
 SHARED_CACHE_CONTROL = re.compile(
     r"(?:^|,)\s*(?:public|s-maxage\s*=|max-age\s*=|immutable|stale-while-revalidate\s*=)",
     re.IGNORECASE,

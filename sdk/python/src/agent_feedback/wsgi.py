@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from typing import Any, Callable, Iterable
+from urllib.parse import quote
 
 from .core import (
     AgentFeedback,
@@ -10,6 +11,7 @@ from .core import (
     encoded_envelope,
     inject_html,
     normalize_operation,
+    request_discovery_link,
 )
 
 MAX_BODY_BYTES = 1024 * 1024
@@ -22,6 +24,37 @@ def _with_request_vary(headers: list[tuple[str, str]]) -> list[tuple[str, str]]:
         if any(token.strip().lower() == "agent-feedback-request" for token in value.split(",")):
             return headers
     return [*headers, ("Vary", "Agent-Feedback-Request")]
+
+
+def _request_target(environ: dict[str, Any]) -> str:
+    raw = environ.get("RAW_URI") or environ.get("REQUEST_URI")
+    if raw:
+        return str(raw)
+    path = quote(
+        f'{environ.get("SCRIPT_NAME", "")}{environ.get("PATH_INFO", "/")}',
+        safe="/:@-._~!$&'()*+,;=",
+    )
+    query = str(environ.get("QUERY_STRING", ""))
+    return f"{path}?{query}" if query else path
+
+
+def _with_request_discovery(
+    environ: dict[str, Any], status: str, headers: list[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    status_code = int(status.split(" ", 1)[0])
+    content_type = next((v for k, v in headers if k.lower() == "content-type"), "")
+    content_length = next((v for k, v in headers if k.lower() == "content-length"), None)
+    if (
+        environ.get("REQUEST_METHOD") not in {"GET", "HEAD"}
+        or not 200 <= status_code < 300
+        or not ("application/json" in content_type or "text/html" in content_type)
+        or content_length is None
+        or not content_length.isdigit()
+        or int(content_length) > MAX_BODY_BYTES
+    ):
+        return headers
+    link = request_discovery_link(_request_target(environ))
+    return [*headers, ("Link", link)] if link else headers
 
 
 class AgentFeedbackWSGI:
@@ -42,7 +75,9 @@ class AgentFeedbackWSGI:
                 headers: list[tuple[str, str]],
                 exc_info: Any = None,
             ) -> Any:
-                return start_response(status, _with_request_vary(headers), exc_info)
+                headers = _with_request_vary(headers)
+                headers = _with_request_discovery(environ, status, headers)
+                return start_response(status, headers, exc_info)
 
             return self.app(environ, start_response_with_request_vary)
         started = time.perf_counter()
@@ -62,6 +97,14 @@ class AgentFeedbackWSGI:
         cache_control = ",".join(v for k, v in headers if k.lower() == "cache-control")
         declared_length = int(content_length) if content_length and content_length.isdigit() else None
         safe_body = not writes and declared_length is not None and declared_length <= MAX_BODY_BYTES
+        content_type = next((v for k, v in headers if k.lower() == "content-type"), "")
+        head_eligible = (
+            200 <= status_code < 300
+            and environ.get("REQUEST_METHOD") == "HEAD"
+            and self.runtime.options.cache_mode == "request"
+            and request_opt_in
+            and ("application/json" in content_type or "text/html" in content_type)
+        )
         eligible = (
             200 <= status_code < 300
             and environ.get("REQUEST_METHOD") != "HEAD"
@@ -106,26 +149,31 @@ class AgentFeedbackWSGI:
 
         customer_ref = context.get("customerRef")
         prepared = None
+        if head_eligible:
+            surface = "http_headers"
         if surface:
             prepared = self.runtime.prepare(
                 customer_ref=customer_ref,
                 consent_state=self.runtime.cached_consent(customer_ref),
             )
             envelope = prepared["envelope"]
-            output = raw
+            output = raw if not head_eligible else None
             if surface == "http_json" and envelope:
                 payload["_agentFeedback"] = envelope
                 output = json.dumps(payload, separators=(",", ":")).encode()
             elif surface == "http_html" and envelope and html is not None:
                 output = inject_html(html, envelope).encode()
 
-        if prepared and prepared["envelope"] and output is not None and surface:
+        if prepared and prepared["envelope"] and surface:
             headers = [
                 (key, value)
                 for key, value in headers
-                if key.lower() not in {"content-length", "cache-control", "agent-feedback"}
+                if key.lower()
+                not in ({"cache-control", "agent-feedback"} if head_eligible else {"content-length", "cache-control", "agent-feedback"})
             ]
-            headers.extend([("Content-Length", str(len(output))), ("Cache-Control", "private, no-store")])
+            if not head_eligible and output is not None:
+                headers.append(("Content-Length", str(len(output))))
+            headers.append(("Cache-Control", "private, no-store"))
             if surface == "http_headers":
                 headers.extend(
                     [
@@ -151,7 +199,7 @@ class AgentFeedbackWSGI:
                 context=context,
             )
             self.runtime.warm_consent(customer_ref)
-            return [output or b""]
+            return body if head_eligible else [output or b""]
         return chunks if chunks is not None else body
 
     def shutdown(self) -> bool:

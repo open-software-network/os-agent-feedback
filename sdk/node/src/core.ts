@@ -8,6 +8,21 @@ export type ProductSurface = "http_json" | "http_html" | "http_headers" | "mcp";
 export type InteractionClassification = "unclassified" | "confirmed";
 export type HttpCacheMode = "safe" | "private" | "request";
 
+export const REQUEST_DISCOVERY_PARAMETER =
+  'rel="agent-feedback"; request-header="Agent-Feedback-Request: 1"';
+
+/** Build a same-origin Link target without trusting Host or forwarded-host headers. */
+export function requestDiscoveryLink(requestTarget: string): string | undefined {
+  try {
+    const base = "http://agent-feedback.invalid";
+    const parsed = new URL(requestTarget, base);
+    if (parsed.origin !== base) return undefined;
+    return `<${parsed.pathname}${parsed.search}>; ${REQUEST_DISCOVERY_PARAMETER}`;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface HttpInstrumentationContext {
   surface: Exclude<ProductSurface, "mcp">;
   statusCode: number;

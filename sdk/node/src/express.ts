@@ -9,6 +9,7 @@ import {
   normalizeOperation,
   type PreparedInteraction,
   type ProductSurface,
+  requestDiscoveryLink,
 } from "./core.js";
 
 const operationOverride = Symbol("agent-feedback-operation");
@@ -31,6 +32,10 @@ function ensureRequestVary(response: Response): void {
   response.vary("Agent-Feedback-Request");
 }
 
+function appendLink(response: Response, value: string): void {
+  response.append("Link", value);
+}
+
 export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeedbackExpress {
   const runtime = new AgentFeedbackRuntime(options);
 
@@ -45,8 +50,31 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
     let instrumentation: Instrumentation | undefined;
     let instrumentationSkipped = false;
     let recorded = false;
+    let discoveryAttached = false;
+    let feedbackHeadersAttached = false;
     const originalJson = response.json.bind(response);
     const originalSend = response.send.bind(response);
+
+    const requestOptedIn = (): boolean => request.get("agent-feedback-request") === "1";
+
+    const attachDiscovery = (supported: boolean): void => {
+      if (
+        discoveryAttached ||
+        !supported ||
+        runtime.cacheMode !== "request" ||
+        requestOptedIn() ||
+        (request.method !== "GET" && request.method !== "HEAD") ||
+        response.statusCode < 200 ||
+        response.statusCode >= 300
+      ) {
+        return;
+      }
+      const link = requestDiscoveryLink(request.originalUrl || request.url);
+      if (link) {
+        appendLink(response, link);
+        discoveryAttached = true;
+      }
+    };
 
     const routePath = (): string => {
       const route = request.route as { path?: string | string[] } | undefined;
@@ -58,7 +86,7 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
       if (
         response.statusCode < 200 ||
         response.statusCode >= 300 ||
-        request.method === "HEAD" ||
+        (request.method === "HEAD" && surface !== "http_headers") ||
         !runtime.matches(request.originalUrl || request.url)
       ) {
         return undefined;
@@ -70,7 +98,7 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
           surface: surface as Exclude<ProductSurface, "mcp">,
           statusCode: response.statusCode,
           body,
-          requestOptIn: request.get("agent-feedback-request") === "1",
+          requestOptIn: requestOptedIn(),
           cacheControl: String(response.getHeader("cache-control") || ""),
         })
       ) {
@@ -89,7 +117,8 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
     };
 
     const attachHeaders = (current: Instrumentation): void => {
-      if (!current.prepared.envelope) return;
+      if (!current.prepared.envelope || feedbackHeadersAttached) return;
+      feedbackHeadersAttached = true;
       response.setHeader("Agent-Feedback", encodedEnvelope(current.prepared.envelope));
       response.append(
         "Link",
@@ -99,6 +128,13 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
 
     response.json = ((body: unknown) => {
       if (matched && runtime.cacheMode === "request") ensureRequestVary(response);
+      const ownedFeedback = isPlainObject(body) && Object.hasOwn(body, "_agentFeedback");
+      attachDiscovery(body !== undefined && !ownedFeedback);
+      if (request.method === "HEAD") {
+        const current = attach("http_headers", body);
+        if (current) attachHeaders(current);
+        return originalJson(body);
+      }
       if (isPlainObject(body)) {
         if (Object.hasOwn(body, "_agentFeedback")) {
           instrumentationSkipped = true;
@@ -122,6 +158,15 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
     response.send = ((body?: unknown) => {
       if (matched && runtime.cacheMode === "request") ensureRequestVary(response);
       const contentType = String(response.getHeader("content-type") || "");
+      const supported =
+        contentType.includes("application/json") ||
+        (typeof body === "string" && contentType.includes("text/html"));
+      attachDiscovery(supported);
+      if (request.method === "HEAD" && supported) {
+        const current = attach("http_headers", body);
+        if (current) attachHeaders(current);
+        return originalSend(body);
+      }
       if (typeof body === "string" && contentType.includes("text/html")) {
         const current = attach("http_html", body);
         return originalSend(

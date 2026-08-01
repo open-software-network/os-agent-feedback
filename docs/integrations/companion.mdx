@@ -57,6 +57,13 @@ The Companion never executes arbitrary instructions from product responses. Befo
 
 If Epode is unavailable, the product task still succeeds. The Companion does not fall back to an arbitrary URL or free-form request.
 
+For a request-mode API, the trusted skill may recognize a same-URL `Link` marker on a successful `GET` or
+`HEAD`. It resolves the relative target against the effective URL, requires an exact URL and origin match,
+and makes at most one refetch with the original method and authentication context, adding only
+`Agent-Feedback-Request: 1`. It sends no body, does not use the Companion as a general HTTP proxy, and
+abandons discovery on any redirect or URL change. Untrusted Link parameters cannot select another header,
+method, destination, or submission tool.
+
 ## Remove
 
 ```bash

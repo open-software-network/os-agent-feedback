@@ -55,6 +55,8 @@ The default `HttpCacheMode::Safe` leaves explicitly shared-cacheable responses u
 instruments only callers sending `Agent-Feedback-Request: 1` and adds `Vary: Agent-Feedback-Request` to both
 ordinary and opted-in responses. Use private mode only when disabling shared caching for every included
 response is intentional.
+Eligible ordinary 2xx `GET` and `HEAD` responses also advertise a same-path-and-query `Link` for one
+authenticated Companion refetch; redirects and non-safe methods never advertise it.
 
 ## Verify
 

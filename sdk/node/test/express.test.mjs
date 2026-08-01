@@ -477,6 +477,7 @@ test("Express does not silently destroy an explicit shared cache policy", async 
 });
 
 test("Express request cache mode instruments only explicit agent requests", async () => {
+  const authorization = [];
   const middleware = agentFeedback({
     apiKey: key,
     cacheMode: "request",
@@ -486,22 +487,43 @@ test("Express request cache mode instruments only explicit agent requests", asyn
   });
   const app = express();
   app.use(middleware);
-  app.get("/search", (_request, response) => {
+  app.get("/search", (request, response) => {
+    authorization.push(request.get("authorization"));
     response.set("Cache-Control", "public, max-age=300");
     response.json({ answer: "cached" });
   });
   const server = await serve(app);
 
-  const ordinary = await fetch(`${server.url}/search`);
+  const ordinary = await fetch(`${server.url}/search?scope=private`, {
+    headers: { authorization: "Bearer customer-secret" },
+  });
   assert.equal((await ordinary.json())._agentFeedback, undefined);
   assert.equal(ordinary.headers.get("cache-control"), "public, max-age=300");
   assert.match(ordinary.headers.get("vary") || "", /Agent-Feedback-Request/i);
-  const agent = await fetch(`${server.url}/search`, {
-    headers: { "agent-feedback-request": "1" },
+  assert.equal(
+    ordinary.headers.get("link"),
+    '</search?scope=private>; rel="agent-feedback"; request-header="Agent-Feedback-Request: 1"',
+  );
+  const agent = await fetch(`${server.url}/search?scope=private`, {
+    headers: {
+      authorization: "Bearer customer-secret",
+      "agent-feedback-request": "1",
+    },
   });
   assert.equal((await agent.json())._agentFeedback.v, 1);
   assert.equal(agent.headers.get("cache-control"), "private, no-store");
   assert.match(agent.headers.get("vary") || "", /Agent-Feedback-Request/i);
+  assert.equal(agent.headers.get("link"), null);
+  assert.deepEqual(authorization, ["Bearer customer-secret", "Bearer customer-secret"]);
+
+  const ordinaryHead = await fetch(`${server.url}/search?scope=head`, { method: "HEAD" });
+  assert.match(ordinaryHead.headers.get("link") || "", /request-header=/);
+  const agentHead = await fetch(`${server.url}/search?scope=head`, {
+    method: "HEAD",
+    headers: { "agent-feedback-request": "1" },
+  });
+  assert.match(agentHead.headers.get("agent-feedback") || "", /^ey/);
+  assert.equal(agentHead.headers.get("cache-control"), "private, no-store");
   await middleware.shutdown();
   await server.close();
 });

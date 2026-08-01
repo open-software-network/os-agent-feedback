@@ -158,12 +158,15 @@ func TestMiddlewareCacheModesPreservePublicResponsesUnlessExplicit(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			handler := runtime.Middleware(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+			var authorization []string
+			handler := runtime.Middleware(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				authorization = append(authorization, request.Header.Get("Authorization"))
 				response.Header().Set("Content-Type", "application/json")
 				response.Header().Set("Cache-Control", "public, s-maxage=600")
 				_, _ = response.Write([]byte(`{"answer":"cached"}`))
 			}))
-			request := httptest.NewRequest(http.MethodGet, "/status", nil)
+			request := httptest.NewRequest(http.MethodGet, "/status?scope=private", nil)
+			request.Header.Set("Authorization", "Bearer customer-secret")
 			if test.requestOptIn {
 				request.Header.Set("Agent-Feedback-Request", "1")
 			}
@@ -188,11 +191,66 @@ func TestMiddlewareCacheModesPreservePublicResponsesUnlessExplicit(t *testing.T)
 				if got := response.Header().Values("Vary"); !strings.Contains(strings.Join(got, ","), "Agent-Feedback-Request") {
 					t.Fatalf("Vary = %q, want Agent-Feedback-Request", got)
 				}
+				link := response.Header().Get("Link")
+				if test.requestOptIn && link != "" {
+					t.Fatalf("opted-in Link = %q, want no discovery link", link)
+				}
+				if !test.requestOptIn && link != `</status?scope=private>; rel="agent-feedback"; request-header="Agent-Feedback-Request: 1"` {
+					t.Fatalf("ordinary Link = %q", link)
+				}
+			}
+			if len(authorization) != 1 || authorization[0] != "Bearer customer-secret" {
+				t.Fatalf("authorization changed: %q", authorization)
 			}
 			if err := runtime.Shutdown(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestRequestCacheDiscoveryUsesHeadersForHeadAndSkipsRedirects(t *testing.T) {
+	runtime, err := New(Options{
+		APIKey: conformanceKey, CacheMode: CacheRequest, Include: []string{"/status", "/redirect"},
+		FlushInterval: time.Hour, Sender: func(context.Context, string, http.Header, []byte) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := runtime.Middleware(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		if request.URL.Path == "/redirect" {
+			response.WriteHeader(http.StatusFound)
+			return
+		}
+		response.Header().Set("Content-Length", "19")
+		_, _ = response.Write([]byte(`{"answer":"cached"}`))
+	}))
+
+	ordinary := httptest.NewRecorder()
+	handler.ServeHTTP(ordinary, httptest.NewRequest(http.MethodHead, "/status", nil))
+	if !strings.Contains(ordinary.Header().Get("Link"), `request-header="Agent-Feedback-Request: 1"`) {
+		t.Fatalf("ordinary HEAD Link = %q", ordinary.Header().Get("Link"))
+	}
+	opting := httptest.NewRequest(http.MethodHead, "/status", nil)
+	opting.Header.Set("Agent-Feedback-Request", "1")
+	requested := httptest.NewRecorder()
+	handler.ServeHTTP(requested, opting)
+	if requested.Header().Get("Agent-Feedback") == "" {
+		t.Fatal("opted-in HEAD did not receive Agent-Feedback")
+	}
+	redirect := httptest.NewRecorder()
+	handler.ServeHTTP(redirect, httptest.NewRequest(http.MethodGet, "/redirect", nil))
+	if redirect.Header().Get("Link") != "" {
+		t.Fatalf("redirect Link = %q, want none", redirect.Header().Get("Link"))
+	}
+	networkPath := httptest.NewRecorder()
+	handler.ServeHTTP(networkPath, httptest.NewRequest(http.MethodGet, "//status", nil))
+	if networkPath.Header().Get("Link") != "" {
+		t.Fatalf("network-path Link = %q, want none", networkPath.Header().Get("Link"))
+	}
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 
