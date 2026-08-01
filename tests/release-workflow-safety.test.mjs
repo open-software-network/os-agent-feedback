@@ -140,6 +140,7 @@ test("additive database expansion is separately approved, attested, and fail-clo
   assert.doesNotMatch(source, /^\s+(?:push|pull_request|schedule):/m);
   assert.match(source, /group: epode-release-mutation/);
   assert.match(source, /^\s+- stage-production-bridge$/m);
+  assert.match(source, /^\s+- recover-canary$/m);
   assert.match(
     source,
     /environment: \$\{\{ contains\(inputs\.operation, 'production'\) && 'production' \|\| 'v2-canary' \}\}/,
@@ -171,6 +172,11 @@ test("additive database expansion is separately approved, attested, and fail-clo
 
   assert.match(source, /EPODE_MIGRATION_STATUS=pending/);
   assert.match(source, /Apply the reviewed migration to canary under advisory lock/);
+  assert.match(source, /Verify the applied canary ledger before recovery/);
+  assert.match(
+    source,
+    /Canary recovery requires matching pending evidence from an interrupted apply/,
+  );
   assert.match(source, /Restart and verify the exact bridge image on expanded canary schema/);
   assert.match(
     source,
