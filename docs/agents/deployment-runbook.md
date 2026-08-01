@@ -45,7 +45,9 @@ database recovery:
 The canary workflow safely provisions only public routing values:
 `PUBLIC_BASE_URL`, `WEB_APP_URL`, and `API_URL`. It stages them without an
 extra deployment, re-reads them for equality, then deploys the API and checks
-its health before deploying the web service.
+its health before deploying the web service. After the web health and OAuth
+start checks pass, it records the exact API/web refs and digests as the latest
+verified canary pair without triggering another deployment.
 
 `PUBLIC_BASE_URL` and `WEB_APP_URL` intentionally use the web domain. That
 keeps browser authentication cookies, the OAuth callback, same-origin feedback
@@ -60,16 +62,21 @@ character lowercase SHA because path-filtered build workflows can legitimately
 produce the two images from different commits. The workflow resolves both
 7-character tags and digests before entering the `v2-canary` environment. It
 then deploys API followed by web and verifies each Railway digest and public
-health endpoint. Floating `staging`, `latest`, and `production` tags are never
-accepted as deployment inputs.
+health endpoint. It also verifies that `/auth/start` redirects to the configured
+OS Accounts origin and sets secure PKCE and state cookies before recording the
+pair as promotion-eligible. Floating `staging`, `latest`, and `production` tags
+are never accepted as deployment inputs.
 
 ## Production promotion
 
 Run `Promote or rollback production` with `operation=promote` and the exact API
 and web SHAs reviewed in canary. The workflow resolves the complete pair before
-the production approval and captures the currently serving pair as a verified
-recovery point. After approval it deploys API and then web. Production GHCR
-tags move only after both Railway deployments report the planned digests.
+the production approval. After approval, it fails closed unless those exact
+refs and digests are both the last successfully attested canary pair and the
+images currently active in `v2-canary`. It then captures the currently serving
+production pair as a verified recovery point and deploys API followed by web.
+Production GHCR tags move only after both Railway deployments report the
+planned digests and the production health and OAuth-start smoke checks pass.
 
 If the web deployment fails, the workflow restores the API recovery image and
 leaves both `production` tags unchanged. A manual cancellation or external

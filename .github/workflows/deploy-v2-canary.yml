@@ -135,6 +135,7 @@ jobs:
         run: npm install --global "@railway/cli@${RAILWAY_CLI_VERSION}"
 
       - name: Validate services and domains; provision public variables
+        id: routing
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
@@ -180,6 +181,12 @@ jobs:
               exit 1
             fi
           done
+          accounts_url="$(jq -r '.OS_ACCOUNTS_URL // empty' <<<"$api_variables")"
+          if [[ ! "$accounts_url" =~ ^https://[^/]+/?$ ]]; then
+            echo "::error::$API_SERVICE has no valid OS_ACCOUNTS_URL."
+            exit 1
+          fi
+          echo "accounts_url=${accounts_url%/}" >>"$GITHUB_OUTPUT"
 
           # These values are public, repository-owned routing configuration.
           # Stage them without an extra deployment; the image deployment below
@@ -232,11 +239,69 @@ jobs:
             "${{ needs.plan.outputs.web_ref }}" \
             "${{ needs.plan.outputs.web_digest }}"
 
-      - name: Verify web health
+      - name: Verify web health and authentication start
         run: |
+          set -euo pipefail
           curl --fail --silent --show-error \
             --retry 12 --retry-all-errors --retry-delay 5 \
             "https://${WEB_DOMAIN}/api/health" >/dev/null
+
+          headers="$(mktemp)"
+          trap 'rm -f "$headers"' EXIT
+          status="$(
+            curl --silent --show-error --max-time 20 \
+              --dump-header "$headers" \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              "https://${WEB_DOMAIN}/auth/start"
+          )"
+          if [[ "$status" != "303" ]]; then
+            echo "::error::Canary authentication start returned HTTP $status instead of 303."
+            exit 1
+          fi
+          location="$(awk 'BEGIN { IGNORECASE=1 } /^location:/ { sub(/^[^:]+:[[:space:]]*/, ""); sub(/\r$/, ""); print; exit }' "$headers")"
+          if [[ "$location" != "${{ steps.routing.outputs.accounts_url }}"/* ]]; then
+            echo "::error::Canary authentication start did not redirect to the configured accounts origin."
+            exit 1
+          fi
+          for cookie in af_oa_pkce af_oa_state; do
+            grep -Eiq "^set-cookie: ${cookie}=[^;]+;.*HttpOnly;.*SameSite=Lax;.*Secure" "$headers" || {
+              echo "::error::Canary authentication start did not set a secure ${cookie} cookie."
+              exit 1
+            }
+          done
+
+      - name: Record the verified canary pair
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          VERIFIED_API_REF: ${{ needs.plan.outputs.api_ref }}
+          VERIFIED_API_DIGEST: ${{ needs.plan.outputs.api_digest }}
+          VERIFIED_WEB_REF: ${{ needs.plan.outputs.web_ref }}
+          VERIFIED_WEB_DIGEST: ${{ needs.plan.outputs.web_digest }}
+        run: |
+          set -euo pipefail
+          railway variable set \
+            "EPODE_CANARY_API_REF=$VERIFIED_API_REF" \
+            "EPODE_CANARY_API_DIGEST=$VERIFIED_API_DIGEST" \
+            "EPODE_CANARY_WEB_REF=$VERIFIED_WEB_REF" \
+            "EPODE_CANARY_WEB_DIGEST=$VERIFIED_WEB_DIGEST" \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment v2-canary \
+            --service "$API_SERVICE" \
+            --skip-deploys \
+            --json >/dev/null
+
+          variables="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$API_SERVICE" --json)"
+          jq -e \
+            --arg api_ref "$VERIFIED_API_REF" \
+            --arg api_digest "$VERIFIED_API_DIGEST" \
+            --arg web_ref "$VERIFIED_WEB_REF" \
+            --arg web_digest "$VERIFIED_WEB_DIGEST" \
+            '.EPODE_CANARY_API_REF == $api_ref
+              and .EPODE_CANARY_API_DIGEST == $api_digest
+              and .EPODE_CANARY_WEB_REF == $web_ref
+              and .EPODE_CANARY_WEB_DIGEST == $web_digest' \
+            <<<"$variables" >/dev/null
 
       - name: Summarize verified canary
         run: |
@@ -248,4 +313,5 @@ jobs:
             echo "- **Web:** \`${{ needs.plan.outputs.web_ref }}@${{ needs.plan.outputs.web_digest }}\`"
             echo "- **API URL:** https://${API_DOMAIN}"
             echo "- **Web URL:** https://${WEB_DOMAIN}"
+            echo "- **Promotion attestation:** recorded after health and authentication checks"
           } >>"$GITHUB_STEP_SUMMARY"

@@ -202,6 +202,57 @@ jobs:
           fi
           echo "accounts_url=${accounts_url%/}" >>"$GITHUB_OUTPUT"
 
+      - name: Verify the exact promotion pair passed canary
+        if: inputs.operation == 'promote'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          EXPECTED_API_REF: ${{ needs.plan.outputs.api_ref }}
+          EXPECTED_API_DIGEST: ${{ needs.plan.outputs.api_digest }}
+          EXPECTED_WEB_REF: ${{ needs.plan.outputs.web_ref }}
+          EXPECTED_WEB_DIGEST: ${{ needs.plan.outputs.web_digest }}
+        run: |
+          set -euo pipefail
+          services="$(railway service list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --json)"
+          attestation="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$API_SERVICE" --json)"
+          jq -e \
+            --arg api_ref "$EXPECTED_API_REF" \
+            --arg api_digest "$EXPECTED_API_DIGEST" \
+            --arg web_ref "$EXPECTED_WEB_REF" \
+            --arg web_digest "$EXPECTED_WEB_DIGEST" \
+            '.EPODE_CANARY_API_REF == $api_ref
+              and .EPODE_CANARY_API_DIGEST == $api_digest
+              and .EPODE_CANARY_WEB_REF == $web_ref
+              and .EPODE_CANARY_WEB_DIGEST == $web_digest' \
+            <<<"$attestation" >/dev/null || {
+            echo "::error::The requested API/web pair has no matching successful v2-canary attestation."
+            exit 1
+          }
+
+          for artifact in api web; do
+            if [[ "$artifact" == "api" ]]; then
+              service="$API_SERVICE"
+              expected_ref="$EXPECTED_API_REF"
+              expected_digest="$EXPECTED_API_DIGEST"
+            else
+              service="$WEB_SERVICE"
+              expected_ref="$EXPECTED_WEB_REF"
+              expected_digest="$EXPECTED_WEB_DIGEST"
+            fi
+            count="$(jq --arg service "$service" '[.[] | select(.name == $service)] | length' <<<"$services")"
+            if [[ "$count" -ne 1 ]]; then
+              echo "::error::Expected exactly one v2-canary service named $service; found $count."
+              exit 1
+            fi
+            active_id="$(jq -r --arg service "$service" 'first(.[] | select(.name == $service) | .deploymentId) // empty' <<<"$services")"
+            deployments="$(railway deployment list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$service" --limit 100 --json)"
+            active_ref="$(jq -r --arg id "$active_id" 'first(.[] | select(.id == $id) | .meta.image) // empty' <<<"$deployments")"
+            active_digest="$(jq -r --arg id "$active_id" 'first(.[] | select(.id == $id) | .meta.imageDigest) // empty' <<<"$deployments")"
+            if [[ "$active_ref" != "$expected_ref" || "$active_digest" != "$expected_digest" ]]; then
+              echo "::error::Active v2-canary $service does not match the requested, attested image."
+              exit 1
+            fi
+          done
+
       - name: Capture recoverable production state
         id: previous
         env:
