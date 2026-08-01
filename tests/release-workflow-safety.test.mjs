@@ -84,6 +84,16 @@ test("production promotion verifies the active canary pair and can compensate ei
     /if \[\[ "\$OPERATION" == "promote" \]\]; then[\s\S]*git merge-base --is-ancestor/,
     "rollback candidates must pass the same ancestry and exact-CI gates as promotions",
   );
+  const canaryVerification = source.slice(
+    source.indexOf("Verify the exact promotion pair passed canary"),
+    source.indexOf("Capture recoverable production state"),
+  );
+  assert.match(
+    canaryVerification,
+    /RAILWAY_TOKEN: \$\{\{ secrets\.RAILWAY_CANARY_TOKEN \}\}/,
+    "a production-scoped Railway token cannot read the environment-scoped canary attestation",
+  );
+  assert.doesNotMatch(canaryVerification, /RAILWAY_TOKEN: \$\{\{ secrets\.RAILWAY_TOKEN \}\}/);
   assert.match(source, /Verify both production tags by digest/);
   assert.match(source, /id: tag_readback/);
   assert.match(source, /steps\.tag_readback\.outcome != 'success'/);
