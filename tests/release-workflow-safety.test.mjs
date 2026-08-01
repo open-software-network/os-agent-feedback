@@ -23,6 +23,12 @@ test("canary deployment is main-only, same-commit, serialized, and fail-closed",
   assert.match(source, /verify-image-artifact-ledger\.sh/);
   assert.match(source, /EPODE_CANARY_STATUS=pending/);
   assert.match(source, /EPODE_CANARY_STATUS=verified/);
+  assert.match(source, /EPODE_CANARY_API_REF=invalidated/);
+  assert.doesNotMatch(
+    source,
+    /"EPODE_CANARY_(?:API_REF|API_DIGEST|API_DEPLOYMENT_ID|REVISION|WEB_REF|WEB_DIGEST|WEB_DEPLOYMENT_ID)="/,
+    "Railway CLI rejects empty KEY= assignments, so invalidation must use explicit sentinel values",
+  );
   assert.match(source, /Restore previous routing and API after failed canary validation/);
   assert.match(source, /Restore previous web after failed canary validation/);
   assert.ok(
