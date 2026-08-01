@@ -173,7 +173,7 @@ class _TelemetryQueue:
         headers = {
             "authorization": f"Bearer {self.options.api_key}",
             "content-type": "application/json",
-            "user-agent": "agent-feedback-python/0.1.0",
+            "user-agent": "agent-feedback-python/0.2.0",
         }
         body = json.dumps({"events": batch}, separators=(",", ":")).encode()
         for attempt in range(self.options.max_telemetry_attempts):
@@ -436,7 +436,7 @@ class AgentFeedback:
             request = urllib.request.Request(
                 f"{self.options.endpoint}/api/v2/consent/state",
                 data=json.dumps({"subject": subject}).encode(),
-                headers={"authorization": f"Bearer {self.options.api_key}", "content-type": "application/json", "user-agent": "agent-feedback-python/0.1.0"},
+                headers={"authorization": f"Bearer {self.options.api_key}", "content-type": "application/json", "user-agent": "agent-feedback-python/0.2.0"},
                 method="POST",
             )
             with urllib.request.urlopen(request, timeout=self.options.consent_timeout) as response:

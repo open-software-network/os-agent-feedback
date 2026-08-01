@@ -166,6 +166,69 @@ test("MCP keeps full journey telemetry while requesting feedback only at outcome
   await feedback.shutdown();
 });
 
+test("MCP outcome feedback never waits for a remote Ask-once lookup", async () => {
+  const tools = new Map();
+  let resolveLookup;
+  let consentLookups = 0;
+  const server = {
+    registerTool(name, configuration, handler) {
+      tools.set(name, { configuration, handler });
+      return { remove() {} };
+    },
+  };
+  const feedback = createMcpInstrumentation({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    feedbackMode: "ask_once",
+    customerRef: () => "acct_nonblocking",
+    feedbackTools: ["finish"],
+    consentTimeoutMs: 25,
+    flushIntervalMs: 60_000,
+    logger: { debug() {}, warn() {} },
+    fetch: async (url) => {
+      if (String(url).endsWith("/api/v2/consent/state")) {
+        consentLookups += 1;
+        return new Promise((resolve) => {
+          resolveLookup = resolve;
+        });
+      }
+      return new Response("{}", { status: 202 });
+    },
+  });
+  feedback.instrument(server);
+  server.registerTool("progress", {}, async () => ({
+    content: [{ type: "text", text: "working" }],
+    structuredContent: { progress: 50 },
+  }));
+  server.registerTool("finish", {}, async () => ({
+    content: [{ type: "text", text: "done" }],
+    structuredContent: { result: "done" },
+  }));
+
+  const progress = await Promise.race([
+    tools.get("progress").handler({}, {}),
+    new Promise((resolve) => setTimeout(() => resolve("timed_out"), 50)),
+  ]);
+  assert.notEqual(progress, "timed_out");
+  assert.equal(consentLookups, 0);
+
+  const outcome = await Promise.race([
+    tools.get("finish").handler({}, {}),
+    new Promise((resolve) => setTimeout(() => resolve("timed_out"), 50)),
+  ]);
+  assert.notEqual(outcome, "timed_out");
+  assert.equal(outcome.structuredContent._agentFeedback.state, "consent_required");
+  assert.equal(consentLookups, 1);
+  resolveLookup(
+    new Response('{"state":"approved"}', {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  await feedback.shutdown();
+});
+
 test("MCP can group a session-creation call by an identifier returned in its result", async () => {
   const calls = [];
   const tools = new Map();

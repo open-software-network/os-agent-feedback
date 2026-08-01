@@ -157,8 +157,17 @@ function envelopeFrom(response, body) {
 }
 
 function assertProtocolEnvelope(envelope) {
+  const schemaEnvelope = localBackend
+    ? JSON.parse(
+        JSON.stringify(envelope, (_key, value) =>
+          typeof value === "string" && value.startsWith(`${backendUrl}/`)
+            ? `https://epode.test/${value.slice(backendUrl.length + 1)}`
+            : value,
+        ),
+      )
+    : envelope;
   assert.equal(
-    validateEnvelopeSchema(envelope),
+    validateEnvelopeSchema(schemaEnvelope),
     true,
     `invalid protocol envelope: ${JSON.stringify(validateEnvelopeSchema.errors)}`,
   );
@@ -818,7 +827,7 @@ async function prepareNode(fixtureName) {
   const manifestPath = join(target, "package.json");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   manifest.dependencies["@agent-feedback/node"] =
-    `${backendUrl}/static/agent-feedback-node-0.1.0.tgz`;
+    `${backendUrl}/static/agent-feedback-node-0.2.0.tgz`;
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   run("npm", ["install", "--ignore-scripts"], { cwd: target });
   return target;
@@ -856,7 +865,10 @@ async function prepareGo() {
     ],
     { cwd: target },
   );
-  run("go", ["get", "github.com/open-software-network/os-epode/sdk/go@latest"], { cwd: target });
+  run("go", ["mod", "edit", "-require=github.com/open-software-network/os-epode/sdk/go@v0.2.0"], {
+    cwd: target,
+  });
+  run("go", ["mod", "tidy"], { cwd: target });
   run("go", ["build", "-o", "setup-matrix-go", "."], { cwd: target });
   return target;
 }

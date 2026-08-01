@@ -41,6 +41,40 @@ test("Fastify instruments JSON and agent-readable HTML", async () => {
   await app.close();
 });
 
+test("Fastify reads customer context after normal authentication hooks", async () => {
+  const telemetry = [];
+  const app = Fastify();
+  const plugin = agentFeedback({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    feedbackMode: "ask_once",
+    include: ["/api/account"],
+    customerRef: (request) => request.user?.accountId,
+    flushIntervalMs: 1,
+    fetch: async (url, init) => {
+      if (String(url).endsWith("/api/v2/telemetry/batches")) {
+        telemetry.push(JSON.parse(init.body));
+      }
+      return new Response('{"state":"unknown"}', {
+        status: String(url).endsWith("/api/v2/consent/state") ? 200 : 202,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  await app.register(plugin);
+  app.addHook("preHandler", async (request) => {
+    request.user = { accountId: "acct_authenticated" };
+  });
+  app.get("/api/account", async () => ({ account: "ready" }));
+  await app.ready();
+
+  const response = await app.inject({ method: "GET", url: "/api/account" });
+  assert.equal(response.json()._agentFeedback.mode, "ask_once");
+  await plugin.shutdown();
+  assert.equal(telemetry[0].events[0].customerRef, "acct_authenticated");
+  await app.close();
+});
+
 test("Fastify Ask-once never awaits Epode and keeps consent_required through an outage", async () => {
   let rejectLookup;
   let consentLookups = 0;

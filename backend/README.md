@@ -60,7 +60,7 @@ Critical instructions travel with every response; an agent does not need to read
 
 ## Capability security
 
-New product keys embed a public key ID. The SDK derives an HMAC signing key from the full company key. PostgreSQL stores only the SHA-256 key hash; the Rust service uses that hash to verify the signed capability. Capability claims contain only protocol version, interaction ID, issuance/expiry timestamps, and a nonce—never customer or product data.
+New product keys embed a public key ID. The SDK derives an HMAC signing key from the full company key. PostgreSQL stores only the SHA-256 key hash; the Rust service uses that hash to verify the signed capability. Capability claims contain protocol version, public key ID, interaction ID, issuance/expiry timestamps, and a nonce. Ask-once adds a pseudonymous HMAC-derived consent subject. They never contain the raw customer reference, product response, prompt, or personal identity.
 
 Capabilities expire after at most two hours and are bound to one interaction. The first accepted review wins; repeats return the original record. Forged, expired, revoked-key, and cross-workspace capabilities are rejected.
 

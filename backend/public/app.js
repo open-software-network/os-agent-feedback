@@ -585,7 +585,7 @@ const setupStackOptions = {
 function setupInstructions() {
   const artifacts = `${location.origin}/static`;
   const route = setupSurface === "static" ? "/docs/**" : setupSurface === "website" ? "/docs/*" : "/search";
-  const nodeInstall = `npm install ${artifacts}/agent-feedback-node-0.1.0.tgz`;
+  const nodeInstall = `npm install ${artifacts}/agent-feedback-node-0.2.0.tgz`;
   const environment = `AGENT_FEEDBACK_KEY=${apiSecret || "paste_product_key_here"}\nAGENT_FEEDBACK_MODE=${dashboard.currentEnvironment?.feedbackMode || "never_ask"}`;
   const instructions = {
     "node-mcp": {
@@ -616,28 +616,28 @@ function setupInstructions() {
     },
     "python-asgi": {
       name: "Python · ASGI",
-      install: `pip install ${artifacts}/agent_feedback-0.1.0-py3-none-any.whl`,
+      install: `pip install ${artifacts}/agent_feedback-0.2.0-py3-none-any.whl`,
       code: `from agent_feedback import AgentFeedbackASGI\n\napp = AgentFeedbackASGI(\n    app,\n    api_key=os.environ["AGENT_FEEDBACK_KEY"],\n    include=("${route}",),\n    customer_ref=lambda scope: scope.get("account_id"),\n)`,
       advanced: `session_ref=lambda scope: scope.get("agent_session_id") # optional journey grouping`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },
     "python-wsgi": {
       name: "Python · WSGI",
-      install: `pip install ${artifacts}/agent_feedback-0.1.0-py3-none-any.whl`,
+      install: `pip install ${artifacts}/agent_feedback-0.2.0-py3-none-any.whl`,
       code: `from agent_feedback import AgentFeedbackWSGI\n\napp.wsgi_app = AgentFeedbackWSGI(\n    app.wsgi_app,\n    api_key=os.environ["AGENT_FEEDBACK_KEY"],\n    include=("${route}",),\n    customer_ref=lambda environ: environ.get("account_id"),\n)`,
       advanced: `session_ref=lambda environ: environ.get("agent_session_id") # optional journey grouping`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },
     go: {
       name: "Go · net/http",
-      install: `go get github.com/open-software-network/os-epode/sdk/go@latest`,
+      install: `go get github.com/open-software-network/os-epode/sdk/go@v0.2.0`,
       code: `feedback, err := agentfeedback.New(agentfeedback.Options{\n    APIKey: os.Getenv("AGENT_FEEDBACK_KEY"),\n    Include: []string{"${route}"},\n    CustomerRef: func(r *http.Request) string { return accountID(r.Context()) },\n})\nif err != nil { log.Fatal(err) }\ndefer feedback.Shutdown(context.Background())\n\nhandler := feedback.Middleware(router)`,
       advanced: `SessionRef: func(r *http.Request) string { return agentSessionID(r.Context()) }`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },
     rust: {
       name: "Rust · Axum/Tower",
-      install: `mkdir -p vendor/agent-feedback-rust\ncurl -fsSL ${artifacts}/agent-feedback-rust-0.1.0.tar.gz | tar -xz -C vendor/agent-feedback-rust`,
+      install: `mkdir -p vendor/agent-feedback-rust\ncurl -fsSL ${artifacts}/agent-feedback-rust-0.2.0.tar.gz | tar -xz -C vendor/agent-feedback-rust`,
       code: `// Cargo.toml: agent-feedback = { path = "vendor/agent-feedback-rust" }\nlet feedback = AgentFeedbackLayer::new(\n    Options::new(std::env::var("AGENT_FEEDBACK_KEY")?)\n        .include(["${route}"])\n        .customer_ref(|request| authenticated_account_id(request)),\n)?;\n\nlet app = router.layer(feedback);`,
       advanced: `.session_ref(|request| agent_session_id(request)) // optional journey grouping`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,

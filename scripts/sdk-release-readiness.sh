@@ -62,11 +62,20 @@ node_consumer="$(mktemp -d "${TMPDIR:-/tmp}/agent-feedback-node.XXXXXX")"
 cleanup_paths=("$node_consumer")
 cleanup() { rm -rf "${cleanup_paths[@]}"; }
 trap cleanup EXIT
-npm --prefix "$node_consumer" init --yes >/dev/null
+(
+  cd "$node_consumer"
+  npm init --yes >/dev/null
+)
 npm --prefix "$node_consumer" install --ignore-scripts --no-package-lock "$node_tarball" >/dev/null
 (
   cd "$node_consumer"
-  node --input-type=module -e 'import { AgentFeedbackRuntime } from "@agent-feedback/node"; if (typeof AgentFeedbackRuntime !== "function") process.exit(1)'
+  node --input-type=module -e '
+    import { AgentFeedbackRuntime } from "@agent-feedback/node";
+    import { createStaticDocsProxy } from "@agent-feedback/node/edge";
+    if (typeof AgentFeedbackRuntime !== "function" || typeof createStaticDocsProxy !== "function") {
+      process.exit(1);
+    }
+  '
 )
 
 # Python: build both a wheel and source distribution with pinned hatchling,

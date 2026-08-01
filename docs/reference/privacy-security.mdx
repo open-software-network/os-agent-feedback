@@ -19,7 +19,9 @@ still responsible for keeping sensitive material out of summaries and finding de
 ## Product key
 
 The `af_live_...` key belongs only in trusted server configuration. SDKs derive a signing key with SHA-256 and use
-it to create a scoped `afr2_...` capability locally. The capability contains no customer or product data.
+it to create a scoped `afr2_...` capability locally. A capability never contains the raw customer reference,
+product response, prompt, or personal identity. Ask-once capabilities do contain a public key ID and a
+pseudonymous HMAC-derived consent subject so Epode can remember the choice for that product scope.
 
 ## Capability
 

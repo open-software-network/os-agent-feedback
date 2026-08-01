@@ -75,7 +75,7 @@ export function setupInstructions(
 ): { install: string; code: string; verify: string } {
   const artifacts = `${origin}/static`;
   const route = surface === "static" ? "/docs/**" : surface === "website" ? "/docs/*" : "/search";
-  const nodeInstall = `npm install ${artifacts}/agent-feedback-node-0.1.0.tgz`;
+  const nodeInstall = `npm install ${artifacts}/agent-feedback-node-0.2.0.tgz`;
   const byStack: Record<SetupStack, { install: string; code: string; verify: string }> = {
     "node-mcp": {
       install: `${nodeInstall}\nnpm install @modelcontextprotocol/server @modelcontextprotocol/node @modelcontextprotocol/express`,
@@ -100,22 +100,22 @@ export function setupInstructions(
       verify: `npx agent-feedback-doctor https://your-product.example${route.replaceAll("*", "test")}`,
     },
     "python-asgi": {
-      install: `pip install ${artifacts}/agent_feedback-0.1.0-py3-none-any.whl`,
+      install: `pip install ${artifacts}/agent_feedback-0.2.0-py3-none-any.whl`,
       code: `app = AgentFeedbackASGI(\n    app,\n    api_key=os.environ["AGENT_FEEDBACK_KEY"],\n    include=("${route}",),\n)`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },
     "python-wsgi": {
-      install: `pip install ${artifacts}/agent_feedback-0.1.0-py3-none-any.whl`,
+      install: `pip install ${artifacts}/agent_feedback-0.2.0-py3-none-any.whl`,
       code: `app.wsgi_app = AgentFeedbackWSGI(\n    app.wsgi_app,\n    api_key=os.environ["AGENT_FEEDBACK_KEY"],\n    include=("${route}",),\n)`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },
     go: {
-      install: "go get github.com/open-software-network/os-epode/sdk/go@latest",
+      install: "go get github.com/open-software-network/os-epode/sdk/go@v0.2.0",
       code: `feedback, err := agentfeedback.New(agentfeedback.Options{\n    APIKey: os.Getenv("AGENT_FEEDBACK_KEY"),\n    Include: []string{"${route}"},\n})\nhandler := feedback.Middleware(router)`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },
     rust: {
-      install: `mkdir -p vendor/agent-feedback-rust\ncurl -fsSL ${artifacts}/agent-feedback-rust-0.1.0.tar.gz | tar -xz -C vendor/agent-feedback-rust`,
+      install: `mkdir -p vendor/agent-feedback-rust\ncurl -fsSL ${artifacts}/agent-feedback-rust-0.2.0.tar.gz | tar -xz -C vendor/agent-feedback-rust`,
       code: `let feedback = AgentFeedbackLayer::new(\n    Options::new(std::env::var("AGENT_FEEDBACK_KEY")?)\n        .include(["${route}"]),\n)?;\nlet app = router.layer(feedback);`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },

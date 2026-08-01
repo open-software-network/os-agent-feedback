@@ -12,6 +12,11 @@ changes the bootstrap files in `backend/public/`. Those hosted files remain
 available until all registry releases are established and consumers have moved
 to registry installation.
 
+Hosted bootstrap artifacts are immutable releases too. A changed package must
+use a new SemVer filename (for example, `agent-feedback-node-0.2.0.tgz`); never
+replace bytes at an existing URL because package-manager lockfiles pin their
+integrity. Keep every previously published hosted filename available.
+
 For a release, update the Node, Python, and Rust package versions together,
 run the readiness command, and create one protected tag per registry target at
 the reviewed commit:

@@ -2,12 +2,17 @@
 
 import { createHash } from "node:crypto";
 import { readdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, relative, resolve } from "node:path";
+import { basename, dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const examplesRoot = resolve(repoRoot, "examples");
-const artifactPath = resolve(repoRoot, "backend/public/agent-feedback-node-0.1.0.tgz");
+const sdkManifest = JSON.parse(await readFile(resolve(repoRoot, "sdk/node/package.json"), "utf8"));
+const artifactPath = resolve(
+  repoRoot,
+  `backend/public/agent-feedback-node-${sdkManifest.version}.tgz`,
+);
+const publicArtifactUrl = `https://app.epode.ai/static/${basename(artifactPath)}`;
 const dependencyName = "@agent-feedback/node";
 const dependencySections = ["dependencies", "devDependencies", "optionalDependencies"];
 
@@ -28,8 +33,9 @@ async function findFiles(directory, filename) {
 function resolvesToHostedArtifact(specifier, ownerPath) {
   return (
     typeof specifier === "string" &&
-    specifier.startsWith("file:") &&
-    resolve(dirname(ownerPath), specifier.slice("file:".length)) === artifactPath
+    (specifier === publicArtifactUrl ||
+      (specifier.startsWith("file:") &&
+        resolve(dirname(ownerPath), specifier.slice("file:".length)) === artifactPath))
   );
 }
 
@@ -51,10 +57,15 @@ export async function findHostedExampleLockfiles() {
 
   for (const manifestPath of manifestPaths) {
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-    const usesHostedArtifact = dependencySections.some((section) =>
-      resolvesToHostedArtifact(manifest[section]?.[dependencyName], manifestPath),
-    );
-    if (!usesHostedArtifact) continue;
+    const usesLocalHostedArtifact = dependencySections.some((section) => {
+      const specifier = manifest[section]?.[dependencyName];
+      return (
+        typeof specifier === "string" &&
+        specifier.startsWith("file:") &&
+        resolvesToHostedArtifact(specifier, manifestPath)
+      );
+    });
+    if (!usesLocalHostedArtifact) continue;
 
     const lockfilePath = resolve(dirname(manifestPath), "package-lock.json");
     if (!availableLockfiles.has(lockfilePath)) {
@@ -98,18 +109,28 @@ export async function syncExampleSdkIntegrity({ write = false } = {}) {
   for (const lockfilePath of lockfilePaths) {
     const lockfile = JSON.parse(await readFile(lockfilePath, "utf8"));
     const entries = hostedLockEntries(lockfile, lockfilePath);
-    if (entries.every(([, metadata]) => metadata.integrity === expected)) continue;
+    if (
+      entries.every(
+        ([, metadata]) =>
+          metadata.integrity === expected && metadata.version === sdkManifest.version,
+      )
+    ) {
+      continue;
+    }
 
     staleLockfiles.push(lockfilePath);
     if (write) {
-      for (const [, metadata] of entries) metadata.integrity = expected;
+      for (const [, metadata] of entries) {
+        metadata.version = sdkManifest.version;
+        metadata.integrity = expected;
+      }
       await writeFile(lockfilePath, `${JSON.stringify(lockfile, null, 2)}\n`);
     }
   }
 
   if (staleLockfiles.length > 0 && !write) {
     throw new Error(
-      `Example lockfile integrity is stale for ${staleLockfiles
+      `Example lockfile SDK version or integrity is stale for ${staleLockfiles
         .map((lockfilePath) => relative(repoRoot, lockfilePath))
         .join(", ")}. Run pnpm build:artifacts.`,
     );

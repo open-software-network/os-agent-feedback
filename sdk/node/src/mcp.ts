@@ -148,22 +148,6 @@ function instrumentServer(
         const sessionRef = contextValue(options.sessionRef, result);
         const customerRef = contextValue(options.customerRef, result);
         const runtimeHint = contextValue(options.runtimeHint, result);
-        const consentState = await runtime.resolveConsent(customerRef);
-        const prepared = runtime.prepare({ customerRef, consentState });
-        runtime.record(prepared, {
-          surface: "mcp",
-          operation: name,
-          statusCode: result.isError ? 500 : 200,
-          durationMs: Math.max(0, Math.round(performance.now() - started)),
-          classification: "confirmed",
-          confirmationMethod: "mcp",
-          customerRef,
-          runtimeHint,
-          runtimeHintSource: runtimeHint ? "mcp" : undefined,
-          sessionRef,
-          sessionSource: sessionRef ? "mcp" : undefined,
-        });
-
         const feedbackTool =
           options.feedbackTools === undefined ||
           matchesTool(name, options.feedbackTools, undefined);
@@ -183,10 +167,32 @@ function instrumentServer(
             shouldRequestFeedback = false;
           }
         }
+        // Match HTTP: only process-local consent state may influence the
+        // product response. A remote lookup warms the cache in the background
+        // after an eligible outcome, so Epode latency/outages never delay a
+        // business tool result.
+        const consentState = shouldRequestFeedback
+          ? runtime.cachedConsent(customerRef)
+          : "unavailable";
+        const prepared = runtime.prepare({ customerRef, consentState });
+        runtime.record(prepared, {
+          surface: "mcp",
+          operation: name,
+          statusCode: result.isError ? 500 : 200,
+          durationMs: Math.max(0, Math.round(performance.now() - started)),
+          classification: "confirmed",
+          confirmationMethod: "mcp",
+          customerRef,
+          runtimeHint,
+          runtimeHintSource: runtimeHint ? "mcp" : undefined,
+          sessionRef,
+          sessionSource: sessionRef ? "mcp" : undefined,
+        });
         if (!shouldRequestFeedback) return result;
         // Match HTTP behavior: never attach feedback instructions to failed
         // product results. Telemetry above still records the failure.
         if (result.isError) return result;
+        runtime.warmConsent(customerRef);
 
         const envelope = prepared.envelope;
         if (!envelope) return result;
@@ -269,7 +275,7 @@ function instrumentServer(
             headers: {
               authorization: `Bearer ${feedbackHandle}`,
               "content-type": "application/json",
-              "user-agent": "@agent-feedback/node/0.1.0",
+              "user-agent": "@agent-feedback/node/0.2.0",
             },
             body: JSON.stringify({ decision }),
             signal: AbortSignal.timeout(options.reportTimeoutMs ?? 10_000),
@@ -406,7 +412,7 @@ function instrumentServer(
             headers: {
               authorization: `Bearer ${feedbackHandle}`,
               "content-type": "application/json",
-              "user-agent": "@agent-feedback/node/0.1.0",
+              "user-agent": "@agent-feedback/node/0.2.0",
             },
             body: JSON.stringify({
               summary,
@@ -478,6 +484,8 @@ export function createMcpInstrumentation(options: McpInstrumentationOptions): Mc
     flushIntervalMs: options.flushIntervalMs,
     maxQueueSize: options.maxQueueSize,
     telemetryTimeoutMs: options.telemetryTimeoutMs,
+    consentTimeoutMs: options.consentTimeoutMs,
+    consentCacheTtlMs: options.consentCacheTtlMs,
     maxTelemetryAttempts: options.maxTelemetryAttempts,
     shutdownTimeoutMs: options.shutdownTimeoutMs,
     fetch: options.fetch,

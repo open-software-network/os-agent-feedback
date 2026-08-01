@@ -69,12 +69,10 @@ export function agentFeedback(
 
   const implementation = async (app: FastifyInstance) => {
     app.addHook("onRequest", (request, _reply, done) => {
-      const context = runtime.context(request);
-      const matched = runtime.matches(request.url);
       states.set(request, {
         started: performance.now(),
-        context,
-        consentState: matched ? runtime.cachedConsent(context.customerRef) : "unavailable",
+        context: {},
+        consentState: "unavailable",
       });
       done();
     });
@@ -113,6 +111,12 @@ export function agentFeedback(
       ) {
         return undefined;
       }
+      // Authentication commonly runs in preValidation or preHandler. Read
+      // customer/session context only after the handler has completed so a
+      // global Epode plugin sees the verified identity established by normal
+      // Fastify authentication hooks.
+      state.context = runtime.context(request);
+      state.consentState = runtime.cachedConsent(state.context.customerRef);
       state.prepared = runtime.prepare({
         customerRef: state.context.customerRef,
         consentState: state.consentState,

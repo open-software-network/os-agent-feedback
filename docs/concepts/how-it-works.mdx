@@ -15,9 +15,10 @@ Opportunity telemetry is delivered later through a bounded background queue.
 
 ## What the capability can do
 
-The short-lived capability can submit one report for one interaction. It contains only a protocol
-version, interaction ID, issue/expiry timestamps, and nonce. It does not contain customer context,
-product content, a prompt, or an identity.
+The short-lived capability can submit one report for one interaction. Every capability contains a
+protocol version, public key ID, interaction ID, issue/expiry timestamps, and nonce. Ask-once adds a
+pseudonymous HMAC-derived consent subject. It never contains the raw customer reference, product
+content, a prompt, or a personal identity.
 
 ## What a report contains
 
@@ -45,4 +46,3 @@ If Epode is slow or unavailable:
 - queued opportunity telemetry may be retried or dropped;
 - a feedback submission receives a retryable failure;
 - no prompt, transcript, credential, or raw product payload is sent as telemetry.
-
