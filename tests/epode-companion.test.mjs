@@ -234,6 +234,106 @@ test("Epode Companion exposes fixed consent and bounded report tools", async () 
   }
 });
 
+test("Epode Companion suppresses repeated accepted writes without overriding server consent", async () => {
+  const consentHandle = `afr2_${"c".repeat(80)}`;
+  const declinedHandle = `afr2_${"e".repeat(80)}`;
+  const reportHandle = `afr2_${"d".repeat(80)}`;
+  const calls = [];
+  const decisions = new Map();
+  const api = await listen(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    calls.push({ path: request.url, authorization: request.headers.authorization, body });
+    response.writeHead(200, { "content-type": "application/json" });
+    if (request.url === "/api/v2/consent/decisions") {
+      const standing = decisions.get(request.headers.authorization) || body.decision;
+      decisions.set(request.headers.authorization, standing);
+      response.end(
+        JSON.stringify(
+          standing === "approved"
+            ? {
+                state: "approved",
+                feedback: { submit: { authorization: `Bearer ${reportHandle}` } },
+              }
+            : { state: "declined" },
+        ),
+      );
+      return;
+    }
+    response.end(JSON.stringify({ accepted: true, report: { id: "report-first" } }));
+  });
+  const companion = startCompanion(api.endpoint);
+  try {
+    const approve = {
+      name: "record_product_feedback_consent",
+      arguments: { feedbackHandle: consentHandle, decision: "approved" },
+    };
+    const firstApproval = await companion.request("tools/call", approve);
+    const replayedApproval = await companion.request("tools/call", approve);
+    assert.deepEqual(replayedApproval.result, firstApproval.result);
+
+    const firstReport = await companion.request("tools/call", {
+      name: "submit_product_feedback",
+      arguments: { feedbackHandle: reportHandle, outcome: "completed" },
+    });
+    const replayedReport = await companion.request("tools/call", {
+      name: "submit_product_feedback",
+      arguments: {
+        feedbackHandle: reportHandle,
+        outcome: "not_completed",
+        signals: ["incorrect"],
+      },
+    });
+    assert.deepEqual(replayedReport.result, firstReport.result);
+
+    const decline = {
+      name: "record_product_feedback_consent",
+      arguments: { feedbackHandle: declinedHandle, decision: "declined" },
+    };
+    const firstDecline = await companion.request("tools/call", decline);
+    const replayedDecline = await companion.request("tools/call", decline);
+    assert.deepEqual(replayedDecline.result, firstDecline.result);
+
+    // A conflicting decision for one interaction still reaches Epode; the
+    // Companion must not manufacture a flip from its cached approval.
+    const conflicting = await companion.request("tools/call", {
+      name: "record_product_feedback_consent",
+      arguments: { feedbackHandle: consentHandle, decision: "declined" },
+    });
+    assert.equal(conflicting.result.isError, true);
+    assert.equal(conflicting.result.structuredContent.accepted, false);
+    assert.deepEqual(calls, [
+      {
+        path: "/api/v2/consent/decisions",
+        authorization: `Bearer ${consentHandle}`,
+        body: { decision: "approved" },
+      },
+      {
+        path: "/api/v2/reports",
+        authorization: `Bearer ${reportHandle}`,
+        body: {
+          summary: "The product completed the requested outcome.",
+          impact: "helped",
+        },
+      },
+      {
+        path: "/api/v2/consent/decisions",
+        authorization: `Bearer ${declinedHandle}`,
+        body: { decision: "declined" },
+      },
+      {
+        path: "/api/v2/consent/decisions",
+        authorization: `Bearer ${consentHandle}`,
+        body: { decision: "declined" },
+      },
+    ]);
+  } finally {
+    companion.child.kill();
+    await api.close();
+  }
+});
+
 test("Epode Companion makes cold Ask-once inspection authoritative", async (testContext) => {
   const handle = `afr2_${"9".repeat(80)}`;
   for (const scenario of [

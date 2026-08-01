@@ -5187,20 +5187,12 @@ pub(crate) async fn submit_product_feedback(
     .await?
     .ok_or_else(|| ApiError::conflict("interactionId belongs to another product environment"))?;
 
-    if let Some(existing) = sqlx::query_as::<_, ProductFeedbackReport>(
-        "SELECT * FROM feedback_reports WHERE interaction_id = $1",
-    )
-    .bind(claims.i)
-    .fetch_optional(&mut *tx)
-    .await?
-    {
-        tx.commit().await?;
-        return Ok((interaction, existing));
-    }
-    let report = sqlx::query_as::<_, ProductFeedbackReport>(
+    let inserted_report = sqlx::query_as::<_, ProductFeedbackReport>(
         r"INSERT INTO feedback_reports
         (id, workspace_id, interaction_id, summary, impact, confidence, findings, workaround)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *",
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT (interaction_id) DO NOTHING
+        RETURNING *",
     )
     .bind(Uuid::new_v4())
     .bind(key.0)
@@ -5210,8 +5202,22 @@ pub(crate) async fn submit_product_feedback(
     .bind(input.confidence)
     .bind(findings_json)
     .bind(workaround)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
+    let Some(report) = inserted_report else {
+        // `ON CONFLICT` waits for an in-flight competing insert to finish.
+        // Reading after it returns therefore makes simultaneous retries behave
+        // exactly like sequential retries: both callers receive the first
+        // accepted report and neither can replace it.
+        let existing = sqlx::query_as::<_, ProductFeedbackReport>(
+            "SELECT * FROM feedback_reports WHERE interaction_id = $1",
+        )
+        .bind(claims.i)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        return Ok((interaction, existing));
+    };
     assign_report_group(
         &mut tx,
         &crate::grouping::FingerprintGrouper,
@@ -8725,6 +8731,82 @@ mod product_tests {
             anyhow::ensure!(relation.is_none(), "legacy table {table} still exists");
         }
         Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn simultaneous_report_retries_return_the_first_receipt() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace_id = Uuid::new_v4();
+        sqlx::query(
+            r"INSERT INTO workspaces (id, os_user_id, name, slug)
+            VALUES ($1, $2, 'Concurrent report retries', $3)",
+        )
+        .bind(workspace_id)
+        .bind(format!("usr_report_retry_{}", workspace_id.simple()))
+        .bind(format!(
+            "report-retry-{}",
+            &workspace_id.simple().to_string()[..8]
+        ))
+        .execute(&pool)
+        .await?;
+        let result = async {
+            let (_, environment) = create_product(
+                &pool,
+                workspace_id,
+                CreateProductInput {
+                    name: "Concurrent report product".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let (write_key, write_secret) = create_api_key(
+                &pool,
+                workspace_id,
+                environment.id,
+                Some("Concurrent report writer".into()),
+                Some("write".into()),
+                None,
+            )
+            .await
+            .map_err(test_error)?;
+            let interaction_id = Uuid::new_v4();
+            let capability = test_capability(&write_secret, write_key.id, interaction_id);
+            let first = submit_product_feedback(
+                &pool,
+                &capability,
+                feedback_input("The first simultaneous report described a useful result."),
+            );
+            let second = submit_product_feedback(
+                &pool,
+                &capability,
+                feedback_input("The second simultaneous report must not replace the first."),
+            );
+            let (first, second) = tokio::join!(first, second);
+            let first = first.map_err(test_error)?.1;
+            let second = second.map_err(test_error)?.1;
+            anyhow::ensure!(first.id == second.id);
+            anyhow::ensure!(first.summary == second.summary);
+            let report_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM feedback_reports WHERE interaction_id = $1",
+            )
+            .bind(interaction_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(report_count == 1);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await?;
+        result
     }
 
     #[tokio::test]

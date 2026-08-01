@@ -1,7 +1,34 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { mcpClientArguments } from "../experiments/agent-compliance/runtime-config.mjs";
 import { startLabServer } from "../experiments/agent-compliance/server.mjs";
+
+test("agent evaluator preserves the exact MCP server across initial and resumed turns", () => {
+  const run = {
+    id: "run-consent-1",
+    baseUrl: "http://127.0.0.1:43210",
+    placement: "mcp_mrtr",
+    copy: "native_input_required",
+    surface: "mcp",
+  };
+  const server = "/repo/experiments/agent-compliance/mcp-server.mjs";
+  const codex = mcpClientArguments("codex", run, server);
+  assert.deepEqual(JSON.parse(codex[3].replace("mcp_servers.acme.args=", "")), [
+    server,
+    "--run-id",
+    run.id,
+    "--base-url",
+    run.baseUrl,
+    "--placement",
+    run.placement,
+    "--copy",
+    run.copy,
+  ]);
+  const claude = JSON.parse(mcpClientArguments("claude", run, server)[1]);
+  assert.deepEqual(claude.mcpServers.acme.args, JSON.parse(codex[3].split("=", 2)[1]));
+  assert.deepEqual(mcpClientArguments("codex", { ...run, surface: "http" }, server), []);
+});
 
 test("compliance lab isolates response and llms.txt placements", async () => {
   const lab = await startLabServer();

@@ -61,6 +61,16 @@ const outcomes = Object.keys(outcomeReports);
 const signals = Object.keys(signalFindings);
 const retryableStatuses = new Set([429, 502, 503, 504]);
 const supportedProtocolVersions = new Set(["2026-07-28", "2025-11-25", "2025-06-18"]);
+const rememberedConsentResults = new Map();
+const rememberedReportResults = new Map();
+const maxRememberedResults = 2_048;
+
+function rememberResult(cache, key, value) {
+  cache.delete(key);
+  cache.set(key, value);
+  if (cache.size > maxRememberedResults) cache.delete(cache.keys().next().value);
+  return value;
+}
 
 function result(text, structuredContent = {}, isError = false) {
   return {
@@ -188,6 +198,8 @@ async function recordConsent(arguments_) {
   if (!["approved", "declined"].includes(arguments_.decision)) {
     throw new Error("decision must be approved or declined");
   }
+  const remembered = rememberedConsentResults.get(feedbackHandle);
+  if (remembered?.decision === arguments_.decision) return remembered.result;
   const { response, value } = await epodeRequest(
     "/api/v2/consent/decisions",
     feedbackHandle,
@@ -219,10 +231,15 @@ async function recordConsent(arguments_) {
         true,
       );
     }
-    return result("Permission declined. Do not submit product feedback.", {
+    const declined = result("Permission declined. Do not submit product feedback.", {
       state: "declined",
       accepted: true,
     });
+    rememberResult(rememberedConsentResults, feedbackHandle, {
+      decision: arguments_.decision,
+      result: declined,
+    });
+    return declined;
   }
   if (value?.state !== "approved") {
     return result(
@@ -239,7 +256,7 @@ async function recordConsent(arguments_) {
     );
   }
   validateHandle(reportHandle);
-  return result(
+  const approved = result(
     "Permission approved. This consent action is complete: do not inspect or record permission again for this handle. Call submit_product_feedback exactly once now with the returned feedbackHandle and bounded outcome categories.",
     {
       state: "feedback_ready",
@@ -251,6 +268,11 @@ async function recordConsent(arguments_) {
       },
     },
   );
+  rememberResult(rememberedConsentResults, feedbackHandle, {
+    decision: arguments_.decision,
+    result: approved,
+  });
+  return approved;
 }
 
 async function inspectFeedback(arguments_) {
@@ -348,6 +370,8 @@ async function inspectFeedback(arguments_) {
 
 async function submitFeedback(arguments_) {
   const { feedbackHandle, report } = validateReport(arguments_);
+  const remembered = rememberedReportResults.get(feedbackHandle);
+  if (remembered) return remembered;
   const { response, value } = await epodeRequest(
     "/api/v2/reports",
     feedbackHandle,
@@ -375,7 +399,11 @@ async function submitFeedback(arguments_) {
       true,
     );
   }
-  return result("Product feedback accepted.", value);
+  return rememberResult(
+    rememberedReportResults,
+    feedbackHandle,
+    result("Product feedback accepted.", value),
+  );
 }
 
 const tools = [
