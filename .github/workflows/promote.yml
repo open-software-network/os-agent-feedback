@@ -244,7 +244,7 @@ jobs:
       - name: Verify the exact promotion pair passed canary
         if: inputs.operation == 'promote'
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_CANARY_TOKEN }}
           EXPECTED_API_REF: ${{ needs.plan.outputs.api_ref }}
           EXPECTED_API_DIGEST: ${{ needs.plan.outputs.api_digest }}
           EXPECTED_REVISION: ${{ needs.plan.outputs.api_revision }}
