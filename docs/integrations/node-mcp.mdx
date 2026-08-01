@@ -8,18 +8,29 @@ registers `record_product_feedback_consent` and `report_product_feedback`; the p
 customer agent which action is currently allowed.
 
 <Note>
-In MCP tool results the feedback envelope appears in two places: as
-`structuredContent._agentFeedback` on the product tool's result, and as an appended `content` text
-entry that restates the instruction for clients that only read text content. Both describe the same
-action; agents should prefer the structured field.
+For a tool without `outputSchema`, the feedback envelope is
+`structuredContent._agentFeedback`. If the business tool declares `outputSchema`, Epode leaves its
+`structuredContent` exactly schema-valid and appends a standalone JSON text block shaped as
+`{"_agentFeedback": {...}}` instead. A plain-language instruction follows either form. Agents should
+use the machine-readable envelope in whichever one of those two locations is present.
 </Note>
 
 ## Install
 
 ```bash
-npm install https://app.epode.ai/static/agent-feedback-node-0.1.0.tgz
+mkdir -p .epode/artifacts &&
+curl -fsSL https://app.epode.ai/static/agent-feedback-node-0.2.2.tgz \
+  -o .epode/artifacts/agent-feedback-node-0.2.2.tgz &&
+printf '%s  %s\n' \
+  'a108603544c2d17af6859c45d994593a246401ca2f0def1fbeb43f74f5c16fe8' \
+  '.epode/artifacts/agent-feedback-node-0.2.2.tgz' | shasum -a 256 -c - &&
+npm install ./.epode/artifacts/agent-feedback-node-0.2.2.tgz &&
 npm install @modelcontextprotocol/server @modelcontextprotocol/node @modelcontextprotocol/express zod
 ```
+
+Keep the versioned tarball in `.epode/artifacts` and include it in source control or the deployment build
+context alongside `package.json` and `package-lock.json`. Both manifests refer to that project-local file,
+so `npm ci` still works after the npm cache is cleared or the original shell exits.
 
 ## Configure once
 
@@ -27,25 +38,57 @@ Create one process-level Epode instrumentation object so telemetry can batch acr
 fresh MCP server for each stateless HTTP request and instrument it **before** registering business tools.
 
 ```ts
-import { createMcpInstrumentation } from "@agent-feedback/node/mcp";
-import { createMcpExpressApp } from "@modelcontextprotocol/express";
+import {
+  createMcpInstrumentation,
+  type McpInstrumentationContext,
+} from "@agent-feedback/node/mcp";
+import {
+  createMcpExpressApp,
+  requireBearerAuth,
+} from "@modelcontextprotocol/express";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import { productTokenVerifier } from "./product-auth.js";
 
 // [] rejects browser Origin requests. Add only trusted browser client origins.
 const app = createMcpExpressApp({ host: "0.0.0.0", allowedOrigins: [] });
+
+// Adapt your existing signature/introspection verifier. It must authorize the
+// selected tenant and put its stable opaque ID in authInfo.extra.accountId.
+app.use("/mcp", requireBearerAuth({
+  verifier: productTokenVerifier,
+  requiredScopes: ["mcp"],
+}));
+
+function stringField(value: unknown, key: string): string | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const field = Reflect.get(value, key);
+  return typeof field === "string" && field.length > 0 ? field : undefined;
+}
+
+function authenticatedAccountId(context: McpInstrumentationContext) {
+  const accountId = context.http?.authInfo?.extra?.accountId;
+  return typeof accountId === "string" && accountId.length > 0 ? accountId : undefined;
+}
 
 const feedback = createMcpInstrumentation({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
   includeTools: ["search", "fetch_result"],
   feedbackTools: ["fetch_result"],
+  customerRef: (_args, context) => authenticatedAccountId(context),
   sessionRef: (args, _context, result) =>
-    args.runId || result?.structuredContent?.runId,
+    stringField(args, "runId") ?? stringField(result?.structuredContent, "runId"),
 });
 
+const feedbackInstructions =
+  'After each selected product tool call, find _agentFeedback in structuredContent or in a standalone JSON content block. Finish the product task first. For consent_required, show the product answer, ask the exact returned question once, and wait for the user\'s next turn; record only an explicit standalone Yes or No. For feedback_ready, call report_product_feedback exactly once. For feedback_disabled, do nothing unless the user explicitly asks to change permission. Keep successful background reporting out of the final answer.';
+
 function productServer() {
-  const server = new McpServer({ name: "your-product", version: "1.0.0" });
+  const server = new McpServer(
+    { name: "your-product", version: "1.0.0" },
+    { instructions: feedbackInstructions },
+  );
 
   feedback.instrument(server);
 
@@ -69,6 +112,13 @@ app.all("/mcp", (req, res) => handleMcp(req, res, req.body));
 app.listen(Number(process.env.PORT || 3000), "0.0.0.0");
 ```
 
+`productTokenVerifier` is the adapter for your product's real access-token verification, not a decoder
+or example token table. It must verify the signature or introspection result, expiration, audience,
+the `mcp` scope, and the caller's membership in the selected account before returning. The MCP Express
+middleware then attaches the verified `AuthInfo` to the request; the Node adapter passes it through as
+`context.http.authInfo`. Never populate `accountId` from a request header, query parameter, tool argument,
+email address, or unverified JWT payload.
+
 <Warning>
 Do not create or depend on `Mcp-Session-Id` for modern requests. MCP 2026-07-28 is stateless. Use an
 explicit application-level handle if your product has a meaningful multi-tool journey.
@@ -84,9 +134,8 @@ const feedback = createMcpInstrumentation({
   includeTools: ["browser_*"],
   feedbackTools: ["browser_close"],
   sessionRef: (args, _context, result) =>
-    args.sessionId || result?.structuredContent?.sessionId,
-  customerRef: (_args, context) =>
-    context.http?.authInfo?.extra?.accountId,
+    stringField(args, "sessionId") ?? stringField(result?.structuredContent, "sessionId"),
+  customerRef: (_args, context) => authenticatedAccountId(context),
 });
 ```
 
@@ -99,6 +148,12 @@ const feedback = createMcpInstrumentation({
   identifier it returns.
 - `customerRef` must come from verified product authentication and is required to remember Ask once across
   interactions. Without it, Ask once safely falls back to per-interaction permission.
+- Never ask is the most reliable mode on current Codex and Claude MCP clients. Ask once and Ask every
+  time depend on client support for surfacing and resuming consent; treat them as experimental until
+  you verify the exact client versions you support. Never infer approval when a client stops early.
+
+Keep the stage-aware Epode rule in the server-level `instructions`, near the beginning if you also
+have product-specific instructions. Result-local metadata alone is not reliable across all MCP clients.
 
 Epode adds a monotonic client sequence to preserve rapid tool order. The backend also reconciles a report
 that arrives before its background interaction metadata.
@@ -108,9 +163,9 @@ that arrives before its background interaction metadata.
 From an MCP 2026-07-28 client:
 
 1. Call `server/discover`.
-2. Call `tools/list` and confirm your product tool, `record_product_feedback_consent`, and
-   `report_product_feedback` are present.
-3. Call one normal product tool and confirm its result contains `_agentFeedback`.
+2. Call `tools/list`. When feedback is `off`, confirm only your product tools are present and stop. Otherwise,
+   confirm `record_product_feedback_consent` and `report_product_feedback` are also present.
+3. When feedback is enabled, call one normal product tool and confirm its result contains `_agentFeedback`.
 4. If the result has `state: "consent_required"`, ask its exact question and call
    `record_product_feedback_consent` with only `approved` or `declined`. Do not call the report tool unless an
    approved decision returns `state: "feedback_ready"` and a report action.

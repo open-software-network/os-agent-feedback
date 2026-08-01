@@ -1,4 +1,5 @@
 import { createMcpInstrumentation } from "@agent-feedback/node/mcp";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
@@ -25,19 +26,39 @@ const mcp = createMcpHandler(productServer, { legacy: "stateless", responseMode:
 const handleMcp = toNodeHandler(mcp);
 
 app.get("/health", (_request, response) => response.json({ ok: true }));
-app.use("/mcp", (request, _response, next) => {
-  const accountId = request.get("x-customer-ref");
-  if (accountId) {
-    // The fixture header stands in for a value established by the product's
-    // authentication middleware. Never trust a customer reference supplied
-    // directly by an unauthenticated caller in production.
-    request.auth = {
-      token: "setup-matrix-auth",
-      clientId: "setup-matrix-client",
-      scopes: [],
-      extra: { accountId },
-    };
+app.use("/mcp", (request, response, next) => {
+  const token = request.get("authorization")?.replace(/^Bearer\s+/i, "");
+  const [payload, signature] = token?.split(".") || [];
+  const expected = payload
+    ? createHmac("sha256", process.env.SETUP_MATRIX_PRODUCT_AUTH_SECRET || "")
+        .update(payload)
+        .digest("base64url")
+    : "";
+  if (
+    !signature ||
+    signature.length !== expected.length ||
+    !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))
+  ) {
+    return response.status(401).json({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32001, message: "Unauthorized" },
+    });
   }
+  const accountId = Buffer.from(payload, "base64url").toString("utf8");
+  if (!/^[A-Za-z0-9_.:-]{1,160}$/.test(accountId)) {
+    return response.status(401).json({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32001, message: "Unauthorized" },
+    });
+  }
+  request.auth = {
+    token: "verified-setup-matrix-auth",
+    clientId: "setup-matrix-client",
+    scopes: [],
+    extra: { accountId },
+  };
   next();
 });
 app.all("/mcp", (request, response) => handleMcp(request, response, request.body));

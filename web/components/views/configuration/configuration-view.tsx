@@ -64,7 +64,6 @@ export function ProductConfigurationView({
   controls: ReactNode;
 }) {
   const product = data.currentProduct;
-  const environment = data.currentEnvironment;
   const canManageProduct = data.currentRole === "owner" || data.currentRole === "admin";
 
   return (
@@ -72,7 +71,6 @@ export function ProductConfigurationView({
       <Panel title="Product details">
         <dl className="divide-y text-sm">
           <Property label="Product" value={product?.name ?? "No product selected"} />
-          <Property label="Environment" value={environment?.name ?? "Not configured"} />
           <Property label="Team" value={data.workspace.name} />
           <Property label="Your role" value={titleCase(data.currentRole)} />
         </dl>

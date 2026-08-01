@@ -15,17 +15,16 @@ description: "Server environment variables and adapter options."
 Do not use `AGENT_FEEDBACK_READ_KEY` in a product integration. Read keys are for the optional Epode dashboard MCP
 client and cannot sign feedback capabilities.
 
-## Mode precedence
+## Mode alignment
 
-The server-side collection policy configured in the Epode dashboard always wins. The SDK
-`feedbackMode` / `AGENT_FEEDBACK_MODE` option is a hint that shapes local behavior (for example
-consent-cache warming); it never overrides the mode the server enforces when it signs feedback
-capabilities and builds envelopes.
+The SDK signs the initial feedback action locally so Epode never sits on the product response path.
+`feedbackMode` / `AGENT_FEEDBACK_MODE` therefore controls the question or report action agents see.
+The dashboard policy independently enforces what consent and reports Epode will accept.
 
-Drift symptom: the envelope's `mode` (the effective mode for this interaction) differs from what
-your SDK configuration suggests, or `configuredMode` differs from the mode you set locally. When
-that happens, check the product's collection policy in the dashboard — it is the source of truth —
-and align the SDK option with it to avoid confusion.
+Keep both values aligned. After changing the dashboard policy, update `AGENT_FEEDBACK_MODE` in the
+product and redeploy it; Setup shows the exact current value. Until that deploy finishes, the backend
+fails closed when an older product action conflicts with the new policy, but agents may still see the
+old instruction. The envelope's `configuredMode` helps diagnose this drift.
 
 ## Common adapter options
 
@@ -35,6 +34,7 @@ and align the SDK option with it to avoid confusion.
 | `include` | Route patterns that receive feedback contracts |
 | `feedbackMode` / `feedback_mode` | Explicit mode override |
 | `customerRef` / `customer_ref` | Stable opaque product-auth account or tenant ID; required for durable Ask once |
+| `sessionRef` / `session_ref` | Optional product-proven journey reference; omit it rather than infer continuity |
 | `consentTimeoutMs` / `consent_timeout` / `AGENT_FEEDBACK_CONSENT_TIMEOUT_MS` | Timeout for optional consent-cache warming or protocol-specific lookups (default 750 ms). HTTP product responses never await it. |
 | `endpoint` | Override Epode origin in tests |
 
@@ -47,4 +47,6 @@ successful responses are intended for customer agents.
 ## Key rotation
 
 Rotate a key from Setup. The previous key remains valid for one hour so you can deploy the replacement without
-dropping product traffic. Consent is product-scoped, so rotating a key does not expose or change the raw customer reference.
+dropping product traffic. Put the new value directly into the deployment secret manager and keep it out of browser
+storage, shell history, CI logs, repositories, MCP clients, and product-auth requests. Consent is product-scoped, so
+rotating a key does not expose or change the raw customer reference.

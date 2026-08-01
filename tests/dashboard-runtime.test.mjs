@@ -453,6 +453,59 @@ test("action notices render as ephemeral accessible toasts", async () => {
   assert.match(notice.className, /notice-error/);
 });
 
+test("a reloaded legacy setup shows only key prefixes and rotation guidance", async () => {
+  const { page } = await loadDashboard({ href: "https://app.epode.ai/?view=setup" });
+  assert.match(page.innerHTML, /Full server-side key is hidden/);
+  assert.match(page.innerHTML, /af_live_1234abcd…/);
+  assert.match(page.innerHTML, /Full read key is hidden/);
+  assert.match(page.innerHTML, /af_read_5678beef…/);
+  assert.match(page.innerHTML, /Rotate key/);
+  assert.doesNotMatch(page.innerHTML, /fresh_secret_value|rotated_secret_value/);
+});
+
+test("legacy policy saves an exact custom retention period with feedback mode", async () => {
+  const state = structuredClone(dashboard);
+  const policyUpdates = [];
+  const fetchImpl = async (path, options = {}) => {
+    if (path === "/api/settings/policy" && options.method === "POST") {
+      const body = JSON.parse(options.body);
+      policyUpdates.push(body);
+      state.currentEnvironment = {
+        ...state.currentEnvironment,
+        feedbackMode: body.feedbackMode,
+        retentionDays: body.retentionDays,
+      };
+      state.environments = [state.currentEnvironment];
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ environment: structuredClone(state.currentEnvironment) }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => structuredClone(state) };
+  };
+  const { handlers, page } = await loadDashboard({
+    href: "https://app.epode.ai/?view=policy",
+    fetchImpl,
+  });
+  assert.match(page.innerHTML, /Data retention/);
+  assert.match(page.innerHTML, /value="30"/);
+  const form = new Map([
+    ["feedbackMode", "ask_once"],
+    ["retentionDays", "47"],
+  ]);
+  await handlers.submit({ preventDefault() {}, target: { id: "policy-form", formData: form } });
+  assert.deepEqual(policyUpdates, [
+    {
+      environmentId: "environment-1",
+      feedbackMode: "ask_once",
+      collectEventSummaries: false,
+      retentionDays: 47,
+    },
+  ]);
+  assert.match(page.innerHTML, /47 days/);
+});
+
 test("setup lists key kinds with expiry and last-used, and rotating a read key keeps it a read key", async () => {
   const state = structuredClone(dashboard);
   const rotated = [];

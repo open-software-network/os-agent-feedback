@@ -6,14 +6,15 @@ description: "Instrument selected Express JSON and HTML responses with one globa
 ## Install
 
 ```bash
-npm install https://app.epode.ai/static/agent-feedback-node-0.1.0.tgz express
+npm install https://app.epode.ai/static/agent-feedback-node-0.2.2.tgz express
 ```
 
 Node 20 or newer is required.
 
 ## Configure once
 
-Register Epode before the included route handlers:
+Run product authentication and authorized tenant selection first, then register Epode before the
+included route handlers. `customerRef` only reads identity your product already verified.
 
 ```ts
 import express from "express";
@@ -21,6 +22,8 @@ import { agentFeedback } from "@agent-feedback/node/express";
 
 const app = express();
 
+app.use(authenticateProductRequest);
+app.use(selectAuthorizedTenant);
 app.use(agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
   include: ["/search", "/docs/*"],
@@ -56,8 +59,14 @@ app.use(agentFeedback({
 ```
 
 The agent caller sends `Agent-Feedback-Request: 1`. Only that request receives feedback metadata and
-becomes `private, no-store`; the public response keeps its existing cache policy. Use
+becomes `private, no-store`; the public response keeps its existing cache policy. The SDK also adds
+`Vary: Agent-Feedback-Request`, so a CDN cannot replay the ordinary cached body to an opted-in caller. Use
 `cacheMode: "private"` only when disabling shared caching on every included response is intentional.
+Eligible ordinary 2xx `GET` and `HEAD` responses also carry a same-path-and-query `Link` marker, allowing
+an installed Epode Companion to make one authenticated opt-in refetch without changing the public body.
+
+`*` matches one path segment (`/docs/*` matches `/docs/guide`). Use `**` for any depth
+(`/docs/**` also matches `/docs/platform/authentication`).
 
 ## Async jobs
 
@@ -96,8 +105,22 @@ It does not change the visible page.
 npx agent-feedback-doctor https://your-product.example/search?q=epode-test
 ```
 
-The doctor checks shape preservation, the scoped capability, submission origin, and telemetry. In
-`never_ask`, it submits one synthetic review. In ask modes, it validates consent without claiming approval.
+The doctor checks shape preservation, the scoped capability, trusted submission origin, and the company-side
+opportunity without creating feedback. In ask modes, it validates consent without claiming approval. Use a real
+customer-agent task to prove confirmation and reporting.
+
+## Serverless and edge-hosted Node
+
+Keep the middleware object outside the request handler when the platform reuses isolates. If the platform
+provides `waitUntil`, attach `feedback.flush()` to that lifecycle hook after the response is committed:
+
+```ts
+context.waitUntil(feedback.flush());
+```
+
+Do not await telemetry before sending the product response. On platforms with no background lifecycle at
+all, opportunity telemetry is best effort and may be dropped when an isolate freezes; feedback reports still
+use their independent signed submission path.
 
 ## Customer-agent coverage
 

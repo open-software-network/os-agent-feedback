@@ -106,7 +106,9 @@ function AppSidebar({
   const isCollapsed = !isMobile && state === "collapsed";
   const productName = data.currentProduct?.name ?? "No product selected";
   const userInitials = initials(data.user.displayName) || "OS";
-  const canSwitchContext = data.workspaceMemberships.length > 1 || data.products.length > 1;
+  const canCreateProduct = data.currentRole === "owner" || data.currentRole === "admin";
+  const canOpenContext =
+    canCreateProduct || data.workspaceMemberships.length > 1 || data.products.length > 1;
 
   function contextChanged(change: () => void) {
     change();
@@ -120,7 +122,7 @@ function AppSidebar({
         <span className="truncate text-sm font-medium">{productName}</span>
         <span className="truncate text-xs text-muted-foreground">{data.workspace.name}</span>
       </div>
-      {canSwitchContext ? (
+      {canOpenContext ? (
         <IconChevronGrabberVertical className="shrink-0 text-muted-foreground" />
       ) : null}
     </>
@@ -130,13 +132,13 @@ function AppSidebar({
     <Sidebar collapsible="icon" className="border-r-0">
       <SidebarHeader className="h-12 shrink-0 justify-center border-b px-2 py-0">
         <div className="relative flex h-7 items-center">
-          {canSwitchContext ? (
+          {canOpenContext ? (
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={
                   <button
                     type="button"
-                    aria-label={`${productName}, ${data.workspace.name} - switch context`}
+                    aria-label={`${productName}, ${data.workspace.name} - open context menu`}
                     className={cn(
                       "group/context mr-10 flex min-w-0 flex-1 items-center gap-2 overflow-hidden rounded-md px-1 py-1 text-left transition-[opacity,transform,background-color] duration-150 ease-out hover:bg-sidebar-accent data-popup-open:bg-sidebar-accent motion-reduce:transition-none",
                       isCollapsed
@@ -185,6 +187,16 @@ function AppSidebar({
                     <DropdownMenuItem disabled>No products</DropdownMenuItem>
                   )}
                 </DropdownMenuGroup>
+                {canCreateProduct ? (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      onClick={() => contextChanged(() => onNavigate("configuration"))}
+                    >
+                      New product
+                    </DropdownMenuItem>
+                  </>
+                ) : null}
               </DropdownMenuContent>
             </DropdownMenu>
           ) : (

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -72,15 +72,71 @@ describe("FeedbackView", () => {
     await waitFor(() => expect(window.location.search).not.toContain("status="));
   });
 
-  it("keeps the loaded-page disclosure and fetches a selected report outside that page", async () => {
+  it("resolves a GitHub signal backlink to the exact retained reports", async () => {
+    const data = dashboardFixture();
+    const groupKey = "6910e1b05a001949e02f04db6d67d013";
+    window.history.replaceState({}, "", `/?view=feedback&group=${groupKey}`);
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/dashboard/feedback?")) {
+        return Promise.resolve(
+          json({
+            reports: data.reports,
+            total: 1,
+            facets: feedbackFacets(),
+            limit: 50,
+            nextCursor: null,
+          }),
+        );
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderFeedback(data);
+
+    expect(await screen.findByText("Signal cluster evidence · 1 matching report")).toBeVisible();
+    await waitFor(() => {
+      const request = fetchMock.mock.calls.find(([input]) =>
+        String(input).startsWith("/api/dashboard/feedback?"),
+      );
+      expect(request).toBeDefined();
+      const url = new URL(String(request?.[0]), "https://app.epode.ai");
+      expect(url.searchParams.get("groupKey")).toBe(groupKey);
+      expect(url.searchParams.has("since")).toBe(false);
+      expect(new URL(window.location.href).searchParams.get("range")).toBe("all");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Show all feedback" }));
+    await waitFor(() =>
+      expect(new URL(window.location.href).searchParams.has("group")).toBe(false),
+    );
+  });
+
+  it("paginates the complete server-filtered result and fetches a selected report outside it", async () => {
     const complete = dashboardFixture();
     const report = complete.reports[0];
     const data = dashboardFixture({
       reports: [],
       listState: { ...complete.listState, reportsLoaded: 0, reportsTotal: 501 },
     });
-    const loadMore = vi.fn();
-    const fetchMock = vi.fn().mockResolvedValue(json({ report }));
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/dashboard/feedback?") && path.includes("cursor=next-page")) {
+        return Promise.resolve(
+          json({ reports: [report], total: 501, limit: 50, nextCursor: null }),
+        );
+      }
+      if (path.startsWith("/api/dashboard/feedback?")) {
+        return Promise.resolve(
+          json({ reports: [], total: 501, limit: 50, nextCursor: "next-page" }),
+        );
+      }
+      if (path.includes(`/api/dashboard/reports/${report.id}?`)) {
+        return Promise.resolve(json({ report }));
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     const list = renderWithQuery(
@@ -90,15 +146,19 @@ describe("FeedbackView", () => {
         selectReport={vi.fn()}
         openInteraction={vi.fn()}
         openSession={vi.fn()}
-        loadMore={loadMore}
         refresh={vi.fn().mockResolvedValue(undefined)}
         setNotice={vi.fn()}
       />,
     );
 
-    expect(screen.getByText(/Filters apply to loaded reports/)).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Load 250 more" }));
-    expect(loadMore).toHaveBeenCalledOnce();
+    expect(await screen.findByText(/Filters cover all retained feedback/)).toBeVisible();
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([input]) =>
+          String(input).startsWith("/api/dashboard/feedback?"),
+        ),
+      ).toBe(true),
+    );
     list.unmount();
 
     renderWithQuery(
@@ -108,7 +168,6 @@ describe("FeedbackView", () => {
         selectReport={vi.fn()}
         openInteraction={vi.fn()}
         openSession={vi.fn()}
-        loadMore={loadMore}
         refresh={vi.fn().mockResolvedValue(undefined)}
         setNotice={vi.fn()}
       />,
@@ -121,38 +180,132 @@ describe("FeedbackView", () => {
     );
   });
 
+  it("offers counted facets from outside the loaded page and retains them when selected", async () => {
+    const complete = dashboardFixture();
+    const data = dashboardFixture({
+      reports: [],
+      listState: { ...complete.listState, reportsLoaded: 0, reportsTotal: 7 },
+    });
+    const facets = {
+      status: [{ name: "new", count: 7 }],
+      impact: [{ name: "blocked", count: 7 }],
+      surface: [{ name: "mcp", count: 7 }],
+      topic: [{ name: "outside_page", count: 7 }],
+      findingKind: [{ name: "defect", count: 7 }],
+      severity: [{ name: "blocking", count: 7 }],
+      tag: [],
+      assignee: [{ name: "unassigned", count: 7 }],
+      workaround: [{ name: "none", count: 7 }],
+    };
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/dashboard/feedback?")) {
+        return Promise.resolve(
+          json({
+            reports: [],
+            total: path.includes("topic=outside_page") ? 0 : 7,
+            facets,
+            limit: 50,
+            nextCursor: null,
+          }),
+        );
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderFeedback(data);
+
+    expect(await screen.findByText(/Filters cover all retained feedback/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Topic" }));
+    const option = await screen.findByRole("checkbox", { name: "Outside Page" });
+    expect(within(option.closest("div") as HTMLElement).getByText("7")).toBeVisible();
+
+    fireEvent.click(option);
+
+    await waitFor(() => {
+      expect(window.location.search).toContain("topic=outside_page");
+      expect(
+        fetchMock.mock.calls.some(([input]) => String(input).includes("topic=outside_page")),
+      ).toBe(true);
+    });
+    expect(screen.getByRole("checkbox", { name: "Outside Page" })).toBeChecked();
+  });
+
+  it("debounces feedback search before issuing a server request", async () => {
+    const data = dashboardFixture();
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/dashboard/feedback?")) {
+        return Promise.resolve(
+          json({
+            reports: data.reports,
+            total: data.reports.length,
+            limit: 50,
+            nextCursor: null,
+          }),
+        );
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderFeedback(data);
+    const search = screen.getByRole("textbox", { name: "Search feedback" });
+    fireEvent.change(search, { target: { value: "t" } });
+    fireEvent.change(search, { target: { value: "ti" } });
+    fireEvent.change(search, { target: { value: "timeout" } });
+
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("q=timeout"))).toBe(false);
+    await waitFor(() => {
+      const searched = fetchMock.mock.calls.filter(([input]) => String(input).includes("q="));
+      expect(searched).toHaveLength(1);
+      expect(String(searched[0][0])).toContain("q=timeout");
+    });
+  });
+
   it("defaults to reports and loads read-only grouped signals on demand", async () => {
     const data = dashboardFixture();
     const selectReport = vi.fn();
-    const fetchMock = vi.fn().mockResolvedValue(
-      json({
-        groups: [
-          {
-            explanation: "Agents repeatedly hit authorization failures during setup.",
-            githubIssue: {
-              issueNumber: 42,
-              repoFullName: "open-software/epode",
-              state: "open",
-              url: "https://github.com/open-software/epode/issues/42",
-            },
-            groupKey: "authorization-setup",
-            latestOccurredAt: "2026-07-30T12:00:00Z",
-            reportCount: 7,
+    const groups = {
+      groups: [
+        {
+          explanation: "Agents repeatedly hit authorization failures during setup.",
+          githubIssue: {
+            issueNumber: 42,
+            repoFullName: "open-software/epode",
+            state: "open",
+            url: "https://github.com/open-software/epode/issues/42",
           },
-          {
-            explanation:
-              "product 22222222-2222-4222-8222-222222222222 · operation refund_create · surface mcp · defect/idempotency · 5xx",
-            githubIssue: null,
-            groupKey: "c86875b212d12aa37bb9a3fff09787d6",
-            latestOccurredAt: "2026-07-30T12:00:00Z",
-            reportCount: 2,
-          },
-        ],
-        hasMore: false,
-        limit: 100,
-        offset: 0,
-      }),
-    );
+          groupKey: "authorization-setup",
+          latestOccurredAt: "2026-07-30T12:00:00Z",
+          reportCount: 7,
+        },
+        {
+          explanation:
+            "product 22222222-2222-4222-8222-222222222222 · operation refund_create · surface mcp · defect/idempotency · 5xx",
+          githubIssue: null,
+          groupKey: "c86875b212d12aa37bb9a3fff09787d6",
+          latestOccurredAt: "2026-07-30T12:00:00Z",
+          reportCount: 2,
+        },
+      ],
+      hasMore: false,
+      limit: 100,
+      offset: 0,
+    };
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/dashboard/feedback?")) {
+        return Promise.resolve(
+          json({ reports: data.reports, total: data.reports.length, limit: 50, nextCursor: null }),
+        );
+      }
+      if (path.includes("/groups?")) return Promise.resolve(json(groups));
+      if (path.endsWith("/github-repo")) return Promise.resolve(json(null));
+      throw new Error(`Unexpected request: ${path}`);
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     renderWithQuery(
@@ -187,6 +340,22 @@ describe("FeedbackView", () => {
       "https://github.com/open-software/epode/issues/42",
     );
     expect(screen.queryByRole("dialog", { name: "Feedback detail" })).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Review 2 reports in this signal cluster" }),
+    );
+
+    expect(await screen.findByText(/Signal cluster evidence/)).toBeVisible();
+    await waitFor(() => {
+      expect(new URL(window.location.href).searchParams.get("group")).toBe(
+        "c86875b212d12aa37bb9a3fff09787d6",
+      );
+      expect(
+        fetchMock.mock.calls.some(([input]) =>
+          String(input).includes("groupKey=c86875b212d12aa37bb9a3fff09787d6"),
+        ),
+      ).toBe(true);
+    });
   });
 
   it("loads additional signal pages and points unmapped products to Connectors", async () => {
@@ -214,8 +383,7 @@ describe("FeedbackView", () => {
     renderFeedback(data);
     fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
 
-    expect(await screen.findByText(first.groupKey)).toBeVisible();
-    expect(screen.getByText(first.explanation)).toBeVisible();
+    expect(await screen.findByText(first.explanation)).toBeVisible();
     expect(screen.queryByRole("button", { name: "File GitHub issue" })).not.toBeInTheDocument();
     expect(screen.getByText(/map this product to a GitHub repository/i)).toBeVisible();
     expect(screen.getByRole("link", { name: "Open Connectors" })).toHaveAttribute(
@@ -225,8 +393,10 @@ describe("FeedbackView", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Load more" }));
 
-    expect(await screen.findByText(second.groupKey)).toBeVisible();
+    expect(await screen.findByText(second.explanation)).toBeVisible();
+    expect(screen.getByText(first.explanation)).toBeVisible();
     expect(screen.getByText(first.groupKey)).toBeVisible();
+    expect(screen.getByText(second.groupKey)).toBeVisible();
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes("offset=50"))).toBe(true);
     for (const [, init] of fetchMock.mock.calls) {
       expect(new Headers(init.headers).get("x-workspace-id")).toBe(data.workspace.id);
@@ -894,7 +1064,7 @@ describe("FeedbackView", () => {
     expect(screen.getByRole("button", { name: "Save triage" })).toBeVisible();
   });
 
-  it("opens a report from the full row with pointer or keyboard input", () => {
+  it("opens a report from the full row or its explicit accessible control", () => {
     const data = dashboardFixture();
     const selectReport = vi.fn();
     renderWithQuery(
@@ -912,7 +1082,7 @@ describe("FeedbackView", () => {
 
     const row = screen.getByRole("row", { name: new RegExp(data.reports[0].summary) });
     fireEvent.click(row);
-    fireEvent.keyDown(row, { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: data.reports[0].summary }));
 
     expect(selectReport).toHaveBeenNthCalledWith(1, data.reports[0].id);
     expect(selectReport).toHaveBeenNthCalledWith(2, data.reports[0].id);
@@ -968,6 +1138,20 @@ function repositoryMapping(productId: string) {
     pathPrefix: null,
     createdAt: "2026-07-30T12:00:00Z",
     updatedAt: "2026-07-30T12:00:00Z",
+  };
+}
+
+function feedbackFacets() {
+  return {
+    status: [{ name: "new", count: 1 }],
+    impact: [{ name: "blocked", count: 1 }],
+    surface: [{ name: "mcp", count: 1 }],
+    topic: [{ name: "freshness", count: 1 }],
+    findingKind: [{ name: "defect", count: 1 }],
+    severity: [{ name: "blocking", count: 1 }],
+    tag: [],
+    assignee: [{ name: "unassigned", count: 1 }],
+    workaround: [{ name: "none", count: 1 }],
   };
 }
 

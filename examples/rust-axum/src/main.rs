@@ -1,8 +1,35 @@
 use std::{env, net::SocketAddr};
 
 use agent_feedback::{AgentFeedbackLayer, Options};
-use axum::{Json, Router, routing::get};
+use axum::{
+    Json, Router,
+    extract::Request,
+    http::StatusCode,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::get,
+};
 use serde_json::{Value, json};
+
+#[derive(Clone)]
+struct AccountId(String);
+
+async fn authenticate_product_request(mut request: Request, next: Next) -> Response {
+    let authorization = request
+        .headers()
+        .get("authorization")
+        .and_then(|value| value.to_str().ok());
+    match authorization {
+        None => next.run(request).await,
+        Some("Bearer example-company-token") => {
+            request
+                .extensions_mut()
+                .insert(AccountId("example-account".into()));
+            next.run(request).await
+        }
+        Some(_) => StatusCode::UNAUTHORIZED.into_response(),
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -15,11 +42,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .include(["/api/status"])
             .customer_ref(|request| {
                 request
-                    .headers()
-                    .get("x-customer-ref")?
-                    .to_str()
-                    .ok()
-                    .map(str::to_owned)
+                    .extensions()
+                    .get::<AccountId>()
+                    .map(|account| account.0.clone())
             })
             .runtime_hint(|request| {
                 request
@@ -34,7 +59,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/", get(about))
         .route("/health", get(health))
         .route("/api/status", get(status))
-        .layer(feedback.clone());
+        .layer(feedback.clone())
+        .layer(middleware::from_fn(authenticate_product_request));
     let address: SocketAddr = format!(
         "0.0.0.0:{}",
         env::var("PORT").unwrap_or_else(|_| "8080".into())

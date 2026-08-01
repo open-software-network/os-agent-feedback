@@ -1,0 +1,109 @@
+# Deployment and rollback runbook
+
+Epode deploys API and web containers from commit-addressed GHCR tags. A tag is
+accepted only when its OCI revision label matches the requested commit, its
+registry digest is valid, and Railway reports both the same tag in
+`meta.image` and the same digest in `meta.imageDigest` for the successful
+deployment.
+
+## Required external configuration
+
+GitHub and Railway configuration is intentionally not created by repository
+automation when it controls credentials, human approval, DNS ownership, or
+database recovery:
+
+- Create GitHub environments named `v2-canary`, `production`, and
+  `sdk-release`. Require production and SDK-release reviewers. Restrict who
+  can approve and deploy, and protect `sdk/*/v*` tags.
+- Add an environment-scoped `RAILWAY_TOKEN` secret and `RAILWAY_PROJECT_ID`
+  variable to `v2-canary` and `production`. The Railway token must be limited
+  to the Epode project.
+- In `v2-canary`, set `V2_CANARY_API_DOMAIN` and `V2_CANARY_WEB_DOMAIN` to
+  hostnames already attached to their services, without `https://` or a path.
+  `agent-feedback-api-v2-canary.up.railway.app` is the existing public API
+  hostname. Assign the web hostname in Railway before the first web canary.
+- If the Railway services are not named `epode-api` and `epode-web`, set
+  `RAILWAY_API_SERVICE` and `RAILWAY_WEB_SERVICE` in each GitHub environment.
+- Configure Railway's GHCR pull credential on both services. This credential
+  remains in Railway and is never exposed to the workflow.
+- Attach the stable canary domains in Railway and complete any external DNS or
+  certificate validation. The workflow validates exact ownership. It does not
+  replace or delete domains because those operations can change public routing.
+- Pre-provision the canary API's `DATABASE_URL`, `OS_ACCOUNTS_URL`,
+  `OS_ACCOUNTS_API_URL`, and `OS_ACCOUNTS_CLIENT_ID`. They may be Railway
+  references or sealed values. The workflow verifies that the keys exist but
+  never prints their values.
+- Allow `https://<V2_CANARY_WEB_DOMAIN>` in the OS Accounts App and OAuth
+  client's origin policy, and allow
+  `https://<V2_CANARY_WEB_DOMAIN>/auth/callback` as a redirect URI. The browser
+  begins authentication through the web BFF, so the PKCE cookies and callback
+  must remain on that same public origin.
+- Configure the npm, PyPI, and crates.io trusted publishers described in
+  `sdk/RELEASE.md`. The `sdk-release` environment approval is the review gate
+  for the exact uploaded release candidate.
+- For SDK releases, create the annotated `sdk/release/vX.Y.Z` marker first,
+  then push each annotated package tag in its own `git push` command. Never
+  push all four package tags together: GitHub suppresses tag-push workflow
+  events when a single push contains more than three tags.
+  then create each annotated `sdk/{node,python,rust,go}/vX.Y.Z` package tag at
+  that exact commit. Each package workflow validates the common marker before
+  publishing, so packages can retry independently without accepting a mixed
+  source revision.
+
+The canary workflow safely provisions only public routing values:
+`PUBLIC_BASE_URL`, `WEB_APP_URL`, and `API_URL`. It stages them without an
+extra deployment, re-reads them for equality, then deploys the API and checks
+its health before deploying the web service. After the web health and OAuth
+start checks pass, it records the exact API/web refs and digests as the latest
+verified canary pair without triggering another deployment.
+
+`PUBLIC_BASE_URL` and `WEB_APP_URL` intentionally use the web domain. That
+keeps browser authentication cookies, the OAuth callback, same-origin feedback
+and API proxy routes, and generated public links on one origin. `API_URL` on
+the web service points to the API domain only for server-to-server BFF
+forwarding.
+
+## Canary deployment
+
+Run `Deploy v2 canary` with the same candidate commit SHA for API and web. Both
+images are built for every protected-main commit so a release always represents
+one source revision, including when only one application directory changed. The
+workflow resolves both 7-character tags and digests before entering the
+`v2-canary` environment. It then deploys API followed by web and verifies each
+Railway digest and public health endpoint. It also verifies that `/auth/start`
+redirects to the configured accounts origin, secure PKCE/state cookies, exact
+integration discovery, and typed downloadable artifacts before recording the
+pair as promotion-eligible. Floating `staging`, `latest`, and `production` tags
+are never accepted as deployment inputs.
+
+## Production promotion
+
+Run `Promote or rollback production` with `operation=promote` and the exact API
+and web SHAs reviewed in canary. The workflow resolves the complete pair before
+the production approval. After approval, it fails closed unless those exact
+refs and digests are both the last successfully attested canary pair and the
+images currently active in `v2-canary`. It then captures the currently serving
+production pair as a verified recovery point and deploys API followed by web.
+Production GHCR tags move only after both Railway deployments report the
+planned digests and the production health and OAuth-start smoke checks pass.
+
+If either deployment, public smoke, or production-tag move fails, the workflow
+attempts both service restorations independently. Tag movement also restores
+both prior production tags before failing. A manual cancellation or external
+Railway mutation can still interrupt this recovery path; inspect both service
+deployment IDs, digests, and tags before retrying.
+
+## Rollback
+
+Run the same workflow with `operation=rollback`, the prior API and web SHA
+tags, `confirm_rollback=true`, and a non-empty `rollback_reason`. Rollback is an
+explicit paired API-then-web deployment with the same tag, digest, approval,
+and failure-recovery checks as promotion. Do not use a floating production tag
+as the rollback target.
+
+An image rollback does **not** roll back database migrations. The API runs
+`sqlx` migrations during startup, and deployed migrations may have changed
+schema or data before a later image is selected. Production migrations must be
+backward-compatible with the prior API. If a migration itself must be reversed,
+stop the image rollback, assess data loss, and execute a separately reviewed
+database recovery or forward-fix procedure before changing application images.

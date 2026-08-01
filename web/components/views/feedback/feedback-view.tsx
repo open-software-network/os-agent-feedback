@@ -1,6 +1,6 @@
 "use client";
 
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
 import { IconArrowUpRight } from "central-icons/IconArrowUpRight";
 import { IconCalendarCheck } from "central-icons/IconCalendarCheck";
 import { IconCheckCircle2 } from "central-icons/IconCheckCircle2";
@@ -38,13 +38,16 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsList, TabsPanel, TabsTab } from "@/components/ui/tabs";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { ApiError, apiRequest } from "@/lib/api/client";
 import { fetchProductGithubRepo } from "@/lib/api/connectors";
 import type {
   DashboardData,
+  DashboardFeedbackFacets,
   DashboardReportResponse,
   ProductFeedbackReport,
 } from "@/lib/api/dashboard";
+import { fetchDashboardFeedbackPage } from "@/lib/api/dashboard";
 import {
   fetchProductGroupsWindow,
   fileGroupGithubIssue,
@@ -131,7 +134,6 @@ export function FeedbackView({
   selectReport,
   openInteraction,
   openSession,
-  loadMore,
   refresh,
   setNotice,
 }: {
@@ -140,7 +142,8 @@ export function FeedbackView({
   selectReport: (reportId: string | null) => void;
   openInteraction: (interactionId: string) => void;
   openSession: (sessionId: string) => void;
-  loadMore: () => void;
+  /** @deprecated Pagination is now owned by the server-backed list query. */
+  loadMore?: () => void;
   refresh: () => Promise<unknown>;
   setNotice: (message: string) => void;
 }) {
@@ -148,10 +151,77 @@ export function FeedbackView({
   const [query, setQuery] = useState(initialLocation.query);
   const [filters, setFilters] = useState<FeedbackFiltersState>(initialLocation.filters);
   const [range, setRange] = useState(initialLocation.range);
+  const [groupKey, setGroupKey] = useState(initialLocation.groupKey);
   const [mode, setMode] = useState<FeedbackMode>("reports");
   const [groupLimit, setGroupLimit] = useState(groupsPageSize);
   const productId = data.currentProduct?.id;
-  const loadedReport = data.reports.find((report) => report.id === selectedReportId);
+  const debouncedQuery = useDebouncedValue(query, 250);
+  const since = useMemo(() => rangeStart(range), [range]);
+  const searchSettling = query.trim() !== debouncedQuery.trim();
+  const hasFacetFilters = facetOrder.some((facet) => filters[facet].length > 0);
+  const canSeedReportList =
+    !groupKey &&
+    !query.trim() &&
+    !hasFacetFilters &&
+    data.listState.reportsLoaded === data.listState.reportsTotal &&
+    data.reports.every((report) => !since || new Date(report.createdAt) >= new Date(since));
+  const seedFacets = useMemo(() => feedbackFacetsFromReports(data.reports), [data.reports]);
+  const reportPages = useInfiniteQuery({
+    queryKey: [
+      "feedback-list",
+      data.workspace.id,
+      productId,
+      groupKey,
+      debouncedQuery,
+      filters,
+      since,
+    ],
+    queryFn: ({ pageParam }) =>
+      fetchDashboardFeedbackPage(data.workspace.id, {
+        productId: productId ?? "",
+        groupKey: groupKey ?? undefined,
+        q: debouncedQuery.trim() || undefined,
+        status: filters.status,
+        impact: filters.impact,
+        surface: filters.surface,
+        topic: filters.topic,
+        findingKind: filters.kind,
+        severity: filters.severity,
+        tag: filters.tag,
+        assignee: filters.assignee,
+        workaround: filters.workaround,
+        since,
+        limit: 50,
+        cursor: pageParam,
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page) => page.nextCursor ?? undefined,
+    initialData: canSeedReportList
+      ? {
+          pages: [
+            {
+              reports: data.reports,
+              total: data.listState.reportsTotal,
+              facets: seedFacets,
+              limit: Math.min(100, Math.max(1, data.reports.length || 50)),
+              nextCursor: null,
+            },
+          ],
+          pageParams: [undefined],
+        }
+      : undefined,
+    initialDataUpdatedAt: 0,
+    enabled: Boolean(productId),
+  });
+  const reports = searchSettling
+    ? []
+    : (reportPages.data?.pages.flatMap((page) =>
+        Array.isArray(page.reports) ? page.reports : [],
+      ) ?? []);
+  const reportTotal = reportPages.data?.pages[0]?.total ?? data.listState.reportsTotal;
+  const facetData = reportPages.data?.pages[0]?.facets ?? feedbackFacetsFromReports(reports);
+  const feedbackPending = reportPages.isPending || searchSettling;
+  const loadedReport = reports.find((report) => report.id === selectedReportId);
   const detail = useQuery({
     queryKey: ["feedback", data.workspace.id, productId, selectedReportId],
     queryFn: () =>
@@ -202,8 +272,8 @@ export function FeedbackView({
   }, [data.workspace.id, mode, productId, resetMerging]);
 
   useEffect(() => {
-    writeFilterLocation(query, filters, range);
-  }, [filters, query, range]);
+    writeFilterLocation(query, filters, range, groupKey);
+  }, [filters, groupKey, query, range]);
 
   useEffect(() => {
     const restoreFilters = () => {
@@ -211,61 +281,84 @@ export function FeedbackView({
       setQuery(location.query);
       setFilters(location.filters);
       setRange(location.range);
+      setGroupKey(location.groupKey);
     };
     window.addEventListener("popstate", restoreFilters);
     return () => window.removeEventListener("popstate", restoreFilters);
   }, []);
 
   const filterOptions = useMemo<Record<FeedbackFacet, FilterOption[]>>(() => {
-    const findings = data.reports.flatMap(reportFindings);
     const memberNames = new Map(
       data.teamMembers.map((member) => [member.osUserId, member.displayName]),
     );
-    const assignedIds = unique(data.reports.map((report) => report.assigneeOsUserId));
+    const counts = Object.fromEntries(
+      Object.entries(facetData).map(([facet, values]) => [
+        facet,
+        new Map(values.map((item) => [item.name, item.count])),
+      ]),
+    ) as Record<keyof DashboardFeedbackFacets, Map<string, number>>;
+    const options = (
+      facet: FeedbackFacet,
+      source: keyof DashboardFeedbackFacets,
+      label: (value: string) => string,
+    ) =>
+      unique([...facetData[source].map((item) => item.name), ...filters[facet]]).map((value) => ({
+        value,
+        label: label(value),
+        count: counts[source].get(value) ?? 0,
+      }));
+    const assignedIds = facetData.assignee
+      .map((item) => item.name)
+      .filter((value) => value !== "unassigned");
     const assigneeIds = unique([
       ...data.teamMembers.map((member) => member.osUserId),
       ...assignedIds,
+      ...filters.assignee.filter((value) => value !== "unassigned"),
     ]);
 
     return {
-      status: workflowStatuses.map((value) => ({ value, label: workflowLabels[value] })),
-      impact: impactValues.map((value) => ({ value, label: impactLabels[value] })),
-      surface: unique(data.reports.map((report) => report.surface)).map((value) => ({
+      status: workflowStatuses.map((value) => ({
         value,
-        label: interfaceLabel(value),
+        label: workflowLabels[value],
+        count: counts.status.get(value) ?? 0,
       })),
-      topic: unique(findings.map((finding) => finding.topic)).map((value) => ({
+      impact: impactValues.map((value) => ({
         value,
-        label: titleCase(value),
+        label: impactLabels[value],
+        count: counts.impact.get(value) ?? 0,
       })),
-      kind: unique(findings.map((finding) => finding.kind)).map((value) => ({
-        value,
-        label: titleCase(value),
-      })),
-      severity: unique(findings.map((finding) => finding.severity)).map((value) => ({
-        value,
-        label: titleCase(value),
-      })),
-      tag: unique(data.reports.flatMap((report) => report.tags)).map((value) => ({
-        value,
-        label: value,
-      })),
+      surface: options("surface", "surface", interfaceLabel),
+      topic: options("topic", "topic", titleCase),
+      kind: options("kind", "findingKind", titleCase),
+      severity: options("severity", "severity", titleCase),
+      tag: options("tag", "tag", (value) => value),
       assignee: [
-        { value: "unassigned", label: "Unassigned" },
-        ...assigneeIds.map((value) => ({ value, label: memberNames.get(value) ?? value })),
+        {
+          value: "unassigned",
+          label: "Unassigned",
+          count: counts.assignee.get("unassigned") ?? 0,
+        },
+        ...assigneeIds.map((value) => ({
+          value,
+          label: memberNames.get(value) ?? value,
+          count: counts.assignee.get(value) ?? 0,
+        })),
       ],
       workaround: [
-        { value: "used", label: "Observed" },
-        { value: "suggested", label: "Suggested" },
-        { value: "none", label: "None recorded" },
+        { value: "used", label: "Observed", count: counts.workaround.get("used") ?? 0 },
+        {
+          value: "suggested",
+          label: "Not used",
+          count: counts.workaround.get("suggested") ?? 0,
+        },
+        {
+          value: "none",
+          label: "None recorded",
+          count: counts.workaround.get("none") ?? 0,
+        },
       ],
     };
-  }, [data.reports, data.teamMembers]);
-
-  const filteredReports = useMemo(
-    () => filterFeedbackReports(data.reports, { filters, query, range }),
-    [data.reports, filters, query, range],
-  );
+  }, [data.teamMembers, facetData, filters]);
 
   function commitFilters(nextFilters: FeedbackFiltersState) {
     setFilters(nextFilters);
@@ -280,12 +373,12 @@ export function FeedbackView({
   }
 
   async function refreshSelectedReport() {
-    await refresh();
+    await Promise.all([refresh(), reportPages.refetch()]);
     if (!loadedReport) await detail.refetch();
   }
 
   async function refreshView() {
-    await refresh();
+    await Promise.all([refresh(), reportPages.refetch()]);
     if (mode === "signals" && productId && isEditor(data.currentRole)) {
       await groups.refetch();
     }
@@ -296,7 +389,20 @@ export function FeedbackView({
     if (nextMode === "signals") selectReport(null);
   }
 
-  const incomplete = data.listState.reportsLoaded < data.listState.reportsTotal;
+  function reviewSignalReports(nextGroupKey: string) {
+    setQuery("");
+    setFilters(createEmptyFilters());
+    setRange("all");
+    setGroupKey(nextGroupKey);
+    selectMode("reports");
+  }
+
+  function reviewAllReports() {
+    setGroupKey(null);
+    selectMode("reports");
+  }
+
+  const incomplete = Boolean(reportPages.hasNextPage);
 
   return (
     <DetailWorkspace
@@ -347,51 +453,105 @@ export function FeedbackView({
             onClearAll={() => {
               setQuery("");
               setRange(defaultRange);
+              setGroupKey(null);
               commitFilters(createEmptyFilters());
             }}
           />
 
-          {incomplete ? (
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/25 px-4 py-2 text-xs text-muted-foreground">
-              <p>
-                Showing the newest {data.listState.reportsLoaded.toLocaleString()} of{" "}
-                {data.listState.reportsTotal.toLocaleString()} reports. Filters apply to loaded
-                reports.
+          {groupKey ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-attention/5 px-4 py-2 text-xs">
+              <p aria-live="polite">
+                {feedbackPending
+                  ? "Loading exact signal evidence…"
+                  : `Signal cluster evidence · ${reportTotal.toLocaleString()} matching ${
+                      reportTotal === 1 ? "report" : "reports"
+                    }`}
               </p>
-              <Button variant="outline" size="sm" onClick={loadMore}>
-                Load 250 more
+              <Button type="button" variant="ghost" size="xs" onClick={() => setGroupKey(null)}>
+                Show all feedback
               </Button>
             </div>
           ) : null}
 
-          {filteredReports.length ? (
+          {reportPages.isError ? (
+            <div
+              className="border-b bg-destructive/5 px-4 py-2 text-xs text-destructive"
+              role="alert"
+            >
+              Feedback could not be loaded. Use Refresh to try again.
+            </div>
+          ) : null}
+
+          {feedbackPending ? (
+            <p className="border-b px-4 py-3 text-xs text-muted-foreground" role="status">
+              Loading feedback…
+            </p>
+          ) : null}
+
+          {!feedbackPending && reportTotal > 0 ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/25 px-4 py-2 text-xs text-muted-foreground">
+              <p aria-live="polite">
+                Showing {reports.length.toLocaleString()} of {reportTotal.toLocaleString()} matching
+                reports. Filters cover all retained feedback.
+              </p>
+              {incomplete ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={reportPages.isFetchingNextPage}
+                  onClick={() => void reportPages.fetchNextPage()}
+                >
+                  {reportPages.isFetchingNextPage ? "Loading…" : "Load 50 more"}
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+
+          {reports.length ? (
             <section
               className="min-h-0 flex-1 overflow-auto bg-background"
               aria-label="Feedback reports"
             >
               <FeedbackTable
-                reports={filteredReports}
+                reports={reports}
                 selectedId={selectedReportId}
                 onSelect={selectReport}
               />
             </section>
+          ) : feedbackPending ? (
+            <div className="min-h-0 flex-1 bg-canvas" />
           ) : (
             <div className="min-h-0 flex-1 bg-canvas p-4">
               <EmptyState
-                title="No matching feedback"
-                description="Try a wider filter or wait for agents to submit feedback."
+                title={
+                  data.listState.reportsTotal === 0 ? "No feedback yet" : "No matching feedback"
+                }
+                description={
+                  data.listState.reportsTotal === 0
+                    ? "Finish setup and send one real product request before waiting for an agent report."
+                    : "Clear the filters and show all retained feedback."
+                }
                 action={
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      setQuery("");
-                      setRange(defaultRange);
-                      commitFilters(createEmptyFilters());
-                    }}
-                  >
-                    Clear filters
-                  </Button>
+                  data.listState.reportsTotal === 0 ? (
+                    isEditor(data.currentRole) ? (
+                      <Button size="sm" onClick={() => navigateToSetup()}>
+                        Open Setup
+                      </Button>
+                    ) : null
+                  ) : (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setQuery("");
+                        setRange("all");
+                        setGroupKey(null);
+                        commitFilters(createEmptyFilters());
+                      }}
+                    >
+                      Show all retained feedback
+                    </Button>
+                  )
                 }
               />
             </div>
@@ -410,6 +570,8 @@ export function FeedbackView({
             mutationGroupKey={filing.variables}
             filingPending={filing.isPending}
             filingError={filing.error}
+            onReviewReports={reviewAllReports}
+            onReviewGroup={reviewSignalReports}
             onFileIssue={(groupKey) => filing.mutate(groupKey)}
             onCheckAgain={async () => {
               await groups.refetch();
@@ -443,6 +605,16 @@ export function FeedbackView({
   );
 }
 
+function navigateToSetup() {
+  const url = new URL(window.location.href);
+  url.searchParams.set("view", "setup");
+  url.searchParams.delete("report");
+  url.searchParams.delete("session");
+  url.searchParams.delete("interaction");
+  window.history.pushState({}, "", url);
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
 function SignalsView({
   canView,
   hasProduct,
@@ -454,6 +626,8 @@ function SignalsView({
   mutationGroupKey,
   filingPending,
   filingError,
+  onReviewReports,
+  onReviewGroup,
   onFileIssue,
   onCheckAgain,
   mergePendingSource,
@@ -476,6 +650,8 @@ function SignalsView({
   mutationGroupKey: string | undefined;
   filingPending: boolean;
   filingError: Error | null;
+  onReviewReports: () => void;
+  onReviewGroup: (groupKey: string) => void;
   onFileIssue: (groupKey: string) => void;
   onCheckAgain: () => Promise<void>;
   mergePendingSource: string | undefined;
@@ -530,6 +706,23 @@ function SignalsView({
 
   return (
     <div className="grid gap-3">
+      <section className="border bg-background px-4 py-3" aria-labelledby="signal-clusters-title">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 id="signal-clusters-title" className="text-sm font-medium">
+              Signal clusters
+            </h2>
+            <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
+              Each report belongs to one cluster using its operation, interface, status class, and
+              one deterministic primary finding (severity first, then finding type). Secondary
+              findings remain available on the full report.
+            </p>
+          </div>
+          <Button type="button" variant="outline" size="sm" onClick={onReviewReports}>
+            Review full reports
+          </Button>
+        </div>
+      </section>
       {!mappingAvailable && groups.groups.some((group) => !group.githubIssue) ? (
         <StatusMessage>
           Map this product to a GitHub repository before filing an issue.{" "}
@@ -587,6 +780,7 @@ function SignalsView({
             mappingAvailable={mappingAvailable}
             mutationGroupKey={mutationGroupKey}
             filingPending={filingPending}
+            onReviewGroup={onReviewGroup}
             onFileIssue={onFileIssue}
             mergePendingSource={mergePendingSource}
             mergePending={mergePending}
@@ -614,6 +808,7 @@ function SignalsTable({
   mappingAvailable,
   mutationGroupKey,
   filingPending,
+  onReviewGroup,
   onFileIssue,
   mergePendingSource,
   mergePending,
@@ -624,6 +819,7 @@ function SignalsTable({
   mappingAvailable: boolean;
   mutationGroupKey: string | undefined;
   filingPending: boolean;
+  onReviewGroup: (groupKey: string) => void;
   onFileIssue: (groupKey: string) => void;
   mergePendingSource: string | undefined;
   mergePending: boolean;
@@ -690,8 +886,17 @@ function SignalsTable({
                     <span className="truncate font-mono">{group.groupKey}</span>
                   </p>
                 </TableCell>
-                <TableCell className="text-xs text-muted-foreground">
-                  {group.reportCount.toLocaleString()}
+                <TableCell className="text-xs">
+                  <Button
+                    type="button"
+                    variant="link"
+                    className="h-auto p-0 text-xs"
+                    aria-label={`Review ${group.reportCount.toLocaleString()} ${group.reportCount === 1 ? "report" : "reports"} in this signal cluster`}
+                    onClick={() => onReviewGroup(group.groupKey)}
+                  >
+                    {group.reportCount.toLocaleString()}{" "}
+                    {group.reportCount === 1 ? "report" : "reports"}
+                  </Button>
                 </TableCell>
                 <TableCell
                   className="text-xs text-muted-foreground"
@@ -905,8 +1110,9 @@ function FeedbackTable({
             key={report.id}
             data-state={selectedId === report.id ? "selected" : undefined}
             aria-selected={selectedId === report.id}
+            aria-label={`Open feedback: ${report.summary}`}
             tabIndex={0}
-            className="cursor-pointer bg-background hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring data-[state=selected]:bg-selected data-[state=selected]:shadow-[inset_2px_0_0_var(--attention)]"
+            className="cursor-pointer bg-background hover:bg-muted/40 data-[state=selected]:bg-selected data-[state=selected]:shadow-[inset_2px_0_0_var(--attention)]"
             onClick={() => onSelect(report.id)}
             onKeyDown={(event) => {
               if (event.key === "Enter" || event.key === " ") {
@@ -917,7 +1123,16 @@ function FeedbackTable({
           >
             <TableCell className="h-[66px] overflow-hidden pl-4">
               <div className="min-w-0">
-                <p className="truncate text-[13px] font-medium leading-5">{report.summary}</p>
+                <Button
+                  variant="link"
+                  className="h-auto max-w-full justify-start truncate p-0 text-[13px] font-medium leading-5"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onSelect(report.id);
+                  }}
+                >
+                  {report.summary}
+                </Button>
                 <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
                   {report.operation} · {interfaceLabel(report.surface)}
                 </p>
@@ -1084,11 +1299,13 @@ function FeedbackDetailContent({
             <Separator className="my-5" />
             <section>
               <h3 className="text-xs font-medium">
-                {report.workaround.used ? "Workaround observed" : "Suggested workaround"}
+                {report.workaround.used ? "Workaround observed" : "No workaround used"}
               </h3>
-              <p className="mt-2 text-[13px] leading-5 text-muted-foreground">
-                {report.workaround.detail ?? "No detail provided."}
-              </p>
+              {report.workaround.detail ? (
+                <p className="mt-2 text-[13px] leading-5 text-muted-foreground">
+                  {report.workaround.detail}
+                </p>
+              ) : null}
             </section>
           </>
         ) : null}
@@ -1275,6 +1492,40 @@ function unique(values: Array<string | null | undefined>) {
   );
 }
 
+function feedbackFacetsFromReports(reports: ProductFeedbackReport[]): DashboardFeedbackFacets {
+  const facet = (values: (report: ProductFeedbackReport) => Array<string | null | undefined>) => {
+    const counts = new Map<string, number>();
+    for (const report of reports) {
+      for (const value of new Set(values(report).filter((item): item is string => Boolean(item)))) {
+        counts.set(value, (counts.get(value) ?? 0) + 1);
+      }
+    }
+    return [...counts]
+      .map(([name, count]) => ({ name, count }))
+      .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name));
+  };
+
+  return {
+    status: facet((report) => [report.workflowStatus ?? "new"]),
+    impact: facet((report) => [report.impact ?? "unknown"]),
+    surface: facet((report) => [report.surface]),
+    topic: facet((report) => reportFindings(report).map((finding) => finding.topic)),
+    findingKind: facet((report) => reportFindings(report).map((finding) => finding.kind)),
+    severity: facet((report) => reportFindings(report).map((finding) => finding.severity)),
+    tag: facet((report) => report.tags),
+    assignee: facet((report) => [report.assigneeOsUserId ?? "unassigned"]),
+    workaround: facet((report) => [
+      report.workaround ? (report.workaround.used ? "used" : "suggested") : "none",
+    ]),
+  };
+}
+
+function rangeStart(range: string): string | undefined {
+  const days = range === "7d" ? 7 : range === "30d" ? 30 : null;
+  if (days === null) return undefined;
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1_000).toISOString();
+}
+
 function connectorsPath(workspaceId: string, productId: string): string {
   const params = new URLSearchParams({ view: "connectors", team: workspaceId, product: productId });
   return `/?${params}`;
@@ -1284,21 +1535,29 @@ function readFilterLocation(): {
   query: string;
   filters: FeedbackFiltersState;
   range: string;
+  groupKey: string | null;
 } {
   if (typeof window === "undefined") {
-    return { query: "", filters: createEmptyFilters(), range: defaultRange };
+    return { query: "", filters: createEmptyFilters(), range: defaultRange, groupKey: null };
   }
   const params = new URL(window.location.href).searchParams;
   const filters = createEmptyFilters();
+  const groupKey = params.get("group");
   for (const facet of facetOrder) filters[facet] = params.getAll(facet).filter(Boolean);
   return {
     query: params.get("q") ?? "",
     filters,
-    range: params.get("range") ?? defaultRange,
+    range: params.get("range") ?? (groupKey ? "all" : defaultRange),
+    groupKey,
   };
 }
 
-function writeFilterLocation(query: string, filters: FeedbackFiltersState, range: string) {
+function writeFilterLocation(
+  query: string,
+  filters: FeedbackFiltersState,
+  range: string,
+  groupKey: string | null,
+) {
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
   if (query.trim()) url.searchParams.set("q", query.trim());
@@ -1309,5 +1568,7 @@ function writeFilterLocation(query: string, filters: FeedbackFiltersState, range
   }
   if (range === defaultRange) url.searchParams.delete("range");
   else url.searchParams.set("range", range);
+  if (groupKey) url.searchParams.set("group", groupKey);
+  else url.searchParams.delete("group");
   window.history.replaceState(window.history.state, "", url);
 }

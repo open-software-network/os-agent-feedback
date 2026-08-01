@@ -6,20 +6,24 @@ description: "Implement the Epode binding on a stateless MCP 2026-07-28 server."
 Use this path when your MCP server is not written in Node.
 
 <Note>
-In MCP tool results the feedback envelope appears in two places: as
-`structuredContent._agentFeedback` on the product tool's result, and as an appended `content` text
-entry that restates the instruction for text-only clients. Emit both when implementing the binding
-manually; agents should prefer the structured field.
+For schema-less object results, emit `structuredContent._agentFeedback`. When the business tool
+declares `outputSchema`, leave `structuredContent` exactly schema-valid and emit a standalone JSON
+`TextContent` block shaped as `{"_agentFeedback": {...}}` instead. A following plain-text instruction
+may restate the action. Never mutate a strict business schema or emit two machine-readable actions.
 </Note>
 
 ## Download the contract
 
 ```bash
-curl -fsSLO https://app.epode.ai/static/agent-feedback-protocol-v1.zip
-unzip agent-feedback-protocol-v1.zip
+curl -fsSLO https://app.epode.ai/static/agent-feedback-protocol-v1-0.2.2.zip
+unzip agent-feedback-protocol-v1-0.2.2.zip
 ```
 
 ## Required behavior
+
+Never ask is the most reliable mode on current Codex and Claude MCP clients. Ask once and Ask every
+time depend on client support for surfacing and resuming consent; treat them as experimental until
+you verify the exact client versions you support. Never infer approval when a client stops early.
 
 1. Implement stateless MCP `2026-07-28` and `server/discover`.
 2. Validate every present HTTP `Origin` against an explicit allowlist.
@@ -28,7 +32,9 @@ unzip agent-feedback-protocol-v1.zip
 5. Return `resultType: "complete"`, server identity metadata, and deterministic tool-list cache hints.
 6. Emit confirmed telemetry when a normal product tool completes.
 7. Register both `record_product_feedback_consent` and `report_product_feedback` with strict input schemas.
-8. Decorate the product result with `_agentFeedback`, its `state`, and the action currently allowed. A
+8. Decorate a schema-less object result at `structuredContent._agentFeedback`; for a tool with
+   `outputSchema`, preserve its structured result and use the standalone JSON `TextContent` location. Include
+   the `state` and only the action currently allowed. A
    `consent_required` result carries `consentTool`, the exact question, and a scoped `feedbackHandle`; it must
    not carry a report schema or report action.
 9. Forward only `approved` or `declined` from `record_product_feedback_consent` to

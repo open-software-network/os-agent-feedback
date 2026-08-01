@@ -19,7 +19,27 @@ still responsible for keeping sensitive material out of summaries and finding de
 ## Product key
 
 The `af_live_...` key belongs only in trusted server configuration. SDKs derive a signing key with SHA-256 and use
-it to create a scoped `afr2_...` capability locally. The capability contains no customer or product data.
+it to create a scoped `afr2_...` capability locally. A capability never contains the raw customer reference,
+product response, prompt, or personal identity. Ask-once capabilities do contain a public key ID, a
+pseudonymous HMAC-derived consent subject, and a non-negative consent revision so Epode can remember
+the choice for that product scope without accepting stale updates.
+
+Setup shows a newly created or rotated key only for the current page load and does not persist the full secret in
+browser storage. Move it directly into a deployment secret manager. Never paste it into shell history, CI output,
+a committed `.env` file, browser or mobile code, an MCP client, a product-auth header, or a support message. If the
+value is lost, rotate it; Epode cannot reveal it again.
+
+## Data retention
+
+Team owners and admins can set each product's retention period to any whole number from 1 to 365 days in
+**Collection policy**. A shorter period changes dashboard filtering immediately, so feedback reports,
+interactions, and sessions outside the retained window stop appearing right away. Physical deletion runs on a
+schedule and can take up to the scheduled purge interval. The purge permanently removes expired feedback,
+interactions, and sessions.
+
+Durable Ask-once permission is a separate data control. It survives the telemetry retention window so a customer
+is not asked again merely because older product data expired. That permission remains until it is explicitly
+changed or the product is deleted; changing retention alone does not reset it.
 
 ## Capability
 
@@ -32,10 +52,13 @@ it to create a scoped `afr2_...` capability locally. The capability contains no 
 ## Agent and customer identity
 
 Epode does not identify an agent. HTTP runtime headers and MCP client information are unverified hints. Optional
-`customerRef` and session references are opaque values supplied by your own authenticated product context.
+`customerRef` and session references are opaque values supplied by your own authenticated product
+context. Epode stores `customerRef` with interaction telemetry for optional customer grouping. Session
+references are hashed before storage. Ask-once consent uses an HMAC-derived subject, so neither the raw
+`customerRef` nor the stored telemetry value is exposed to the customer's agent in the feedback envelope.
+Use non-personal internal identifiers only.
 
 ## Origin safety
 
 Agent-side HTTP helpers require an explicit allowlist of HTTPS submit origins. MCP servers validate every present
 browser `Origin` against an explicit allowlist. Empty MCP origin allowlists reject browser-originated requests.
-

@@ -1,0 +1,97 @@
+---
+title: "Static sites and hosted docs at the edge"
+description: "Add feedback to finite static HTML through a trusted reverse proxy without exposing the product key."
+---
+
+Use this advanced path only when your team controls a server-side edge route or reverse proxy in front of the
+static site, CMS, or hosted documentation origin. A browser script, tag manager, theme snippet, or public build
+variable is never safe: `AGENT_FEEDBACK_KEY` must remain an edge secret.
+
+Bind the Worker only to dedicated public docs routes such as `/docs/*`; never attach it as a hostname-wide
+catch-all or fallback. The SDK `include` list is a second fail-closed boundary, not a substitute for the edge
+platform's route binding. Paths outside `include` return 404 and methods other than GET or HEAD return 405 without
+contacting the upstream origin.
+
+If the hosting platform cannot route the site's public hostname through infrastructure you control, direct
+integration is still unsupported. Do not proxy customer feedback through your origin; reports go directly to
+Epode with a short-lived write-only capability.
+
+## Cloudflare Worker-compatible proxy
+
+Install the Node SDK in the Worker project and enable the platform's Node compatibility mode:
+
+```bash
+npm install https://app.epode.ai/static/agent-feedback-node-0.2.2.tgz
+```
+
+```js
+import { createStaticDocsProxy } from "@agent-feedback/node/edge";
+
+let proxy;
+
+export default {
+  fetch(request, env, context) {
+    // The edge platform must route only dedicated public docs paths here.
+    proxy ??= createStaticDocsProxy({
+      apiKey: env.AGENT_FEEDBACK_KEY,
+      feedbackMode: env.AGENT_FEEDBACK_MODE || "never_ask",
+      upstreamOrigin: env.DOCS_UPSTREAM_ORIGIN,
+      // Optional private-origin credential from the edge secret manager.
+      // A customer's Authorization/Cookie headers are never forwarded.
+      upstreamAuthorization: env.DOCS_UPSTREAM_AUTHORIZATION || undefined,
+      include: ["/docs", "/docs/**"],
+    });
+    return proxy.fetch(request, context);
+  },
+};
+```
+
+The public route and `DOCS_UPSTREAM_ORIGIN` must be different HTTPS origins to prevent recursion. Store the
+product key with the edge platform's secret manager, never in `wrangler.jsonc`, source control, client JavaScript,
+or the static site's build environment.
+
+The proxy forwards only bounded representation and conditional-request headers such as `Accept`, `Range`,
+`If-None-Match`, and a valid `traceparent`. It never forwards caller `Authorization`, `Cookie`,
+`Proxy-Authorization`, origin/referrer, forwarding/IP, baggage, or hop-by-hop headers to the different origin.
+It also removes upstream cookies, authentication challenges, `Clear-Site-Data`, and hop-by-hop headers before
+returning a response. If a private docs origin requires authentication, set `DOCS_UPSTREAM_AUTHORIZATION` as a
+separate edge secret; callers cannot supply or override it.
+
+## Cache and routing behavior
+
+Ordinary HTML stays byte-for-byte identical and retains its public cache policy and content encoding. The proxy
+adds `Vary: Agent-Feedback-Request` plus a same-public-URL discovery marker. The one opted-in refetch receives the
+same body with a private `Agent-Feedback` capability header. Configure a CDN outside the proxy to honor `Vary` or
+include `Agent-Feedback-Request` in its cache key; otherwise leave that outer cache disabled for the proxied route.
+
+Static HTML with or without `Content-Length` is supported. Partial or range responses (`206` or
+`Content-Range`), explicit transfer-encoded streams, attachments, declared bodies over 1 MiB, non-HTML bodies,
+errors, redirects, and pre-instrumented responses receive no feedback contract. A fragment is never treated as a
+completed product outcome. Same-upstream redirects are rewritten to the public origin. Other redirects from the
+trusted upstream pass through unchanged to preserve existing login or download flows and may intentionally leave
+the proxy origin.
+
+Epode telemetry is scheduled with the edge lifecycle hook. Epode timeout or outage may drop telemetry but never
+changes or delays the upstream response. The capability is signed locally; the product key is sent only to Epode's
+telemetry and optional consent-state endpoints, never to the docs origin or customer agent.
+
+## Verify
+
+Check both variants before routing production traffic:
+
+```bash
+curl -i https://docs.example.com/docs/start
+curl -i -H 'Agent-Feedback-Request: 1' https://docs.example.com/docs/start
+```
+
+The first response remains publicly cacheable and contains no `Agent-Feedback`, `afr2_`, or product key. The second
+has the identical body, `Cache-Control: private, no-store`, and an `Agent-Feedback` header. Then simulate an invalid
+Epode endpoint and confirm the docs response still succeeds. Also send a dummy caller `Authorization` and `Cookie`,
+then verify neither reaches the origin and no origin `Set-Cookie` reaches the public response.
+
+[Run the complete trusted-edge example](https://github.com/open-software-network/os-epode/tree/main/examples/static-docs-edge)
+
+<Note>
+This closes the integration gap for teams that already control the public edge route. It remains an advanced-only
+option and does not make a third-party no-code site programmable.
+</Note>

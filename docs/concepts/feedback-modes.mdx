@@ -23,6 +23,10 @@ An unknown customer receives only the exact question and an `approved|declined` 
 
 Every report starts with the question-only contract. Approval reveals a report contract for that interaction only. No consent fields are included in the report body.
 
+For MCP, current client support for surfacing and resuming either consent mode is inconsistent.
+Prefer Never ask unless you have verified the exact Codex, Claude, or other client versions your
+customers use. A client that cannot resume must stop safely; it never turns silence into approval.
+
 <Warning>
 Ask modes require a conversational runtime that notices the instruction, pauses, receives the user's answer,
 and resumes the pending report. A response envelope cannot force an independent HTTP agent to do this.

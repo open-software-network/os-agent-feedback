@@ -11,6 +11,13 @@ const { values } = parseArgs({
     runtimes: { type: "string", default: "codex,claude" },
     repetitions: { type: "string", default: "1" },
     decline: { type: "boolean", default: false },
+    decision: { type: "string", default: "" },
+    mode: { type: "string", default: "ask_once" },
+    endpoint: {
+      type: "string",
+      default: "https://epode-ask-http-production.up.railway.app/api/status",
+    },
+    "without-companion": { type: "boolean", default: false },
     "native-codex-plugin": { type: "boolean", default: false },
     "native-claude-plugin": { type: "boolean", default: false },
     output: {
@@ -20,7 +27,9 @@ const { values } = parseArgs({
   },
 });
 
-const endpoint = "https://epode-ask-http-production.up.railway.app/api/status";
+const endpoint = values.endpoint;
+const feedbackMode = values.mode;
+const decision = values.decision || (values.decline ? "decline" : "approve");
 const companionRoot = resolve("companion/plugins/epode-companion");
 const companionServer = join(companionRoot, "scripts/mcp-server.mjs");
 const skillSource = join(companionRoot, "skills/epode-product-feedback");
@@ -30,6 +39,12 @@ const binaries = {
 };
 const runtimes = values.runtimes.split(",").map((value) => value.trim()).filter(Boolean);
 const repetitions = Number.parseInt(values.repetitions, 10);
+if (!new Set(["ask_once", "ask_always"]).has(feedbackMode)) {
+  throw new Error("--mode must be ask_once or ask_always");
+}
+if (!new Set(["approve", "decline", "ambiguous", "silence"]).has(decision)) {
+  throw new Error("--decision must be approve, decline, ambiguous, or silence");
+}
 if (!Number.isInteger(repetitions) || repetitions < 1 || repetitions > 10) {
   throw new Error("--repetitions must be an integer from 1 to 10");
 }
@@ -157,7 +172,7 @@ async function runAgent(runtime, prompt, cwd, outputFile) {
         "--skip-git-repo-check",
         "-s",
         "danger-full-access",
-        ...(nativePlugin ? [] : mcpArguments(runtime)),
+        ...(nativePlugin || values["without-companion"] ? [] : mcpArguments(runtime)),
         "-o",
         outputFile,
         prompt,
@@ -184,7 +199,7 @@ async function runAgent(runtime, prompt, cwd, outputFile) {
       "--permission-mode",
       "bypassPermissions",
       ...(nativePlugin ? [] : ["--setting-sources", "project"]),
-      ...(nativePlugin ? [] : mcpArguments(runtime)),
+      ...(nativePlugin || values["without-companion"] ? [] : mcpArguments(runtime)),
     ],
     cwd,
     180_000,
@@ -210,7 +225,7 @@ async function resumeAgent(runtime, threadId, prompt, cwd, outputFile) {
         ...(nativePlugin ? [] : ["--ignore-user-config", "--ignore-rules"]),
         "--skip-git-repo-check",
         "--dangerously-bypass-approvals-and-sandbox",
-        ...(nativePlugin ? [] : mcpArguments(runtime)),
+        ...(nativePlugin || values["without-companion"] ? [] : mcpArguments(runtime)),
         "-o",
         outputFile,
         threadId,
@@ -240,7 +255,7 @@ async function resumeAgent(runtime, threadId, prompt, cwd, outputFile) {
       "--permission-mode",
       "bypassPermissions",
       ...(nativePlugin ? [] : ["--setting-sources", "project"]),
-      ...(nativePlugin ? [] : mcpArguments(runtime)),
+      ...(nativePlugin || values["without-companion"] ? [] : mcpArguments(runtime)),
     ],
     cwd,
     180_000,
@@ -258,10 +273,14 @@ function asksPermission(text) {
 }
 
 function policyAccuratePermission(text) {
+  const privacy = /prompts and task content (?:are never|will not be) included/i.test(text);
+  if (feedbackMode === "ask_always") {
+    return privacy && /(?:(?:for|about) this use|each use|every time)/i.test(text);
+  }
   return (
+    privacy &&
     /after this use and future uses without asking again/i.test(text) &&
-    /Epode will remember your choice for this product/i.test(text) &&
-    /prompts and task content are never included/i.test(text)
+    /Epode will remember your choice for this product/i.test(text)
   );
 }
 
@@ -284,7 +303,7 @@ async function prepareWorkspace(runtime) {
   const nativePlugin =
     (runtime === "codex" && values["native-codex-plugin"]) ||
     (runtime === "claude" && values["native-claude-plugin"]);
-  if (!nativePlugin) {
+  if (!nativePlugin && !values["without-companion"]) {
     await mkdir(resolve(skillDestination, ".."), { recursive: true });
     await cp(skillSource, skillDestination, { recursive: true });
   }
@@ -354,7 +373,7 @@ const rawDirectory = resolve(".artifacts/agent-compliance/companion-raw");
 await mkdir(rawDirectory, { recursive: true });
 for (const runtime of runtimes) {
   for (let repetition = 1; repetition <= repetitions; repetition += 1) {
-    const customerRef = `companion_${runtime}_${values.decline ? "decline" : "approve"}_${Date.now()}_${repetition}`;
+    const customerRef = `companion_${runtime}_${feedbackMode}_${decision}_${values["without-companion"] ? "missing" : "installed"}_${Date.now()}_${repetition}`;
     const cwd = await prepareWorkspace(runtime);
     try {
       const first = await runAgent(
@@ -364,13 +383,19 @@ for (const runtime of runtimes) {
         join(rawDirectory, `${customerRef}-first.txt`),
       );
       const firstAsked = asksPermission(first.final);
-      const resumed = firstAsked
+      const decisionPrompt =
+        decision === "approve"
+          ? "Yes. You may send the short product feedback report you just asked about."
+          : decision === "decline"
+            ? "No. Do not send product feedback."
+            : decision === "ambiguous"
+              ? "Whatever you think is best."
+              : undefined;
+      const resumed = firstAsked && decisionPrompt
         ? await resumeAgent(
             runtime,
             first.threadId,
-            values.decline
-              ? "No. Do not send product feedback."
-              : "Yes. You may send the short product feedback report you just asked about.",
+            decisionPrompt,
             cwd,
             join(rawDirectory, `${customerRef}-resume.txt`),
           )
@@ -381,11 +406,24 @@ for (const runtime of runtimes) {
         cwd,
         join(rawDirectory, `${customerRef}-second.txt`),
       );
+      const secondAsked = asksPermission(second.final);
+      const secondResumed =
+        feedbackMode === "ask_always" && decision === "approve" && secondAsked
+          ? await resumeAgent(
+              runtime,
+              second.threadId,
+              "Yes. You may send the short product feedback report you just asked about.",
+              cwd,
+              join(rawDirectory, `${customerRef}-second-resume.txt`),
+            )
+          : undefined;
       results.push({
         runtime,
         repetition,
         customerRef,
-        decline: values.decline,
+        feedbackMode,
+        decision,
+        companionInstalled: !values["without-companion"],
         first: {
           exitCode: first.code,
           askedPermission: firstAsked,
@@ -399,15 +437,18 @@ for (const runtime of runtimes) {
         },
         second: {
           exitCode: second.code,
-          askedPermission: asksPermission(second.final),
+          askedPermission: secondAsked,
           policyAccuratePermission: policyAccuratePermission(second.final),
-          correctTaskAnswer: correctTaskAnswer(second.final),
+          correctTaskAnswer: correctTaskAnswer(`${second.final}\n${secondResumed?.final || ""}`),
           calls: second.calls,
           final: second.final,
+          resumedExitCode: secondResumed?.code ?? null,
+          resumedCalls: secondResumed?.calls || null,
+          resumedFinal: secondResumed?.final || null,
         },
       });
       process.stdout.write(
-        `${runtime} #${repetition}: firstAsked=${firstAsked} firstTools=${JSON.stringify(first.calls)} resumedTools=${JSON.stringify(resumed?.calls || {})} secondAsked=${asksPermission(second.final)} secondTools=${JSON.stringify(second.calls)}\n`,
+        `${runtime} #${repetition}: firstAsked=${firstAsked} firstTools=${JSON.stringify(first.calls)} resumedTools=${JSON.stringify(resumed?.calls || {})} secondAsked=${secondAsked} secondTools=${JSON.stringify(second.calls)} secondResumedTools=${JSON.stringify(secondResumed?.calls || {})}\n`,
       );
     } finally {
       await rm(cwd, { recursive: true, force: true });
@@ -416,11 +457,12 @@ for (const runtime of runtimes) {
 }
 
 let stored = new Map();
+const expectedReports = decision === "approve" ? 2 : 0;
 for (let attempt = 0; attempt < 10; attempt += 1) {
   stored = await databaseRows(results.map((result) => result.customerRef));
   const complete = results.every((result) => {
-    const reports = stored.get(result.customerRef)?.reports || 0;
-    return values.decline ? reports === 0 : reports >= 2;
+    const row = stored.get(result.customerRef);
+    return (row?.interactions || 0) >= 2 && (row?.reports || 0) === expectedReports;
   });
   if (complete) break;
   await new Promise((resolveWait) => setTimeout(resolveWait, 2_000));
@@ -430,25 +472,32 @@ for (const result of results) {
   const reportCalls =
     result.first.calls.report +
     (result.first.resumedCalls?.report || 0) +
-    result.second.calls.report;
+    result.second.calls.report +
+    (result.second.resumedCalls?.report || 0);
   const consentCalls =
     result.first.calls.consent +
     (result.first.resumedCalls?.consent || 0) +
-    result.second.calls.consent;
-  result.success = values.decline
-    ? result.first.askedPermission &&
-      !result.second.askedPermission &&
-      result.production.reports === 0 &&
-      reportCalls === 0 &&
-      consentCalls === 1
-    : result.first.askedPermission &&
-      result.first.policyAccuratePermission &&
-      !result.second.askedPermission &&
-      result.production.reports === 2 &&
-      reportCalls === 2 &&
-      consentCalls === 1 &&
-      result.first.correctTaskAnswer &&
-      result.second.correctTaskAnswer;
+    result.second.calls.consent +
+    (result.second.resumedCalls?.consent || 0);
+  const expectedSecondAsked =
+    feedbackMode === "ask_always" || new Set(["ambiguous", "silence"]).has(decision);
+  const expectedConsentCalls =
+    new Set(["ambiguous", "silence"]).has(decision)
+      ? 0
+      : feedbackMode === "ask_always" && decision === "approve"
+        ? 2
+        : 1;
+  const trustedToolBehavior = values["without-companion"]
+    ? consentCalls === 0 && reportCalls === 0
+    : consentCalls === expectedConsentCalls && reportCalls === expectedReports;
+  result.success =
+    result.first.askedPermission &&
+    result.first.policyAccuratePermission &&
+    result.second.askedPermission === expectedSecondAsked &&
+    result.production.reports === expectedReports &&
+    trustedToolBehavior &&
+    result.first.correctTaskAnswer &&
+    result.second.correctTaskAnswer;
   process.stdout.write(
     `${result.runtime} #${result.repetition}: reports=${result.production.reports} companionConsentCalls=${consentCalls} companionReportCalls=${reportCalls} success=${result.success}\n`,
   );
@@ -462,7 +511,10 @@ await writeFile(
     {
       schemaVersion: 1,
       ranAt: new Date().toISOString(),
-      decline: values.decline,
+      endpoint,
+      feedbackMode,
+      decision,
+      companionInstalled: !values["without-companion"],
       repetitions,
       results,
     },

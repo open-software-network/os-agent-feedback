@@ -20,6 +20,7 @@ jobs:
       backend: ${{ steps.filter.outputs.backend }}
       node: ${{ steps.filter.outputs.node }}
       sdk-node: ${{ steps.filter.outputs.sdk-node }}
+      sdk-packages: ${{ steps.filter.outputs.sdk-packages }}
       examples: ${{ steps.filter.outputs.examples }}
       web: ${{ steps.filter.outputs.web }}
       docs: ${{ steps.filter.outputs.docs }}
@@ -45,6 +46,9 @@ jobs:
               - "sdk/**"
               - "protocol/**"
               - "docs/**"
+              - "scripts/hosted-artifact-ledger.json"
+              - "scripts/verify-image-artifact-ledger.sh"
+              - "scripts/verify-public-integration-surface.sh"
               - ".github/workflows/ci.yml"
             sdk-node:
               - "package.json"
@@ -54,11 +58,20 @@ jobs:
               - "Makefile"
               - "sdk/node/**"
               - ".github/workflows/ci.yml"
+            sdk-packages:
+              - "sdk/**"
+              - "scripts/sdk-release-readiness.sh"
+              - "package.json"
+              - "pnpm-lock.yaml"
+              - "pnpm-workspace.yaml"
+              - ".github/workflows/ci.yml"
+              - ".github/workflows/sdk-release.yml"
             examples:
-              - "backend/public/agent-feedback-node-0.1.0.tgz"
+              - "backend/public/agent-feedback-node-*.tgz"
               - "sdk/node/**"
               - "examples/node-express/**"
               - "examples/node-mcp/**"
+              - "examples/static-docs-edge/**"
               - ".dockerignore"
               - ".github/workflows/build-node-examples.yml"
               - ".github/workflows/ci.yml"
@@ -84,6 +97,8 @@ jobs:
               - ".github/workflows/ci.yml"
             workflows:
               - ".github/workflows/**"
+              - "scripts/railway-deploy-image.sh"
+              - "scripts/verify-public-integration-surface.sh"
 
   backend:
     name: Backend
@@ -151,8 +166,42 @@ jobs:
       - name: Test Node SDK
         run: make sdk-node-test
 
+  sdk-packages:
+    name: SDK package artifacts
+    needs: changes
+    if: needs.changes.outputs.sdk-packages == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.24.x"
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: "1.88"
+      - name: Install locked Node dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build, validate, and install SDK artifacts
+        run: SDK_ARTIFACT_DIR=.artifacts/sdk-release bash scripts/sdk-release-readiness.sh
+      - name: Upload SDK release candidates
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sdk-release-candidate
+          path: .artifacts/sdk-release
+          if-no-files-found: error
+
   examples:
-    name: Node examples
+    name: Product examples
     needs: changes
     if: needs.changes.outputs.examples == 'true'
     runs-on: ubuntu-latest
@@ -165,14 +214,24 @@ jobs:
           cache-dependency-path: |
             examples/node-express/package-lock.json
             examples/node-mcp/package-lock.json
+            examples/static-docs-edge/package-lock.json
       - name: Install locked production dependencies
         run: |
           npm ci --prefix examples/node-express --omit=dev --ignore-scripts
           npm ci --prefix examples/node-mcp --omit=dev --ignore-scripts
+          npm install \
+            --prefix examples/static-docs-edge \
+            --ignore-scripts \
+            --no-save \
+            --package-lock=false \
+            wrangler@4.118.0 \
+            "$GITHUB_WORKSPACE/backend/public/agent-feedback-node-0.2.2.tgz"
       - name: Check entry points
         run: |
           node --check examples/node-express/src/index.js
           node --check examples/node-mcp/src/index.js
+      - name: Validate static edge worker bundle
+        run: npm run --prefix examples/static-docs-edge check
       - name: Smoke-test health endpoints
         env:
           AGENT_FEEDBACK_KEY: af_live_11111111111111111111111111111111_22222222222222222222222222222222_abcdefghijklmnopqrstuvwxyz
@@ -223,6 +282,8 @@ jobs:
         run: make web-typecheck
       - name: Test web
         run: make web-test
+      - name: Run dashboard release browser check
+        run: make web-release-e2e
       - name: Build web
         run: make web-build
 
@@ -270,10 +331,16 @@ jobs:
           tar -xzf actionlint.tar.gz actionlint
       - name: Lint workflows
         run: ./actionlint -color
+      - name: Lint deployment and public-surface helpers
+        run: >-
+          shellcheck
+          scripts/railway-deploy-image.sh
+          scripts/verify-image-artifact-ledger.sh
+          scripts/verify-public-integration-surface.sh
 
   ci-ok:
     name: CI
-    needs: [backend, node, sdk-node, examples, web, docs, workflows]
+    needs: [backend, node, sdk-node, sdk-packages, examples, web, docs, workflows]
     if: always()
     runs-on: ubuntu-latest
     steps:

@@ -1,4 +1,5 @@
 import type { components } from "@/lib/api/types";
+import { authStartPath, currentReturnTo } from "@/lib/auth/return-to";
 
 type ApiErrorEnvelope = components["schemas"]["ApiErrorEnvelope"];
 
@@ -36,7 +37,7 @@ export async function apiRequest<T>(
 
   if (response.status === 401) {
     if (typeof window !== "undefined") {
-      window.location.assign("/auth/start");
+      window.location.assign(authStartPath(currentReturnTo(window.location)));
     }
     throw new ApiError("Authentication required", response.status);
   }

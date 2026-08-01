@@ -1,4 +1,4 @@
-.PHONY: help install node-install backend-install node-version-check backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test sdk-node-test web-install web-types-check web-check web-typecheck web-test web-build docs-validate docs-a11y types check
+.PHONY: help install node-install backend-install node-version-check backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test sdk-node-test web-install web-types-check web-check web-typecheck web-test web-release-e2e web-build docs-validate docs-a11y types check
 
 .DEFAULT_GOAL := help
 
@@ -75,6 +75,9 @@ web-typecheck: node-version-check  ## Typecheck the web workspace
 
 web-test: node-version-check  ## Run the web unit and component tests
 	pnpm --filter @epode/web test
+
+web-release-e2e: node-version-check  ## Run the disposable signed-in dashboard browser release check
+	pnpm --filter @epode/web run test:release-e2e
 
 web-build: node-version-check  ## Build the standalone Next.js web artifact
 	pnpm --filter @epode/web build

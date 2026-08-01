@@ -48,6 +48,7 @@
               "integrations/python-wsgi",
               "integrations/go-http",
               "integrations/rust-axum",
+              "integrations/static-edge",
               "integrations/manual-http"
             ]
           },

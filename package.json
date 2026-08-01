@@ -7,7 +7,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/open-software-network/os-epode.git"
+    "url": "git+https://github.com/open-software-network/os-epode.git"
   },
   "scripts": {
     "check": "biome check .",
@@ -43,5 +43,21 @@
     "ajv-formats": "3.0.1",
     "mint": "4.2.734",
     "openapi-typescript": "7.13.0"
-  }
+  },
+  "name": "os-epode",
+  "version": "1.0.0",
+  "description": "Epode tells companies whether their product actually worked for the independent customer agents using it.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "example": "examples",
+    "test": "tests"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/open-software-network/os-epode/issues"
+  },
+  "homepage": "https://github.com/open-software-network/os-epode#readme"
 }

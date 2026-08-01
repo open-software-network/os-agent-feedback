@@ -1,0 +1,565 @@
+name: Deploy v2 canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_sha:
+        description: API image commit SHA (7-40 lowercase hexadecimal characters).
+        required: true
+        type: string
+      web_sha:
+        description: Web image commit SHA (7-40 lowercase hexadecimal characters).
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: epode-release-mutation
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  RAILWAY_CLI_VERSION: 5.30.1
+
+jobs:
+  plan:
+    name: Resolve immutable images
+    runs-on: ubuntu-latest
+    outputs:
+      api_ref: ${{ steps.resolve.outputs.api_ref }}
+      api_digest: ${{ steps.resolve.outputs.api_digest }}
+      api_revision: ${{ steps.resolve.outputs.api_revision }}
+      web_ref: ${{ steps.resolve.outputs.web_ref }}
+      web_digest: ${{ steps.resolve.outputs.web_digest }}
+      web_revision: ${{ steps.resolve.outputs.web_revision }}
+    env:
+      API_SHA: ${{ inputs.api_sha }}
+      WEB_SHA: ${{ inputs.web_sha }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Require a protected-main workflow definition
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          expected_ref="refs/heads/${DEFAULT_BRANCH}"
+          if [[ "$WORKFLOW_REF" != "$expected_ref" ]]; then
+            echo "::error::Canary deployment must run from $expected_ref, not $WORKFLOW_REF."
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve and cross-check API and web images
+        id: resolve
+        run: |
+          set -euo pipefail
+          for artifact in api web; do
+            if [[ "$artifact" == "api" ]]; then
+              requested_sha="$API_SHA"
+            else
+              requested_sha="$WEB_SHA"
+            fi
+            if [[ ! "$requested_sha" =~ ^[0-9a-f]{7,40}$ ]]; then
+              echo "::error::${artifact}_sha must be a 7-40 character lowercase hexadecimal commit SHA."
+              exit 1
+            fi
+
+            sha_short="${requested_sha:0:7}"
+            image="${REGISTRY}/open-software-network/os-epode-${artifact}"
+            ref="${image}:${sha_short}"
+            if ! docker buildx imagetools inspect "$ref" --raw >/dev/null 2>&1; then
+              echo "::error::Required image $ref does not exist. Build both images before canary deployment."
+              exit 1
+            fi
+
+            digest="$(
+              docker buildx imagetools inspect "$ref" \
+                --format '{{ json .Manifest }}' | jq -r '.digest // empty'
+            )"
+            revision="$(
+              docker buildx imagetools inspect "$ref" \
+                --format '{{ json .Image }}' \
+                | jq -r 'first(.. | objects | select(.config?.Labels?["org.opencontainers.image.revision"] != null) | .config.Labels["org.opencontainers.image.revision"]) // empty'
+            )"
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Could not resolve an immutable digest for $ref."
+              exit 1
+            fi
+            if [[ ! "$revision" =~ ^[0-9a-f]{40}$ || "${revision:0:${#requested_sha}}" != "$requested_sha" ]]; then
+              echo "::error::$ref was built from ${revision:-an unknown revision}, not $requested_sha."
+              exit 1
+            fi
+
+            {
+              echo "${artifact}_ref=$ref"
+              echo "${artifact}_digest=$digest"
+              echo "${artifact}_revision=$revision"
+            } >>"$GITHUB_OUTPUT"
+            {
+              echo "### ${artifact^^} canary image"
+              echo "- **Tag:** \`$ref\`"
+              echo "- **Digest:** \`$digest\`"
+              echo "- **Revision:** \`$revision\`"
+            } >>"$GITHUB_STEP_SUMMARY"
+            printf -v "${artifact}_resolved_revision" '%s' "$revision"
+          done
+
+          if [[ "$api_resolved_revision" != "$web_resolved_revision" ]]; then
+            echo "::error::Canary validation requires API and web images from one candidate commit."
+            exit 1
+          fi
+          git fetch --no-tags origin "$DEFAULT_BRANCH"
+          if ! git merge-base --is-ancestor "$api_resolved_revision" "origin/$DEFAULT_BRANCH"; then
+            echo "::error::Canary revision $api_resolved_revision is not on protected $DEFAULT_BRANCH."
+            exit 1
+          fi
+
+      - name: Preserve every previously published hosted artifact
+        env:
+          API_REF: ${{ steps.resolve.outputs.api_ref }}
+          API_DIGEST: ${{ steps.resolve.outputs.api_digest }}
+        run: bash scripts/verify-image-artifact-ledger.sh "${API_REF}@${API_DIGEST}"
+
+  deploy:
+    name: Deploy API then web
+    needs: plan
+    runs-on: ubuntu-latest
+    environment: v2-canary
+    env:
+      RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+      API_SERVICE: ${{ vars.RAILWAY_API_SERVICE || 'epode-api' }}
+      WEB_SERVICE: ${{ vars.RAILWAY_WEB_SERVICE || 'epode-web' }}
+      API_DOMAIN: ${{ vars.V2_CANARY_API_DOMAIN }}
+      WEB_DOMAIN: ${{ vars.V2_CANARY_WEB_DOMAIN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      - name: Install Railway CLI
+        run: npm install --global "@railway/cli@${RAILWAY_CLI_VERSION}"
+
+      - name: Capture recoverable canary state
+        id: previous
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$RAILWAY_TOKEN" || -z "$RAILWAY_PROJECT_ID" ]]; then
+            echo "::error::The v2-canary RAILWAY_TOKEN secret and RAILWAY_PROJECT_ID variable are required."
+            exit 1
+          fi
+          services="$(railway service list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --json)"
+          for artifact in api web; do
+            if [[ "$artifact" == "api" ]]; then
+              service="$API_SERVICE"
+            else
+              service="$WEB_SERVICE"
+            fi
+            active_id="$(jq -r --arg service "$service" 'first(.[] | select(.name == $service) | .deploymentId) // empty' <<<"$services")"
+            deployments="$(railway deployment list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$service" --limit 100 --json)"
+            previous_ref="$(jq -r --arg id "$active_id" 'first(.[] | select(.id == $id) | .meta.image) // empty' <<<"$deployments")"
+            previous_digest="$(jq -r --arg id "$active_id" 'first(.[] | select(.id == $id) | .meta.imageDigest) // empty' <<<"$deployments")"
+            expected_image="ghcr.io/open-software-network/os-epode-${artifact}"
+            previous_tag="${previous_ref#"${expected_image}:"}"
+            if [[ "$previous_tag" == "$previous_ref" || ! "$previous_tag" =~ ^[0-9a-f]{7}$ ]]; then
+              echo "::error::Active $service image $previous_ref is not a recoverable immutable Epode SHA tag."
+              exit 1
+            fi
+            if [[ ! "$previous_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Active $service deployment has no recoverable image digest."
+              exit 1
+            fi
+            registry_digest="$(docker buildx imagetools inspect "$previous_ref" --format '{{ json .Manifest }}' | jq -r '.digest // empty')"
+            if [[ "$registry_digest" != "$previous_digest" ]]; then
+              echo "::error::Cannot safely restore $service: the active tag no longer resolves to its deployed digest."
+              exit 1
+            fi
+            {
+              echo "${artifact}_ref=$previous_ref"
+              echo "${artifact}_digest=$previous_digest"
+            } >>"$GITHUB_OUTPUT"
+          done
+
+          api_variables="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$API_SERVICE" --json)"
+          web_variables="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$WEB_SERVICE" --json)"
+          previous_public_base_url="$(jq -r '.PUBLIC_BASE_URL // empty' <<<"$api_variables")"
+          previous_web_app_url="$(jq -r '.WEB_APP_URL // empty' <<<"$api_variables")"
+          previous_api_url="$(jq -r '.API_URL // empty' <<<"$web_variables")"
+          for value in "$previous_public_base_url" "$previous_web_app_url" "$previous_api_url"; do
+            if [[ ! "$value" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]]; then
+              echo "::error::Existing canary routing is not recoverable: $value"
+              exit 1
+            fi
+          done
+          {
+            echo "public_base_url=$previous_public_base_url"
+            echo "web_app_url=$previous_web_app_url"
+            echo "api_url=$previous_api_url"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Validate services and domains; provision public variables
+        id: routing
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          PREVIOUS_PUBLIC_BASE_URL: ${{ steps.previous.outputs.public_base_url }}
+          PREVIOUS_WEB_APP_URL: ${{ steps.previous.outputs.web_app_url }}
+          PREVIOUS_API_URL: ${{ steps.previous.outputs.api_url }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$RAILWAY_TOKEN" || -z "$RAILWAY_PROJECT_ID" ]]; then
+            echo "::error::The v2-canary RAILWAY_TOKEN secret and RAILWAY_PROJECT_ID variable are required."
+            exit 1
+          fi
+          for pair in "API_DOMAIN=$API_DOMAIN" "WEB_DOMAIN=$WEB_DOMAIN"; do
+            name="${pair%%=*}"
+            domain="${pair#*=}"
+            if [[ ! "$domain" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]]; then
+              echo "::error::$name must be a hostname without a scheme or path."
+              exit 1
+            fi
+          done
+
+          services="$(railway service list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --json)"
+          for service in "$API_SERVICE" "$WEB_SERVICE"; do
+            count="$(jq --arg service "$service" '[.[] | select(.name == $service)] | length' <<<"$services")"
+            if [[ "$count" -ne 1 ]]; then
+              echo "::error::Expected exactly one service named $service in v2-canary; found $count."
+              exit 1
+            fi
+          done
+
+          for spec in "$API_SERVICE=$API_DOMAIN" "$WEB_SERVICE=$WEB_DOMAIN"; do
+            service="${spec%%=*}"
+            expected_domain="${spec#*=}"
+            domains="$(railway domain list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$service" --json)"
+            if ! jq -e --arg domain "$expected_domain" '.domains | any(.domain == $domain)' <<<"$domains" >/dev/null; then
+              echo "::error::$service does not own configured domain $expected_domain in v2-canary."
+              exit 1
+            fi
+          done
+
+          # The API cannot boot without these pre-provisioned or referenced
+          # values. Only key presence is tested so sealed secrets stay opaque.
+          api_variables="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$API_SERVICE" --json)"
+          for key in DATABASE_URL OS_ACCOUNTS_URL OS_ACCOUNTS_API_URL OS_ACCOUNTS_CLIENT_ID; do
+            if ! jq -e --arg key "$key" 'has($key)' <<<"$api_variables" >/dev/null; then
+              echo "::error::$API_SERVICE is missing required v2-canary variable $key."
+              exit 1
+            fi
+          done
+          accounts_url="$(jq -r '.OS_ACCOUNTS_URL // empty' <<<"$api_variables")"
+          if [[ ! "$accounts_url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]]; then
+            echo "::error::$API_SERVICE has no valid OS_ACCOUNTS_URL."
+            exit 1
+          fi
+          echo "accounts_url=${accounts_url%/}" >>"$GITHUB_OUTPUT"
+
+          # These values are public, repository-owned routing configuration.
+          # Stage them without an extra deployment; the image deployment below
+          # applies the values once together with the reviewed artifact.
+          routing_mutated=true
+          restore_routing_on_error() {
+            status="$?"
+            if [[ "$status" -ne 0 && "$routing_mutated" == "true" ]]; then
+              railway variable set \
+                "PUBLIC_BASE_URL=$PREVIOUS_PUBLIC_BASE_URL" \
+                "WEB_APP_URL=$PREVIOUS_WEB_APP_URL" \
+                --project "$RAILWAY_PROJECT_ID" \
+                --environment v2-canary \
+                --service "$API_SERVICE" \
+                --skip-deploys \
+                --json >/dev/null || true
+              railway variable set \
+                "API_URL=$PREVIOUS_API_URL" \
+                --project "$RAILWAY_PROJECT_ID" \
+                --environment v2-canary \
+                --service "$WEB_SERVICE" \
+                --skip-deploys \
+                --json >/dev/null || true
+            fi
+            exit "$status"
+          }
+          trap restore_routing_on_error EXIT
+          railway variable set \
+            "PUBLIC_BASE_URL=https://${WEB_DOMAIN}" \
+            "WEB_APP_URL=https://${WEB_DOMAIN}" \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment v2-canary \
+            --service "$API_SERVICE" \
+            --skip-deploys \
+            --json >/dev/null
+          railway variable set \
+            "API_URL=https://${API_DOMAIN}" \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment v2-canary \
+            --service "$WEB_SERVICE" \
+            --skip-deploys \
+            --json >/dev/null
+
+          api_variables="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$API_SERVICE" --json)"
+          web_variables="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$WEB_SERVICE" --json)"
+          jq -e --arg public_url "https://${WEB_DOMAIN}" --arg web_url "https://${WEB_DOMAIN}" \
+            '.PUBLIC_BASE_URL == $public_url and .WEB_APP_URL == $web_url' <<<"$api_variables" >/dev/null
+          jq -e --arg api_url "https://${API_DOMAIN}" '.API_URL == $api_url' <<<"$web_variables" >/dev/null
+          trap - EXIT
+
+      - name: Invalidate any previous canary attestation
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          CANARY_RUN_ID: ${{ github.run_id }}
+          CANARY_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          railway variable set \
+            "EPODE_CANARY_STATUS=pending" \
+            "EPODE_CANARY_RUN_ID=$CANARY_RUN_ID" \
+            "EPODE_CANARY_RUN_ATTEMPT=$CANARY_RUN_ATTEMPT" \
+            "EPODE_CANARY_API_REF=" \
+            "EPODE_CANARY_API_DIGEST=" \
+            "EPODE_CANARY_API_DEPLOYMENT_ID=" \
+            "EPODE_CANARY_REVISION=" \
+            "EPODE_CANARY_WEB_REF=" \
+            "EPODE_CANARY_WEB_DIGEST=" \
+            "EPODE_CANARY_WEB_DEPLOYMENT_ID=" \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment v2-canary \
+            --service "$API_SERVICE" \
+            --skip-deploys \
+            --json >/dev/null
+
+      - name: Deploy and verify API image
+        id: deploy_api
+        continue-on-error: true
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          bash scripts/railway-deploy-image.sh \
+            v2-canary \
+            "$API_SERVICE" \
+            "${{ needs.plan.outputs.api_ref }}" \
+            "${{ needs.plan.outputs.api_digest }}"
+
+      - name: Verify API health
+        id: smoke_api
+        if: steps.deploy_api.outcome == 'success'
+        continue-on-error: true
+        run: |
+          curl --fail --silent --show-error \
+            --retry 12 --retry-all-errors --retry-delay 5 \
+            "https://${API_DOMAIN}/api/health" >/dev/null
+
+      - name: Deploy and verify web image
+        id: deploy_web
+        if: steps.deploy_api.outcome == 'success' && steps.smoke_api.outcome == 'success'
+        continue-on-error: true
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          bash scripts/railway-deploy-image.sh \
+            v2-canary \
+            "$WEB_SERVICE" \
+            "${{ needs.plan.outputs.web_ref }}" \
+            "${{ needs.plan.outputs.web_digest }}"
+
+      - name: Verify web health and authentication start
+        id: smoke_web
+        if: steps.deploy_web.outcome == 'success'
+        continue-on-error: true
+        env:
+          ACCOUNTS_URL: ${{ steps.routing.outputs.accounts_url }}
+        run: |
+          bash scripts/verify-public-integration-surface.sh \
+            "https://${WEB_DOMAIN}" \
+            "$ACCOUNTS_URL"
+
+      - name: Restore previous routing and API after failed canary validation
+        id: restore_api
+        if: >-
+          always() && (
+            steps.deploy_api.outcome != 'success' ||
+            steps.smoke_api.outcome != 'success' ||
+            steps.deploy_web.outcome != 'success' ||
+            steps.smoke_web.outcome != 'success'
+          )
+        continue-on-error: true
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          PREVIOUS_PUBLIC_BASE_URL: ${{ steps.previous.outputs.public_base_url }}
+          PREVIOUS_WEB_APP_URL: ${{ steps.previous.outputs.web_app_url }}
+          PREVIOUS_API_URL: ${{ steps.previous.outputs.api_url }}
+        run: |
+          set +e
+          restore_status=0
+          railway variable set \
+            "PUBLIC_BASE_URL=$PREVIOUS_PUBLIC_BASE_URL" \
+            "WEB_APP_URL=$PREVIOUS_WEB_APP_URL" \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment v2-canary \
+            --service "$API_SERVICE" \
+            --skip-deploys \
+            --json >/dev/null || restore_status=1
+          railway variable set \
+            "API_URL=$PREVIOUS_API_URL" \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment v2-canary \
+            --service "$WEB_SERVICE" \
+            --skip-deploys \
+            --json >/dev/null || restore_status=1
+          bash scripts/railway-deploy-image.sh \
+            v2-canary \
+            "$API_SERVICE" \
+            "${{ steps.previous.outputs.api_ref }}" \
+            "${{ steps.previous.outputs.api_digest }}" || restore_status=1
+          exit "$restore_status"
+
+      - name: Restore previous web after failed canary validation
+        id: restore_web
+        if: >-
+          always() && (
+            steps.deploy_api.outcome != 'success' ||
+            steps.smoke_api.outcome != 'success' ||
+            steps.deploy_web.outcome != 'success' ||
+            steps.smoke_web.outcome != 'success'
+          )
+        continue-on-error: true
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          bash scripts/railway-deploy-image.sh \
+            v2-canary \
+            "$WEB_SERVICE" \
+            "${{ steps.previous.outputs.web_ref }}" \
+            "${{ steps.previous.outputs.web_digest }}"
+
+      - name: Fail a canary validation that required restoration
+        if: >-
+          always() && (
+            steps.deploy_api.outcome != 'success' ||
+            steps.smoke_api.outcome != 'success' ||
+            steps.deploy_web.outcome != 'success' ||
+            steps.smoke_web.outcome != 'success'
+          )
+        run: |
+          if [[ "${{ steps.restore_api.outcome }}" != "success" || "${{ steps.restore_web.outcome }}" != "success" ]]; then
+            echo "::error::Canary validation failed and at least one independent restoration failed. Immediate operator intervention is required."
+          else
+            echo "::error::Canary validation failed. The prior API and web pair were independently restored, and the promotion attestation remains invalid."
+          fi
+          exit 1
+
+      - name: Record the verified canary pair
+        if: steps.smoke_web.outcome == 'success'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          VERIFIED_API_REF: ${{ needs.plan.outputs.api_ref }}
+          VERIFIED_API_DIGEST: ${{ needs.plan.outputs.api_digest }}
+          VERIFIED_API_DEPLOYMENT_ID: ${{ steps.deploy_api.outputs.deployment_id }}
+          VERIFIED_REVISION: ${{ needs.plan.outputs.api_revision }}
+          VERIFIED_WEB_REF: ${{ needs.plan.outputs.web_ref }}
+          VERIFIED_WEB_DIGEST: ${{ needs.plan.outputs.web_digest }}
+          VERIFIED_WEB_DEPLOYMENT_ID: ${{ steps.deploy_web.outputs.deployment_id }}
+          CANARY_RUN_ID: ${{ github.run_id }}
+          CANARY_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$VERIFIED_API_DEPLOYMENT_ID" || -z "$VERIFIED_WEB_DEPLOYMENT_ID" ]]; then
+            echo "::error::A verified canary attestation requires both frozen Railway deployment IDs."
+            exit 1
+          fi
+          railway variable set \
+            "EPODE_CANARY_STATUS=pending" \
+            "EPODE_CANARY_RUN_ID=$CANARY_RUN_ID" \
+            "EPODE_CANARY_RUN_ATTEMPT=$CANARY_RUN_ATTEMPT" \
+            "EPODE_CANARY_API_REF=$VERIFIED_API_REF" \
+            "EPODE_CANARY_API_DIGEST=$VERIFIED_API_DIGEST" \
+            "EPODE_CANARY_API_DEPLOYMENT_ID=$VERIFIED_API_DEPLOYMENT_ID" \
+            "EPODE_CANARY_REVISION=$VERIFIED_REVISION" \
+            "EPODE_CANARY_WEB_REF=$VERIFIED_WEB_REF" \
+            "EPODE_CANARY_WEB_DIGEST=$VERIFIED_WEB_DIGEST" \
+            "EPODE_CANARY_WEB_DEPLOYMENT_ID=$VERIFIED_WEB_DEPLOYMENT_ID" \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment v2-canary \
+            --service "$API_SERVICE" \
+            --skip-deploys \
+            --json >/dev/null
+
+          variables="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$API_SERVICE" --json)"
+          jq -e \
+            --arg api_ref "$VERIFIED_API_REF" \
+            --arg api_digest "$VERIFIED_API_DIGEST" \
+            --arg api_deployment_id "$VERIFIED_API_DEPLOYMENT_ID" \
+            --arg revision "$VERIFIED_REVISION" \
+            --arg web_ref "$VERIFIED_WEB_REF" \
+            --arg web_digest "$VERIFIED_WEB_DIGEST" \
+            --arg web_deployment_id "$VERIFIED_WEB_DEPLOYMENT_ID" \
+            --arg run_id "$CANARY_RUN_ID" \
+            --arg run_attempt "$CANARY_RUN_ATTEMPT" \
+            '.EPODE_CANARY_STATUS == "pending"
+              and .EPODE_CANARY_RUN_ID == $run_id
+              and .EPODE_CANARY_RUN_ATTEMPT == $run_attempt
+              and .EPODE_CANARY_API_REF == $api_ref
+              and .EPODE_CANARY_API_DIGEST == $api_digest
+              and .EPODE_CANARY_API_DEPLOYMENT_ID == $api_deployment_id
+              and .EPODE_CANARY_REVISION == $revision
+              and .EPODE_CANARY_WEB_REF == $web_ref
+              and .EPODE_CANARY_WEB_DIGEST == $web_digest
+              and .EPODE_CANARY_WEB_DEPLOYMENT_ID == $web_deployment_id' \
+            <<<"$variables" >/dev/null
+
+          railway variable set \
+            "EPODE_CANARY_STATUS=verified" \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment v2-canary \
+            --service "$API_SERVICE" \
+            --skip-deploys \
+            --json >/dev/null
+          variables="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$API_SERVICE" --json)"
+          jq -e \
+            --arg run_id "$CANARY_RUN_ID" \
+            --arg run_attempt "$CANARY_RUN_ATTEMPT" \
+            '.EPODE_CANARY_STATUS == "verified"
+              and .EPODE_CANARY_RUN_ID == $run_id
+              and .EPODE_CANARY_RUN_ATTEMPT == $run_attempt' \
+            <<<"$variables" >/dev/null
+
+      - name: Summarize verified canary
+        if: steps.smoke_web.outcome == 'success'
+        run: |
+          {
+            echo "### v2 canary deployed"
+            echo "- **API revision:** \`${{ needs.plan.outputs.api_revision }}\`"
+            echo "- **Web revision:** \`${{ needs.plan.outputs.web_revision }}\`"
+            echo "- **API:** \`${{ needs.plan.outputs.api_ref }}@${{ needs.plan.outputs.api_digest }}\`"
+            echo "- **Web:** \`${{ needs.plan.outputs.web_ref }}@${{ needs.plan.outputs.web_digest }}\`"
+            echo "- **API URL:** https://${API_DOMAIN}"
+            echo "- **Web URL:** https://${WEB_DOMAIN}"
+            echo "- **Promotion attestation:** recorded after health and authentication checks"
+          } >>"$GITHUB_STEP_SUMMARY"

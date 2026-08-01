@@ -9,6 +9,8 @@ You do not need to know who the customer's agent is.
 
 `customerRef` is an optional opaque identifier derived from authentication your product already has.
 Good values are internal account or tenant IDs. Do not send names, email addresses, prompts, or task text.
+Epode stores this value with interaction telemetry so your dashboard can group usage by customer. The
+agent-facing feedback envelope receives only an HMAC-derived consent subject, never the raw reference.
 
 ```ts
 app.use(agentFeedback({
@@ -30,3 +32,12 @@ support workflow, or research run. If no stable reference exists, leave it out a
 An MCP transport session is not product-session proof. MCP 2026-07-28 transport is stateless; application
 continuity must be explicit.
 </Note>
+
+## Retention
+
+Collection policy accepts any whole-number retention period from 1 to 365 days. Dashboard queries apply a new
+period immediately. Feedback, interactions, and sessions outside the window stop appearing at once and are
+physically removed by the scheduled purge, which can take up to one purge interval.
+
+The HMAC-derived Ask-once permission decision is intentionally separate from telemetry retention. It survives
+until the permission is explicitly changed or the product is deleted.

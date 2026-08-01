@@ -1,0 +1,263 @@
+name: Release SDK package
+
+on:
+  push:
+    tags:
+      - "sdk/node/v*"
+      - "sdk/python/v*"
+      - "sdk/rust/v*"
+      - "sdk/go/v*"
+
+# Publish jobs narrow this further. OIDC is deliberately unavailable while the
+# release candidate is built and smoke-tested.
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Build and validate release candidate
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      package: ${{ steps.release.outputs.package }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          # npm trusted publishing needs Node 22.14+ and npm 11.5.1+.
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.24.x"
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: "1.88"
+      - name: Validate protected SDK tag
+        id: release
+        env:
+          TAG: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^sdk/(node|python|rust|go)/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::Expected sdk/{node,python,rust,go}/vX.Y.Z; received $TAG."
+            exit 1
+          fi
+          if [[ "$(git cat-file -t "$TAG")" != "tag" ]]; then
+            echo "::error::$TAG must be an annotated, protected package tag."
+            exit 1
+          fi
+          reviewed_commit="$(git rev-parse 'HEAD^{commit}')"
+          if [[ "$(git rev-list -n 1 "$TAG")" != "$reviewed_commit" ]]; then
+            echo "::error::$TAG does not resolve to the checked-out release commit."
+            exit 1
+          fi
+          git fetch --no-tags origin "$DEFAULT_BRANCH"
+          if ! git merge-base --is-ancestor "$reviewed_commit" "origin/$DEFAULT_BRANCH"; then
+            echo "::error::SDK release commit $reviewed_commit is not on protected $DEFAULT_BRANCH."
+            exit 1
+          fi
+          ci_conclusion="$(
+            gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${reviewed_commit}&status=completed&per_page=20" \
+              --jq '.workflow_runs | map(select(.head_branch == env.DEFAULT_BRANCH and .event == "push")) | max_by(.run_number, .run_attempt) | .conclusion // empty'
+          )"
+          if [[ "$ci_conclusion" != "success" ]]; then
+            echo "::error::SDK release commit $reviewed_commit has no successful protected-main CI run."
+            exit 1
+          fi
+          echo "package=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          echo "version=${BASH_REMATCH[2]}" >> "$GITHUB_OUTPUT"
+      - name: Check tag and package versions agree
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          node_version=$(node -p "require('./sdk/node/package.json').version")
+          python_version=$(python -c 'import tomllib; print(tomllib.load(open("sdk/python/pyproject.toml", "rb"))["project"]["version"])')
+          rust_version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' sdk/rust/Cargo.toml | head -1)
+          [[ "$node_version" == "$VERSION" && "$python_version" == "$VERSION" && "$rust_version" == "$VERSION" ]] || {
+            echo "::error::Tag $VERSION does not match package versions: node=$node_version python=$python_version rust=$rust_version"
+            exit 1
+          }
+      - name: Verify the coordinated SDK release marker
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          reviewed_commit="$(git rev-parse 'HEAD^{commit}')"
+          release_tag="sdk/release/v${VERSION}"
+          git fetch --force origin "refs/tags/${release_tag}:refs/tags/${release_tag}"
+          if [[ "$(git cat-file -t "$release_tag")" != "tag" ]]; then
+            echo "::error::$release_tag must be an annotated release marker created before package tags."
+            exit 1
+          fi
+          resolved="$(git rev-list -n 1 "$release_tag")"
+          if [[ "$resolved" != "$reviewed_commit" ]]; then
+            echo "::error::$release_tag resolves to $resolved instead of reviewed commit $reviewed_commit."
+            exit 1
+          fi
+      - name: Install locked Node dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Run cross-language SDK conformance
+        run: bash tests/cross_language_conformance.sh
+      - name: Build, dry-run, and smoke-test release artifacts
+        run: SDK_ARTIFACT_DIR=.artifacts/sdk-release bash scripts/sdk-release-readiness.sh
+      - name: Upload immutable release candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sdk-release-candidate
+          path: .artifacts/sdk-release
+          if-no-files-found: error
+
+  publish-node:
+    name: Publish npm package
+    needs: preflight
+    if: needs.preflight.outputs.package == 'node'
+    runs-on: ubuntu-latest
+    environment: sdk-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: sdk-release-candidate
+          path: release-candidate
+      - name: Publish the reviewed tarball with npm OIDC
+        run: npm publish --access public "$(find release-candidate/node -name '*.tgz' -type f -print -quit)"
+
+  publish-python:
+    name: Publish PyPI package
+    needs: preflight
+    if: needs.preflight.outputs.package == 'python'
+    runs-on: ubuntu-latest
+    environment: sdk-release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: sdk-release-candidate
+          path: release-candidate
+      - name: Publish the reviewed distributions with PyPI OIDC
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: release-candidate/python
+
+  publish-rust:
+    name: Publish crates.io package
+    needs: preflight
+    if: needs.preflight.outputs.package == 'rust'
+    runs-on: ubuntu-latest
+    environment: sdk-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: sdk-release-candidate
+          path: release-candidate
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: "1.88"
+      - name: Revalidate the reviewed crate against checkout
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          (
+            cd release-candidate
+            shasum -a 256 --check CHECKSUMS.sha256
+          )
+          reviewed="release-candidate/rust/agent-feedback-${VERSION}.crate"
+          if [[ ! -f "$reviewed" ]]; then
+            echo "::error::The reviewed Rust crate $reviewed is missing."
+            exit 1
+          fi
+
+          export SOURCE_DATE_EPOCH
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          cargo package --locked --manifest-path sdk/rust/Cargo.toml >/dev/null
+          rebuilt="sdk/rust/target/package/agent-feedback-${VERSION}.crate"
+          if ! cmp --silent "$reviewed" "$rebuilt"; then
+            echo "::error::The crate packaged from checkout differs from the reviewed release candidate."
+            shasum -a 256 "$reviewed" "$rebuilt"
+            exit 1
+          fi
+      - name: Exchange the GitHub OIDC token for crates.io credentials
+        id: crates-auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1
+      - name: Publish the reviewed crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          cargo publish --locked --manifest-path sdk/rust/Cargo.toml
+
+  publish-go:
+    name: Verify Go module release tag
+    needs: preflight
+    if: needs.preflight.outputs.package == 'go'
+    runs-on: ubuntu-latest
+    environment: sdk-release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.24.x"
+      - name: Verify the tag through the public Go module proxy
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          module="github.com/open-software-network/os-epode/sdk/go"
+          for _ in $(seq 1 30); do
+            resolved="$(GOPROXY=https://proxy.golang.org go list -m -f '{{.Version}}' "$module@v${VERSION}" 2>/dev/null || true)"
+            if [[ "$resolved" == "v${VERSION}" ]]; then
+              echo "Verified $module@$resolved through proxy.golang.org."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::$module@v${VERSION} was not installable through proxy.golang.org after five minutes."
+          exit 1
+      - name: Record Go module publication boundary
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          {
+            echo "### Go module release"
+            echo "The protected tag \`sdk/go/v${VERSION}\` is the Go module release."
+            echo "No registry credential or upload is used; the Go proxy discovers this immutable VCS tag."
+          } >> "$GITHUB_STEP_SUMMARY"

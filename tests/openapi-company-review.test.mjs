@@ -151,10 +151,10 @@ test("the current Epode OpenAPI compiles reproducibly to a review-only manifest"
 
   assert.deepEqual(first, second);
   assert.equal(first.source.sha256, expectedDigest);
-  assert.equal(first.summary.totalOperations, 42);
-  assert.equal(first.summary.readOnlyGetOrHead, 16);
+  assert.equal(first.summary.totalOperations, 44);
+  assert.equal(first.summary.readOnlyGetOrHead, 18);
   assert.equal(first.summary.eligibleForCompanyReview, 1);
-  assert.equal(first.summary.excludedByPolicy, 41);
+  assert.equal(first.summary.excludedByPolicy, 43);
   assert.equal(first.summary.approvedForIr, 0);
   assert.equal(first.upstream.status, "company_input_required");
   assert.deepEqual(first.upstream.usablePinnedBaseUrls, []);

@@ -79,6 +79,13 @@ export function dashboardFixture(overrides: Partial<DashboardData> = {}): Dashbo
       createdAt: now,
       updatedAt: now,
     },
+    activationMilestones: {
+      workspaceId,
+      productId,
+      firstOpportunityAt: now,
+      firstConfirmedInteractionAt: now,
+      firstReportAt: now,
+    },
     apiKeys: [
       {
         id: "77777777-7777-4777-8777-777777777777",
@@ -90,6 +97,8 @@ export function dashboardFixture(overrides: Partial<DashboardData> = {}): Dashbo
         expiresAt: null,
         lastUsedAt: now,
         revokedAt: null,
+        interactionCount: 1,
+        reportCount: 1,
       },
     ],
     interactions: [
@@ -159,6 +168,12 @@ export function dashboardFixture(overrides: Partial<DashboardData> = {}): Dashbo
         startedAt: now,
         lastSeenAt: now,
         createdAt: now,
+        interactionCount: 1,
+        reportCount: 1,
+        firstOperation: "search",
+        lastOperation: "search",
+        customerRef: "account-42",
+        strongestImpact: "degraded",
       },
     ],
     insights: {

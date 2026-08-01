@@ -78,7 +78,7 @@ test("dashboard action notices are ephemeral fixed toasts", () => {
 
 test("products exist before integration setup without an environment picker", () => {
   assert.match(dashboardHtml, /id="product-scope"/);
-  assert.match(dashboardHtml, /app\.js\?v=20260731-companion/);
+  assert.match(dashboardHtml, /app\.js\?v=20260801-edge/);
   assert.match(dashboardScript, /Create your first product/);
   assert.match(dashboardScript, /id="product-select"/);
   assert.match(dashboardScript, /\+ New product/);
@@ -94,17 +94,25 @@ test("setup starts with the selected product integration", () => {
   assert.match(dashboardScript, /MCP server/);
   assert.match(dashboardScript, /HTTP API/);
   assert.match(dashboardScript, /Server-rendered website/);
-  assert.match(dashboardScript, /Static site or CMS/);
+  assert.match(dashboardScript, /Static site \/ hosted docs/);
+  assert.match(dashboardScript, /Trusted edge proxy/);
+  assert.match(dashboardScript, /createStaticDocsProxy/);
+  assert.match(dashboardScript, /"static-edge"/);
+  assert.match(dashboardScript, /dedicated public docs routes/);
+  assert.match(dashboardScript, /never a hostname-wide catch-all/);
+  assert.match(dashboardScript, /second fail-closed boundary/);
+  assert.match(dashboardScript, /returns 404 and POST returns 405 without reaching upstream/);
+  assert.doesNotMatch(dashboardScript, /Edge integration coming soon/);
   assert.match(dashboardScript, /setupStackOptions\[setupSurface\]/);
   assert.doesNotMatch(dashboardScript, /Run backend contract test/);
 });
 
-test("collection policy distinguishes Epode-managed once and per-report consent", () => {
+test("collection policy operates consent and bounded retention controls", () => {
   assert.match(dashboardScript, /Never ask — submit autonomously/);
   assert.doesNotMatch(dashboardScript, />Auto —/);
   assert.match(dashboardScript, /Ask once — Epode remembers the answer/);
   assert.match(dashboardScript, /Ask every time — request permission for each report/);
-  assert.match(dashboardScript, /agent stores nothing/);
+  assert.match(dashboardScript, /never shown to the agent/);
   assert.match(dashboardScript, /Silence or ambiguity never becomes approval/);
   assert.match(backendStore, /"never_ask", "ask_once", "ask_always", "off"/);
   assert.match(neverAskMigration, /SET feedback_mode = 'never_ask'/);
@@ -116,11 +124,21 @@ test("collection policy distinguishes Epode-managed once and per-report consent"
     dashboardScript,
     /AGENT_FEEDBACK_MODE=\$\{dashboard\.currentEnvironment\?\.feedbackMode/,
   );
-  assert.doesNotMatch(
+  assert.match(dashboardScript, /<p class="eyebrow">RETENTION<\/p>/);
+  assert.match(dashboardScript, /name="retentionDays" type="number" min="1" max="365"/);
+  for (const days of [7, 30, 90, 180, 365]) {
+    assert.match(dashboardScript, new RegExp(`<option value="${days}">`));
+  }
+  assert.match(dashboardScript, /retentionDays = Number\(form\.get\("retentionDays"\)\)/);
+  assert.match(dashboardScript, /retentionDays < 1 \|\| retentionDays > 365/);
+  assert.match(dashboardScript, /collectEventSummaries: false, retentionDays \}/);
+  assert.match(dashboardScript, /Dashboard filtering changes immediately/);
+  assert.match(dashboardScript, /physical deletion may take up to the scheduled purge interval/i);
+  assert.match(dashboardScript, /Expired feedback, interactions, and sessions/);
+  assert.match(
     dashboardScript,
-    /<p class="eyebrow">RETENTION<\/p>|Data lifetime|Retention period|day retention/,
+    /survives retention until it is explicitly changed or the product is deleted/,
   );
-  assert.match(dashboardScript, /retentionDays: dashboard\.currentEnvironment\.retentionDays/);
 });
 
 test("setup offers one guided install with a manual fallback", () => {
@@ -134,8 +152,13 @@ test("setup offers one guided install with a manual fallback", () => {
 test("setup explains the real customer-agent coverage path", () => {
   assert.match(dashboardScript, /Customer-agent coverage: native MCP/);
   assert.match(dashboardScript, /No separate Epode install is required/);
-  assert.match(dashboardScript, /Customer-agent coverage: HTTP/);
-  assert.match(dashboardScript, /Epode Companion makes this reliable in Codex and Claude Code/);
+  assert.match(dashboardScript, /CUSTOMER COVERAGE/);
+  assert.match(
+    dashboardScript,
+    /Your company-side integration is complete without another install/,
+  );
+  assert.match(dashboardScript, /optionally share Epode Companion once/);
+  assert.match(dashboardScript, /reliable Codex and Claude Code handling/);
   assert.match(dashboardScript, /codex plugin marketplace add open-software-network\/os-epode/);
   assert.match(
     dashboardScript,
@@ -166,7 +189,7 @@ test("setup warns about legacy keys and keeps rotation visible", () => {
   assert.match(dashboardScript, /\/\^af_\(live\|read\)_\[0-9a-f\]\{8\}\$\//);
   assert.match(dashboardScript, /class="secret-callout warning"/);
   assert.match(dashboardStyles, /\.secret-callout\.warning/);
-  assert.match(dashboardHtml, /styles\.css\?v=20260731-companion/);
+  assert.match(dashboardHtml, /styles\.css\?v=20260731-coverage/);
   assert.match(dashboardScript, /legacy key and cannot produce valid afr2 capabilities/i);
   assert.match(dashboardScript, /V2 integrations will fail boot validation/);
   assert.match(dashboardScript, /current key will keep working for one hour/);
@@ -217,10 +240,31 @@ test("read keys are created with a 90-day default expiry and an explicit never o
     /if \(expiresIn !== "never"\) payload\.expiresInSeconds = Number\(expiresIn\)/,
   );
   assert.match(dashboardScript, /Save this read key now/);
-  assert.match(
+  assert.match(dashboardScript, /readSecret = body\.secret/);
+});
+
+test("legacy setup keeps full write and read secrets out of Web Storage", () => {
+  assert.doesNotMatch(dashboardScript, /\bsessionStorage\b/);
+  assert.doesNotMatch(
     dashboardScript,
-    /rememberSetupSecret\(dashboard\.currentEnvironment\.id, body\.secret, "read"\)/,
+    /setupSecretKey|rememberSetupSecret|recalledSetupSecret|agent-feedback:(?:product|read)-key/,
   );
+  const storageCalls = [
+    ...dashboardScript.matchAll(
+      /\b(?:sessionStorage|localStorage)\?\.(?:getItem|setItem)\(([^)]*)\)/g,
+    ),
+  ];
+  assert.ok(storageCalls.length > 0, "expected the unrelated team preference storage calls");
+  for (const [, argumentsSource] of storageCalls) {
+    assert.doesNotMatch(
+      argumentsSource,
+      /apiSecret|readSecret|body\.secret|\bsecret\b|af_live_|af_read_/,
+    );
+  }
+  assert.match(dashboardScript, /stays only in page memory and disappears on reload/);
+  assert.match(dashboardScript, /does not save full keys in browser storage/);
+  assert.match(dashboardScript, /Full server-side key is hidden/);
+  assert.match(dashboardScript, /Full read key is hidden/);
 });
 
 test("read keys ship per-client MCP config snippets, not a server env variable", () => {
@@ -298,8 +342,8 @@ test("setup verifies the connection with data from its own product key", () => {
 test("setup communicates the HTTP and MCP evidence models separately", () => {
   assert.match(dashboardScript, /confirmed agent interaction/);
   assert.match(dashboardScript, /becomes confirmed when its receipt returns/);
-  assert.match(dashboardScript, /Telemetry is asynchronous/);
-  assert.match(dashboardScript, /Ask once state lookup is bounded/);
+  assert.match(dashboardScript, /Telemetry and Ask once state refreshes run in the background/);
+  assert.match(dashboardScript, /never delay the product response/);
   assert.match(dashboardScript, /MCP 2026-07-28 is stateless/);
   assert.match(dashboardScript, /createMcpInstrumentation/);
   assert.match(dashboardScript, /context\.http\?\.authInfo\?\.extra\?\.accountId/);
@@ -330,6 +374,7 @@ test("every enabled setup choice has a fresh executable E2E example", async () =
       "rust",
       "manual-http",
     ],
+    static: ["static-edge"],
   };
   for (const [surface, integrations] of Object.entries(expected)) {
     const start = dashboardScript.indexOf(`  ${surface}: [`);
@@ -351,6 +396,7 @@ test("every enabled setup choice has a fresh executable E2E example", async () =
     "setup-matrix-manual-http/server.py",
     "setup-matrix-node-mcp/index.js",
     "setup-matrix-manual-mcp/server.py",
+    "static-docs-edge/worker.js",
   ];
   await Promise.all(
     fixtures.map((fixture) => access(new URL(`../examples/${fixture}`, import.meta.url))),

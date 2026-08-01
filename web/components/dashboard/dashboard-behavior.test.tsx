@@ -640,7 +640,13 @@ describe("dashboard view behavior", () => {
         }),
       ),
     );
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual(
+    const workflowRequest = fetchMock.mock.calls.find(
+      ([input, init]) =>
+        String(input) === `/api/dashboard/reports/${data.reports[0].id}` &&
+        init?.method === "PATCH",
+    );
+    expect(workflowRequest).toBeDefined();
+    expect(JSON.parse(workflowRequest?.[1]?.body as string)).toEqual(
       expect.objectContaining({
         productId: data.currentProduct?.id,
         internalNote: "Reproduce against the fresh index",
@@ -656,7 +662,26 @@ describe("dashboard view behavior", () => {
       interactions: data.interactions,
       reports: data.reports,
     };
-    const fetchMock = vi.fn().mockResolvedValue(json(detail));
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/dashboard/sessions?")) {
+        return Promise.resolve(
+          json({
+            sessions: data.sessions,
+            rollup: {
+              sessions: 1,
+              interactions: 1,
+              multiStepSessions: 0,
+              averageInteractions: 1,
+            },
+            limit: 50,
+            nextCursor: null,
+          }),
+        );
+      }
+      if (path.startsWith("/api/dashboard/sessions/")) return Promise.resolve(json(detail));
+      throw new Error(`Unexpected request: ${path}`);
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     const list = renderWithQuery(
@@ -792,6 +817,174 @@ describe("dashboard view behavior", () => {
 
     expect(screen.getByRole("button", { name: "Rotate" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
+  });
+
+  it("explains the customer-agent step for HTTP without burdening MCP customers", () => {
+    renderWithQuery(
+      <SetupView
+        data={dashboardFixture()}
+        secrets={null}
+        rememberSecret={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        setNotice={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/Customer-agent step: none/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "HTTP API" }));
+    expect(screen.getByText(/generic HTTP and website agents are best effort/)).toBeVisible();
+    expect(screen.getByRole("link", { name: "customer-agent setup" })).toHaveAttribute(
+      "href",
+      "https://docs.epode.ai/quickstart#customer-agent-step",
+    );
+  });
+
+  it("keeps setup status authoritative when key activity is outside the dashboard slice", () => {
+    const data = dashboardFixture({ interactions: [], reports: [] });
+    renderWithQuery(
+      <SetupView
+        data={data}
+        secrets={null}
+        rememberSecret={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        setNotice={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("End-to-end feedback loop proven")).toBeVisible();
+    expect(screen.getByText(/1 product interaction\(s\) in the last 30 days/)).toBeVisible();
+    expect(screen.getByText(/1 structured report\(s\) in the last 30 days/)).toBeVisible();
+    expect(screen.getByText(/Feedback received/)).toBeVisible();
+    expect(screen.queryByText("Never seen")).not.toBeInTheDocument();
+  });
+
+  it("keeps product setup connected while a rotated key overlaps its unused successor", () => {
+    const base = dashboardFixture();
+    const predecessor = base.apiKeys[0];
+    const successor = {
+      ...predecessor,
+      id: "88888888-8888-4888-8888-888888888888",
+      prefix: "af_live_5678efab",
+      createdAt: "2026-07-30T12:30:00Z",
+      lastUsedAt: null,
+      interactionCount: 0,
+      reportCount: 0,
+    };
+    const data = dashboardFixture({
+      apiKeys: [successor, predecessor],
+      interactions: [],
+      reports: [],
+    });
+
+    renderWithQuery(
+      <SetupView
+        data={data}
+        secrets={null}
+        rememberSecret={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        setNotice={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("End-to-end feedback loop proven")).toBeVisible();
+    expect(screen.getByText(/1 product interaction\(s\) in the last 30 days/)).toBeVisible();
+    expect(screen.getByText(/1 structured report\(s\) in the last 30 days/)).toBeVisible();
+    expect(screen.getAllByText(/af_live_5678efab/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/af_live_1234abcd/)).toBeVisible();
+    expect(screen.getByText(/Never seen/)).toBeVisible();
+    expect(screen.getByText(/Feedback received/)).toBeVisible();
+  });
+
+  it.each([
+    [0, 0, 0, "Not connected", /Next: deploy the current write key/],
+    [1, 0, 0, "Product route connected", /company-side connection works/],
+    [1, 1, 0, "Agent use confirmed", /Agent use is confirmed/],
+    [1, 1, 1, "End-to-end feedback loop proven", /Activation complete/],
+  ] as const)("separates opportunity, confirmation, and report activation at %i/%i/%i", (opportunities, confirmedInteractions, reports, description, nextAction) => {
+    const base = dashboardFixture();
+    const activationMilestones = base.activationMilestones;
+    if (!activationMilestones) throw new Error("fixture requires activation milestones");
+    const writeKey = base.apiKeys[0];
+    const data = dashboardFixture({
+      apiKeys: [
+        {
+          ...writeKey,
+          interactionCount: opportunities,
+          reportCount: reports,
+        },
+      ],
+      insights: {
+        ...base.insights,
+        opportunities,
+        confirmedInteractions,
+        reports,
+      },
+      activationMilestones: {
+        ...activationMilestones,
+        firstOpportunityAt: opportunities ? "2026-07-01T12:00:00Z" : null,
+        firstConfirmedInteractionAt: confirmedInteractions ? "2026-07-02T12:00:00Z" : null,
+        firstReportAt: reports ? "2026-07-03T12:00:00Z" : null,
+      },
+    });
+
+    renderWithQuery(
+      <SetupView
+        data={data}
+        secrets={null}
+        rememberSecret={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        setNotice={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(description)).toBeVisible();
+    expect(screen.getAllByText("First opportunity")).toHaveLength(2);
+    expect(screen.getByText("First confirmed interaction")).toBeVisible();
+    expect(screen.getByText("First feedback report")).toBeVisible();
+    expect(screen.getByText(nextAction)).toBeVisible();
+  });
+
+  it("keeps durable activation complete after the rolling insight window becomes quiet", () => {
+    const base = dashboardFixture();
+    const data = dashboardFixture({
+      interactions: [],
+      reports: [],
+      sessions: [],
+      listState: {
+        interactionsLoaded: 0,
+        interactionsTotal: 0,
+        reportsLoaded: 0,
+        reportsTotal: 0,
+        sessionsLoaded: 0,
+        sessionsTotal: 0,
+      },
+      insights: {
+        ...base.insights,
+        opportunities: 0,
+        confirmedInteractions: 0,
+        reports: 0,
+      },
+    });
+
+    renderWithQuery(
+      <SetupView
+        data={data}
+        secrets={null}
+        rememberSecret={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        setNotice={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("End-to-end feedback loop proven")).toBeVisible();
+    expect(
+      screen.getByText(/no product interactions in the current 30-day insight window/i),
+    ).toBeVisible();
+    expect(
+      screen.getByText(/no proven interactions in the current 30-day insight window/i),
+    ).toBeVisible();
+    expect(screen.getByText(/no reports in the current 30-day insight window/i)).toBeVisible();
+    expect(screen.getByText(/Activation complete/)).toBeVisible();
   });
 
   it("does not auto-recreate a removed write key and offers manual recovery", async () => {
@@ -953,13 +1146,14 @@ describe("dashboard view behavior", () => {
     );
 
     fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
-    expect(await screen.findByText(group.groupKey)).toBeVisible();
+    expect(await screen.findByText(group.explanation)).toBeVisible();
+    expect(screen.getByText(group.groupKey)).toBeVisible();
     fireEvent.click(screen.getByRole("tab", { name: "Reports" }));
     expect(
       screen.getByRole("row", { name: /Search results omitted the newest document/ }),
     ).toBeVisible();
     expect(screen.getByLabelText("Search feedback")).toBeVisible();
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("keeps the Feedback list usable when one report has malformed findings", async () => {
@@ -970,11 +1164,12 @@ describe("dashboard view behavior", () => {
       summary: "Legacy report with malformed findings",
       findings: null as never,
     };
-    vi.stubGlobal("fetch", feedbackGroupFetch(data));
+    const malformedData = { ...data, reports: [malformedReport, data.reports[0]] };
+    vi.stubGlobal("fetch", feedbackGroupFetch(malformedData));
 
     renderWithQuery(
       <FeedbackView
-        data={{ ...data, reports: [malformedReport, data.reports[0]] }}
+        data={malformedData}
         selectedReportId={null}
         selectReport={vi.fn()}
         openInteraction={vi.fn()}
@@ -986,7 +1181,7 @@ describe("dashboard view behavior", () => {
     );
 
     expect(
-      screen.getByRole("row", { name: /Legacy report with malformed findings/ }),
+      await screen.findByRole("row", { name: /Legacy report with malformed findings/ }),
     ).toBeVisible();
     expect(
       screen.getByRole("row", { name: /Search results omitted the newest document/ }),
@@ -995,18 +1190,35 @@ describe("dashboard view behavior", () => {
     expect(await screen.findByText("No signals yet")).toBeVisible();
     fireEvent.click(screen.getByRole("tab", { name: "Reports" }));
     expect(
-      screen.getByRole("row", { name: /Legacy report with malformed findings/ }),
+      await screen.findByRole("row", { name: /Legacy report with malformed findings/ }),
     ).toBeVisible();
   });
 
   it("filters feedback by the displayed received time", async () => {
+    window.history.replaceState({}, "", "/?view=feedback&range=all");
     const data = dashboardFixture();
     const report = {
       ...data.reports[0],
       createdAt: new Date().toISOString(),
       occurredAt: "2020-01-01T00:00:00Z",
     };
-    vi.stubGlobal("fetch", feedbackGroupFetch(data));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.startsWith("/api/dashboard/feedback?")) {
+          const reports = path.includes("since=") ? [] : [report];
+          return Promise.resolve(
+            json({ reports, total: reports.length, limit: 50, nextCursor: null }),
+          );
+        }
+        if (path.includes("/groups?")) {
+          return Promise.resolve(json({ groups: [], hasMore: false, limit: 50, offset: 0 }));
+        }
+        if (path.endsWith("/github-repo")) return Promise.resolve(json(null));
+        throw new Error(`Unexpected request: ${path}`);
+      }),
+    );
 
     renderWithQuery(
       <FeedbackView
@@ -1024,15 +1236,18 @@ describe("dashboard view behavior", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
     expect(await screen.findByText("No signals yet")).toBeVisible();
     fireEvent.click(screen.getByRole("tab", { name: "Reports" }));
-    fireEvent.click(screen.getByRole("button", { name: "Filters" }));
-    fireEvent.click(await screen.findByRole("tab", { name: "Received" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Filters/ }));
+    fireEvent.click(await screen.findByRole("tab", { name: /^Received/ }));
     fireEvent.click(screen.getByRole("button", { name: "Last 7 days" }));
-    expect(
-      screen.getByRole("row", { name: /Search results omitted the newest document/ }),
-    ).toBeVisible();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("row", { name: /Search results omitted the newest document/ }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(await screen.findByText("No matching feedback")).toBeVisible();
   });
 
-  it("preserves the existing policy fields while changing feedback mode", async () => {
+  it("saves an exact custom retention period with feedback mode and explains deletion timing", async () => {
     const data = dashboardFixture();
     const fetchMock = vi.fn().mockResolvedValue(json({ environment: data.currentEnvironment }));
     vi.stubGlobal("fetch", fetchMock);
@@ -1040,6 +1255,14 @@ describe("dashboard view behavior", () => {
     render(
       <PolicyView data={data} refresh={vi.fn().mockResolvedValue(undefined)} setNotice={vi.fn()} />,
     );
+    const retentionInput = screen.getByLabelText("Retention days");
+    expect(retentionInput).toHaveAttribute("min", "1");
+    expect(retentionInput).toHaveAttribute("max", "365");
+    expect(screen.getByRole("button", { name: "7 days" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "365 days" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "30 days" }));
+    expect(retentionInput).toHaveValue(30);
+    fireEvent.change(retentionInput, { target: { value: "47" } });
     fireEvent.change(screen.getByLabelText("Feedback mode"), { target: { value: "ask_once" } });
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
@@ -1048,8 +1271,30 @@ describe("dashboard view behavior", () => {
       environmentId: data.currentEnvironment?.id,
       feedbackMode: "ask_once",
       collectEventSummaries: false,
-      retentionDays: 90,
+      retentionDays: 47,
     });
+    expect(screen.getByText(/Dashboard filtering changes immediately/)).toBeVisible();
+    expect(screen.getByText(/scheduled purge interval/)).toBeVisible();
+    expect(screen.getByText(/survives retention until/)).toBeVisible();
+  });
+
+  it("rejects retention periods outside 1 to 365 days before saving", async () => {
+    const data = dashboardFixture();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <PolicyView data={data} refresh={vi.fn().mockResolvedValue(undefined)} setNotice={vi.fn()} />,
+    );
+    fireEvent.change(screen.getByLabelText("Retention days"), { target: { value: "366" } });
+    const policyForm = screen.getByRole("button", { name: "Save changes" }).closest("form");
+    if (!policyForm) throw new Error("Policy form is missing");
+    fireEvent.submit(policyForm);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Retention must be between 1 and 365 days.",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("keeps team-management controls hidden from members", () => {
@@ -1123,6 +1368,11 @@ function feedbackGroupFetch(
   const productId = data.currentProduct?.id ?? "";
   return vi.fn().mockImplementation((input: RequestInfo | URL) => {
     const path = String(input);
+    if (path.startsWith("/api/dashboard/feedback?")) {
+      return Promise.resolve(
+        json({ reports: data.reports, total: data.reports.length, limit: 50, nextCursor: null }),
+      );
+    }
     if (path === `/api/products/${productId}/github-repo`) {
       return Promise.resolve(json(null));
     }

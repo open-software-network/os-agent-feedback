@@ -3,14 +3,6 @@ name: Build web
 on:
   push:
     branches: [main]
-    paths:
-      - "web/**"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "pnpm-workspace.yaml"
-      - "backend/openapi.json"
-      - ".dockerignore"
-      - ".github/workflows/build-web.yml"
   workflow_dispatch:
 
 permissions:

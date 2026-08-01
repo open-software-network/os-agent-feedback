@@ -193,6 +193,23 @@ export function TeamView({
           }
         />
       )}
+      {embedded ? (
+        <Panel title="Team details">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="font-medium">{data.workspace.name}</p>
+              <p className="text-sm text-muted-foreground">
+                {data.teamMembers.length} member{data.teamMembers.length === 1 ? "" : "s"}
+              </p>
+            </div>
+            {canInvite ? (
+              <Button variant="outline" onClick={() => setRenaming(true)}>
+                Rename team
+              </Button>
+            ) : null}
+          </div>
+        </Panel>
+      ) : null}
       {error ? <StatusMessage tone="error">{error}</StatusMessage> : null}
       {renaming ? (
         <Panel title="Rename team">

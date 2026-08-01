@@ -1,7 +1,69 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { mcpClientArguments } from "../experiments/agent-compliance/runtime-config.mjs";
 import { startLabServer } from "../experiments/agent-compliance/server.mjs";
+
+test("agent evaluator preserves the exact MCP server across initial and resumed turns", () => {
+  const run = {
+    id: "run-consent-1",
+    baseUrl: "http://127.0.0.1:43210",
+    placement: "mcp_mrtr",
+    copy: "native_input_required",
+    surface: "mcp",
+  };
+  const server = "/repo/experiments/agent-compliance/mcp-server.mjs";
+  const codex = mcpClientArguments("codex", run, server);
+  assert.deepEqual(JSON.parse(codex[3].replace("mcp_servers.acme.args=", "")), [
+    server,
+    "--run-id",
+    run.id,
+    "--base-url",
+    run.baseUrl,
+    "--placement",
+    run.placement,
+    "--copy",
+    run.copy,
+  ]);
+  const claude = JSON.parse(mcpClientArguments("claude", run, server)[1]);
+  assert.deepEqual(claude.mcpServers.acme.args, JSON.parse(codex[3].split("=", 2)[1]));
+  assert.deepEqual(mcpClientArguments("codex", { ...run, surface: "http" }, server), []);
+});
+
+test("agent evaluator configures the product and Companion MCP servers together", () => {
+  const server = "/repo/experiments/agent-compliance/mcp-server.mjs";
+  const companionServer = "/repo/companion/plugins/epode-companion/scripts/mcp-server.mjs";
+  const run = {
+    id: "run-companion-1",
+    baseUrl: "http://127.0.0.1:43210",
+    placement: "mcp_companion_consent",
+    copy: "full_silent_success",
+    surface: "mcp",
+    companionServer,
+  };
+
+  const codex = mcpClientArguments("codex", run, server);
+  const codexProduct = codex.find((value) => value.startsWith("mcp_servers.acme.args="));
+  const codexCompanion = codex.find((value) =>
+    value.startsWith("mcp_servers.epode_companion.args="),
+  );
+  assert.deepEqual(JSON.parse(codexProduct.split("=", 2)[1]), [
+    server,
+    "--run-id",
+    run.id,
+    "--base-url",
+    run.baseUrl,
+    "--placement",
+    run.placement,
+    "--copy",
+    run.copy,
+  ]);
+  assert.deepEqual(JSON.parse(codexCompanion.split("=", 2)[1]), [companionServer]);
+
+  const claude = JSON.parse(mcpClientArguments("claude", run, server)[1]);
+  assert.deepEqual(claude.mcpServers.acme.args, JSON.parse(codexProduct.split("=", 2)[1]));
+  assert.deepEqual(claude.mcpServers["epode-companion"].args, [companionServer]);
+});
 
 test("compliance lab isolates response and llms.txt placements", async () => {
   const lab = await startLabServer();
@@ -172,6 +234,69 @@ test("Epode-managed ask once turns later responses into never ask", async () => 
     });
     const declinedProduct = await (await fetch(declinedRun.productUrl)).json();
     assert.equal(declinedProduct._agentFeedback, undefined);
+  } finally {
+    await lab.close();
+  }
+});
+
+test("Companion handoff remembers Ask-once approval across interactions", async () => {
+  const lab = await startLabServer();
+  const customerRef = "customer_companion_approved";
+  try {
+    const firstRun = lab.createRun({
+      mode: "ask_once",
+      consentOwner: "epode",
+      placement: "mcp_companion_consent",
+      copy: "full_silent_success",
+      customerRef,
+    });
+    const firstHandle = `afr2_${firstRun.id.replaceAll("-", "")}${"a".repeat(16)}`;
+    const authorization = `Bearer ${firstHandle}`;
+
+    const required = await fetch(`${lab.baseUrl}/api/v2/capabilities/introspect`, {
+      method: "POST",
+      headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(required.status, 200);
+    assert.equal((await required.json()).state, "consent_required");
+
+    const decision = await fetch(`${lab.baseUrl}/api/v2/consent/decisions`, {
+      method: "POST",
+      headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify({ decision: "approved" }),
+    });
+    assert.equal(decision.status, 200);
+    assert.equal((await decision.json()).state, "approved");
+
+    const firstReport = await fetch(`${lab.baseUrl}/api/v2/reports`, {
+      method: "POST",
+      headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify({ summary: "The first product outcome was useful." }),
+    });
+    assert.equal(firstReport.status, 200);
+    assert.equal((await firstReport.json()).accepted, true);
+
+    const secondRun = lab.createRun({
+      mode: "ask_once",
+      consentOwner: "epode",
+      placement: "mcp_companion_consent",
+      copy: "full_silent_success",
+      customerRef,
+      consentScope: firstRun.consentScope,
+    });
+    const secondHandle = `afr2_${secondRun.id.replaceAll("-", "")}${"a".repeat(16)}`;
+    const remembered = await fetch(`${lab.baseUrl}/api/v2/capabilities/introspect`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${secondHandle}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+    assert.equal(remembered.status, 200);
+    assert.equal((await remembered.json()).state, "feedback_ready");
+    assert.equal(lab.getConsent("acme_queue", customerRef), "approved");
   } finally {
     await lab.close();
   }

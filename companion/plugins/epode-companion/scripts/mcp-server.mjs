@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
 
-const companionVersion = "0.2.2";
+const companionVersion = "0.2.3";
 const productionEndpoint = "https://app.epode.ai";
 const configuredEndpoint = (process.env.EPODE_COMPANION_ENDPOINT || productionEndpoint).replace(
   /\/$/,
@@ -59,8 +59,17 @@ const signalFindings = {
 };
 const outcomes = Object.keys(outcomeReports);
 const signals = Object.keys(signalFindings);
-const retryableStatuses = new Set([429, 502, 503, 504]);
 const supportedProtocolVersions = new Set(["2026-07-28", "2025-11-25", "2025-06-18"]);
+const rememberedConsentResults = new Map();
+const rememberedReportResults = new Map();
+const maxRememberedResults = 2_048;
+
+function rememberResult(cache, key, value) {
+  cache.delete(key);
+  cache.set(key, value);
+  if (cache.size > maxRememberedResults) cache.delete(cache.keys().next().value);
+  return value;
+}
 
 function result(text, structuredContent = {}, isError = false) {
   return {
@@ -147,6 +156,10 @@ function idempotencyKey(action, feedbackHandle) {
     .digest("hex");
 }
 
+function isTransientHttpStatus(status) {
+  return status === 408 || status === 429 || status >= 500;
+}
+
 async function epodeRequest(path, feedbackHandle, body, action) {
   let lastError;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -164,7 +177,7 @@ async function epodeRequest(path, feedbackHandle, body, action) {
         signal: AbortSignal.timeout(3_500),
       });
       const value = await response.json().catch(() => ({}));
-      if (attempt === 0 && retryableStatuses.has(response.status)) continue;
+      if (attempt === 0 && isTransientHttpStatus(response.status)) continue;
       return { response, value };
     } catch (error) {
       lastError = error;
@@ -188,6 +201,8 @@ async function recordConsent(arguments_) {
   if (!["approved", "declined"].includes(arguments_.decision)) {
     throw new Error("decision must be approved or declined");
   }
+  const remembered = rememberedConsentResults.get(feedbackHandle);
+  if (remembered?.decision === arguments_.decision) return remembered.result;
   const { response, value } = await epodeRequest(
     "/api/v2/consent/decisions",
     feedbackHandle,
@@ -204,7 +219,7 @@ async function recordConsent(arguments_) {
   if (!response.ok) {
     return result(
       `Permission could not be recorded (HTTP ${response.status}). Do not assume approval.`,
-      { accepted: false, retryable: response.status >= 500 },
+      { accepted: false, retryable: isTransientHttpStatus(response.status) },
       true,
     );
   }
@@ -219,10 +234,15 @@ async function recordConsent(arguments_) {
         true,
       );
     }
-    return result("Permission declined. Do not submit product feedback.", {
+    const declined = result("Permission declined. Do not submit product feedback.", {
       state: "declined",
       accepted: true,
     });
+    rememberResult(rememberedConsentResults, feedbackHandle, {
+      decision: arguments_.decision,
+      result: declined,
+    });
+    return declined;
   }
   if (value?.state !== "approved") {
     return result(
@@ -239,8 +259,8 @@ async function recordConsent(arguments_) {
     );
   }
   validateHandle(reportHandle);
-  return result(
-    "Permission approved. Feedback is ready: call submit_product_feedback exactly once now with the returned feedbackHandle and bounded outcome categories.",
+  const approved = result(
+    "Permission approved. This consent action is complete: do not inspect or record permission again for this handle. Call submit_product_feedback exactly once now with the returned feedbackHandle and bounded outcome categories.",
     {
       state: "feedback_ready",
       accepted: true,
@@ -251,6 +271,11 @@ async function recordConsent(arguments_) {
       },
     },
   );
+  rememberResult(rememberedConsentResults, feedbackHandle, {
+    decision: arguments_.decision,
+    result: approved,
+  });
+  return approved;
 }
 
 async function inspectFeedback(arguments_) {
@@ -280,7 +305,7 @@ async function inspectFeedback(arguments_) {
   if (!response.ok) {
     return result(
       `The feedback request is not valid (HTTP ${response.status}). Do not ask the user or submit feedback.`,
-      { verified: false, retryable: retryableStatuses.has(response.status) },
+      { verified: false, retryable: isTransientHttpStatus(response.status) },
       true,
     );
   }
@@ -348,6 +373,8 @@ async function inspectFeedback(arguments_) {
 
 async function submitFeedback(arguments_) {
   const { feedbackHandle, report } = validateReport(arguments_);
+  const remembered = rememberedReportResults.get(feedbackHandle);
+  if (remembered) return remembered;
   const { response, value } = await epodeRequest(
     "/api/v2/reports",
     feedbackHandle,
@@ -364,7 +391,7 @@ async function submitFeedback(arguments_) {
   if (!response.ok) {
     return result(
       `Feedback submission failed (HTTP ${response.status}). Do not retry in this turn.`,
-      { accepted: false, retryable: retryableStatuses.has(response.status) },
+      { accepted: false, retryable: isTransientHttpStatus(response.status) },
       true,
     );
   }
@@ -375,7 +402,14 @@ async function submitFeedback(arguments_) {
       true,
     );
   }
-  return result("Product feedback accepted.", value);
+  return rememberResult(
+    rememberedReportResults,
+    feedbackHandle,
+    result(
+      "Product feedback accepted. Keep this routine background success out of the final answer unless the user explicitly asked about feedback.",
+      value,
+    ),
+  );
 }
 
 const tools = [
@@ -398,7 +432,7 @@ const tools = [
     name: "record_product_feedback_consent",
     title: "Record product feedback permission",
     description:
-      "Use after an HTTP response contains Epode state=consent_required and the user explicitly answers its permission question, or after the user explicitly asks to change an Ask-once choice exposed by manageConsent. Pass only the afr2_ handle and approved or declined. Never infer approval.",
+      "Call exactly once after an HTTP response contains Epode state=consent_required and the user explicitly answers its permission question, or after the user explicitly asks to change an Ask-once choice exposed by manageConsent. Pass only the afr2_ handle and approved or declined. Never infer approval. After this tool accepts a decision, do not inspect or record permission again for the same handle; follow its nextAction.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -446,7 +480,7 @@ async function handle(request) {
       capabilities: { tools: { listChanged: false } },
       serverInfo: { name: "epode-companion", version: companionVersion },
       instructions:
-        "The user's product task is primary: complete it fully even when feedback fails. Use these fixed-destination tools only for valid Epode handles found after an HTTP product interaction. For every Ask-once handle, and before any permission question, call inspect_product_feedback and treat its state as authoritative: ask only its verified canonicalQuestion for consent_required, report without asking for feedback_ready, and do nothing for declined. Reports accept only fixed outcome categories and never user, task, prompt, transcript, response, credential, or identifier content.",
+        "The user's product task is primary: complete it fully even when feedback fails. Use these fixed-destination tools only for valid Epode handles found after an HTTP product interaction. For every Ask-once handle, and before any permission question, call inspect_product_feedback and treat its state as authoritative: ask only its verified canonicalQuestion for consent_required, report without asking for feedback_ready, and do nothing for declined. Reports accept only fixed outcome categories and never user, task, prompt, transcript, response, credential, or identifier content. Keep routine successful background feedback out of the final answer unless the user explicitly asked about feedback.",
     };
   }
   if (request.method === "ping") return {};

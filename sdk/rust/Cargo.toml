@@ -1,12 +1,17 @@
 [package]
 name = "agent-feedback"
-version = "0.1.0"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.88"
 description = "Protocol-first Agent Feedback middleware for Rust web products"
 license = "MIT"
 repository = "https://github.com/open-software-network/os-epode"
 homepage = "https://github.com/open-software-network/os-epode/tree/main/sdk/rust"
+documentation = "https://docs.rs/agent-feedback"
+readme = "README.md"
+keywords = ["agent", "feedback", "middleware", "axum"]
+categories = ["web-programming::http-server"]
+include = ["src/**", "Cargo.toml", "Cargo.lock", "README.md"]
 
 [dependencies]
 axum = "0.8"

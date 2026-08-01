@@ -10,21 +10,39 @@ const mcpSource = await readFile(
   new URL("../examples/node-mcp/src/index.js", import.meta.url),
   "utf8",
 );
+const fastifySource = await readFile(
+  new URL("../examples/node-fastify/src/index.js", import.meta.url),
+  "utf8",
+);
+const pythonAsgiSource = await readFile(
+  new URL("../examples/python-asgi/app.py", import.meta.url),
+  "utf8",
+);
+const crawlSource = await readFile(
+  new URL("../examples/icp-crawl-fastify/index.js", import.meta.url),
+  "utf8",
+);
+const goDocs = await readFile(new URL("../docs/integrations/go-http.mdx", import.meta.url), "utf8");
+const goExample = await readFile(new URL("../examples/go-http/main.go", import.meta.url), "utf8");
 
-test("the hosted playground creates feedback opportunities and explicit sessions", () => {
+test("the hosted playground creates feedback opportunities without trusting caller identity", () => {
   assert.match(source, /include: \["\/api\/status", "\/api\/recommendation"\]/);
-  assert.match(source, /sessionRef: \(request\) => request\.header\("x-agent-session"\)/);
-  assert.match(source, /customerRef: \(request\) => request\.header\("x-customer-ref"\)/);
+  assert.doesNotMatch(source, /customerRef:.*header/);
+  assert.match(source, /sessionRef: experimentRefsEnabled/);
+  assert.match(source, /EPODE_EXAMPLE_ENABLE_EXPERIMENT_REFS/);
+  assert.match(source, /hosted playground is anonymous/);
   assert.match(source, /runtimeHint: \(request\) => request\.header\("user-agent"\)/);
   assert.match(source, /reliability/);
   assert.match(source, /speed/);
   assert.match(source, /cost/);
 });
 
-test("hosted HTTP and MCP examples support both consent modes", () => {
+test("hosted HTTP and MCP examples support every feedback mode", () => {
   assert.match(source, /process\.env\.AGENT_FEEDBACK_MODE \|\| "never_ask"/);
+  assert.match(source, /"off"/);
   assert.match(source, /feedbackMode,/);
   assert.match(mcpSource, /process\.env\.AGENT_FEEDBACK_MODE \|\| "never_ask"/);
+  assert.match(mcpSource, /feedbackMode === "off"/);
   assert.match(mcpSource, /feedbackMode,/);
   assert.match(mcpSource, /record_product_feedback_consent/);
   assert.match(mcpSource, /Epode—not this client—remembers the decision/);
@@ -33,4 +51,32 @@ test("hosted HTTP and MCP examples support both consent modes", () => {
   assert.match(mcpSource, /EPODE_EXAMPLE_ENABLE_EXPERIMENT_REFS/);
   assert.match(mcpSource, /sessionRef: experimentRefsEnabled/);
   assert.match(mcpSource, /verified MCP authentication/);
+  assert.match(mcpSource, /scope: "regional"/);
+  assert.match(mcpSource, /checkedAt: new Date\(\)\.toISOString\(\)/);
+});
+
+test("public examples use verified or deliberately anonymous customer identity", () => {
+  assert.doesNotMatch(source, /customerRef:.*x-customer-ref/);
+  assert.doesNotMatch(fastifySource, /customerRef:.*x-customer-ref/);
+  assert.doesNotMatch(pythonAsgiSource, /customer_ref=.*x-customer-ref/);
+  assert.match(pythonAsgiSource, /public example is anonymous/);
+  assert.match(crawlSource, /Bearer demo-crawl-team-token/);
+  assert.match(crawlSource, /customerRef: \(request\) => request\.productAuth\?\.accountId/);
+  assert.match(crawlSource, /sessionRef: \(request\) => request\.params\?\.id/);
+  assert.doesNotMatch(crawlSource, /customerRef:.*x-team-id/);
+});
+
+test("runnable servers close cleanly before flushing feedback telemetry", () => {
+  assert.match(source, /server\.close\(\(error\)/);
+  assert.match(fastifySource, /const shutdown = async \(\) => app\.close\(\)/);
+  assert.match(mcpSource, /server\.close\(\(error\)/);
+  assert.match(pythonAsgiSource, /feedback_app\.shutdown\(\)/);
+  assert.match(crawlSource, /const shutdown = async \(\) => app\.close\(\)/);
+  assert.doesNotMatch(goDocs, /log\.Fatal\(http\.ListenAndServe/);
+  assert.match(goDocs, /errors\.Join\(serveErr, serverErr, feedbackErr\)/);
+  assert.match(goExample, /feedback\.Shutdown\(feedbackContext\)/);
+  assert.ok(
+    goExample.indexOf("feedback.Shutdown(feedbackContext)") <
+      goExample.indexOf("log.Fatal(serveErr)"),
+  );
 });

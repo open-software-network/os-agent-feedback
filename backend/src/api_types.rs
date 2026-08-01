@@ -209,7 +209,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::models::{ProductFeedbackReportWithInteraction, ProductInteraction};
+    use crate::models::{
+        ProductActivationMilestones, ProductFeedbackReportWithInteraction, ProductInteraction,
+    };
 
     fn timestamp() -> DateTime<Utc> {
         DateTime::from_timestamp(1_700_000_000, 0).expect("fixture timestamp is valid")
@@ -252,6 +254,8 @@ mod tests {
             last_used_at: None,
             revoked_at: None,
             expires_at: None,
+            interaction_count: 0,
+            report_count: 0,
         }
     }
 
@@ -496,6 +500,8 @@ mod tests {
                 "lastUsedAt",
                 "revokedAt",
                 "expiresAt",
+                "interactionCount",
+                "reportCount",
             ],
         );
         let product_response = assert_keys(ProductResponse { product: product() }, &["product"]);
@@ -572,6 +578,8 @@ mod tests {
                 "lastUsedAt",
                 "revokedAt",
                 "expiresAt",
+                "interactionCount",
+                "reportCount",
             ],
         );
         let api_key_rotated = assert_keys(
@@ -596,6 +604,8 @@ mod tests {
                 "lastUsedAt",
                 "revokedAt",
                 "expiresAt",
+                "interactionCount",
+                "reportCount",
             ],
         );
         let environment_response = assert_keys(
@@ -673,6 +683,22 @@ mod tests {
 
     #[test]
     fn nullable_dashboard_fields_remain_present_as_null() {
+        let activation = serde_json::to_value(ProductActivationMilestones {
+            workspace_id: Uuid::nil(),
+            product_id: Uuid::nil(),
+            first_opportunity_at: None,
+            first_confirmed_interaction_at: None,
+            first_report_at: None,
+        })
+        .expect("activation milestones serialize");
+        for key in [
+            "firstOpportunityAt",
+            "firstConfirmedInteractionAt",
+            "firstReportAt",
+        ] {
+            assert_eq!(activation.get(key), Some(&Value::Null), "{key}");
+        }
+
         let interaction = serde_json::to_value(interaction()).expect("interaction serializes");
         for key in [
             "apiKeyId",

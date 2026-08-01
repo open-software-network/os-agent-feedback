@@ -6,14 +6,15 @@ description: "Instrument FastAPI, Starlette, Quart, or Django ASGI responses."
 ## Install
 
 ```bash
-python -m pip install https://app.epode.ai/static/agent_feedback-0.1.0-py3-none-any.whl
+python -m pip install https://app.epode.ai/static/agent_feedback-0.2.2-py3-none-any.whl
 ```
 
 Python 3.10 or newer is required.
 
 ## Configure once
 
-Wrap the completed ASGI app:
+Wrap the completed ASGI app, then put your product authentication/tenant middleware outside Epode so
+it executes first. `customer_ref` is a synchronous accessor, not an authentication hook:
 
 ```python
 import os
@@ -32,12 +33,13 @@ def customer_ref(scope):
     # scope["state"] (or read your session/auth header) in your auth middleware.
     return scope.get("state", {}).get("account_id")
 
-app = AgentFeedbackASGI(
+instrumented_app = AgentFeedbackASGI(
     app,
     api_key=os.environ["AGENT_FEEDBACK_KEY"],
     include=("/search", "/docs/*"),
     customer_ref=customer_ref,  # required for durable Ask once; optional otherwise
 )
+app = ProductTenantAuthMiddleware(instrumented_app)
 ```
 
 ## Server-rendered HTML
@@ -50,7 +52,10 @@ JSON objects retain their existing shape and add `_agentFeedback`.
 In `include`/`exclude` patterns, `*` matches one path segment and `**` matches any depth. `cache_mode`
 mirrors the Node SDK: the default `"safe"` skips responses that declare a shared cache policy, `"private"`
 replaces shared caching with `private, no-store` deliberately, and `"request"` instruments only requests
-that opt in with the `Agent-Feedback-Request: 1` header.
+that opt in with the `Agent-Feedback-Request: 1` header. Request mode adds
+`Vary: Agent-Feedback-Request` so shared caches keep ordinary and opted-in responses separate.
+Eligible ordinary 2xx `GET` and `HEAD` responses also advertise a same-path-and-query `Link` for one
+authenticated Companion refetch; redirects and non-safe methods never advertise it.
 
 ## Verify
 
@@ -64,18 +69,18 @@ For the full automated check, run the integration doctor. It ships inside the No
 the npm registry), so any stack can run it with a throwaway install:
 
 ```bash
-npm install https://app.epode.ai/static/agent-feedback-node-0.1.0.tgz
+npm install https://app.epode.ai/static/agent-feedback-node-0.2.2.tgz
 npx agent-feedback-doctor --url https://your-product.example/search?q=epode-test
 ```
 
-Then confirm **Setup** shows telemetry. A generic HTTP client does not automatically prove agent use;
+Then confirm **Setup** shows the first opportunity. The doctor deliberately creates no report. A generic HTTP client does not automatically prove agent use;
 the interaction becomes confirmed when its feedback capability returns.
 
 ## Customer-agent coverage
 
 Your ASGI middleware creates the HTTP/HTML feedback contract; it cannot make an independent customer agent act
 on it. For reliable Codex and Claude Code handling, customers install
-[Epode Companion](/integrations/companion) once for every Epode-instrumented product they use. This is a
+[Epode Companion](/integrations/companion) once for all Epode-instrumented products they use. This is a
 user-side plugin, not another Python package, account, or product key.
 
 [View the runnable ASGI example](https://github.com/open-software-network/os-epode/tree/main/examples/setup-matrix-python-asgi)

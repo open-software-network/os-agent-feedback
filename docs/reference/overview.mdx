@@ -35,7 +35,11 @@ Content-Type: application/json
 {"subject":"afsub1_..."}
 ```
 
-The subject is derived from a stable opaque `customerRef`; the raw reference is never sent to Epode.
+The subject is derived from a stable opaque `customerRef`. The raw reference is not sent in this
+consent-state lookup and never appears in the agent-facing feedback envelope. When `customerRef` is
+configured, opportunity telemetry separately sends and stores that opaque value so the dashboard can
+group product usage by customer. Use an internal non-personal account or tenant ID, never a name or
+email address.
 
 ### How the `afsub1_` subject is derived
 
@@ -84,8 +88,8 @@ The customer's agent receives only a short-lived interaction capability. It neve
 ## Downloadable conformance bundle
 
 ```bash
-curl -fsSLO https://app.epode.ai/static/agent-feedback-protocol-v1.zip
-unzip agent-feedback-protocol-v1.zip
+curl -fsSLO https://app.epode.ai/static/agent-feedback-protocol-v1-0.2.2.zip
+unzip agent-feedback-protocol-v1-0.2.2.zip
 ```
 
 Use the included schemas and signing vector as the source of truth for a new adapter.

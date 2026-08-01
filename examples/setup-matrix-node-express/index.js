@@ -1,12 +1,37 @@
 import express from "express";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { agentFeedback } from "@agent-feedback/node/express";
 
 const app = express();
+function authenticate(request, response, next) {
+  if (request.path === "/health") return next();
+  const token = request.get("authorization")?.replace(/^Bearer\s+/i, "");
+  const [payload, signature] = token?.split(".") || [];
+  const expected = payload
+    ? createHmac("sha256", process.env.SETUP_MATRIX_PRODUCT_AUTH_SECRET || "")
+        .update(payload)
+        .digest("base64url")
+    : "";
+  if (
+    !signature ||
+    signature.length !== expected.length ||
+    !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))
+  ) {
+    return response.status(401).json({ error: "unauthorized" });
+  }
+  const accountId = Buffer.from(payload, "base64url").toString("utf8");
+  if (!/^[A-Za-z0-9_.:-]{1,160}$/.test(accountId)) {
+    return response.status(401).json({ error: "unauthorized" });
+  }
+  request.auth = { accountId };
+  next();
+}
+app.use(authenticate);
 const feedback = agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
   endpoint: process.env.AGENT_FEEDBACK_URL,
   include: ["/search", "/docs/*"],
-  customerRef: (request) => request.get("x-customer-ref"),
+  customerRef: (request) => request.auth?.accountId,
 });
 app.use(feedback);
 app.get("/search", (_request, response) => response.json({ stack: "node-express", answer: "express-result" }));

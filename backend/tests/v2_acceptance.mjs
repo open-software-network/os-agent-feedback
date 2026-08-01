@@ -9,8 +9,15 @@ if (!apiKey) throw new Error("AGENT_FEEDBACK_KEY is required");
 const keyMatch = /^af_live_([0-9a-f]{32})_(.{20,})$/i.exec(apiKey);
 if (!keyMatch) throw new Error("A v2 product key is required");
 
-function capability(interactionId, issuedAt = Math.floor(Date.now() / 1000), expiresAt = issuedAt + 7200) {
+function capability(
+  interactionId,
+  issuedAt = Math.floor(Date.now() / 1000),
+  expiresAt = issuedAt + 7200,
+  { subject, revision } = {},
+) {
   const claims = { v: 1, i: interactionId, iat: issuedAt, exp: expiresAt, n: randomBytes(18).toString("base64url") };
+  if (subject !== undefined) claims.s = subject;
+  if (revision !== undefined) claims.r = revision;
   const payload = Buffer.from(JSON.stringify(claims)).toString("base64url");
   const input = `afr2_${keyMatch[1].toLowerCase()}.${payload}`;
   const signingKey = createHash("sha256").update(apiKey).digest();

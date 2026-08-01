@@ -45,6 +45,109 @@ describe("dashboard data flow", () => {
     ).toBeVisible();
   });
 
+  it("keeps shown-once product keys in page memory instead of browser storage", async () => {
+    window.history.replaceState({}, "", "/?view=setup");
+    const base = dashboardFixture();
+    const data = dashboardFixture({
+      apiKeys: [],
+      insights: {
+        ...base.insights,
+        opportunities: 0,
+        confirmedInteractions: 0,
+        reports: 0,
+      },
+    });
+    const secret = "af_live_memory_only_secret";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input) === "/api/settings/api-keys" && init?.method === "POST") {
+          return Promise.resolve(json({ apiKey: base.apiKeys[0], secret, shownOnce: true }));
+        }
+        return Promise.resolve(feedbackApiResponse(String(input), data) ?? json(data));
+      }),
+    );
+
+    render(
+      <Providers>
+        <Home />
+      </Providers>,
+    );
+
+    expect((await screen.findAllByText(secret)).length).toBeGreaterThan(0);
+    const storedValues = Array.from({ length: window.sessionStorage.length }, (_, index) => {
+      const key = window.sessionStorage.key(index);
+      return key ? window.sessionStorage.getItem(key) : null;
+    });
+    expect(storedValues).not.toContain(secret);
+    expect(Object.keys(window.sessionStorage)).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/agent-feedback:(?:product|read)-key:/)]),
+    );
+  });
+
+  it("recovers from a removed team saved only in local storage", async () => {
+    const staleTeam = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const data = dashboardFixture();
+    window.localStorage.setItem("epode:last-team", staleTeam);
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (
+        path ===
+        `/api/dashboard?workspaceId=${staleTeam}&interactionLimit=250&reportLimit=250&sessionLimit=100`
+      ) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: "You are not a member of this team" }), {
+            status: 403,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
+      return Promise.resolve(feedbackApiResponse(path, data) ?? json(data));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <Providers>
+        <Home />
+      </Providers>,
+    );
+
+    expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining(`workspaceId=${staleTeam}`),
+      expect.any(Object),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/dashboard?interactionLimit=250&reportLimit=250&sessionLimit=100",
+      expect.any(Object),
+    );
+    expect(window.localStorage.getItem("epode:last-team")).toBe(data.workspace.id);
+    expect(new URL(window.location.href).searchParams.get("team")).toBe(data.workspace.id);
+  });
+
+  it("preserves an explicit forbidden team deep link and its error", async () => {
+    const forbiddenTeam = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    window.history.replaceState({}, "", `/?view=feedback&team=${forbiddenTeam}`);
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: "You are not a member of this team" }), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <Providers>
+        <Home />
+      </Providers>,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("You are not a member of this team");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(new URL(window.location.href).searchParams.get("team")).toBe(forbiddenTeam);
+    expect(window.localStorage.getItem("epode:last-team")).toBeNull();
+  });
+
   it("does not expose editor-only views or product actions to members", async () => {
     window.history.replaceState({}, "", "/?view=connectors");
     const fetchMock = vi
@@ -228,7 +331,7 @@ describe("dashboard data flow", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
-        const supplemental = feedbackApiResponse(String(input));
+        const supplemental = feedbackApiResponse(String(input), data);
         if (supplemental) return Promise.resolve(supplemental);
         if (init?.method === "PATCH")
           return Promise.resolve(json({ product: data.currentProduct }));
@@ -258,10 +361,38 @@ describe("dashboard data flow", () => {
 
 function dashboardFetch(data: ReturnType<typeof dashboardFixture>) {
   return (input: RequestInfo | URL) =>
-    Promise.resolve(feedbackApiResponse(String(input)) ?? json(data));
+    Promise.resolve(feedbackApiResponse(String(input), data) ?? json(data));
 }
 
-function feedbackApiResponse(path: string): Response | null {
+function feedbackApiResponse(
+  path: string,
+  data: ReturnType<typeof dashboardFixture>,
+): Response | null {
+  if (path.startsWith("/api/dashboard/feedback?")) {
+    return json({
+      reports: data.reports,
+      total: data.listState.reportsTotal,
+      limit: 50,
+      nextCursor: null,
+    });
+  }
+  if (path.startsWith("/api/dashboard/sessions?")) {
+    const interactions = data.sessions.reduce(
+      (total, session) => total + session.interactionCount,
+      0,
+    );
+    return json({
+      sessions: data.sessions,
+      rollup: {
+        sessions: data.listState.sessionsTotal,
+        interactions,
+        multiStepSessions: data.sessions.filter((session) => session.interactionCount > 1).length,
+        averageInteractions: data.sessions.length ? interactions / data.sessions.length : 0,
+      },
+      limit: 50,
+      nextCursor: null,
+    });
+  }
   if (path.includes("/groups?")) {
     return json({ groups: [], hasMore: false, limit: 50, offset: 0 });
   }

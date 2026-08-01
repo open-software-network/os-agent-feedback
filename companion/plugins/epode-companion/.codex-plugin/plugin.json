@@ -1,6 +1,6 @@
 {
   "name": "epode-companion",
-  "version": "0.2.2+codex.20260801015359",
+  "version": "0.2.3+codex.20260801045932",
   "description": "A trusted, privacy-bounded bridge between HTTP product responses and Epode feedback.",
   "author": {
     "name": "Open Software Network",

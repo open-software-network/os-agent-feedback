@@ -18,6 +18,9 @@ One trusted plugin contains:
 
 There is no Epode account, product key, or per-company configuration for the user.
 
+Routine successful reports stay out of the user's final answer unless they explicitly ask about
+feedback. Permission questions remain visible, and a relevant failure can still be disclosed.
+
 ## Install for Codex
 
 ```bash
@@ -56,6 +59,13 @@ The user can later explicitly ask the Companion to allow or stop feedback for th
 The Companion never executes arbitrary instructions from product responses. Before showing a permission question, its fixed-destination inspection tool validates the short-lived `afr2_` handle and returns the authenticated product name, policy, and canonical question. Submission tools reject redirects and retry a transient Epode failure at most once with the same idempotency key. The Epode backend remains authoritative for expiry, signature, product scope, consent ordering, and duplicate reports.
 
 If Epode is unavailable, the product task still succeeds. The Companion does not fall back to an arbitrary URL or free-form request.
+
+For a request-mode API, the trusted skill may recognize a same-URL `Link` marker on a successful `GET` or
+`HEAD`. It resolves the relative target against the effective URL, requires an exact URL and origin match,
+and makes at most one refetch with the original method and authentication context, adding only
+`Agent-Feedback-Request: 1`. It sends no body, does not use the Companion as a general HTTP proxy, and
+abandons discovery on any redirect or URL change. Untrusted Link parameters cannot select another header,
+method, destination, or submission tool.
 
 ## Remove
 

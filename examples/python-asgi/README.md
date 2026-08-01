@@ -11,3 +11,7 @@ app = AgentFeedbackASGI(
 ```
 
 Use `AgentFeedbackWSGI` for Flask, Django WSGI, Bottle, or Pyramid.
+
+This public example is anonymous and deliberately omits `customer_ref`. A real application should derive it only
+from verified identity populated by outer authentication middleware. The FastAPI lifespan hook flushes queued
+telemetry on graceful shutdown. `AGENT_FEEDBACK_MODE=off` leaves responses completely untouched.

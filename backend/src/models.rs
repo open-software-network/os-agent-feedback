@@ -126,6 +126,7 @@ pub(crate) struct FeedbackDiscoveryResponse {
     pub classification: ClassificationDiscovery,
     pub mcp: McpDiscovery,
     pub integrations: IntegrationsDiscovery,
+    pub integrity_manifest: String,
     pub reliability: ReliabilityDiscovery,
     pub identity: String,
     pub privacy: String,
@@ -219,6 +220,8 @@ pub(crate) struct ApiKeyPublic {
     pub revoked_at: Option<DateTime<Utc>>,
     #[schema(required = true, nullable)]
     pub expires_at: Option<DateTime<Utc>>,
+    pub interaction_count: i64,
+    pub report_count: i64,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -359,6 +362,34 @@ pub(crate) struct ProductSession {
     pub started_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
+}
+
+/// A session row enriched with complete server-side rollups for the dashboard.
+///
+/// Dashboard interaction and report windows are independently paginated. Keeping
+/// these counts on the session summary prevents an older session from appearing
+/// empty merely because its interactions are outside the currently loaded window.
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardSessionSummary {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub environment_id: Uuid,
+    pub source: String,
+    pub ref_hint: String,
+    pub started_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub interaction_count: i64,
+    pub report_count: i64,
+    #[schema(required = true, nullable)]
+    pub first_operation: Option<String>,
+    #[schema(required = true, nullable)]
+    pub last_operation: Option<String>,
+    #[schema(required = true, nullable)]
+    pub customer_ref: Option<String>,
+    #[schema(required = true, nullable)]
+    pub strongest_impact: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
@@ -696,6 +727,7 @@ pub(crate) struct ConsentStateInput {
 #[derive(Debug, Serialize, ToSchema)]
 pub(crate) struct ConsentStateResponse {
     pub state: String,
+    pub revision: i64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -764,12 +796,118 @@ pub(crate) struct DashboardListState {
     pub sessions_loaded: usize,
 }
 
+/// A bounded, server-filtered page of feedback reports.
+///
+/// `total` is computed from the complete retained product dataset with the
+/// active filters, not from the returned page.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardFeedbackPage {
+    pub reports: Vec<ProductFeedbackReportWithInteraction>,
+    pub total: i64,
+    pub facets: DashboardFeedbackFacets,
+    pub limit: i64,
+    #[schema(required = true, nullable)]
+    pub next_cursor: Option<String>,
+}
+
+/// Facet counts across the complete retained search/time window.
+///
+/// Counts use disjunctive faceting: each facet honors every active filter
+/// except its own selection, so alternative values remain discoverable within
+/// the filtered context. Pagination is never applied to these aggregates.
+#[derive(Debug, Default, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardFeedbackFacets {
+    pub status: Vec<InsightCount>,
+    pub impact: Vec<InsightCount>,
+    pub surface: Vec<InsightCount>,
+    pub topic: Vec<InsightCount>,
+    pub finding_kind: Vec<InsightCount>,
+    pub severity: Vec<InsightCount>,
+    pub tag: Vec<InsightCount>,
+    pub assignee: Vec<InsightCount>,
+    pub workaround: Vec<InsightCount>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardSessionRollup {
+    pub sessions: i64,
+    pub interactions: i64,
+    pub multi_step_sessions: i64,
+    #[schema(value_type = f64)]
+    pub average_interactions: f64,
+}
+
+/// A bounded, server-filtered page of proven sessions.
+///
+/// The rollup is computed across every retained session matching the active
+/// filters, independently of the current page.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardSessionsPage {
+    pub sessions: Vec<DashboardSessionSummary>,
+    pub rollup: DashboardSessionRollup,
+    pub limit: i64,
+    #[schema(required = true, nullable)]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DashboardFeedbackFilters {
+    pub query: Option<String>,
+    pub group_key: Option<String>,
+    pub statuses: Option<Vec<String>>,
+    pub impacts: Option<Vec<String>>,
+    pub surfaces: Option<Vec<String>>,
+    pub topics: Option<Vec<String>>,
+    pub finding_kinds: Option<Vec<String>>,
+    pub severities: Option<Vec<String>>,
+    pub tags: Option<Vec<String>>,
+    pub assignees: Option<Vec<String>>,
+    pub include_unassigned: bool,
+    pub workarounds: Option<Vec<String>>,
+    pub operation: Option<String>,
+    pub customer_ref: Option<String>,
+    pub since: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
+    pub limit: Option<i64>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DashboardSessionFilters {
+    pub query: Option<String>,
+    pub kind: Option<String>,
+    pub impacts: Option<Vec<String>>,
+    pub operation: Option<String>,
+    pub customer_ref: Option<String>,
+    pub since: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
+    pub limit: Option<i64>,
+    pub cursor: Option<String>,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DashboardSessionDetail {
     pub session: ProductSession,
     pub interactions: Vec<ProductInteraction>,
     pub reports: Vec<ProductFeedbackReportWithInteraction>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProductActivationMilestones {
+    pub workspace_id: Uuid,
+    pub product_id: Uuid,
+    #[schema(required = true, nullable)]
+    pub first_opportunity_at: Option<DateTime<Utc>>,
+    #[schema(required = true, nullable)]
+    pub first_confirmed_interaction_at: Option<DateTime<Utc>>,
+    #[schema(required = true, nullable)]
+    pub first_report_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -787,10 +925,12 @@ pub(crate) struct DashboardData {
     pub current_product: Option<Product>,
     #[schema(required = true, nullable)]
     pub current_environment: Option<ProductEnvironment>,
+    #[schema(required = true, nullable)]
+    pub activation_milestones: Option<ProductActivationMilestones>,
     pub api_keys: Vec<ApiKeyPublic>,
     pub interactions: Vec<ProductInteraction>,
     pub reports: Vec<ProductFeedbackReportWithInteraction>,
-    pub sessions: Vec<ProductSession>,
+    pub sessions: Vec<DashboardSessionSummary>,
     pub insights: Insights,
     pub list_state: DashboardListState,
 }

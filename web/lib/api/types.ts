@@ -262,6 +262,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/dashboard/feedback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["dashboard_feedback_list_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/dashboard/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["dashboard_sessions_list_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/dashboard/reports/{report_id}": {
         parameters: {
             query?: never;
@@ -604,11 +636,15 @@ export interface components {
             expiresAt: string | null;
             /** Format: uuid */
             id: string;
+            /** Format: int64 */
+            interactionCount: number;
             kind: string;
             label: string;
             /** Format: date-time */
             lastUsedAt: string | null;
             prefix: string;
+            /** Format: int64 */
+            reportCount: number;
             /** Format: date-time */
             revokedAt: string | null;
         };
@@ -639,6 +675,18 @@ export interface components {
             decision: string;
         };
         ConsentDecisionResponse: {
+            /**
+             * @description True when this call recorded the standing decision; false when a prior
+             *     decision already stood and was returned unchanged.
+             */
+            changed: boolean;
+            /**
+             * Format: date-time
+             * @description When the standing decision was made. Matches the request time when this
+             *     call recorded the decision, and the original decision time when a prior
+             *     decision stands.
+             */
+            decidedAt: string;
             feedback: unknown;
             state: string;
         };
@@ -646,6 +694,8 @@ export interface components {
             subject: string;
         };
         ConsentStateResponse: {
+            /** Format: int64 */
+            revision: number;
             state: string;
         };
         CreateApiKeyInput: {
@@ -670,6 +720,7 @@ export interface components {
             id: string;
         };
         DashboardData: {
+            activationMilestones: null | components["schemas"]["ProductActivationMilestones"];
             apiKeys: components["schemas"]["ApiKeyPublic"][];
             currentEnvironment: null | components["schemas"]["ProductEnvironment"];
             currentProduct: null | components["schemas"]["Product"];
@@ -680,12 +731,45 @@ export interface components {
             listState: components["schemas"]["DashboardListState"];
             products: components["schemas"]["Product"][];
             reports: components["schemas"]["ProductFeedbackReportWithInteraction"][];
-            sessions: components["schemas"]["ProductSession"][];
+            sessions: components["schemas"]["DashboardSessionSummary"][];
             teamInvitations: components["schemas"]["TeamInvitation"][];
             teamMembers: components["schemas"]["TeamMember"][];
             user: components["schemas"]["CurrentUser"];
             workspace: components["schemas"]["Workspace"];
             workspaceMemberships: components["schemas"]["WorkspaceMembership"][];
+        };
+        /**
+         * @description Facet counts across the complete retained search/time window.
+         *
+         *     Counts use disjunctive faceting: each facet honors every active filter
+         *     except its own selection, so alternative values remain discoverable within
+         *     the filtered context. Pagination is never applied to these aggregates.
+         */
+        DashboardFeedbackFacets: {
+            assignee: components["schemas"]["InsightCount"][];
+            findingKind: components["schemas"]["InsightCount"][];
+            impact: components["schemas"]["InsightCount"][];
+            severity: components["schemas"]["InsightCount"][];
+            status: components["schemas"]["InsightCount"][];
+            surface: components["schemas"]["InsightCount"][];
+            tag: components["schemas"]["InsightCount"][];
+            topic: components["schemas"]["InsightCount"][];
+            workaround: components["schemas"]["InsightCount"][];
+        };
+        /**
+         * @description A bounded, server-filtered page of feedback reports.
+         *
+         *     `total` is computed from the complete retained product dataset with the
+         *     active filters, not from the returned page.
+         */
+        DashboardFeedbackPage: {
+            facets: components["schemas"]["DashboardFeedbackFacets"];
+            /** Format: int64 */
+            limit: number;
+            nextCursor: string | null;
+            reports: components["schemas"]["ProductFeedbackReportWithInteraction"][];
+            /** Format: int64 */
+            total: number;
         };
         DashboardInteractionResponse: {
             interaction: components["schemas"]["ProductInteraction"];
@@ -709,6 +793,60 @@ export interface components {
             reports: components["schemas"]["ProductFeedbackReportWithInteraction"][];
             session: components["schemas"]["ProductSession"];
         };
+        DashboardSessionRollup: {
+            /** Format: double */
+            averageInteractions: number;
+            /** Format: int64 */
+            interactions: number;
+            /** Format: int64 */
+            multiStepSessions: number;
+            /** Format: int64 */
+            sessions: number;
+        };
+        /**
+         * @description A session row enriched with complete server-side rollups for the dashboard.
+         *
+         *     Dashboard interaction and report windows are independently paginated. Keeping
+         *     these counts on the session summary prevents an older session from appearing
+         *     empty merely because its interactions are outside the currently loaded window.
+         */
+        DashboardSessionSummary: {
+            /** Format: date-time */
+            createdAt: string;
+            customerRef: string | null;
+            /** Format: uuid */
+            environmentId: string;
+            firstOperation: string | null;
+            /** Format: uuid */
+            id: string;
+            /** Format: int64 */
+            interactionCount: number;
+            lastOperation: string | null;
+            /** Format: date-time */
+            lastSeenAt: string;
+            refHint: string;
+            /** Format: int64 */
+            reportCount: number;
+            source: string;
+            /** Format: date-time */
+            startedAt: string;
+            strongestImpact: string | null;
+            /** Format: uuid */
+            workspaceId: string;
+        };
+        /**
+         * @description A bounded, server-filtered page of proven sessions.
+         *
+         *     The rollup is computed across every retained session matching the active
+         *     filters, independently of the current page.
+         */
+        DashboardSessionsPage: {
+            /** Format: int64 */
+            limit: number;
+            nextCursor: string | null;
+            rollup: components["schemas"]["DashboardSessionRollup"];
+            sessions: components["schemas"]["DashboardSessionSummary"][];
+        };
         DeleteProductInput: {
             confirmation: string;
         };
@@ -729,6 +867,7 @@ export interface components {
             feedbackSubmission: components["schemas"]["FeedbackSubmissionDiscovery"];
             identity: string;
             integrations: components["schemas"]["IntegrationsDiscovery"];
+            integrityManifest: string;
             mcp: components["schemas"]["McpDiscovery"];
             name: string;
             privacy: string;
@@ -978,6 +1117,18 @@ export interface components {
             slug: string;
             /** Format: date-time */
             updatedAt: string;
+            /** Format: uuid */
+            workspaceId: string;
+        };
+        ProductActivationMilestones: {
+            /** Format: date-time */
+            firstConfirmedInteractionAt: string | null;
+            /** Format: date-time */
+            firstOpportunityAt: string | null;
+            /** Format: date-time */
+            firstReportAt: string | null;
+            /** Format: uuid */
+            productId: string;
             /** Format: uuid */
             workspaceId: string;
         };
@@ -1323,7 +1474,10 @@ export interface operations {
     };
     auth_start: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Same-origin relative dashboard path restored after authentication. */
+                return_to?: string;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -2490,6 +2644,190 @@ export interface operations {
                 };
             };
             /** @description Dashboard state could not be loaded */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    dashboard_feedback_list_handler: {
+        parameters: {
+            query: {
+                productId: string;
+                groupKey?: string;
+                q?: string;
+                status?: string;
+                impact?: string;
+                surface?: string;
+                topic?: string;
+                findingKind?: string;
+                severity?: string;
+                tag?: string;
+                assignee?: string;
+                workaround?: string;
+                operation?: string;
+                customerRef?: string;
+                since?: string;
+                until?: string;
+                limit?: number;
+                cursor?: string;
+            };
+            header?: {
+                /** @description Team to access; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Server-filtered feedback page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DashboardFeedbackPage"];
+                };
+            };
+            /** @description Invalid filters, time range, cursor, or page size */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot access the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Product not found in the team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Cursor is outside the retained window */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Feedback page could not be loaded */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    dashboard_sessions_list_handler: {
+        parameters: {
+            query: {
+                productId: string;
+                q?: string;
+                kind?: string;
+                impact?: string;
+                operation?: string;
+                customerRef?: string;
+                since?: string;
+                until?: string;
+                limit?: number;
+                cursor?: string;
+            };
+            header?: {
+                /** @description Team to access; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Server-filtered sessions page with complete rollups */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DashboardSessionsPage"];
+                };
+            };
+            /** @description Invalid filters, time range, cursor, or page size */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot access the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Product not found in the team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Cursor is outside the retained window */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Sessions page could not be loaded */
             500: {
                 headers: {
                     [name: string]: unknown;

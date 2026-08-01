@@ -49,6 +49,15 @@ func FeedbackConsentAction(envelope *Envelope) string {
 }
 
 func FeedbackFromResponse(response *http.Response, body []byte) (*Envelope, error) {
+	if encoded := response.Header.Get("Agent-Feedback"); encoded != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(encoded)
+		if err == nil {
+			var envelope Envelope
+			if json.Unmarshal(decoded, &envelope) == nil && validEnvelope(&envelope) {
+				return &envelope, nil
+			}
+		}
+	}
 	var object map[string]json.RawMessage
 	if json.Unmarshal(body, &object) == nil {
 		if raw, ok := object["_agentFeedback"]; ok {
@@ -63,15 +72,6 @@ func FeedbackFromResponse(response *http.Response, body []byte) (*Envelope, erro
 		var envelope Envelope
 		if json.Unmarshal(match[1], &envelope) == nil && validEnvelope(&envelope) {
 			return &envelope, nil
-		}
-	}
-	if encoded := response.Header.Get("Agent-Feedback"); encoded != "" {
-		decoded, err := base64.RawURLEncoding.DecodeString(encoded)
-		if err == nil {
-			var envelope Envelope
-			if json.Unmarshal(decoded, &envelope) == nil && validEnvelope(&envelope) {
-				return &envelope, nil
-			}
 		}
 	}
 	return nil, errors.New("product response did not include a valid Agent Feedback contract")
@@ -165,7 +165,7 @@ func SubmitFeedbackConsent(ctx context.Context, envelope *Envelope, decision str
 	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, action.URL, bytes.NewReader(body))
 	request.Header.Set("Authorization", action.Authorization)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", "agent-feedback-go-agent/0.1.0")
+	request.Header.Set("User-Agent", "agent-feedback-go-agent/0.2.2")
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -262,7 +262,7 @@ func SubmitProductFeedback(ctx context.Context, envelope *Envelope, report Feedb
 	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, envelope.Submit.URL, bytes.NewReader(body))
 	request.Header.Set("Authorization", envelope.Submit.Authorization)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", "agent-feedback-go-agent/0.1.0")
+	request.Header.Set("User-Agent", "agent-feedback-go-agent/0.2.2")
 	if client == nil {
 		client = http.DefaultClient
 	}

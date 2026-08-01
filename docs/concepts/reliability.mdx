@@ -37,7 +37,10 @@ For Ask once, Companion validates that capability and reads Epode's remembered d
 HTTP responses with an explicit shared cache policy are skipped by the Node SDK's safe default. This
 prevents an observability plugin from unexpectedly disabling a CDN. If agent callers can identify
 themselves at request time, `cacheMode: "request"` instruments only requests with
-`Agent-Feedback-Request: 1`.
+`Agent-Feedback-Request: 1`. Eligible ordinary 2xx `GET` and `HEAD` responses advertise a same-URL
+`Link` so an installed Companion can make one authenticated opt-in refetch without changing the product
+body. Both variants use `Vary: Agent-Feedback-Request`; the opted-in capability is still
+`private, no-store`. This is best-effort discovery—clients and intermediaries may hide Link headers.
 
 ## Why MCP is stronger
 

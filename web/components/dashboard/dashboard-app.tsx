@@ -21,7 +21,7 @@ import { PolicyView } from "@/components/views/policy/policy-view";
 import { SessionsView } from "@/components/views/sessions/sessions-view";
 import { SetupView } from "@/components/views/setup/setup-view";
 import { TeamView } from "@/components/views/team/team-view";
-import { apiRequest } from "@/lib/api/client";
+import { ApiError, apiRequest } from "@/lib/api/client";
 import {
   DASHBOARD_LIMIT_DEFAULTS,
   type DashboardData,
@@ -54,6 +54,7 @@ export function DashboardApp() {
   const [secrets, setSecrets] = useState<ShownSecrets | null>(null);
   const [limits, setLimits] = useState<Limits>({ ...DASHBOARD_LIMIT_DEFAULTS });
   const historyMode = useRef<"push" | "replace">("replace");
+  const explicitWorkspaceSelection = useRef(false);
 
   const showNotice = useCallback(
     (message: string, timeoutMs = 2_800, tone: Notice["tone"] = "status") => {
@@ -101,7 +102,9 @@ export function DashboardApp() {
         ? (requestedView as DashboardView)
         : "home",
     );
-    setWorkspaceId(url.searchParams.get("team") ?? localStorageValue("epode:last-team"));
+    const requestedWorkspaceId = url.searchParams.get("team");
+    explicitWorkspaceSelection.current = Boolean(requestedWorkspaceId);
+    setWorkspaceId(requestedWorkspaceId || localStorageValue("epode:last-team"));
     setProductId(url.searchParams.get("product") ?? "");
     setSelectedReportId(url.searchParams.get("report"));
     setSelectedSessionId(url.searchParams.get("session"));
@@ -131,8 +134,35 @@ export function DashboardApp() {
       }),
     enabled: ready,
     refetchInterval: view === "setup" ? 5_000 : false,
+    retry: (failureCount, error) => {
+      if (error instanceof ApiError && error.status === 403) return false;
+      return failureCount < 1;
+    },
   });
   const data = dashboardQuery.data;
+
+  useEffect(() => {
+    if (
+      !(dashboardQuery.error instanceof ApiError) ||
+      dashboardQuery.error.status !== 403 ||
+      explicitWorkspaceSelection.current ||
+      !workspaceId
+    ) {
+      return;
+    }
+    try {
+      if (window.localStorage.getItem("epode:last-team") === workspaceId) {
+        window.localStorage.removeItem("epode:last-team");
+      }
+    } catch {
+      // Storage is optional; clearing the in-memory selection still recovers.
+    }
+    setWorkspaceId("");
+    setProductId("");
+    setSelectedReportId(null);
+    setSelectedSessionId(null);
+    setSelectedInteractionId(null);
+  }, [dashboardQuery.error, workspaceId]);
 
   useEffect(() => {
     if (!data) return;
@@ -151,7 +181,7 @@ export function DashboardApp() {
       setView("home");
     }
     if (data.currentEnvironment && secrets?.environmentId !== data.currentEnvironment.id) {
-      setSecrets(recallSecrets(data.currentEnvironment.id));
+      setSecrets({ environmentId: data.currentEnvironment.id });
     }
   }, [data, productId, secrets?.environmentId, view, workspaceId]);
 
@@ -183,7 +213,6 @@ export function DashboardApp() {
     (kind: "write" | "read", secret: string) => {
       const environmentId = data?.currentEnvironment?.id;
       if (!environmentId || !secret) return;
-      persistSecret(environmentId, kind, secret);
       setSecrets((current) => ({
         environmentId,
         ...(current?.environmentId === environmentId ? current : {}),
@@ -195,6 +224,7 @@ export function DashboardApp() {
 
   const changeWorkspace = (nextWorkspaceId: string) => {
     setNotice(null);
+    explicitWorkspaceSelection.current = true;
     setWorkspaceId(nextWorkspaceId);
     setProductId("");
     clearSelection();
@@ -265,7 +295,6 @@ export function DashboardApp() {
   if (!data) return null;
 
   async function productCreated(created: ProductCreatedResponse) {
-    persistSecret(created.environment.id, "write", created.secret);
     setSecrets({ environmentId: created.environment.id, write: created.secret });
     setProductId(created.product.id);
     clearSelection();
@@ -380,12 +409,6 @@ export function DashboardApp() {
             }}
             openInteraction={openInteraction}
             openSession={openSession}
-            loadMore={() =>
-              setLimits((current) => ({
-                ...current,
-                reportLimit: Math.min(current.reportLimit + 250, 10_000),
-              }))
-            }
             refresh={refresh}
             setNotice={showNotice}
           />
@@ -403,12 +426,6 @@ export function DashboardApp() {
             openFeedback={openFeedback}
             openInteraction={openInteraction}
             refresh={refresh}
-            loadMore={() =>
-              setLimits((current) => ({
-                ...current,
-                sessionLimit: Math.min(current.sessionLimit + 100, 10_000),
-              }))
-            }
           />
         );
       case "setup":
@@ -483,31 +500,5 @@ function localStorageValue(key: string): string {
     return window.localStorage.getItem(key) ?? "";
   } catch {
     return "";
-  }
-}
-
-function secretStorageKey(environmentId: string, kind: "write" | "read"): string {
-  return kind === "read"
-    ? `agent-feedback:read-key:${environmentId}`
-    : `agent-feedback:product-key:${environmentId}`;
-}
-
-function persistSecret(environmentId: string, kind: "write" | "read", secret: string) {
-  try {
-    window.sessionStorage.setItem(secretStorageKey(environmentId, kind), secret);
-  } catch {
-    // Private browsing may disable storage; React state keeps the secret visible this page load.
-  }
-}
-
-function recallSecrets(environmentId: string): ShownSecrets {
-  try {
-    return {
-      environmentId,
-      write: window.sessionStorage.getItem(secretStorageKey(environmentId, "write")) || undefined,
-      read: window.sessionStorage.getItem(secretStorageKey(environmentId, "read")) || undefined,
-    };
-  } catch {
-    return { environmentId };
   }
 }

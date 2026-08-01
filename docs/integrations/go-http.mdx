@@ -6,8 +6,20 @@ description: "Use standard-library middleware with net/http or a compatible rout
 ## Install
 
 ```bash
-go get github.com/open-software-network/os-epode/sdk/go@latest
+epode_artifact="$(mktemp -d)/agent-feedback-go-0.2.2.tar.gz" &&
+curl -fsSL https://app.epode.ai/static/agent-feedback-go-0.2.2.tar.gz -o "$epode_artifact" &&
+printf '%s  %s\n' '7f28ce6fb875167aac3afab974ca7cfc5896043e69ed136c375a99b9cde6cc15' "$epode_artifact" \
+  | shasum -a 256 -c - &&
+mkdir -p .epode/agent-feedback-go-0.2.2 &&
+tar -xzf "$epode_artifact" -C .epode/agent-feedback-go-0.2.2 &&
+go mod edit -replace=github.com/open-software-network/os-epode/sdk/go=./.epode/agent-feedback-go-0.2.2 &&
+go mod edit -require=github.com/open-software-network/os-epode/sdk/go@v0.2.2
 ```
+
+This immutable hosted archive is the bootstrap path until the public Go module tag is available. The local
+`replace` keeps installation reproducible without depending on the Go proxy. The versioned `.epode`
+directory prevents files removed by a later SDK release from surviving an upgrade without invoking
+Go's special `vendor/` mode.
 
 ## Configure once
 
@@ -16,14 +28,22 @@ package main
 
 import (
     "context"
+    "errors"
     "log"
     "net/http"
     "os"
+    "os/signal"
+    "syscall"
+    "time"
 
     agentfeedback "github.com/open-software-network/os-epode/sdk/go"
 )
 
 func main() {
+    if err := run(); err != nil { log.Fatal(err) }
+}
+
+func run() error {
     router := http.NewServeMux()
     router.HandleFunc("GET /search", searchHandler)
 
@@ -34,16 +54,39 @@ func main() {
             return accountID(r.Context()) // required for durable Ask once; optional otherwise
         },
     })
-    if err != nil { log.Fatal(err) }
-    defer func() {
-        if err := feedback.Shutdown(context.Background()); err != nil {
-            log.Printf("Epode telemetry shutdown: %v", err)
-        }
-    }()
+    if err != nil { return err }
 
-    log.Fatal(http.ListenAndServe(":8080", feedback.Middleware(router)))
+    instrumented := feedback.Middleware(router)
+    handler := authenticateProductRequest(selectAuthorizedTenant(instrumented))
+    server := &http.Server{
+        Addr: ":8080", Handler: handler, ReadHeaderTimeout: 5 * time.Second,
+    }
+    serverErrors := make(chan error, 1)
+    go func() { serverErrors <- server.ListenAndServe() }()
+
+    signals := make(chan os.Signal, 1)
+    signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+    defer signal.Stop(signals)
+
+    var serveErr error
+    select {
+    case <-signals:
+    case err := <-serverErrors:
+        if !errors.Is(err, http.ErrServerClosed) { serveErr = err }
+    }
+
+    serverContext, cancelServer := context.WithTimeout(context.Background(), 5*time.Second)
+    serverErr := server.Shutdown(serverContext)
+    cancelServer()
+    feedbackContext, cancelFeedback := context.WithTimeout(context.Background(), 5*time.Second)
+    feedbackErr := feedback.Shutdown(feedbackContext)
+    cancelFeedback()
+    return errors.Join(serveErr, serverErr, feedbackErr)
 }
 ```
+
+Authentication must wrap and execute before Epode. Go middleware cannot observe a context created by
+an inner handler with `r.WithContext`, so never place the feedback middleware outside authentication.
 
 ## Server-rendered HTML
 
@@ -60,7 +103,10 @@ In `Include`/`Exclude` patterns, `*` matches exactly one path segment and `**` m
 `CacheMode` controls how instrumentation interacts with HTTP caching. The default `CacheSafe` skips
 responses that declare a shared cache policy (`public`, `max-age`, `s-maxage`, `immutable`). Use
 `CachePrivate` only when replacing shared caching with `private, no-store` is intentional, or
-`CacheRequest` to instrument only requests that opt in with the `Agent-Feedback-Request: 1` header.
+`CacheRequest` to instrument only requests that opt in with the `Agent-Feedback-Request: 1` header. Request
+mode adds `Vary: Agent-Feedback-Request` to both variants so shared caches keep them separate.
+Eligible ordinary 2xx `GET` and `HEAD` responses also advertise a same-path-and-query `Link` for one
+authenticated Companion refetch; redirects and non-safe methods never advertise it.
 
 ## Verify
 

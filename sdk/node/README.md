@@ -15,7 +15,7 @@ There are two reliability levels:
 Until the npm registry release is connected, install the signed build directly from the production service:
 
 ```sh
-npm install https://app.epode.ai/static/agent-feedback-node-0.1.0.tgz
+npm install https://app.epode.ai/static/agent-feedback-node-0.2.2.tgz
 ```
 
 ```ts
@@ -30,7 +30,9 @@ app.use(agentFeedback({
 
 Compatible JSON objects receive `_agentFeedback`. HTML receives an embedded `application/json` handoff. Arrays and scalar JSON responses use `Agent-Feedback` and `Link` headers. Errors, redirects, streams, binary responses, assets, health routes, and unrelated routes are untouched. These HTTP opportunities remain unclassified unless the scoped receipt returns.
 
-The default `cacheMode: "safe"` skips responses with an explicit shared-cache policy instead of silently disabling their CDN behavior. Use `cacheMode: "request"` to instrument only requests carrying `Agent-Feedback-Request: 1`, or `cacheMode: "private"` when every included response is intentionally private. Use `shouldInstrument(req, response)` for terminal async-job results.
+The default `cacheMode: "safe"` skips responses with an explicit shared-cache policy instead of silently disabling their CDN behavior. Use `cacheMode: "request"` to instrument only requests carrying `Agent-Feedback-Request: 1`; it emits `Vary: Agent-Feedback-Request` on both variants and a same-path-and-query discovery `Link` on eligible ordinary 2xx `GET`/`HEAD` responses. The opted-in capability is `private, no-store`. Use `cacheMode: "private"` when every included response is intentionally private. Use `shouldInstrument(req, response)` for terminal async-job results. `*` matches one path segment and `**` matches any depth.
+
+The returned Express middleware and Fastify plugin expose `flush()`. In serverless runtimes, pass that promise to the platform's post-response `waitUntil` hook. Keep product responses independent of telemetry delivery.
 
 ## Fastify
 
@@ -42,6 +44,43 @@ await app.register(agentFeedback({
   include: ["/search", "/docs/*"],
 }));
 ```
+
+## Static sites and hosted docs at a trusted edge
+
+`createStaticDocsProxy` provides a Cloudflare Worker-compatible reverse proxy for finite static HTML. It keeps
+the product key in the edge runtime, leaves the upstream body byte-for-byte, preserves ordinary public caching,
+and gives only an explicit `Agent-Feedback-Request: 1` refetch a private capability header. Reports still submit
+directly to Epode; the edge is not a feedback relay.
+
+The proxy is cross-origin and fail-closed: it forwards only safe representation/conditional headers, never caller
+credentials, cookies, origin/referrer, forwarding metadata, or hop-by-hop headers. It strips upstream cookies,
+authentication challenges, `Clear-Site-Data`, and hop-by-hop headers from every response and redirect. For a private
+origin, pass a separate edge-secret `upstreamAuthorization`; callers cannot override it.
+
+Bind the Worker only to dedicated public docs routes, never a hostname-wide catch-all. The `include` list is a
+second fail-closed boundary: unmatched paths return 404 and methods other than GET or HEAD return 405 without
+contacting the upstream origin.
+
+```ts
+import { createStaticDocsProxy } from "@agent-feedback/node/edge";
+
+let proxy;
+export default {
+  fetch(request, env, context) {
+    // The edge platform must route only dedicated public docs paths here.
+    proxy ??= createStaticDocsProxy({
+      apiKey: env.AGENT_FEEDBACK_KEY,
+      upstreamOrigin: "https://docs-origin.example.com",
+      upstreamAuthorization: env.DOCS_UPSTREAM_AUTHORIZATION || undefined,
+      include: ["/docs", "/docs/**"],
+    });
+    return proxy.fetch(request, context);
+  },
+};
+```
+
+The upstream and public origins must differ. Explicit streams, attachments, non-HTML and error responses remain
+untouched. Store the key with the edge platform's secret manager, never in a static build or client script.
 
 ## MCP 2026-07-28
 
@@ -75,7 +114,7 @@ const handleMcp = toNodeHandler(mcp);
 app.all("/mcp", (req, res) => handleMcp(req, res, req.body));
 ```
 
-The official handler implements `server/discover`, per-request protocol metadata, `Mcp-Method`/`Mcp-Name` validation, cache hints, and the required `resultType` field. Its legacy fallback keeps 2025-era clients working without transport-session state. Business-tool results are decorated automatically and both feedback tools are registered for the customer agent. MCP tool use is a confirmed agent interaction.
+The official handler implements `server/discover`, per-request protocol metadata, `Mcp-Method`/`Mcp-Name` validation, cache hints, and the required `resultType` field. Its legacy fallback keeps 2025-era clients working without transport-session state. Business-tool results are decorated automatically and both feedback tools are registered for the customer agent. Schema-less object results use `structuredContent._agentFeedback`; tools with `outputSchema` keep their business `structuredContent` untouched and receive the same envelope in a standalone JSON `TextContent` block. MCP tool use is a confirmed agent interaction.
 
 `includeTools` controls which business tools become interactions. `feedbackTools` narrows feedback requests to meaningful outcome boundaries while retaining the whole journey in Sessions. `shouldRequestFeedback` can make that decision from the completed result. Extractors receive `(arguments, context, result?)`, which supports grouping a session-creation call by the ID it returns.
 
@@ -130,4 +169,20 @@ The adapter requires an allow-listed HTTPS destination and submits only the stru
 npx agent-feedback-doctor https://your-product.example/search?q=test
 ```
 
-In `never_ask` mode, the doctor verifies response injection and submits a real synthetic review with the scoped receipt. In either consent mode, it validates the consent contract but does not submit a review because a diagnostic cannot impersonate user approval. Set `AGENT_FEEDBACK_ENABLED=false` as an emergency kill switch.
+The doctor sends `Agent-Feedback-Request: 1`, so the same command verifies request-mode handoffs without
+compromising shared caches. For a product route protected by your own authentication, keep that test credential
+in an environment variable and pass only its header mapping:
+
+```sh
+export PRODUCT_TEST_AUTHORIZATION="Bearer $PRODUCT_TEST_TOKEN"
+npx agent-feedback-doctor \
+  --header-env Authorization=PRODUCT_TEST_AUTHORIZATION \
+  https://your-product.example/private-search?q=test
+```
+
+The doctor refuses an `af_live_...` or `af_read_...` value, never forwards product-route headers to Epode, and
+never follows a redirect with authentication. Do not use `AGENT_FEEDBACK_KEY` here.
+
+In `never_ask` mode, the doctor verifies response injection and submits a real synthetic review with the scoped
+receipt. In either consent mode, it validates the consent contract but does not submit a review because a
+diagnostic cannot impersonate user approval. Set `AGENT_FEEDBACK_ENABLED=false` as an emergency kill switch.

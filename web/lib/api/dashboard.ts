@@ -4,12 +4,17 @@ import type { components, operations } from "@/lib/api/types";
 export type DashboardData = components["schemas"]["DashboardData"];
 export type DashboardQuery = NonNullable<operations["dashboard_handler"]["parameters"]["query"]>;
 export type Product = components["schemas"]["Product"];
+export type ProductActivationMilestones = components["schemas"]["ProductActivationMilestones"];
 export type ProductCreatedResponse = components["schemas"]["ProductCreatedResponse"];
 export type ProductResponse = components["schemas"]["ProductResponse"];
 export type ProductDeletedResponse = components["schemas"]["ProductDeletedResponse"];
 export type ProductFeedbackReport = components["schemas"]["ProductFeedbackReportWithInteraction"];
 export type ProductInteraction = components["schemas"]["ProductInteraction"];
 export type ProductSession = components["schemas"]["ProductSession"];
+export type DashboardSessionSummary = components["schemas"]["DashboardSessionSummary"];
+export type DashboardFeedbackPage = components["schemas"]["DashboardFeedbackPage"];
+export type DashboardFeedbackFacets = components["schemas"]["DashboardFeedbackFacets"];
+export type DashboardSessionsPage = components["schemas"]["DashboardSessionsPage"];
 export type DashboardInteractionResponse = components["schemas"]["DashboardInteractionResponse"];
 export type DashboardSessionDetail = components["schemas"]["DashboardSessionDetail"];
 export type FeedbackFinding = components["schemas"]["FeedbackFinding"];
@@ -65,4 +70,92 @@ export function dashboardQueryPath(query: DashboardQuery): string {
 
 export function fetchDashboard(query: DashboardQuery): Promise<DashboardData> {
   return apiRequest<DashboardData>(dashboardQueryPath(query));
+}
+
+export type DashboardFeedbackListQuery = {
+  productId: string;
+  groupKey?: string;
+  q?: string;
+  status?: string[];
+  impact?: string[];
+  surface?: string[];
+  topic?: string[];
+  findingKind?: string[];
+  severity?: string[];
+  tag?: string[];
+  assignee?: string[];
+  workaround?: string[];
+  operation?: string;
+  customerRef?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+  cursor?: string;
+};
+
+export type DashboardSessionsListQuery = {
+  productId: string;
+  q?: string;
+  kind?: string;
+  impact?: string[];
+  operation?: string;
+  customerRef?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+  cursor?: string;
+};
+
+function appendListQuery(params: URLSearchParams, key: string, values?: string[]) {
+  if (values?.length) params.set(key, values.join(","));
+}
+
+export function feedbackListPath(query: DashboardFeedbackListQuery): string {
+  const params = new URLSearchParams({ productId: query.productId });
+  if (query.groupKey) params.set("groupKey", query.groupKey);
+  if (query.q) params.set("q", query.q);
+  appendListQuery(params, "status", query.status);
+  appendListQuery(params, "impact", query.impact);
+  appendListQuery(params, "surface", query.surface);
+  appendListQuery(params, "topic", query.topic);
+  appendListQuery(params, "findingKind", query.findingKind);
+  appendListQuery(params, "severity", query.severity);
+  appendListQuery(params, "tag", query.tag);
+  appendListQuery(params, "assignee", query.assignee);
+  appendListQuery(params, "workaround", query.workaround);
+  if (query.operation) params.set("operation", query.operation);
+  if (query.customerRef) params.set("customerRef", query.customerRef);
+  if (query.since) params.set("since", query.since);
+  if (query.until) params.set("until", query.until);
+  if (query.limit !== undefined) params.set("limit", String(query.limit));
+  if (query.cursor) params.set("cursor", query.cursor);
+  return `/api/dashboard/feedback?${params}`;
+}
+
+export function fetchDashboardFeedbackPage(
+  workspaceId: string,
+  query: DashboardFeedbackListQuery,
+): Promise<DashboardFeedbackPage> {
+  return apiRequest<DashboardFeedbackPage>(feedbackListPath(query), { workspaceId });
+}
+
+export function sessionsListPath(query: DashboardSessionsListQuery): string {
+  const params = new URLSearchParams({ productId: query.productId });
+  if (query.q) params.set("q", query.q);
+  if (query.kind && query.kind !== "all") params.set("kind", query.kind);
+  appendListQuery(params, "impact", query.impact);
+  if (query.operation) params.set("operation", query.operation);
+  if (query.customerRef) params.set("customerRef", query.customerRef);
+  if (query.since) params.set("since", query.since);
+  if (query.until) params.set("until", query.until);
+  if (query.limit !== undefined) params.set("limit", String(query.limit));
+  if (query.cursor) params.set("cursor", query.cursor);
+  return `/api/dashboard/sessions?${params}`;
+}
+
+export function fetchDashboardSessionsPage(
+  workspaceId: string,
+  query: DashboardSessionsListQuery,
+): Promise<DashboardSessionsPage> {
+  return apiRequest<DashboardSessionsPage>(sessionsListPath(query), { workspaceId });
 }

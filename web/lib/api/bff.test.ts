@@ -12,7 +12,9 @@ import {
   OPTIONS as proxyApiOptions,
   POST as proxyApiPost,
 } from "@/app/api/[...path]/route";
-import { GET as proxyAuthGet, POST as proxyAuthPost } from "@/app/auth/[...path]/route";
+import { GET as proxyAuthCallbackGet } from "@/app/auth/callback/route";
+import { POST as proxyAuthLogoutPost } from "@/app/auth/logout/route";
+import { GET as proxyAuthStartGet } from "@/app/auth/start/route";
 import { GET as proxyJoinGet } from "@/app/join/[invitation_id]/route";
 import { OPTIONS as proxyMcpOptions, POST as proxyMcpPost } from "@/app/mcp/route";
 import { GET as proxyStaticGet } from "@/app/static/[...path]/route";
@@ -231,6 +233,30 @@ describe("BFF request header policy", () => {
     );
     expect(lastRequest().headers.authorization).toBe("Bearer af_read_read-secret");
   });
+
+  it("rejects declared and streamed oversized bodies before buffering or proxying", async () => {
+    const before = seenRequests.length;
+    const declared = await proxyApiPost(
+      new NextRequest("https://app.epode.ai/api/v2/reports", {
+        method: "POST",
+        headers: { "content-length": String(64 * 1024 + 1) },
+        body: "{}",
+      }),
+      { params: Promise.resolve({ path: ["v2", "reports"] }) },
+    );
+    expect(declared.status).toBe(413);
+    expect(seenRequests).toHaveLength(before);
+
+    const streamed = await proxyApiPost(
+      new NextRequest("https://app.epode.ai/api/v2/reports", {
+        method: "POST",
+        body: new Uint8Array(80 * 1024),
+      }),
+      { params: Promise.resolve({ path: ["v2", "reports"] }) },
+    );
+    expect(streamed.status).toBe(413);
+    expect(seenRequests).toHaveLength(before);
+  });
 });
 
 describe("BFF response and route behavior", () => {
@@ -249,14 +275,17 @@ describe("BFF response and route behavior", () => {
   });
 
   it("preserves API, MCP, and auth paths and maps the friendly logout path", async () => {
-    await proxyAuthGet(new NextRequest("https://app.epode.ai/auth/start?from=signin"), {
-      params: Promise.resolve({ path: ["start"] }),
-    });
+    await proxyAuthStartGet(new NextRequest("https://app.epode.ai/auth/start?from=signin"));
     expect(lastRequest().url).toBe("/auth/start?from=signin");
 
-    await proxyAuthPost(new NextRequest("https://app.epode.ai/auth/logout", { method: "POST" }), {
-      params: Promise.resolve({ path: ["logout"] }),
-    });
+    await proxyAuthCallbackGet(
+      new NextRequest("https://app.epode.ai/auth/callback?code=code&state=state"),
+    );
+    expect(lastRequest().url).toBe("/auth/callback?code=code&state=state");
+
+    await proxyAuthLogoutPost(
+      new NextRequest("https://app.epode.ai/auth/logout", { method: "POST" }),
+    );
     expect(lastRequest().url).toBe("/api/auth/logout");
 
     await proxyMcpPost(new NextRequest("https://app.epode.ai/mcp", { method: "POST", body: "{}" }));

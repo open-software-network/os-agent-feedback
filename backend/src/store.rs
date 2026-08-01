@@ -9,7 +9,7 @@ use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{Acquire, Executor, PgPool, Postgres, Transaction};
+use sqlx::{Executor, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
@@ -22,21 +22,24 @@ use crate::{
     models::{
         ApiKeyPublic, CapabilityInspectionResponse, ConsentDecisionInput, ConsentStateInput,
         ConsentStateResponse, CreateProductInput, CreateTeamInvitationInput, DashboardContext,
-        DashboardData, DashboardListState, DashboardSessionDetail, DeleteProductInput,
+        DashboardData, DashboardFeedbackFacets, DashboardFeedbackFilters, DashboardFeedbackPage,
+        DashboardListState, DashboardSessionDetail, DashboardSessionFilters,
+        DashboardSessionRollup, DashboardSessionSummary, DashboardSessionsPage, DeleteProductInput,
         FeedbackFindingInput, FeedbackInteractionItem, FeedbackInteractionsPage,
         FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackOperationSummary,
         FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse, FeedbackSummary,
         FeedbackSurfaceSummary, FeedbackWindow, GithubIssueLink, InsightCount, Insights,
-        InteractionTelemetryInput, MergeReportGroupsResponse, PolicyInput, Product, ProductAuth,
-        ProductEnvironment, ProductFeedbackReport, ProductFeedbackReportInput,
-        ProductFeedbackReportWithInteraction, ProductGithubRepo, ProductGithubRepoInput,
-        ProductInteraction, ProductReportGroup, ProductSession, TeamInvitation, TeamMember,
-        TelemetryBatchInput, TelemetryBatchResult, UpdateFeedbackWorkflowInput, UpdateNameInput,
-        UpdateTeamMemberInput, Workspace, WorkspaceMembership,
+        InteractionTelemetryInput, MergeReportGroupsResponse, PolicyInput, Product,
+        ProductActivationMilestones, ProductAuth, ProductEnvironment, ProductFeedbackReport,
+        ProductFeedbackReportInput, ProductFeedbackReportWithInteraction, ProductGithubRepo,
+        ProductGithubRepoInput, ProductInteraction, ProductReportGroup, ProductSession,
+        TeamInvitation, TeamMember, TelemetryBatchInput, TelemetryBatchResult,
+        UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput, Workspace,
+        WorkspaceMembership,
     },
     os_accounts::OsUser,
     security::{
-        bearer_token, parse_capability, random_token, sha256, valid_consent_subject,
+        bearer_token, parse_capability, random_token, sha256, sha256_bytes, valid_consent_subject,
         verify_capability,
     },
 };
@@ -1974,6 +1977,59 @@ async fn product_auth_for_key(
     })
 }
 
+async fn record_product_activation(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    opportunity: bool,
+    confirmed_interaction: bool,
+    report: bool,
+) -> Result<(), ApiError> {
+    let confirmed_interaction = confirmed_interaction || report;
+    let opportunity = opportunity || confirmed_interaction;
+    sqlx::query(
+        r"INSERT INTO product_activation_milestones
+        (product_id, workspace_id, first_opportunity_at,
+         first_confirmed_interaction_at, first_report_at)
+        VALUES (
+          $1,
+          $2,
+          CASE WHEN $3 THEN NOW() END,
+          CASE WHEN $4 THEN NOW() END,
+          CASE WHEN $5 THEN NOW() END
+        )
+        ON CONFLICT (product_id) DO UPDATE SET
+          first_opportunity_at = COALESCE(
+            product_activation_milestones.first_opportunity_at,
+            EXCLUDED.first_opportunity_at
+          ),
+          first_confirmed_interaction_at = COALESCE(
+            product_activation_milestones.first_confirmed_interaction_at,
+            EXCLUDED.first_confirmed_interaction_at
+          ),
+          first_report_at = COALESCE(
+            product_activation_milestones.first_report_at,
+            EXCLUDED.first_report_at
+          ),
+          updated_at = NOW()
+        WHERE
+          (product_activation_milestones.first_opportunity_at IS NULL
+            AND EXCLUDED.first_opportunity_at IS NOT NULL)
+          OR (product_activation_milestones.first_confirmed_interaction_at IS NULL
+            AND EXCLUDED.first_confirmed_interaction_at IS NOT NULL)
+          OR (product_activation_milestones.first_report_at IS NULL
+            AND EXCLUDED.first_report_at IS NOT NULL)",
+    )
+    .bind(product_id)
+    .bind(workspace_id)
+    .bind(opportunity)
+    .bind(confirmed_interaction)
+    .bind(report)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn create_product(
     pool: &PgPool,
@@ -2019,6 +2075,7 @@ pub(crate) async fn create_product(
     .fetch_one(&mut *tx)
     .await
     .map_err(|error| database_conflict(error, "This product already exists"))?;
+    record_product_activation(&mut tx, workspace_id, product.id, false, false, false).await?;
     tx.commit().await?;
     Ok((product, environment))
 }
@@ -2075,7 +2132,8 @@ pub(crate) async fn create_product_with_default_key(
         r"INSERT INTO api_keys
         (id, workspace_id, environment_id, label, prefix, kind, key_hash)
         VALUES ($1, $2, $3, 'Default product key', $4, 'write', $5)
-        RETURNING id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at, expires_at",
+        RETURNING id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at,
+          expires_at, 0::BIGINT AS interaction_count, 0::BIGINT AS report_count",
     )
     .bind(key_id)
     .bind(workspace_id)
@@ -2084,6 +2142,7 @@ pub(crate) async fn create_product_with_default_key(
     .bind(sha256(&secret))
     .fetch_one(&mut *tx)
     .await?;
+    record_product_activation(&mut tx, workspace_id, product.id, false, false, false).await?;
     tx.commit().await?;
     Ok((product, environment, api_key, secret))
 }
@@ -2245,7 +2304,8 @@ pub(crate) async fn create_api_key(
         r"INSERT INTO api_keys
         (id, workspace_id, environment_id, label, prefix, kind, key_hash, expires_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        RETURNING id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at, expires_at",
+        RETURNING id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at,
+          expires_at, 0::BIGINT AS interaction_count, 0::BIGINT AS report_count",
     )
     .bind(key_id)
     .bind(workspace_id)
@@ -2317,7 +2377,8 @@ pub(crate) async fn rotate_api_key(
         r"INSERT INTO api_keys
         (id, workspace_id, environment_id, label, prefix, kind, key_hash, expires_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        RETURNING id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at, expires_at",
+        RETURNING id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at,
+          expires_at, 0::BIGINT AS interaction_count, 0::BIGINT AS report_count",
     )
     .bind(successor_id)
     .bind(workspace_id)
@@ -2412,6 +2473,619 @@ fn encode_feedback_cursor(occurred_at: DateTime<Utc>, id: Uuid) -> Result<String
     let bytes =
         serde_json::to_vec(&FeedbackCursor { occurred_at, id }).map_err(ApiError::internal)?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn dashboard_list_limit(limit: Option<i64>) -> Result<i64, ApiError> {
+    let limit = limit.unwrap_or(50);
+    if !(1..=100).contains(&limit) {
+        return Err(ApiError::bad_request("limit must be between 1 and 100"));
+    }
+    Ok(limit)
+}
+
+fn validate_dashboard_text(
+    value: Option<&str>,
+    field: &str,
+    maximum: usize,
+) -> Result<(), ApiError> {
+    if value.is_some_and(|value| value.is_empty() || value.len() > maximum) {
+        return Err(ApiError::bad_request(format!(
+            "{field} must be between 1 and {maximum} characters"
+        )));
+    }
+    Ok(())
+}
+
+fn dashboard_search_pattern(value: &str) -> String {
+    format!(
+        "%{}%",
+        value
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    )
+}
+
+async fn dashboard_environment_for_product(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+) -> Result<ProductEnvironment, ApiError> {
+    sqlx::query_as::<_, ProductEnvironment>(
+        r"SELECT e.* FROM product_environments e
+        JOIN products p ON p.id = e.product_id
+        WHERE p.id = $1 AND p.workspace_id = $2 AND e.workspace_id = $2
+        ORDER BY e.created_at, e.id LIMIT 1",
+    )
+    .bind(product_id)
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| ApiError::not_found("Product not found"))
+}
+
+pub(crate) async fn dashboard_feedback_page(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    filters: DashboardFeedbackFilters,
+) -> Result<DashboardFeedbackPage, ApiError> {
+    validate_feedback_values(
+        filters.statuses.as_deref(),
+        &["new", "investigating", "planned", "resolved", "wont_act"],
+        "status",
+    )?;
+    validate_feedback_values(
+        filters.impacts.as_deref(),
+        &[
+            "helped",
+            "helped_with_friction",
+            "neutral",
+            "hindered",
+            "blocked",
+            "unknown",
+        ],
+        "impact",
+    )?;
+    validate_feedback_values(
+        filters.surfaces.as_deref(),
+        &["http_json", "http_html", "http_headers", "mcp", "unknown"],
+        "surface",
+    )?;
+    validate_feedback_values(
+        filters.finding_kinds.as_deref(),
+        &[
+            "strength",
+            "friction",
+            "defect",
+            "gap",
+            "suggestion",
+            "uncertainty",
+            "other",
+        ],
+        "findingKind",
+    )?;
+    validate_feedback_values(
+        filters.severities.as_deref(),
+        &["minor", "major", "blocking"],
+        "severity",
+    )?;
+    validate_feedback_values(
+        filters.workarounds.as_deref(),
+        &["used", "suggested", "none"],
+        "workaround",
+    )?;
+    validate_dashboard_text(filters.query.as_deref(), "query", 200)?;
+    validate_dashboard_text(filters.operation.as_deref(), "operation", 160)?;
+    validate_dashboard_text(filters.customer_ref.as_deref(), "customerRef", 160)?;
+    if filters
+        .since
+        .zip(filters.until)
+        .is_some_and(|(since, until)| since > until)
+    {
+        return Err(ApiError::bad_request("since must not be after until"));
+    }
+
+    let environment = dashboard_environment_for_product(pool, workspace_id, product_id).await?;
+    let retained_since = Utc::now() - Duration::days(environment.retention_days.into());
+    let since = filters
+        .since
+        .filter(|since| *since > retained_since)
+        .unwrap_or(retained_since);
+    let limit = dashboard_list_limit(filters.limit)?;
+    let page_size = usize::try_from(limit).map_err(ApiError::internal)?;
+    let cursor = decode_feedback_cursor(filters.cursor.as_deref(), retained_since)?;
+    let cursor_created_at = cursor.as_ref().map(|cursor| cursor.occurred_at);
+    let cursor_id = cursor.as_ref().map(|cursor| cursor.id);
+    let search = filters.query.as_deref().map(dashboard_search_pattern);
+
+    let total = sqlx::query_scalar::<_, i64>(
+        r"SELECT COUNT(*) FROM feedback_reports r
+        JOIN interactions_v2 i ON i.id = r.interaction_id
+        LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
+        WHERE i.environment_id = $1 AND i.occurred_at >= $2 AND r.created_at >= $3
+          AND ($4::TIMESTAMPTZ IS NULL OR r.created_at <= $4)
+          AND ($5::TEXT IS NULL OR r.summary ILIKE $5 ESCAPE '\'
+            OR i.operation ILIKE $5 ESCAPE '\'
+            OR COALESCE(i.customer_ref, '') ILIKE $5 ESCAPE '\'
+            OR r.findings::TEXT ILIKE $5 ESCAPE '\')
+          AND ($6::TEXT[] IS NULL OR COALESCE(w.status, 'new') = ANY($6))
+          AND ($7::TEXT[] IS NULL OR COALESCE(r.impact, 'unknown') = ANY($7))
+          AND ($8::TEXT[] IS NULL OR i.surface = ANY($8))
+          AND ($9::TEXT[] IS NULL OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(r.findings) finding
+            WHERE finding ->> 'topic' = ANY($9)))
+          AND ($10::TEXT[] IS NULL OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(r.findings) finding
+            WHERE finding ->> 'kind' = ANY($10)))
+          AND ($11::TEXT[] IS NULL OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(r.findings) finding
+            WHERE finding ->> 'severity' = ANY($11)))
+          AND ($12::TEXT[] IS NULL OR COALESCE(w.tags, '{}'::TEXT[]) && $12)
+          AND ($13::TEXT[] IS NULL OR w.assignee_os_user_id = ANY($13)
+            OR ($14 AND w.assignee_os_user_id IS NULL))
+          AND ($15::TEXT[] IS NULL OR CASE
+            WHEN r.workaround IS NULL THEN 'none'
+            WHEN r.workaround ->> 'used' = 'true' THEN 'used'
+            ELSE 'suggested' END = ANY($15))
+          AND ($16::TEXT IS NULL OR i.operation = $16)
+          AND ($17::TEXT IS NULL OR i.customer_ref = $17)
+          AND ($18::TEXT IS NULL OR EXISTS (
+            SELECT 1 FROM report_groups report_group
+            WHERE report_group.id = r.group_id
+              AND report_group.workspace_id = r.workspace_id
+              AND report_group.group_key = $18))",
+    )
+    .bind(environment.id)
+    .bind(retained_since)
+    .bind(since)
+    .bind(filters.until)
+    .bind(&search)
+    .bind(&filters.statuses)
+    .bind(&filters.impacts)
+    .bind(&filters.surfaces)
+    .bind(&filters.topics)
+    .bind(&filters.finding_kinds)
+    .bind(&filters.severities)
+    .bind(&filters.tags)
+    .bind(&filters.assignees)
+    .bind(filters.include_unassigned)
+    .bind(&filters.workarounds)
+    .bind(&filters.operation)
+    .bind(&filters.customer_ref)
+    .bind(&filters.group_key)
+    .fetch_one(pool)
+    .await?;
+
+    let facets = dashboard_feedback_facets(
+        pool,
+        environment.id,
+        retained_since,
+        since,
+        filters.until,
+        search.as_deref(),
+        &filters,
+    )
+    .await?;
+
+    let mut reports = sqlx::query_as::<_, ProductFeedbackReportWithInteraction>(
+        r"SELECT r.id, r.interaction_id, r.summary, r.impact, r.confidence,
+        r.findings, r.workaround, r.source, r.created_at,
+        i.session_id, i.surface, i.operation, i.status_code, i.duration_ms,
+        i.customer_ref, i.classification, i.confirmation_method, i.runtime_hint,
+        i.runtime_hint_source, i.occurred_at,
+        COALESCE(w.status, 'new') AS workflow_status, w.assignee_os_user_id,
+        COALESCE(w.tags, '{}'::TEXT[]) AS tags, w.internal_note,
+        w.updated_at AS workflow_updated_at
+        FROM feedback_reports r
+        JOIN interactions_v2 i ON i.id = r.interaction_id
+        LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
+        WHERE i.environment_id = $1 AND i.occurred_at >= $2 AND r.created_at >= $3
+          AND ($4::TIMESTAMPTZ IS NULL OR r.created_at <= $4)
+          AND ($5::TEXT IS NULL OR r.summary ILIKE $5 ESCAPE '\'
+            OR i.operation ILIKE $5 ESCAPE '\'
+            OR COALESCE(i.customer_ref, '') ILIKE $5 ESCAPE '\'
+            OR r.findings::TEXT ILIKE $5 ESCAPE '\')
+          AND ($6::TEXT[] IS NULL OR COALESCE(w.status, 'new') = ANY($6))
+          AND ($7::TEXT[] IS NULL OR COALESCE(r.impact, 'unknown') = ANY($7))
+          AND ($8::TEXT[] IS NULL OR i.surface = ANY($8))
+          AND ($9::TEXT[] IS NULL OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(r.findings) finding
+            WHERE finding ->> 'topic' = ANY($9)))
+          AND ($10::TEXT[] IS NULL OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(r.findings) finding
+            WHERE finding ->> 'kind' = ANY($10)))
+          AND ($11::TEXT[] IS NULL OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(r.findings) finding
+            WHERE finding ->> 'severity' = ANY($11)))
+          AND ($12::TEXT[] IS NULL OR COALESCE(w.tags, '{}'::TEXT[]) && $12)
+          AND ($13::TEXT[] IS NULL OR w.assignee_os_user_id = ANY($13)
+            OR ($14 AND w.assignee_os_user_id IS NULL))
+          AND ($15::TEXT[] IS NULL OR CASE
+            WHEN r.workaround IS NULL THEN 'none'
+            WHEN r.workaround ->> 'used' = 'true' THEN 'used'
+            ELSE 'suggested' END = ANY($15))
+          AND ($16::TEXT IS NULL OR i.operation = $16)
+          AND ($17::TEXT IS NULL OR i.customer_ref = $17)
+          AND ($18::TEXT IS NULL OR EXISTS (
+            SELECT 1 FROM report_groups report_group
+            WHERE report_group.id = r.group_id
+              AND report_group.workspace_id = r.workspace_id
+              AND report_group.group_key = $18))
+          AND ($19::TIMESTAMPTZ IS NULL OR (r.created_at, r.id) < ($19, $20))
+        ORDER BY r.created_at DESC, r.id DESC LIMIT $21",
+    )
+    .bind(environment.id)
+    .bind(retained_since)
+    .bind(since)
+    .bind(filters.until)
+    .bind(search)
+    .bind(filters.statuses)
+    .bind(filters.impacts)
+    .bind(filters.surfaces)
+    .bind(filters.topics)
+    .bind(filters.finding_kinds)
+    .bind(filters.severities)
+    .bind(filters.tags)
+    .bind(filters.assignees)
+    .bind(filters.include_unassigned)
+    .bind(filters.workarounds)
+    .bind(filters.operation)
+    .bind(filters.customer_ref)
+    .bind(filters.group_key)
+    .bind(cursor_created_at)
+    .bind(cursor_id)
+    .bind(limit + 1)
+    .fetch_all(pool)
+    .await?;
+    let next_cursor = if reports.len() > page_size {
+        let last = &reports[page_size - 1];
+        Some(encode_feedback_cursor(last.created_at, last.id)?)
+    } else {
+        None
+    };
+    reports.truncate(page_size);
+    Ok(DashboardFeedbackPage {
+        reports,
+        total,
+        facets,
+        limit,
+        next_cursor,
+    })
+}
+
+/// Compute disjunctive facet counts: each facet applies every active filter
+/// except its own selection, so counts stay useful without claiming that an
+/// incompatible value belongs to the current result set.
+async fn dashboard_feedback_facets(
+    pool: &PgPool,
+    environment_id: Uuid,
+    retained_since: DateTime<Utc>,
+    since: DateTime<Utc>,
+    until: Option<DateTime<Utc>>,
+    search: Option<&str>,
+    filters: &DashboardFeedbackFilters,
+) -> Result<DashboardFeedbackFacets, ApiError> {
+    let rows = sqlx::query_as::<_, (String, String, i64)>(
+        r"WITH base AS MATERIALIZED (
+          SELECT r.id, COALESCE(w.status, 'new') AS workflow_status,
+            COALESCE(r.impact, 'unknown') AS impact, i.surface,
+            CASE WHEN jsonb_typeof(r.findings) = 'array' THEN r.findings ELSE '[]'::JSONB END AS findings,
+            COALESCE(w.tags, '{}'::TEXT[]) AS tags,
+            COALESCE(w.assignee_os_user_id::TEXT, 'unassigned') AS assignee,
+            CASE WHEN r.workaround IS NULL THEN 'none'
+              WHEN r.workaround ->> 'used' = 'true' THEN 'used'
+              ELSE 'suggested' END AS workaround,
+            ($9::TEXT[] IS NULL OR COALESCE(w.status, 'new') = ANY($9)) AS matches_status,
+            ($10::TEXT[] IS NULL OR COALESCE(r.impact, 'unknown') = ANY($10)) AS matches_impact,
+            ($11::TEXT[] IS NULL OR i.surface = ANY($11)) AS matches_surface,
+            ($12::TEXT[] IS NULL OR EXISTS (
+              SELECT 1 FROM jsonb_array_elements(r.findings) finding
+              WHERE finding ->> 'topic' = ANY($12))) AS matches_topic,
+            ($13::TEXT[] IS NULL OR EXISTS (
+              SELECT 1 FROM jsonb_array_elements(r.findings) finding
+              WHERE finding ->> 'kind' = ANY($13))) AS matches_finding_kind,
+            ($14::TEXT[] IS NULL OR EXISTS (
+              SELECT 1 FROM jsonb_array_elements(r.findings) finding
+              WHERE finding ->> 'severity' = ANY($14))) AS matches_severity,
+            ($15::TEXT[] IS NULL OR COALESCE(w.tags, '{}'::TEXT[]) && $15) AS matches_tag,
+            ($16::TEXT[] IS NULL OR w.assignee_os_user_id = ANY($16)
+              OR ($17 AND w.assignee_os_user_id IS NULL)) AS matches_assignee,
+            ($18::TEXT[] IS NULL OR CASE
+              WHEN r.workaround IS NULL THEN 'none'
+              WHEN r.workaround ->> 'used' = 'true' THEN 'used'
+              ELSE 'suggested' END = ANY($18)) AS matches_workaround
+          FROM feedback_reports r
+          JOIN interactions_v2 i ON i.id = r.interaction_id
+          LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
+          WHERE i.environment_id = $1 AND i.occurred_at >= $2 AND r.created_at >= $3
+            AND ($4::TIMESTAMPTZ IS NULL OR r.created_at <= $4)
+            AND ($5::TEXT IS NULL OR r.summary ILIKE $5 ESCAPE '\'
+              OR i.operation ILIKE $5 ESCAPE '\'
+              OR COALESCE(i.customer_ref, '') ILIKE $5 ESCAPE '\'
+              OR r.findings::TEXT ILIKE $5 ESCAPE '\')
+            AND ($6::TEXT IS NULL OR i.operation = $6)
+            AND ($7::TEXT IS NULL OR i.customer_ref = $7)
+            AND ($8::TEXT IS NULL OR EXISTS (
+              SELECT 1 FROM report_groups report_group
+              WHERE report_group.id = r.group_id
+                AND report_group.workspace_id = r.workspace_id
+                AND report_group.group_key = $8))
+        ), facet_values AS (
+          SELECT id AS report_id, 'status'::TEXT AS facet, workflow_status AS value FROM base
+            WHERE matches_impact AND matches_surface AND matches_topic
+              AND matches_finding_kind AND matches_severity AND matches_tag
+              AND matches_assignee AND matches_workaround
+          UNION ALL SELECT id, 'impact', impact FROM base
+            WHERE matches_status AND matches_surface AND matches_topic
+              AND matches_finding_kind AND matches_severity AND matches_tag
+              AND matches_assignee AND matches_workaround
+          UNION ALL SELECT id, 'surface', surface FROM base
+            WHERE matches_status AND matches_impact AND matches_topic
+              AND matches_finding_kind AND matches_severity AND matches_tag
+              AND matches_assignee AND matches_workaround
+          UNION ALL SELECT id, 'assignee', assignee FROM base
+            WHERE matches_status AND matches_impact AND matches_surface AND matches_topic
+              AND matches_finding_kind AND matches_severity AND matches_tag
+              AND matches_workaround
+          UNION ALL SELECT id, 'workaround', workaround FROM base
+            WHERE matches_status AND matches_impact AND matches_surface AND matches_topic
+              AND matches_finding_kind AND matches_severity AND matches_tag
+              AND matches_assignee
+          UNION ALL SELECT id, 'tag', tag FROM base CROSS JOIN LATERAL UNNEST(tags) tag
+            WHERE matches_status AND matches_impact AND matches_surface AND matches_topic
+              AND matches_finding_kind AND matches_severity AND matches_assignee
+              AND matches_workaround
+          UNION ALL SELECT id, 'topic', finding ->> 'topic'
+            FROM base CROSS JOIN LATERAL jsonb_array_elements(findings) finding
+            WHERE matches_status AND matches_impact AND matches_surface
+              AND matches_finding_kind AND matches_severity AND matches_tag
+              AND matches_assignee AND matches_workaround
+          UNION ALL SELECT id, 'finding_kind', finding ->> 'kind'
+            FROM base CROSS JOIN LATERAL jsonb_array_elements(findings) finding
+            WHERE matches_status AND matches_impact AND matches_surface AND matches_topic
+              AND matches_severity AND matches_tag AND matches_assignee
+              AND matches_workaround
+          UNION ALL SELECT id, 'severity', finding ->> 'severity'
+            FROM base CROSS JOIN LATERAL jsonb_array_elements(findings) finding
+            WHERE matches_status AND matches_impact AND matches_surface AND matches_topic
+              AND matches_finding_kind AND matches_tag AND matches_assignee
+              AND matches_workaround
+        )
+        SELECT facet, value, COUNT(DISTINCT report_id)::BIGINT
+        FROM facet_values
+        WHERE value IS NOT NULL AND value <> ''
+        GROUP BY facet, value
+        ORDER BY facet, COUNT(DISTINCT report_id) DESC, value",
+    )
+    .bind(environment_id)
+    .bind(retained_since)
+    .bind(since)
+    .bind(until)
+    .bind(search)
+    .bind(&filters.operation)
+    .bind(&filters.customer_ref)
+    .bind(&filters.group_key)
+    .bind(&filters.statuses)
+    .bind(&filters.impacts)
+    .bind(&filters.surfaces)
+    .bind(&filters.topics)
+    .bind(&filters.finding_kinds)
+    .bind(&filters.severities)
+    .bind(&filters.tags)
+    .bind(&filters.assignees)
+    .bind(filters.include_unassigned)
+    .bind(&filters.workarounds)
+    .fetch_all(pool)
+    .await?;
+
+    let mut facets = DashboardFeedbackFacets::default();
+    for (facet, name, count) in rows {
+        let item = InsightCount { name, count };
+        match facet.as_str() {
+            "status" => facets.status.push(item),
+            "impact" => facets.impact.push(item),
+            "surface" => facets.surface.push(item),
+            "topic" => facets.topic.push(item),
+            "finding_kind" => facets.finding_kind.push(item),
+            "severity" => facets.severity.push(item),
+            "tag" => facets.tag.push(item),
+            "assignee" => facets.assignee.push(item),
+            "workaround" => facets.workaround.push(item),
+            _ => {}
+        }
+    }
+    Ok(facets)
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "bounded aggregate counts are converted to a display-only average"
+)]
+pub(crate) async fn dashboard_sessions_page(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    filters: DashboardSessionFilters,
+) -> Result<DashboardSessionsPage, ApiError> {
+    validate_feedback_values(
+        filters.impacts.as_deref(),
+        &[
+            "helped",
+            "helped_with_friction",
+            "neutral",
+            "hindered",
+            "blocked",
+            "unknown",
+        ],
+        "impact",
+    )?;
+    if filters
+        .kind
+        .as_deref()
+        .is_some_and(|kind| !["all", "multi", "feedback", "no_feedback"].contains(&kind))
+    {
+        return Err(ApiError::bad_request("Invalid session kind filter"));
+    }
+    validate_dashboard_text(filters.query.as_deref(), "query", 200)?;
+    validate_dashboard_text(filters.operation.as_deref(), "operation", 160)?;
+    validate_dashboard_text(filters.customer_ref.as_deref(), "customerRef", 160)?;
+    if filters
+        .since
+        .zip(filters.until)
+        .is_some_and(|(since, until)| since > until)
+    {
+        return Err(ApiError::bad_request("since must not be after until"));
+    }
+
+    let environment = dashboard_environment_for_product(pool, workspace_id, product_id).await?;
+    let retained_since = Utc::now() - Duration::days(environment.retention_days.into());
+    let since = filters
+        .since
+        .filter(|since| *since > retained_since)
+        .unwrap_or(retained_since);
+    let limit = dashboard_list_limit(filters.limit)?;
+    let page_size = usize::try_from(limit).map_err(ApiError::internal)?;
+    let cursor = decode_feedback_cursor(filters.cursor.as_deref(), retained_since)?;
+    let cursor_last_seen_at = cursor.as_ref().map(|cursor| cursor.occurred_at);
+    let cursor_id = cursor.as_ref().map(|cursor| cursor.id);
+    let search = filters.query.as_deref().map(dashboard_search_pattern);
+
+    let (session_count, interaction_count, multi_step_sessions) =
+        sqlx::query_as::<_, (i64, i64, i64)>(
+            r"SELECT COUNT(*), COALESCE(SUM(activity.interaction_count), 0)::BIGINT,
+            COUNT(*) FILTER (WHERE activity.interaction_count > 1)
+            FROM sessions_v2 s
+            CROSS JOIN LATERAL (
+              SELECT COUNT(*)::BIGINT AS interaction_count,
+                COUNT(r.id)::BIGINT AS report_count
+              FROM interactions_v2 i
+              LEFT JOIN feedback_reports r ON r.interaction_id = i.id
+              WHERE i.session_id = s.id AND i.occurred_at >= $9
+            ) activity
+            WHERE s.environment_id = $1 AND s.last_seen_at >= $2
+              AND ($3::TIMESTAMPTZ IS NULL OR s.last_seen_at <= $3)
+              AND ($4::TEXT IS NULL OR s.ref_hint ILIKE $4 ESCAPE '\'
+                OR s.source ILIKE $4 ESCAPE '\'
+                OR EXISTS (SELECT 1 FROM interactions_v2 i WHERE i.session_id = s.id
+                  AND i.occurred_at >= $9
+                  AND (i.operation ILIKE $4 ESCAPE '\'
+                    OR COALESCE(i.customer_ref, '') ILIKE $4 ESCAPE '\')))
+              AND ($5::TEXT IS NULL OR $5 = 'all'
+                OR ($5 = 'multi' AND activity.interaction_count > 1)
+                OR ($5 = 'feedback' AND activity.report_count > 0)
+                OR ($5 = 'no_feedback' AND activity.report_count = 0))
+              AND ($6::TEXT[] IS NULL OR EXISTS (
+                SELECT 1 FROM interactions_v2 i JOIN feedback_reports r ON r.interaction_id = i.id
+                WHERE i.session_id = s.id AND i.occurred_at >= $9
+                  AND COALESCE(r.impact, 'unknown') = ANY($6)))
+              AND ($7::TEXT IS NULL OR EXISTS (
+                SELECT 1 FROM interactions_v2 i WHERE i.session_id = s.id
+                  AND i.occurred_at >= $9 AND i.operation = $7))
+              AND ($8::TEXT IS NULL OR EXISTS (
+                SELECT 1 FROM interactions_v2 i WHERE i.session_id = s.id
+                  AND i.occurred_at >= $9 AND i.customer_ref = $8))",
+        )
+        .bind(environment.id)
+        .bind(since)
+        .bind(filters.until)
+        .bind(&search)
+        .bind(&filters.kind)
+        .bind(&filters.impacts)
+        .bind(&filters.operation)
+        .bind(&filters.customer_ref)
+        .bind(retained_since)
+        .fetch_one(pool)
+        .await?;
+
+    let mut sessions = sqlx::query_as::<_, DashboardSessionSummary>(
+        r"SELECT s.id, s.workspace_id, s.environment_id, s.source, s.ref_hint,
+          s.started_at, s.last_seen_at, s.created_at,
+          activity.interaction_count, activity.report_count,
+          activity.first_operation, activity.last_operation, activity.customer_ref,
+          activity.strongest_impact
+        FROM sessions_v2 s
+        CROSS JOIN LATERAL (
+          SELECT COUNT(i.id)::BIGINT AS interaction_count,
+            COUNT(r.id)::BIGINT AS report_count,
+            (ARRAY_AGG(i.operation ORDER BY i.occurred_at, i.client_sequence NULLS LAST, i.id)
+              FILTER (WHERE i.id IS NOT NULL))[1] AS first_operation,
+            (ARRAY_AGG(i.operation ORDER BY i.occurred_at DESC,
+              i.client_sequence DESC NULLS LAST, i.id DESC)
+              FILTER (WHERE i.id IS NOT NULL))[1] AS last_operation,
+            (ARRAY_AGG(i.customer_ref ORDER BY i.occurred_at, i.client_sequence NULLS LAST, i.id)
+              FILTER (WHERE i.customer_ref IS NOT NULL))[1] AS customer_ref,
+            (ARRAY_AGG(r.impact ORDER BY CASE r.impact
+              WHEN 'blocked' THEN 5 WHEN 'hindered' THEN 4
+              WHEN 'helped_with_friction' THEN 3 WHEN 'neutral' THEN 2
+              WHEN 'unknown' THEN 1 WHEN 'helped' THEN 0 ELSE -1 END DESC,
+              r.created_at DESC) FILTER (WHERE r.impact IS NOT NULL))[1] AS strongest_impact
+          FROM interactions_v2 i
+          LEFT JOIN feedback_reports r ON r.interaction_id = i.id
+          WHERE i.session_id = s.id AND i.occurred_at >= $9
+        ) activity
+        WHERE s.environment_id = $1 AND s.last_seen_at >= $2
+          AND ($3::TIMESTAMPTZ IS NULL OR s.last_seen_at <= $3)
+          AND ($4::TEXT IS NULL OR s.ref_hint ILIKE $4 ESCAPE '\'
+            OR s.source ILIKE $4 ESCAPE '\'
+            OR EXISTS (SELECT 1 FROM interactions_v2 i WHERE i.session_id = s.id
+              AND i.occurred_at >= $9
+              AND (i.operation ILIKE $4 ESCAPE '\'
+                OR COALESCE(i.customer_ref, '') ILIKE $4 ESCAPE '\')))
+          AND ($5::TEXT IS NULL OR $5 = 'all'
+            OR ($5 = 'multi' AND activity.interaction_count > 1)
+            OR ($5 = 'feedback' AND activity.report_count > 0)
+            OR ($5 = 'no_feedback' AND activity.report_count = 0))
+          AND ($6::TEXT[] IS NULL OR EXISTS (
+            SELECT 1 FROM interactions_v2 i JOIN feedback_reports r ON r.interaction_id = i.id
+            WHERE i.session_id = s.id AND i.occurred_at >= $9
+              AND COALESCE(r.impact, 'unknown') = ANY($6)))
+          AND ($7::TEXT IS NULL OR EXISTS (
+            SELECT 1 FROM interactions_v2 i WHERE i.session_id = s.id
+              AND i.occurred_at >= $9 AND i.operation = $7))
+          AND ($8::TEXT IS NULL OR EXISTS (
+            SELECT 1 FROM interactions_v2 i WHERE i.session_id = s.id
+              AND i.occurred_at >= $9 AND i.customer_ref = $8))
+          AND ($10::TIMESTAMPTZ IS NULL OR (s.last_seen_at, s.id) < ($10, $11))
+        ORDER BY s.last_seen_at DESC, s.id DESC LIMIT $12",
+    )
+    .bind(environment.id)
+    .bind(since)
+    .bind(filters.until)
+    .bind(search)
+    .bind(filters.kind)
+    .bind(filters.impacts)
+    .bind(filters.operation)
+    .bind(filters.customer_ref)
+    .bind(retained_since)
+    .bind(cursor_last_seen_at)
+    .bind(cursor_id)
+    .bind(limit + 1)
+    .fetch_all(pool)
+    .await?;
+    let next_cursor = if sessions.len() > page_size {
+        let last = &sessions[page_size - 1];
+        Some(encode_feedback_cursor(last.last_seen_at, last.id)?)
+    } else {
+        None
+    };
+    sessions.truncate(page_size);
+    let average_interactions = if session_count == 0 {
+        0.0
+    } else {
+        interaction_count as f64 / session_count as f64
+    };
+    Ok(DashboardSessionsPage {
+        sessions,
+        rollup: DashboardSessionRollup {
+            sessions: session_count,
+            interactions: interaction_count,
+            multi_step_sessions,
+            average_interactions,
+        },
+        limit,
+        next_cursor,
+    })
 }
 
 #[allow(
@@ -2796,13 +3470,20 @@ pub(crate) async fn purge_expired_product_data(
 async fn dashboard_insights(
     pool: &PgPool,
     environment_id: Option<Uuid>,
+    retained_since: Option<DateTime<Utc>>,
 ) -> Result<Insights, ApiError> {
     const WINDOW_DAYS: i32 = 30;
     const COMPARISON_DAYS: i32 = 7;
     let now = Utc::now();
-    let window_start = now - Duration::days(WINDOW_DAYS.into());
+    let window_start = retained_since.map_or_else(
+        || now - Duration::days(WINDOW_DAYS.into()),
+        |retained_since| retained_since.max(now - Duration::days(WINDOW_DAYS.into())),
+    );
     let recent_start = now - Duration::days(COMPARISON_DAYS.into());
-    let previous_start = recent_start - Duration::days(COMPARISON_DAYS.into());
+    let previous_start = retained_since.map_or_else(
+        || recent_start - Duration::days(COMPARISON_DAYS.into()),
+        |retained_since| retained_since.max(recent_start - Duration::days(COMPARISON_DAYS.into())),
+    );
     let counts = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64)>(
         r"SELECT
           COUNT(i.id) FILTER (WHERE i.occurred_at >= $2),
@@ -3029,24 +3710,55 @@ pub(crate) async fn dashboard_with_limits(
     let environment_id = current_environment
         .as_ref()
         .map(|environment| environment.id);
+    let retained_since = current_environment
+        .as_ref()
+        .map(|environment| Utc::now() - Duration::days(environment.retention_days.into()));
+    let activation_milestones = if let Some(product) = current_product.as_ref() {
+        sqlx::query_as::<_, ProductActivationMilestones>(
+            r"SELECT workspace_id, product_id, first_opportunity_at,
+              first_confirmed_interaction_at, first_report_at
+            FROM product_activation_milestones
+            WHERE workspace_id = $1 AND product_id = $2",
+        )
+        .bind(context.workspace.id)
+        .bind(product.id)
+        .fetch_optional(pool)
+        .await?
+    } else {
+        None
+    };
     let api_keys = sqlx::query_as::<_, ApiKeyPublic>(
-        r"SELECT id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at, expires_at
-        FROM api_keys
-        WHERE environment_id = $1
-          AND revoked_at IS NULL
-          AND (expires_at IS NULL OR expires_at > NOW())
-        ORDER BY created_at DESC",
+        r"SELECT k.id, k.environment_id, k.label, k.prefix, k.kind, k.created_at,
+          k.last_used_at, k.revoked_at, k.expires_at,
+          COALESCE(activity.interaction_count, 0) AS interaction_count,
+          COALESCE(activity.report_count, 0) AS report_count
+        FROM api_keys k
+        LEFT JOIN (
+          SELECT i.api_key_id, COUNT(DISTINCT i.id)::BIGINT AS interaction_count,
+            COUNT(r.id)::BIGINT AS report_count
+          FROM interactions_v2 i
+          LEFT JOIN feedback_reports r ON r.interaction_id = i.id
+          WHERE i.environment_id = $1 AND i.occurred_at >= $2
+          GROUP BY i.api_key_id
+        ) activity ON activity.api_key_id = k.id
+        WHERE k.environment_id = $1
+          AND k.revoked_at IS NULL
+          AND (k.expires_at IS NULL OR k.expires_at > NOW())
+        ORDER BY k.created_at DESC",
     )
     .bind(environment_id)
+    .bind(retained_since)
     .fetch_all(pool)
     .await?;
     let interactions = sqlx::query_as::<_, ProductInteraction>(
         r"SELECT id, workspace_id, environment_id, api_key_id, session_id, surface, operation,
         status_code, duration_ms, customer_ref, classification, confirmation_method,
         runtime_hint, runtime_hint_source, occurred_at, created_at, updated_at
-        FROM interactions_v2 WHERE environment_id = $1 ORDER BY occurred_at DESC LIMIT $2",
+        FROM interactions_v2 WHERE environment_id = $1 AND occurred_at >= $2
+        ORDER BY occurred_at DESC LIMIT $3",
     )
     .bind(environment_id)
+    .bind(retained_since)
     .bind(interaction_limit)
     .fetch_all(pool)
     .await?;
@@ -3061,29 +3773,76 @@ pub(crate) async fn dashboard_with_limits(
         w.updated_at AS workflow_updated_at
         FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id
         LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
-        WHERE i.environment_id = $1 ORDER BY r.created_at DESC LIMIT $2",
+        WHERE i.environment_id = $1 AND i.occurred_at >= $2
+        ORDER BY r.created_at DESC LIMIT $3",
     )
     .bind(environment_id)
+    .bind(retained_since)
     .bind(report_limit)
     .fetch_all(pool)
     .await?;
-    let sessions = sqlx::query_as::<_, ProductSession>(
-        r"SELECT id, workspace_id, environment_id, source, ref_hint, started_at, last_seen_at, created_at
-        FROM sessions_v2 WHERE environment_id = $1 ORDER BY last_seen_at DESC LIMIT $2",
+    let sessions = sqlx::query_as::<_, DashboardSessionSummary>(
+        r"WITH selected_sessions AS (
+          SELECT id, workspace_id, environment_id, source, ref_hint,
+            started_at, last_seen_at, created_at
+          FROM sessions_v2
+          WHERE environment_id = $1 AND last_seen_at >= $2
+          ORDER BY last_seen_at DESC
+          LIMIT $3
+        )
+        SELECT s.id, s.workspace_id, s.environment_id, s.source, s.ref_hint,
+          s.started_at, s.last_seen_at, s.created_at,
+          COALESCE(activity.interaction_count, 0) AS interaction_count,
+          COALESCE(activity.report_count, 0) AS report_count,
+          activity.first_operation, activity.last_operation, activity.customer_ref,
+          activity.strongest_impact
+        FROM selected_sessions s
+        LEFT JOIN LATERAL (
+          SELECT
+            COUNT(i.id)::BIGINT AS interaction_count,
+            COUNT(r.id)::BIGINT AS report_count,
+            (ARRAY_AGG(i.operation ORDER BY i.occurred_at, i.client_sequence NULLS LAST, i.id)
+              FILTER (WHERE i.id IS NOT NULL))[1] AS first_operation,
+            (ARRAY_AGG(i.operation ORDER BY i.occurred_at DESC, i.client_sequence DESC NULLS LAST, i.id DESC)
+              FILTER (WHERE i.id IS NOT NULL))[1] AS last_operation,
+            (ARRAY_AGG(i.customer_ref ORDER BY i.occurred_at, i.client_sequence NULLS LAST, i.id)
+              FILTER (WHERE i.customer_ref IS NOT NULL))[1] AS customer_ref,
+            (ARRAY_AGG(r.impact ORDER BY
+              CASE r.impact
+                WHEN 'blocked' THEN 5
+                WHEN 'hindered' THEN 4
+                WHEN 'helped_with_friction' THEN 3
+                WHEN 'neutral' THEN 2
+                WHEN 'unknown' THEN 1
+                WHEN 'helped' THEN 0
+                ELSE -1
+              END DESC,
+              r.created_at DESC)
+              FILTER (WHERE r.impact IS NOT NULL))[1] AS strongest_impact
+          FROM interactions_v2 i
+          LEFT JOIN feedback_reports r ON r.interaction_id = i.id
+          WHERE i.session_id = s.id AND i.occurred_at >= $2
+        ) activity ON TRUE
+        ORDER BY s.last_seen_at DESC",
     )
     .bind(environment_id)
+    .bind(retained_since)
     .bind(session_limit)
     .fetch_all(pool)
     .await?;
-    let insights = dashboard_insights(pool, environment_id).await?;
+    let insights = dashboard_insights(pool, environment_id, retained_since).await?;
     let (interactions_total, reports_total, sessions_total) =
         sqlx::query_as::<_, (i64, i64, i64)>(
             r"SELECT
-              (SELECT COUNT(*) FROM interactions_v2 WHERE environment_id = $1),
-              (SELECT COUNT(*) FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id WHERE i.environment_id = $1),
-              (SELECT COUNT(*) FROM sessions_v2 WHERE environment_id = $1)",
+              (SELECT COUNT(*) FROM interactions_v2
+                WHERE environment_id = $1 AND occurred_at >= $2),
+              (SELECT COUNT(*) FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id
+                WHERE i.environment_id = $1 AND i.occurred_at >= $2),
+              (SELECT COUNT(*) FROM sessions_v2
+                WHERE environment_id = $1 AND last_seen_at >= $2)",
         )
         .bind(environment_id)
+        .bind(retained_since)
         .fetch_one(pool)
         .await?;
     let list_state = DashboardListState {
@@ -3129,6 +3888,7 @@ pub(crate) async fn dashboard_with_limits(
         environments,
         current_product,
         current_environment,
+        activation_milestones,
         api_keys,
         interactions,
         reports,
@@ -3157,7 +3917,8 @@ pub(crate) async fn dashboard_report_by_id(
         JOIN interactions_v2 i ON i.id = r.interaction_id
         JOIN product_environments e ON e.id = i.environment_id
         LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
-        WHERE r.id = $1 AND i.workspace_id = $2 AND e.product_id = $3",
+        WHERE r.id = $1 AND i.workspace_id = $2 AND e.product_id = $3
+          AND i.occurred_at >= NOW() - make_interval(days => e.retention_days)",
     )
     .bind(report_id)
     .bind(workspace_id)
@@ -3229,6 +3990,7 @@ pub(crate) async fn update_feedback_workflow(
         JOIN interactions_v2 i ON i.id = r.interaction_id
         JOIN product_environments e ON e.id = i.environment_id
         WHERE r.id = $1 AND r.workspace_id = $2 AND e.product_id = $3
+          AND i.occurred_at >= NOW() - make_interval(days => e.retention_days)
         ON CONFLICT (report_id) DO UPDATE SET
           status = EXCLUDED.status,
           assignee_os_user_id = EXCLUDED.assignee_os_user_id,
@@ -3265,7 +4027,8 @@ pub(crate) async fn dashboard_interaction_by_id(
         i.classification, i.confirmation_method, i.runtime_hint, i.runtime_hint_source,
         i.occurred_at, i.created_at, i.updated_at
         FROM interactions_v2 i JOIN product_environments e ON e.id = i.environment_id
-        WHERE i.id = $1 AND i.workspace_id = $2 AND e.product_id = $3",
+        WHERE i.id = $1 AND i.workspace_id = $2 AND e.product_id = $3
+          AND i.occurred_at >= NOW() - make_interval(days => e.retention_days)",
     )
     .bind(interaction_id)
     .bind(workspace_id)
@@ -3285,7 +4048,8 @@ pub(crate) async fn dashboard_session_by_id(
         r"SELECT s.id, s.workspace_id, s.environment_id, s.source, s.ref_hint,
         s.started_at, s.last_seen_at, s.created_at
         FROM sessions_v2 s JOIN product_environments e ON e.id = s.environment_id
-        WHERE s.id = $1 AND s.workspace_id = $2 AND e.product_id = $3",
+        WHERE s.id = $1 AND s.workspace_id = $2 AND e.product_id = $3
+          AND s.last_seen_at >= NOW() - make_interval(days => e.retention_days)",
     )
     .bind(session_id)
     .bind(workspace_id)
@@ -3294,11 +4058,15 @@ pub(crate) async fn dashboard_session_by_id(
     .await?
     .ok_or_else(|| ApiError::not_found("Session not found"))?;
     let interactions = sqlx::query_as::<_, ProductInteraction>(
-        r"SELECT id, workspace_id, environment_id, api_key_id, session_id, surface,
-        operation, status_code, duration_ms, customer_ref, classification,
-        confirmation_method, runtime_hint, runtime_hint_source, occurred_at, created_at, updated_at
-        FROM interactions_v2 WHERE session_id = $1
-        ORDER BY occurred_at, client_sequence NULLS LAST, id",
+        r"SELECT i.id, i.workspace_id, i.environment_id, i.api_key_id, i.session_id, i.surface,
+        i.operation, i.status_code, i.duration_ms, i.customer_ref, i.classification,
+        i.confirmation_method, i.runtime_hint, i.runtime_hint_source,
+        i.occurred_at, i.created_at, i.updated_at
+        FROM interactions_v2 i
+        JOIN product_environments e ON e.id = i.environment_id
+        WHERE i.session_id = $1
+          AND i.occurred_at >= NOW() - make_interval(days => e.retention_days)
+        ORDER BY i.occurred_at, i.client_sequence NULLS LAST, i.id",
     )
     .bind(session_id)
     .fetch_all(pool)
@@ -3313,8 +4081,11 @@ pub(crate) async fn dashboard_session_by_id(
         COALESCE(w.tags, '{}'::TEXT[]) AS tags, w.internal_note,
         w.updated_at AS workflow_updated_at
         FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id
+        JOIN product_environments e ON e.id = i.environment_id
         LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
-        WHERE i.session_id = $1 ORDER BY r.created_at",
+        WHERE i.session_id = $1
+          AND i.occurred_at >= NOW() - make_interval(days => e.retention_days)
+        ORDER BY r.created_at",
     )
     .bind(session_id)
     .fetch_all(pool)
@@ -3356,16 +4127,19 @@ async fn resolve_v2_session(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     environment_id: Uuid,
-    session_ref: &str,
+    customer_scope_hash: &[u8],
+    session_ref_hash: &[u8],
     session_source: &str,
     occurred_at: DateTime<Utc>,
 ) -> Result<Uuid, ApiError> {
     let session_id = Uuid::new_v4();
     let ref_hint = format!("session-{}", &session_id.simple().to_string()[..8]);
+    let scoped_ref_hash = scoped_session_ref_hash(customer_scope_hash, session_ref_hash);
     let resolved = sqlx::query_scalar::<_, Uuid>(
         r"INSERT INTO sessions_v2
-        (id, workspace_id, environment_id, source, ref_hash, ref_hint, started_at, last_seen_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+        (id, workspace_id, environment_id, customer_scope_hash, source, ref_hash,
+         raw_ref_hash, ref_hint, started_at, last_seen_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
         ON CONFLICT (environment_id, source, ref_hash) DO UPDATE
         SET started_at = LEAST(sessions_v2.started_at, EXCLUDED.started_at),
             last_seen_at = GREATEST(sessions_v2.last_seen_at, EXCLUDED.last_seen_at)
@@ -3374,13 +4148,31 @@ async fn resolve_v2_session(
     .bind(session_id)
     .bind(workspace_id)
     .bind(environment_id)
+    .bind(customer_scope_hash)
     .bind(session_source)
-    .bind(sha256(session_ref))
+    .bind(scoped_ref_hash)
+    .bind(session_ref_hash)
     .bind(ref_hint)
     .bind(occurred_at)
     .fetch_one(&mut **tx)
     .await?;
     Ok(resolved)
+}
+
+fn scoped_session_ref_hash(customer_scope_hash: &[u8], session_ref_hash: &[u8]) -> Vec<u8> {
+    // Including scope in the existing unique key preserves the legacy
+    // three-column ON CONFLICT contract during a rolling deployment.
+    let mut material = Vec::with_capacity(customer_scope_hash.len() + session_ref_hash.len());
+    material.extend_from_slice(customer_scope_hash);
+    material.extend_from_slice(session_ref_hash);
+    sha256_bytes(&material)
+}
+
+fn customer_scope_hash(customer_ref: Option<&str>) -> Vec<u8> {
+    customer_ref.map_or_else(
+        || sha256("scope:anonymous"),
+        |customer_ref| sha256(&format!("scope:customer:{customer_ref}")),
+    )
 }
 
 fn validate_telemetry(input: &InteractionTelemetryInput) -> Result<(), ApiError> {
@@ -3481,16 +4273,15 @@ pub(crate) async fn ingest_telemetry_batch(
     }
     let mut accepted = 0;
     let mut dropped = 0;
+    let mut accepted_confirmed_interaction = false;
     let mut changed_interaction_ids = Vec::with_capacity(event_count);
     let mut session_evidence_by_interaction = BTreeMap::new();
     let mut events = input.events;
     events.sort_by_key(|event| event.interaction_id);
     let mut tx = pool.begin().await?;
     for event in events {
-        let mut event_tx = tx.begin().await?;
-        match ingest_telemetry_event(&mut event_tx, auth, event).await {
+        match ingest_telemetry_event(&mut tx, auth, event).await {
             Ok(result) => {
-                event_tx.commit().await?;
                 if result.grouping_facts_changed {
                     changed_interaction_ids.push(result.interaction_id);
                 }
@@ -3500,10 +4291,17 @@ pub(crate) async fn ingest_telemetry_batch(
                 if evidence.is_none() {
                     *evidence = result.session_evidence;
                 }
+                accepted_confirmed_interaction |= result.confirmed;
                 accepted += 1;
             }
             Err(error) if error.status.is_client_error() => {
-                event_tx.rollback().await?;
+                // Every client-error path in `ingest_telemetry_event` either
+                // validates before the upsert or is the conflict result of an
+                // upsert that changed no row. Continuing therefore cannot
+                // preserve a partial event write and does not need a nested
+                // transaction. Avoiding per-event savepoints also keeps a
+                // cancelled request from desynchronizing SQLx's local
+                // transaction depth from PostgreSQL while releasing one.
                 dropped += 1;
             }
             Err(error) => return Err(error),
@@ -3511,6 +4309,17 @@ pub(crate) async fn ingest_telemetry_batch(
     }
     correlate_telemetry_sessions(&mut tx, auth, session_evidence_by_interaction).await?;
     regroup_changed_interaction_reports(&mut tx, &changed_interaction_ids).await?;
+    if accepted > 0 {
+        record_product_activation(
+            &mut tx,
+            auth.workspace.id,
+            auth.environment.product_id,
+            true,
+            accepted_confirmed_interaction,
+            false,
+        )
+        .await?;
+    }
     tx.commit().await?;
     Ok(TelemetryBatchResult { accepted, dropped })
 }
@@ -3524,6 +4333,7 @@ struct TelemetryUpsertResult {
 #[derive(Debug)]
 struct AcceptedTelemetryEvent {
     interaction_id: Uuid,
+    confirmed: bool,
     grouping_facts_changed: bool,
     session_evidence: Option<(String, String)>,
 }
@@ -3544,12 +4354,13 @@ async fn ingest_telemetry_event(
     }
     let customer_ref = opaque_ref(event.customer_ref);
     let session_evidence = session_evidence(event.session_ref, event.session_source)?;
-    let classification = if event.surface == "mcp" {
+    let confirmed = event.surface == "mcp";
+    let classification = if confirmed {
         "confirmed".to_string()
     } else {
         "unclassified".to_string()
     };
-    let confirmation_method = (event.surface == "mcp").then(|| "mcp".to_string());
+    let confirmation_method = confirmed.then(|| "mcp".to_string());
     // The INSERT depends on the materialized `previous` CTE so PostgreSQL must
     // lock and capture the pre-state before the upsert returns its post-state.
     let row = sqlx::query_as::<_, TelemetryUpsertResult>(
@@ -3622,6 +4433,7 @@ async fn ingest_telemetry_event(
         row.ok_or_else(|| ApiError::conflict("interactionId belongs to another workspace"))?;
     Ok(AcceptedTelemetryEvent {
         interaction_id: row.id,
+        confirmed,
         grouping_facts_changed: row.grouping_facts_changed,
         session_evidence,
     })
@@ -3631,9 +4443,11 @@ async fn ingest_telemetry_event(
 struct InteractionSessionState {
     interaction_id: Uuid,
     occurred_at: DateTime<Utc>,
+    customer_ref: Option<String>,
     session_id: Option<Uuid>,
     session_source: Option<String>,
     session_ref_hash: Option<Vec<u8>>,
+    session_customer_scope_hash: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -3641,8 +4455,11 @@ struct SessionCorrelationAction {
     interaction_id: Uuid,
     occurred_at: DateTime<Utc>,
     session_id: Option<Uuid>,
-    session_evidence: Option<(String, String)>,
+    session_source: String,
+    session_ref_hash: Vec<u8>,
+    customer_scope_hash: Vec<u8>,
     sort_source: String,
+    sort_customer_scope_hash: Vec<u8>,
     sort_ref_hash: Vec<u8>,
 }
 
@@ -3653,8 +4470,9 @@ async fn correlate_telemetry_sessions(
 ) -> Result<(), ApiError> {
     let interaction_ids = evidence_by_interaction.keys().copied().collect::<Vec<_>>();
     let states = sqlx::query_as::<_, InteractionSessionState>(
-        r"SELECT i.id AS interaction_id, i.occurred_at, i.session_id,
-          s.source AS session_source, s.ref_hash AS session_ref_hash
+        r"SELECT i.id AS interaction_id, i.occurred_at, i.customer_ref, i.session_id,
+          s.source AS session_source, COALESCE(s.raw_ref_hash, s.ref_hash) AS session_ref_hash,
+          s.customer_scope_hash AS session_customer_scope_hash
         FROM interactions_v2 i
         LEFT JOIN sessions_v2 s ON s.id = i.session_id
         WHERE i.id = ANY($1)",
@@ -3673,50 +4491,62 @@ async fn correlate_telemetry_sessions(
         let evidence = evidence_by_interaction
             .remove(&state.interaction_id)
             .flatten();
-        let (sort_source, sort_ref_hash) = if state.session_id.is_some() {
-            (
-                state.session_source.clone().ok_or_else(|| {
-                    ApiError::internal("linked telemetry interaction has no session source")
-                })?,
-                state.session_ref_hash.clone().ok_or_else(|| {
-                    ApiError::internal("linked telemetry interaction has no session ref hash")
-                })?,
-            )
+        let desired_customer_scope_hash = customer_scope_hash(state.customer_ref.as_deref());
+        let (session_source, session_ref_hash) = if state.session_id.is_some() {
+            let source = state.session_source.clone().ok_or_else(|| {
+                ApiError::internal("linked telemetry interaction has no session source")
+            })?;
+            let ref_hash = state.session_ref_hash.clone().ok_or_else(|| {
+                ApiError::internal("linked telemetry interaction has no session ref hash")
+            })?;
+            (source, ref_hash)
         } else if let Some((session_ref, session_source)) = evidence.as_ref() {
             (session_source.clone(), sha256(session_ref))
         } else {
             continue;
         };
+        let session_id = state.session_id.filter(|_| {
+            state.session_customer_scope_hash.as_deref()
+                == Some(desired_customer_scope_hash.as_slice())
+        });
         actions.push(SessionCorrelationAction {
             interaction_id: state.interaction_id,
             occurred_at: state.occurred_at,
-            session_id: state.session_id,
-            session_evidence: evidence,
-            sort_source,
-            sort_ref_hash,
+            session_id,
+            session_source: session_source.clone(),
+            session_ref_hash: session_ref_hash.clone(),
+            customer_scope_hash: desired_customer_scope_hash,
+            sort_source: session_source,
+            sort_customer_scope_hash: customer_scope_hash(state.customer_ref.as_deref()),
+            sort_ref_hash: session_ref_hash,
         });
     }
     actions.sort_by(|left, right| {
-        (&left.sort_source, &left.sort_ref_hash, left.interaction_id).cmp(&(
-            &right.sort_source,
-            &right.sort_ref_hash,
-            right.interaction_id,
-        ))
+        (
+            &left.sort_source,
+            &left.sort_customer_scope_hash,
+            &left.sort_ref_hash,
+            left.interaction_id,
+        )
+            .cmp(&(
+                &right.sort_source,
+                &right.sort_customer_scope_hash,
+                &right.sort_ref_hash,
+                right.interaction_id,
+            ))
     });
 
     for action in actions {
         let session_id = if let Some(session_id) = action.session_id {
             session_id
         } else {
-            let (session_ref, session_source) = action.session_evidence.ok_or_else(|| {
-                ApiError::internal("unlinked correlation action has no session evidence")
-            })?;
             let session_id = resolve_v2_session(
                 tx,
                 auth.workspace.id,
                 auth.environment.id,
-                &session_ref,
-                &session_source,
+                &action.customer_scope_hash,
+                &action.session_ref_hash,
+                &action.session_source,
                 action.occurred_at,
             )
             .await?;
@@ -3819,17 +4649,18 @@ pub(crate) async fn feedback_consent_state(
             } else {
                 "unknown".to_owned()
             },
+            revision: 0,
         });
     }
-    let state = sqlx::query_scalar::<_, String>(
-        "SELECT decision FROM feedback_consent_subjects WHERE environment_id = $1 AND subject = $2",
+    let state = sqlx::query_as::<_, (String, i64)>(
+        "SELECT decision, revision FROM feedback_consent_subjects WHERE environment_id = $1 AND subject = $2",
     )
     .bind(auth.environment.id)
     .bind(input.subject)
     .fetch_optional(pool)
-    .await?
-    .unwrap_or_else(|| "unknown".to_owned());
-    Ok(ConsentStateResponse { state })
+    .await?;
+    let (state, revision) = state.unwrap_or_else(|| ("unknown".to_owned(), 0));
+    Ok(ConsentStateResponse { state, revision })
 }
 
 pub(crate) async fn inspect_feedback_capability(
@@ -3922,6 +4753,10 @@ pub(crate) struct ConsentDecisionOutcome {
     /// True when this call recorded the standing decision, false when a prior
     /// decision already stood.
     pub(crate) changed: bool,
+    /// True only when this capability may expose the follow-on report action.
+    /// A stale Ask-once CAS can observe an approved current state without
+    /// inheriting that approval.
+    pub(crate) feedback_action_allowed: bool,
     /// True when the capability's interaction verifiably came through the MCP
     /// protocol-tool path (server-side telemetry confirmed the interaction
     /// with `surface = 'mcp'` and `confirmationMethod = 'mcp'`).
@@ -3983,80 +4818,169 @@ pub(crate) async fn record_feedback_consent_decision(
     .bind(&input.decision)
     .fetch_optional(&mut *tx)
     .await?;
-    let (decision, decided_at, changed, flipped_from) = if let Some((_, interaction_decided_at)) =
-        inserted
-    {
-        if key.1 == "ask_once"
-            && let Some(subject) = claims.s.as_deref()
-        {
-            let applied = sqlx::query_as::<_, (String, DateTime<Utc>, Option<String>)>(
-                r"INSERT INTO feedback_consent_subjects (environment_id, subject, decision, decided_at)
-                VALUES ($1, $2, $3, TO_TIMESTAMP($4))
-                ON CONFLICT (environment_id, subject) DO UPDATE SET
-                  decision = EXCLUDED.decision,
-                  decided_at = EXCLUDED.decided_at,
-                  flipped_from = CASE
-                    WHEN feedback_consent_subjects.decision IS DISTINCT FROM EXCLUDED.decision
-                      THEN feedback_consent_subjects.decision
-                    ELSE feedback_consent_subjects.flipped_from
-                  END,
-                  updated_at = NOW()
-                WHERE feedback_consent_subjects.decided_at < EXCLUDED.decided_at
-                RETURNING decision, decided_at,
-                  CASE WHEN xmax <> 0 THEN flipped_from END AS flip_recorded",
-            )
-            .bind(key.2)
-            .bind(subject)
-            .bind(&input.decision)
-            .bind(claims.iat)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let changed = applied.is_some();
-            let (durable_decision, durable_decided_at, flipped_from) = if let Some((
-                decision,
-                decided_at,
-                flip,
-            )) = applied
+    let (decision, decided_at, changed, feedback_action_allowed, flipped_from) =
+        if let Some((_, interaction_decided_at)) = inserted {
+            if key.1 == "ask_once"
+                && let Some(subject) = claims.s.as_deref()
             {
-                // A flip is only reported when this call updated an
-                // existing row and left a different prior decision behind.
-                let flip = flip.filter(|prior| prior != &decision);
-                (decision, decided_at, flip)
-            } else {
-                let (decision, decided_at) = sqlx::query_as::<_, (String, DateTime<Utc>)>(
-                        "SELECT decision, decided_at FROM feedback_consent_subjects WHERE environment_id = $1 AND subject = $2",
+                let expected_revision = claims.r.unwrap_or_default();
+                let applied = if expected_revision == 0 {
+                    // Revision 0 (and legacy capabilities without `r`) means the
+                    // signer observed no subject row. Such a capability may create
+                    // revision 1, but ON CONFLICT deliberately cannot mutate a row
+                    // that appeared before this decision arrived.
+                    sqlx::query_as::<_, (String, DateTime<Utc>, i64, Option<String>)>(
+                        r"INSERT INTO feedback_consent_subjects
+                    (environment_id, subject, decision, decided_at, revision)
+                    VALUES ($1, $2, $3, $4, 1)
+                    ON CONFLICT (environment_id, subject) DO NOTHING
+                    RETURNING decision, decided_at, revision, flipped_from",
                     )
                     .bind(key.2)
                     .bind(subject)
-                    .fetch_one(&mut *tx)
+                    .bind(&input.decision)
+                    .bind(interaction_decided_at)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                } else {
+                    // The revision predicate is the compare-and-set. PostgreSQL's
+                    // row update lock makes concurrent decisions for one revision
+                    // serialize; after the winner increments it, every loser
+                    // affects zero rows.
+                    sqlx::query_as::<_, (String, DateTime<Utc>, i64, Option<String>)>(
+                        r"UPDATE feedback_consent_subjects
+                    SET decision = $3,
+                      decided_at = $4,
+                      flipped_from = CASE
+                        WHEN decision IS DISTINCT FROM $3 THEN decision
+                        ELSE NULL
+                      END,
+                      revision = revision + 1,
+                      updated_at = NOW()
+                    WHERE environment_id = $1 AND subject = $2 AND revision = $5
+                    RETURNING decision, decided_at, revision, flipped_from",
+                    )
+                    .bind(key.2)
+                    .bind(subject)
+                    .bind(&input.decision)
+                    .bind(interaction_decided_at)
+                    .bind(expected_revision)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                };
+
+                if let Some((decision, decided_at, revision, flipped_from)) = applied {
+                    sqlx::query(
+                        r"UPDATE feedback_consent_interactions
+                    SET applied_subject_revision = $3
+                    WHERE interaction_id = $1 AND environment_id = $2",
+                    )
+                    .bind(claims.i)
+                    .bind(key.2)
+                    .bind(revision)
+                    .execute(&mut *tx)
                     .await?;
-                (decision, decided_at, None)
-            };
-            sqlx::query(
-                "UPDATE feedback_consent_interactions SET decision = $3 WHERE interaction_id = $1 AND environment_id = $2",
-            )
-            .bind(claims.i)
-            .bind(key.2)
-            .bind(&durable_decision)
-            .execute(&mut *tx)
-            .await?;
-            (durable_decision, durable_decided_at, changed, flipped_from)
+                    let feedback_action_allowed = decision == "approved";
+                    (
+                        decision,
+                        decided_at,
+                        true,
+                        feedback_action_allowed,
+                        flipped_from,
+                    )
+                } else {
+                    // A failed CAS returns the current durable state, but the
+                    // losing capability must not gain a report action even when
+                    // that current state happens to be approved.
+                    let current =
+                        sqlx::query_as::<_, (String, DateTime<Utc>, i64, Option<String>)>(
+                            r"SELECT decision, decided_at, revision, flipped_from
+                    FROM feedback_consent_subjects
+                    WHERE environment_id = $1 AND subject = $2",
+                        )
+                        .bind(key.2)
+                        .bind(subject)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                    if let Some((decision, decided_at, _, _)) = current {
+                        (decision, decided_at, false, false, None)
+                    } else {
+                        (
+                            "unknown".to_owned(),
+                            interaction_decided_at,
+                            false,
+                            false,
+                            None,
+                        )
+                    }
+                }
+            } else {
+                let feedback_action_allowed = input.decision == "approved";
+                (
+                    input.decision.clone(),
+                    interaction_decided_at,
+                    true,
+                    feedback_action_allowed,
+                    None,
+                )
+            }
         } else {
-            (input.decision.clone(), interaction_decided_at, true, None)
-        }
-    } else {
-        let (decision, decided_at) = sqlx::query_as::<_, (String, DateTime<Utc>)>(
-            "SELECT decision, decided_at FROM feedback_consent_interactions WHERE interaction_id = $1 AND environment_id = $2",
-        )
-        .bind(claims.i)
-        .bind(key.2)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(|| {
-            ApiError::conflict("interactionId belongs to another product environment")
-        })?;
-        (decision, decided_at, false, None)
-    };
+            let (recorded_decision, interaction_decided_at, applied_subject_revision) =
+                sqlx::query_as::<_, (String, DateTime<Utc>, Option<i64>)>(
+                    r"SELECT decision, decided_at, applied_subject_revision
+            FROM feedback_consent_interactions
+            WHERE interaction_id = $1 AND environment_id = $2",
+                )
+                .bind(claims.i)
+                .bind(key.2)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| {
+                    ApiError::conflict("interactionId belongs to another product environment")
+                })?;
+            if key.1 == "ask_once"
+                && let Some(subject) = claims.s.as_deref()
+            {
+                let current = sqlx::query_as::<_, (String, DateTime<Utc>, i64, Option<String>)>(
+                    r"SELECT decision, decided_at, revision, flipped_from
+                FROM feedback_consent_subjects
+                WHERE environment_id = $1 AND subject = $2",
+                )
+                .bind(key.2)
+                .bind(subject)
+                .fetch_optional(&mut *tx)
+                .await?;
+                if let Some((decision, decided_at, revision, flipped_from)) = current {
+                    let still_applied = applied_subject_revision == Some(revision);
+                    let feedback_action_allowed =
+                        still_applied && recorded_decision == "approved" && decision == "approved";
+                    (
+                        decision,
+                        decided_at,
+                        false,
+                        feedback_action_allowed,
+                        still_applied.then_some(flipped_from).flatten(),
+                    )
+                } else {
+                    (
+                        "unknown".to_owned(),
+                        interaction_decided_at,
+                        false,
+                        false,
+                        None,
+                    )
+                }
+            } else {
+                let feedback_action_allowed = recorded_decision == "approved";
+                (
+                    recorded_decision,
+                    interaction_decided_at,
+                    false,
+                    feedback_action_allowed,
+                    None,
+                )
+            }
+        };
     // The protocol-tool path is only claimed when server-side telemetry
     // confirmed this interaction as an MCP tool call. Absence of telemetry is
     // indistinguishable from a plain HTTP interaction, so this stays false for
@@ -4079,6 +5003,7 @@ pub(crate) async fn record_feedback_consent_decision(
         expires_at: claims.exp,
         decided_at,
         changed,
+        feedback_action_allowed,
         protocol_tool,
         flipped_from,
     })
@@ -4693,20 +5618,12 @@ pub(crate) async fn submit_product_feedback(
     .await?
     .ok_or_else(|| ApiError::conflict("interactionId belongs to another product environment"))?;
 
-    if let Some(existing) = sqlx::query_as::<_, ProductFeedbackReport>(
-        "SELECT * FROM feedback_reports WHERE interaction_id = $1",
-    )
-    .bind(claims.i)
-    .fetch_optional(&mut *tx)
-    .await?
-    {
-        tx.commit().await?;
-        return Ok((interaction, existing));
-    }
-    let report = sqlx::query_as::<_, ProductFeedbackReport>(
+    let inserted_report = sqlx::query_as::<_, ProductFeedbackReport>(
         r"INSERT INTO feedback_reports
         (id, workspace_id, interaction_id, summary, impact, confidence, findings, workaround)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *",
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT (interaction_id) DO NOTHING
+        RETURNING *",
     )
     .bind(Uuid::new_v4())
     .bind(key.0)
@@ -4716,8 +5633,23 @@ pub(crate) async fn submit_product_feedback(
     .bind(input.confidence)
     .bind(findings_json)
     .bind(workaround)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
+    record_product_activation(&mut tx, key.0, key.4, true, true, true).await?;
+    let Some(report) = inserted_report else {
+        // `ON CONFLICT` waits for an in-flight competing insert to finish.
+        // Reading after it returns therefore makes simultaneous retries behave
+        // exactly like sequential retries: both callers receive the first
+        // accepted report and neither can replace it.
+        let existing = sqlx::query_as::<_, ProductFeedbackReport>(
+            "SELECT * FROM feedback_reports WHERE interaction_id = $1",
+        )
+        .bind(claims.i)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        return Ok((interaction, existing));
+    };
     assign_report_group(
         &mut tx,
         &crate::grouping::FingerprintGrouper,
@@ -4774,14 +5706,42 @@ mod product_tests {
         interaction_id: Uuid,
         subject: Option<&str>,
     ) -> String {
-        let now = Utc::now();
+        test_capability_with_subject_revision(secret, key_id, interaction_id, subject, None)
+    }
+
+    fn test_capability_with_subject_revision(
+        secret: &str,
+        key_id: Uuid,
+        interaction_id: Uuid,
+        subject: Option<&str>,
+        revision: Option<i64>,
+    ) -> String {
+        test_capability_with_subject_revision_issued_at(
+            secret,
+            key_id,
+            interaction_id,
+            subject,
+            revision,
+            Utc::now().timestamp(),
+        )
+    }
+
+    fn test_capability_with_subject_revision_issued_at(
+        secret: &str,
+        key_id: Uuid,
+        interaction_id: Uuid,
+        subject: Option<&str>,
+        revision: Option<i64>,
+        issued_at: i64,
+    ) -> String {
         let claims = crate::security::CapabilityClaims {
             v: 1,
             i: interaction_id,
-            iat: now.timestamp(),
-            exp: (now + Duration::hours(1)).timestamp(),
+            iat: issued_at,
+            exp: issued_at + Duration::hours(1).num_seconds(),
             n: format!("nonce-{}", Uuid::new_v4().simple()),
             s: subject.map(str::to_owned),
+            r: revision,
         };
         let payload = URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&claims).expect("capability claims should serialize"));
@@ -4837,6 +5797,46 @@ mod product_tests {
             session_source: None,
             occurred_at: Some(Utc::now()),
         }
+    }
+
+    fn http_telemetry_event(
+        interaction_id: Uuid,
+        occurred_at: DateTime<Utc>,
+    ) -> InteractionTelemetryInput {
+        InteractionTelemetryInput {
+            interaction_id,
+            sequence: Some(1),
+            surface: "http_json".into(),
+            operation: "/v1/search".into(),
+            status_code: Some(200),
+            duration_ms: Some(25),
+            customer_ref: None,
+            classification: None,
+            confirmation_method: None,
+            runtime_hint: None,
+            runtime_hint_source: None,
+            session_ref: None,
+            session_source: None,
+            occurred_at: Some(occurred_at),
+        }
+    }
+
+    async fn activation_milestones(
+        pool: &PgPool,
+        workspace_id: Uuid,
+        product_id: Uuid,
+    ) -> anyhow::Result<ProductActivationMilestones> {
+        sqlx::query_as::<_, ProductActivationMilestones>(
+            r"SELECT workspace_id, product_id, first_opportunity_at,
+              first_confirmed_interaction_at, first_report_at
+            FROM product_activation_milestones
+            WHERE workspace_id = $1 AND product_id = $2",
+        )
+        .bind(workspace_id)
+        .bind(product_id)
+        .fetch_one(pool)
+        .await
+        .map_err(Into::into)
     }
 
     #[derive(Debug)]
@@ -6970,6 +7970,869 @@ mod product_tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn dashboard_list_filters_fail_before_database_access() -> anyhow::Result<()> {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://epode:epode@127.0.0.1:1/validation_only")?;
+        let workspace_id = Uuid::new_v4();
+        let product_id = Uuid::new_v4();
+
+        let invalid_status = dashboard_feedback_page(
+            &pool,
+            workspace_id,
+            product_id,
+            DashboardFeedbackFilters {
+                statuses: Some(vec!["deleted".into()]),
+                ..DashboardFeedbackFilters::default()
+            },
+        )
+        .await
+        .expect_err("invalid feedback status must fail before a database call");
+        anyhow::ensure!(invalid_status.status == StatusCode::BAD_REQUEST);
+
+        let invalid_range = dashboard_feedback_page(
+            &pool,
+            workspace_id,
+            product_id,
+            DashboardFeedbackFilters {
+                since: Some(Utc::now()),
+                until: Some(Utc::now() - Duration::days(1)),
+                ..DashboardFeedbackFilters::default()
+            },
+        )
+        .await
+        .expect_err("reversed feedback time range must fail before a database call");
+        anyhow::ensure!(invalid_range.status == StatusCode::BAD_REQUEST);
+
+        let invalid_session_kind = dashboard_sessions_page(
+            &pool,
+            workspace_id,
+            product_id,
+            DashboardSessionFilters {
+                kind: Some("replayed".into()),
+                ..DashboardSessionFilters::default()
+            },
+        )
+        .await
+        .expect_err("invalid session kind must fail before a database call");
+        anyhow::ensure!(invalid_session_kind.status == StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn dashboard_feedback_group_filter_returns_exact_evidence() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let fixture = github_issue_group_fixture(&pool, "Dashboard group evidence", 2).await?;
+
+        let result = async {
+            let page = dashboard_feedback_page(
+                &pool,
+                fixture.workspace_id,
+                fixture.product_id,
+                DashboardFeedbackFilters {
+                    group_key: Some(fixture.group_key.clone()),
+                    ..DashboardFeedbackFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(page.total == 2 && page.reports.len() == 2);
+            anyhow::ensure!(
+                page.reports
+                    .iter()
+                    .all(|report| report.operation == "search_reports")
+            );
+            anyhow::ensure!(
+                page.facets
+                    .topic
+                    .iter()
+                    .any(|topic| topic.name == "search_failure" && topic.count == 2)
+            );
+
+            let missing = dashboard_feedback_page(
+                &pool,
+                fixture.workspace_id,
+                fixture.product_id,
+                DashboardFeedbackFilters {
+                    group_key: Some(Uuid::new_v4().simple().to_string()),
+                    ..DashboardFeedbackFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(missing.total == 0 && missing.reports.is_empty());
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn product_activation_milestones_survive_windows_retention_and_retries()
+    -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Durable product activation").await?;
+
+        let result = async {
+            let (product, environment) = create_product(
+                &pool,
+                workspace.id,
+                CreateProductInput {
+                    name: "Durably activated product".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let (write_key, write_secret) = create_api_key(
+                &pool,
+                workspace.id,
+                environment.id,
+                Some("Activation writer".into()),
+                Some("write".into()),
+                None,
+            )
+            .await
+            .map_err(test_error)?;
+            let auth = ProductAuth {
+                workspace: workspace.clone(),
+                environment: environment.clone(),
+                api_key_id: write_key.id,
+            };
+            let initial = activation_milestones(&pool, workspace.id, product.id).await?;
+            anyhow::ensure!(initial.first_opportunity_at.is_none());
+            anyhow::ensure!(initial.first_confirmed_interaction_at.is_none());
+            anyhow::ensure!(initial.first_report_at.is_none());
+
+            let opportunity_id = Uuid::new_v4();
+            let opportunity_event = http_telemetry_event(opportunity_id, Utc::now());
+            let opportunity = ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![opportunity_event],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(opportunity.accepted == 1 && opportunity.dropped == 0);
+            let after_opportunity = activation_milestones(&pool, workspace.id, product.id).await?;
+            let first_opportunity_at = after_opportunity
+                .first_opportunity_at
+                .ok_or_else(|| anyhow::anyhow!("accepted telemetry did not mark opportunity"))?;
+            anyhow::ensure!(after_opportunity.first_confirmed_interaction_at.is_none());
+            anyhow::ensure!(after_opportunity.first_report_at.is_none());
+
+            let retry = ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![http_telemetry_event(opportunity_id, Utc::now())],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(retry.accepted == 1 && retry.dropped == 0);
+            let after_retry = activation_milestones(&pool, workspace.id, product.id).await?;
+            anyhow::ensure!(after_retry.first_opportunity_at == Some(first_opportunity_at));
+
+            let confirmed_id = Uuid::new_v4();
+            ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![grouping_telemetry_event(confirmed_id)],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let after_confirmation =
+                activation_milestones(&pool, workspace.id, product.id).await?;
+            let first_confirmed_at = after_confirmation
+                .first_confirmed_interaction_at
+                .ok_or_else(|| anyhow::anyhow!("accepted MCP telemetry did not mark confirmation"))?;
+            anyhow::ensure!(after_confirmation.first_opportunity_at == Some(first_opportunity_at));
+            anyhow::ensure!(after_confirmation.first_report_at.is_none());
+
+            let report_interaction_id = Uuid::new_v4();
+            let capability =
+                test_capability(&write_secret, write_key.id, report_interaction_id);
+            submit_product_feedback(
+                &pool,
+                &capability,
+                feedback_input("A durable activation report completed the product loop."),
+            )
+            .await
+            .map_err(test_error)?;
+            let after_report = activation_milestones(&pool, workspace.id, product.id).await?;
+            let first_report_at = after_report
+                .first_report_at
+                .ok_or_else(|| anyhow::anyhow!("accepted report did not mark activation"))?;
+            anyhow::ensure!(after_report.first_opportunity_at == Some(first_opportunity_at));
+            anyhow::ensure!(
+                after_report.first_confirmed_interaction_at == Some(first_confirmed_at)
+            );
+
+            submit_product_feedback(
+                &pool,
+                &capability,
+                feedback_input("A retry cannot replace the first accepted activation report."),
+            )
+            .await
+            .map_err(test_error)?;
+            let after_report_retry =
+                activation_milestones(&pool, workspace.id, product.id).await?;
+            anyhow::ensure!(after_report_retry.first_opportunity_at == Some(first_opportunity_at));
+            anyhow::ensure!(
+                after_report_retry.first_confirmed_interaction_at == Some(first_confirmed_at)
+            );
+            anyhow::ensure!(after_report_retry.first_report_at == Some(first_report_at));
+
+            sqlx::query(
+                "UPDATE interactions_v2 SET occurred_at = NOW() - INTERVAL '400 days' WHERE environment_id = $1",
+            )
+            .bind(environment.id)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "UPDATE product_environments SET retention_days = 1 WHERE id = $1",
+            )
+            .bind(environment.id)
+            .execute(&pool)
+            .await?;
+            let removed = purge_expired_product_data(&pool, 100)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(removed >= 3);
+
+            let after_purge = activation_milestones(&pool, workspace.id, product.id).await?;
+            anyhow::ensure!(after_purge.first_opportunity_at == Some(first_opportunity_at));
+            anyhow::ensure!(
+                after_purge.first_confirmed_interaction_at == Some(first_confirmed_at)
+            );
+            anyhow::ensure!(after_purge.first_report_at == Some(first_report_at));
+
+            let dashboard = dashboard_with_limits(
+                &pool,
+                DashboardContext {
+                    user: CurrentUser {
+                        id: workspace.os_user_id.clone(),
+                        handle: "activation-owner".into(),
+                        email: None,
+                        display_name: "Activation Owner".into(),
+                    },
+                    workspace: workspace.clone(),
+                    role: "owner".into(),
+                    workspace_memberships: vec![],
+                },
+                Some(product.id),
+                None,
+                10,
+                10,
+                10,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(dashboard.insights.opportunities == 0);
+            anyhow::ensure!(dashboard.insights.confirmed_interactions == 0);
+            anyhow::ensure!(dashboard.insights.reports == 0);
+            let durable = dashboard
+                .activation_milestones
+                .ok_or_else(|| anyhow::anyhow!("dashboard omitted durable activation"))?;
+            anyhow::ensure!(durable.first_opportunity_at == Some(first_opportunity_at));
+            anyhow::ensure!(
+                durable.first_confirmed_interaction_at == Some(first_confirmed_at)
+            );
+            anyhow::ensure!(durable.first_report_at == Some(first_report_at));
+
+            let (sibling, sibling_auth) =
+                telemetry_test_product(&pool, &workspace, "Unactivated sibling").await?;
+            let mut invalid_event = http_telemetry_event(Uuid::new_v4(), Utc::now());
+            invalid_event.operation = "/v1/search?customer=raw".into();
+            let invalid = ingest_telemetry_batch(
+                &pool,
+                &sibling_auth,
+                TelemetryBatchInput {
+                    events: vec![invalid_event],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(invalid.accepted == 0 && invalid.dropped == 1);
+            let sibling_activation =
+                activation_milestones(&pool, workspace.id, sibling.id).await?;
+            anyhow::ensure!(sibling_activation.first_opportunity_at.is_none());
+            anyhow::ensure!(sibling_activation.first_confirmed_interaction_at.is_none());
+            anyhow::ensure!(sibling_activation.first_report_at.is_none());
+
+            let sibling_dashboard = dashboard_with_limits(
+                &pool,
+                DashboardContext {
+                    user: CurrentUser {
+                        id: workspace.os_user_id.clone(),
+                        handle: "activation-owner".into(),
+                        email: None,
+                        display_name: "Activation Owner".into(),
+                    },
+                    workspace: workspace.clone(),
+                    role: "owner".into(),
+                    workspace_memberships: vec![],
+                },
+                Some(sibling.id),
+                None,
+                10,
+                10,
+                10,
+            )
+            .await
+            .map_err(test_error)?;
+            let sibling_durable = sibling_dashboard
+                .activation_milestones
+                .ok_or_else(|| anyhow::anyhow!("dashboard omitted sibling activation record"))?;
+            anyhow::ensure!(sibling_durable.product_id == sibling.id);
+            anyhow::ensure!(sibling_durable.first_opportunity_at.is_none());
+
+            delete_product(
+                &pool,
+                workspace.id,
+                product.id,
+                DeleteProductInput {
+                    confirmation: product.name.clone(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let remaining: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM product_activation_milestones WHERE product_id = $1",
+            )
+            .bind(product.id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(remaining == 0);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn dashboard_pages_filter_paginate_and_isolate_complete_datasets() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Dashboard pagination conformance").await?;
+        let isolated_workspace =
+            telemetry_test_workspace(&pool, "Dashboard pagination isolation").await?;
+
+        let result = async {
+            let (product, environment) = create_product(
+                &pool,
+                workspace.id,
+                CreateProductInput {
+                    name: "High volume primary".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let (sibling, sibling_environment) = create_product(
+                &pool,
+                workspace.id,
+                CreateProductInput {
+                    name: "High volume sibling".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let (isolated_product, isolated_environment) = create_product(
+                &pool,
+                isolated_workspace.id,
+                CreateProductInput {
+                    name: "High volume isolated".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let now = Utc::now();
+            let checkout_session = Uuid::new_v4();
+            let search_session = Uuid::new_v4();
+            let expired_session = Uuid::new_v4();
+            for (id, environment_id, source, hint, started_at, last_seen_at) in [
+                (
+                    checkout_session,
+                    environment.id,
+                    "mcp",
+                    "checkout-session",
+                    now - Duration::minutes(5),
+                    now - Duration::minutes(2),
+                ),
+                (
+                    search_session,
+                    environment.id,
+                    "customer",
+                    "search-session",
+                    now - Duration::minutes(4),
+                    now - Duration::minutes(3),
+                ),
+                (
+                    expired_session,
+                    environment.id,
+                    "mcp",
+                    "expired-session",
+                    now - Duration::days(31),
+                    now - Duration::days(31),
+                ),
+            ] {
+                sqlx::query(
+                    r"INSERT INTO sessions_v2
+                    (id, workspace_id, environment_id, source, ref_hash, ref_hint,
+                     started_at, last_seen_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                )
+                .bind(id)
+                .bind(workspace.id)
+                .bind(environment_id)
+                .bind(source)
+                .bind(sha256(hint))
+                .bind(hint)
+                .bind(started_at)
+                .bind(last_seen_at)
+                .execute(&pool)
+                .await?;
+            }
+            let checkout = Uuid::new_v4();
+            let checkout_retry = Uuid::new_v4();
+            let search = Uuid::new_v4();
+            let expired_mixed_interaction = Uuid::new_v4();
+            let expired_interaction = Uuid::new_v4();
+            let sibling_interaction = Uuid::new_v4();
+            let isolated_interaction = Uuid::new_v4();
+            for (id, owning_workspace, environment_id, session_id, operation, customer_ref, occurred_at) in [
+                (checkout, workspace.id, environment.id, Some(checkout_session), "checkout", "tenant-a", now - Duration::minutes(5)),
+                (checkout_retry, workspace.id, environment.id, Some(checkout_session), "checkout_retry", "tenant-a", now - Duration::minutes(2)),
+                (search, workspace.id, environment.id, Some(search_session), "search", "tenant-b", now - Duration::minutes(3)),
+                (expired_mixed_interaction, workspace.id, environment.id, Some(checkout_session), "expired_checkout_history", "tenant-old", now - Duration::days(31)),
+                (expired_interaction, workspace.id, environment.id, Some(expired_session), "expired_operation", "tenant-old", now - Duration::days(31)),
+                (sibling_interaction, workspace.id, sibling_environment.id, None, "checkout", "tenant-a", now - Duration::minutes(1)),
+                (isolated_interaction, isolated_workspace.id, isolated_environment.id, None, "checkout", "tenant-a", now),
+            ] {
+                sqlx::query(
+                    r"INSERT INTO interactions_v2
+                    (id, workspace_id, environment_id, session_id, surface, operation,
+                     status_code, customer_ref, classification, confirmation_method, occurred_at)
+                    VALUES ($1, $2, $3, $4, 'mcp', $5, 200, $6, 'confirmed', 'mcp', $7)",
+                )
+                .bind(id)
+                .bind(owning_workspace)
+                .bind(environment_id)
+                .bind(session_id)
+                .bind(operation)
+                .bind(customer_ref)
+                .bind(occurred_at)
+                .execute(&pool)
+                .await?;
+            }
+            let checkout_report = Uuid::new_v4();
+            let search_report = Uuid::new_v4();
+            let expired_mixed_report = Uuid::new_v4();
+            let expired_report = Uuid::new_v4();
+            let sibling_report = Uuid::new_v4();
+            let isolated_report = Uuid::new_v4();
+            for (id, owning_workspace, interaction_id, summary, impact, findings, created_at) in [
+                (checkout_report, workspace.id, checkout, "Checkout timed out before confirmation.", "blocked", serde_json::json!([{"kind":"defect","topic":"timeout","severity":"blocking","detail":"The agent could not complete checkout."}]), now - Duration::minutes(5)),
+                (search_report, workspace.id, search, "Search returned the expected current result.", "helped", serde_json::json!([{"kind":"strength","topic":"freshness","severity":"minor","detail":"The newest document was returned."}]), now - Duration::minutes(3)),
+                (expired_mixed_report, workspace.id, expired_mixed_interaction, "Expired checkout history must remain hidden.", "hindered", serde_json::json!([{"kind":"friction","topic":"expired_mixed_topic","severity":"major","detail":"Expired evidence must not affect a retained session."}]), now),
+                (expired_report, workspace.id, expired_interaction, "A late report must not resurrect expired evidence.", "blocked", serde_json::json!([{"kind":"defect","topic":"expired_topic","severity":"blocking","detail":"The interaction is outside retention."}]), now),
+                (sibling_report, workspace.id, sibling_interaction, "Sibling checkout timed out before confirmation.", "blocked", serde_json::json!([]), now - Duration::minutes(1)),
+                (isolated_report, isolated_workspace.id, isolated_interaction, "Isolated checkout timed out before confirmation.", "blocked", serde_json::json!([]), now),
+            ] {
+                sqlx::query(
+                    r"INSERT INTO feedback_reports
+                    (id, workspace_id, interaction_id, summary, impact, findings, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                )
+                .bind(id)
+                .bind(owning_workspace)
+                .bind(interaction_id)
+                .bind(summary)
+                .bind(impact)
+                .bind(findings)
+                .bind(created_at)
+                .execute(&pool)
+                .await?;
+            }
+            for (report_id, owning_workspace, status) in [
+                (checkout_report, workspace.id, "investigating"),
+                (search_report, workspace.id, "resolved"),
+                (expired_mixed_report, workspace.id, "planned"),
+                (expired_report, workspace.id, "new"),
+                (sibling_report, workspace.id, "new"),
+                (isolated_report, isolated_workspace.id, "new"),
+            ] {
+                sqlx::query(
+                    r"INSERT INTO feedback_report_workflow
+                    (report_id, workspace_id, status) VALUES ($1, $2, $3)",
+                )
+                .bind(report_id)
+                .bind(owning_workspace)
+                .bind(status)
+                .execute(&pool)
+                .await?;
+            }
+
+            let first = dashboard_feedback_page(
+                &pool,
+                workspace.id,
+                product.id,
+                DashboardFeedbackFilters {
+                    limit: Some(1),
+                    ..DashboardFeedbackFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(first.total == 2 && first.reports.len() == 1);
+            anyhow::ensure!(
+                first
+                    .facets
+                    .status
+                    .iter()
+                    .map(|item| (item.name.as_str(), item.count))
+                    .collect::<BTreeMap<_, _>>()
+                    == BTreeMap::from([("investigating", 1), ("resolved", 1)])
+            );
+            anyhow::ensure!(
+                first
+                    .facets
+                    .topic
+                    .iter()
+                    .map(|item| (item.name.as_str(), item.count))
+                    .collect::<BTreeMap<_, _>>()
+                    == BTreeMap::from([("freshness", 1), ("timeout", 1)])
+            );
+            let second = dashboard_feedback_page(
+                &pool,
+                workspace.id,
+                product.id,
+                DashboardFeedbackFilters {
+                    limit: Some(1),
+                    cursor: first.next_cursor.clone(),
+                    ..DashboardFeedbackFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(second.total == 2 && second.reports.len() == 1);
+            anyhow::ensure!(first.reports[0].id != second.reports[0].id);
+
+            let status_filtered = dashboard_feedback_page(
+                &pool,
+                workspace.id,
+                product.id,
+                DashboardFeedbackFilters {
+                    statuses: Some(vec!["investigating".into()]),
+                    ..DashboardFeedbackFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(status_filtered.total == 1);
+            anyhow::ensure!(
+                status_filtered
+                    .facets
+                    .status
+                    .iter()
+                    .map(|item| (item.name.as_str(), item.count))
+                    .collect::<BTreeMap<_, _>>()
+                    == BTreeMap::from([("investigating", 1), ("resolved", 1)])
+            );
+            anyhow::ensure!(
+                status_filtered
+                    .facets
+                    .impact
+                    .iter()
+                    .map(|item| (item.name.as_str(), item.count))
+                    .collect::<BTreeMap<_, _>>()
+                    == BTreeMap::from([("blocked", 1)])
+            );
+            anyhow::ensure!(
+                status_filtered
+                    .facets
+                    .topic
+                    .iter()
+                    .map(|item| (item.name.as_str(), item.count))
+                    .collect::<BTreeMap<_, _>>()
+                    == BTreeMap::from([("timeout", 1)])
+            );
+
+            let incompatible_facets = dashboard_feedback_page(
+                &pool,
+                workspace.id,
+                product.id,
+                DashboardFeedbackFilters {
+                    statuses: Some(vec!["investigating".into()]),
+                    impacts: Some(vec!["helped".into()]),
+                    ..DashboardFeedbackFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(incompatible_facets.total == 0);
+            anyhow::ensure!(
+                incompatible_facets
+                    .facets
+                    .status
+                    .iter()
+                    .map(|item| (item.name.as_str(), item.count))
+                    .collect::<BTreeMap<_, _>>()
+                    == BTreeMap::from([("resolved", 1)])
+            );
+            anyhow::ensure!(
+                incompatible_facets
+                    .facets
+                    .impact
+                    .iter()
+                    .map(|item| (item.name.as_str(), item.count))
+                    .collect::<BTreeMap<_, _>>()
+                    == BTreeMap::from([("blocked", 1)])
+            );
+            anyhow::ensure!(incompatible_facets.facets.topic.is_empty());
+
+            let filtered = dashboard_feedback_page(
+                &pool,
+                workspace.id,
+                product.id,
+                DashboardFeedbackFilters {
+                    query: Some("timed out".into()),
+                    statuses: Some(vec!["investigating".into()]),
+                    impacts: Some(vec!["blocked".into()]),
+                    operation: Some("checkout".into()),
+                    customer_ref: Some("tenant-a".into()),
+                    since: Some(now - Duration::hours(1)),
+                    until: Some(now),
+                    ..DashboardFeedbackFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(filtered.total == 1 && filtered.reports[0].id == checkout_report);
+            anyhow::ensure!(
+                filtered
+                    .facets
+                    .status
+                    .iter()
+                    .any(|item| item.name == "investigating" && item.count == 1)
+            );
+
+            let sessions = dashboard_sessions_page(
+                &pool,
+                workspace.id,
+                product.id,
+                DashboardSessionFilters {
+                    query: Some("checkout".into()),
+                    kind: Some("multi".into()),
+                    impacts: Some(vec!["blocked".into()]),
+                    operation: Some("checkout".into()),
+                    customer_ref: Some("tenant-a".into()),
+                    since: Some(now - Duration::hours(1)),
+                    until: Some(now),
+                    ..DashboardSessionFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(sessions.rollup.sessions == 1);
+            anyhow::ensure!(sessions.rollup.interactions == 2);
+            anyhow::ensure!(sessions.rollup.multi_step_sessions == 1);
+            anyhow::ensure!(sessions.sessions[0].id == checkout_session);
+
+            let all_sessions = dashboard_sessions_page(
+                &pool,
+                workspace.id,
+                product.id,
+                DashboardSessionFilters::default(),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(all_sessions.rollup.sessions == 2);
+            anyhow::ensure!(all_sessions.rollup.interactions == 3);
+            anyhow::ensure!(all_sessions.rollup.multi_step_sessions == 1);
+            anyhow::ensure!(
+                all_sessions
+                    .sessions
+                    .iter()
+                    .all(|session| session.id != expired_session)
+            );
+            let checkout_summary = all_sessions
+                .sessions
+                .iter()
+                .find(|session| session.id == checkout_session)
+                .expect("retained checkout session should be listed");
+            anyhow::ensure!(checkout_summary.interaction_count == 2);
+            anyhow::ensure!(checkout_summary.report_count == 1);
+            anyhow::ensure!(checkout_summary.first_operation.as_deref() == Some("checkout"));
+
+            let expired_activity_filter = dashboard_sessions_page(
+                &pool,
+                workspace.id,
+                product.id,
+                DashboardSessionFilters {
+                    operation: Some("expired_checkout_history".into()),
+                    ..DashboardSessionFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(expired_activity_filter.rollup.sessions == 0);
+            anyhow::ensure!(expired_activity_filter.sessions.is_empty());
+
+            let context = DashboardContext {
+                user: CurrentUser {
+                    id: "usr_dashboard_retention".into(),
+                    handle: "dashboard-retention".into(),
+                    email: None,
+                    display_name: "Dashboard Retention".into(),
+                },
+                workspace: workspace.clone(),
+                role: "owner".into(),
+                workspace_memberships: vec![],
+            };
+            let bootstrap = dashboard_with_limits(
+                &pool,
+                context,
+                Some(product.id),
+                None,
+                100,
+                100,
+                100,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(bootstrap.list_state.interactions_total == 3);
+            anyhow::ensure!(bootstrap.list_state.reports_total == 2);
+            anyhow::ensure!(bootstrap.list_state.sessions_total == 2);
+            anyhow::ensure!(bootstrap.insights.opportunities == 3);
+            anyhow::ensure!(bootstrap.insights.reports == 2);
+            anyhow::ensure!(
+                bootstrap
+                    .interactions
+                    .iter()
+                    .all(|interaction| interaction.id != expired_interaction
+                        && interaction.id != expired_mixed_interaction)
+            );
+            anyhow::ensure!(
+                bootstrap
+                    .reports
+                    .iter()
+                    .all(|report| report.id != expired_report && report.id != expired_mixed_report)
+            );
+            let bootstrap_checkout = bootstrap
+                .sessions
+                .iter()
+                .find(|session| session.id == checkout_session)
+                .expect("bootstrap should include the retained checkout session");
+            anyhow::ensure!(bootstrap_checkout.interaction_count == 2);
+            anyhow::ensure!(bootstrap_checkout.report_count == 1);
+
+            let expired_report_error = dashboard_report_by_id(
+                &pool,
+                workspace.id,
+                product.id,
+                expired_report,
+            )
+            .await
+            .expect_err("expired reports must not be addressable before purge");
+            anyhow::ensure!(expired_report_error.status == StatusCode::NOT_FOUND);
+            let expired_interaction_error = dashboard_interaction_by_id(
+                &pool,
+                workspace.id,
+                product.id,
+                expired_interaction,
+            )
+            .await
+            .expect_err("expired interactions must not be addressable before purge");
+            anyhow::ensure!(expired_interaction_error.status == StatusCode::NOT_FOUND);
+            let expired_session_error = dashboard_session_by_id(
+                &pool,
+                workspace.id,
+                product.id,
+                expired_session,
+            )
+            .await
+            .expect_err("expired sessions must not be addressable before purge");
+            anyhow::ensure!(expired_session_error.status == StatusCode::NOT_FOUND);
+            let checkout_detail = dashboard_session_by_id(
+                &pool,
+                workspace.id,
+                product.id,
+                checkout_session,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(checkout_detail.interactions.len() == 2);
+            anyhow::ensure!(checkout_detail.reports.len() == 1);
+            anyhow::ensure!(
+                checkout_detail
+                    .interactions
+                    .iter()
+                    .all(|interaction| interaction.id != expired_mixed_interaction)
+            );
+
+            let sibling_page = dashboard_feedback_page(
+                &pool,
+                workspace.id,
+                sibling.id,
+                DashboardFeedbackFilters::default(),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(sibling_page.total == 1 && sibling_page.reports[0].id == sibling_report);
+            let isolation_error = dashboard_feedback_page(
+                &pool,
+                workspace.id,
+                isolated_product.id,
+                DashboardFeedbackFilters::default(),
+            )
+            .await
+            .expect_err("another workspace's product must not be queryable");
+            anyhow::ensure!(isolation_error.status == StatusCode::NOT_FOUND);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        for workspace_id in [workspace.id, isolated_workspace.id] {
+            sqlx::query("DELETE FROM workspaces WHERE id = $1")
+                .bind(workspace_id)
+                .execute(&pool)
+                .await?;
+        }
+        result
+    }
+
     #[test]
     fn telemetry_evidence_matrix_is_fail_closed() {
         let event = |surface: &str, classification: Option<&str>, method: Option<&str>| {
@@ -7119,6 +8982,120 @@ mod product_tests {
 
     #[tokio::test]
     #[ignore = "requires DATABASE_URL"]
+    async fn tenant_scoped_sessions_preserve_the_legacy_upsert_during_rollout() -> anyhow::Result<()>
+    {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Session rollout compatibility").await?;
+
+        let result = async {
+            let (_, auth) = telemetry_test_product(&pool, &workspace, "Session rollout").await?;
+            let occurred_at = Utc::now();
+            let canonical_ref = "workflow:overlap_42";
+            let raw_ref_hash = sha256(canonical_ref);
+            let legacy_session_id = Uuid::new_v4();
+            let legacy_upsert = r"INSERT INTO sessions_v2
+                (id, workspace_id, environment_id, source, ref_hash, ref_hint,
+                 started_at, last_seen_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+                ON CONFLICT (environment_id, source, ref_hash) DO UPDATE
+                SET started_at = LEAST(sessions_v2.started_at, EXCLUDED.started_at),
+                    last_seen_at = GREATEST(sessions_v2.last_seen_at, EXCLUDED.last_seen_at)
+                RETURNING id";
+
+            let first_legacy_result: Uuid = sqlx::query_scalar(legacy_upsert)
+                .bind(legacy_session_id)
+                .bind(workspace.id)
+                .bind(auth.environment.id)
+                .bind("mcp")
+                .bind(&raw_ref_hash)
+                .bind("legacy-overlap")
+                .bind(occurred_at)
+                .fetch_one(&pool)
+                .await?;
+            anyhow::ensure!(first_legacy_result == legacy_session_id);
+
+            let acme_id = Uuid::new_v4();
+            let globex_id = Uuid::new_v4();
+            let mut tenant_a = mcp_telemetry_event(
+                acme_id,
+                Some(1),
+                "tenant_a_overlap",
+                Some(canonical_ref),
+                Some("mcp"),
+                occurred_at,
+            );
+            tenant_a.customer_ref = Some("tenant-a".into());
+            let mut tenant_b = mcp_telemetry_event(
+                globex_id,
+                Some(2),
+                "tenant_b_overlap",
+                Some(canonical_ref),
+                Some("mcp"),
+                occurred_at,
+            );
+            tenant_b.customer_ref = Some("tenant-b".into());
+            let accepted = ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![tenant_a, tenant_b],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(accepted.accepted == 2 && accepted.dropped == 0);
+
+            let acme_session = interaction_session(&pool, acme_id)
+                .await?
+                .expect("tenant A should receive a scoped session");
+            let globex_session = interaction_session(&pool, globex_id)
+                .await?
+                .expect("tenant B should receive a scoped session");
+            anyhow::ensure!(acme_session != globex_session);
+            anyhow::ensure!(acme_session != legacy_session_id);
+            anyhow::ensure!(globex_session != legacy_session_id);
+
+            let retried_legacy_result: Uuid = sqlx::query_scalar(legacy_upsert)
+                .bind(Uuid::new_v4())
+                .bind(workspace.id)
+                .bind(auth.environment.id)
+                .bind("mcp")
+                .bind(&raw_ref_hash)
+                .bind("legacy-overlap-retry")
+                .bind(occurred_at + Duration::seconds(1))
+                .fetch_one(&pool)
+                .await?;
+            anyhow::ensure!(retried_legacy_result == legacy_session_id);
+
+            let legacy_constraint_present: bool = sqlx::query_scalar(
+                r"SELECT EXISTS(
+                  SELECT 1 FROM pg_constraint
+                  WHERE conrelid = 'sessions_v2'::regclass
+                    AND conname = 'sessions_v2_environment_source_ref_hash_key'
+                    AND contype = 'u'
+                )",
+            )
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(legacy_constraint_present);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
     async fn session_correlation_is_proof_backed_end_to_end() -> anyhow::Result<()> {
         let database_url = std::env::var("DATABASE_URL")?;
         let pool = PgPoolOptions::new()
@@ -7143,6 +9120,37 @@ mod product_tests {
             let different_ref_id = Uuid::new_v4();
             let missing_ref_id = Uuid::new_v4();
             let blank_ref_id = Uuid::new_v4();
+            let acme_interaction_id = Uuid::new_v4();
+            let acme_followup_id = Uuid::new_v4();
+            let globex_interaction_id = Uuid::new_v4();
+
+            let mut tenant_a = mcp_telemetry_event(
+                acme_interaction_id,
+                Some(9),
+                "tenant_a_start",
+                Some(canonical_ref),
+                Some("mcp"),
+                occurred_at,
+            );
+            tenant_a.customer_ref = Some("tenant-a".into());
+            let mut tenant_a_followup = mcp_telemetry_event(
+                acme_followup_id,
+                Some(10),
+                "tenant_a_followup",
+                Some(canonical_ref),
+                Some("mcp"),
+                occurred_at,
+            );
+            tenant_a_followup.customer_ref = Some("tenant-a".into());
+            let mut tenant_b = mcp_telemetry_event(
+                globex_interaction_id,
+                Some(11),
+                "tenant_b_start",
+                Some(canonical_ref),
+                Some("mcp"),
+                occurred_at,
+            );
+            tenant_b.customer_ref = Some("tenant-b".into());
 
             let primary = ingest_telemetry_batch(
                 &pool,
@@ -7213,12 +9221,15 @@ mod product_tests {
                             Some("mcp"),
                             occurred_at,
                         ),
+                        tenant_a,
+                        tenant_a_followup,
+                        tenant_b,
                     ],
                 },
             )
             .await
             .map_err(test_error)?;
-            anyhow::ensure!(primary.accepted == 8 && primary.dropped == 0);
+            anyhow::ensure!(primary.accepted == 11 && primary.dropped == 0);
 
             let isolated_id = Uuid::new_v4();
             ingest_telemetry_batch(
@@ -7257,18 +9268,39 @@ mod product_tests {
             );
             anyhow::ensure!(interaction_session(&pool, missing_ref_id).await?.is_none());
             anyhow::ensure!(interaction_session(&pool, blank_ref_id).await?.is_none());
+            let acme_session = interaction_session(&pool, acme_interaction_id)
+                .await?
+                .expect("tenant A proof should create a session");
+            let globex_session = interaction_session(&pool, globex_interaction_id)
+                .await?
+                .expect("tenant B proof should create a session");
+            anyhow::ensure!(
+                interaction_session(&pool, acme_followup_id).await? == Some(acme_session)
+            );
+            anyhow::ensure!(acme_session != globex_session);
+            anyhow::ensure!(acme_session != mcp_session && globex_session != mcp_session);
             anyhow::ensure!(
                 interaction_session(&pool, isolated_id)
                     .await?
                     .is_some_and(|session_id| session_id != mcp_session)
             );
 
-            let (ref_hash, ref_hint): (Vec<u8>, String) =
-                sqlx::query_as("SELECT ref_hash, ref_hint FROM sessions_v2 WHERE id = $1")
+            let (ref_hash, raw_ref_hash, scope_hash, ref_hint): (
+                Vec<u8>,
+                Option<Vec<u8>>,
+                Vec<u8>,
+                String,
+            ) = sqlx::query_as(
+                "SELECT ref_hash, raw_ref_hash, customer_scope_hash, ref_hint FROM sessions_v2 WHERE id = $1",
+            )
                     .bind(mcp_session)
                     .fetch_one(&pool)
                     .await?;
-            anyhow::ensure!(ref_hash == sha256(canonical_ref));
+            let expected_raw_ref_hash = sha256(canonical_ref);
+            anyhow::ensure!(raw_ref_hash.as_deref() == Some(expected_raw_ref_hash.as_slice()));
+            anyhow::ensure!(
+                ref_hash == scoped_session_ref_hash(&scope_hash, &expected_raw_ref_hash)
+            );
             anyhow::ensure!(!ref_hint.contains(canonical_ref));
             let detail =
                 dashboard_session_by_id(&pool, workspace.id, primary_product.id, mcp_session)
@@ -7329,7 +9361,7 @@ mod product_tests {
                     .bind(workspace.id)
                     .fetch_one(&pool)
                     .await?;
-            anyhow::ensure!(session_count == 4);
+            anyhow::ensure!(session_count == 6);
             Ok::<(), anyhow::Error>(())
         }
         .await;
@@ -7508,33 +9540,61 @@ mod product_tests {
             .await
             .map_err(test_error)?;
             anyhow::ensure!(coalesced.accepted == 3 && coalesced.dropped == 0);
-            let coalesced_ref_hash: Vec<u8> = sqlx::query_scalar(
-                r"SELECT s.ref_hash FROM sessions_v2 s
+            let (coalesced_ref_hash, coalesced_raw_ref_hash, coalesced_scope_hash): (
+                Vec<u8>,
+                Option<Vec<u8>>,
+                Vec<u8>,
+            ) = sqlx::query_as(
+                r"SELECT s.ref_hash, s.raw_ref_hash, s.customer_scope_hash FROM sessions_v2 s
                 JOIN interactions_v2 i ON i.session_id = s.id
                 WHERE i.id = $1",
             )
             .bind(coalesced_id)
             .fetch_one(&pool)
             .await?;
-            anyhow::ensure!(coalesced_ref_hash == sha256("workflow:first_valid_proof"));
+            let expected_raw_ref_hash = sha256("workflow:first_valid_proof");
+            anyhow::ensure!(
+                coalesced_raw_ref_hash.as_deref() == Some(expected_raw_ref_hash.as_slice())
+            );
+            anyhow::ensure!(
+                coalesced_ref_hash
+                    == scoped_session_ref_hash(&coalesced_scope_hash, &expected_raw_ref_hash)
+            );
 
+            let isolated_valid_id = Uuid::new_v4();
             let cross_environment = ingest_telemetry_batch(
                 &pool,
                 &isolated_auth,
                 TelemetryBatchInput {
-                    events: vec![mcp_telemetry_event(
-                        interaction_id,
-                        Some(1),
-                        "cross_environment_retry",
-                        Some("workflow:cross_environment"),
-                        Some("mcp"),
-                        first_at,
-                    )],
+                    events: vec![
+                        mcp_telemetry_event(
+                            interaction_id,
+                            Some(1),
+                            "cross_environment_retry",
+                            Some("workflow:cross_environment"),
+                            Some("mcp"),
+                            first_at,
+                        ),
+                        mcp_telemetry_event(
+                            isolated_valid_id,
+                            Some(2),
+                            "valid_after_dropped_conflict",
+                            None,
+                            None,
+                            first_at,
+                        ),
+                    ],
                 },
             )
             .await
             .map_err(test_error)?;
-            anyhow::ensure!(cross_environment.accepted == 0 && cross_environment.dropped == 1);
+            anyhow::ensure!(cross_environment.accepted == 1 && cross_environment.dropped == 1);
+            let isolated_valid_environment: Uuid =
+                sqlx::query_scalar("SELECT environment_id FROM interactions_v2 WHERE id = $1")
+                    .bind(isolated_valid_id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(isolated_valid_environment == isolated_auth.environment.id);
             let isolated_sessions: i64 =
                 sqlx::query_scalar("SELECT COUNT(*) FROM sessions_v2 WHERE environment_id = $1")
                     .bind(isolated_auth.environment.id)
@@ -7923,6 +9983,82 @@ mod product_tests {
 
     #[tokio::test]
     #[ignore = "requires DATABASE_URL"]
+    async fn simultaneous_report_retries_return_the_first_receipt() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace_id = Uuid::new_v4();
+        sqlx::query(
+            r"INSERT INTO workspaces (id, os_user_id, name, slug)
+            VALUES ($1, $2, 'Concurrent report retries', $3)",
+        )
+        .bind(workspace_id)
+        .bind(format!("usr_report_retry_{}", workspace_id.simple()))
+        .bind(format!(
+            "report-retry-{}",
+            &workspace_id.simple().to_string()[..8]
+        ))
+        .execute(&pool)
+        .await?;
+        let result = async {
+            let (_, environment) = create_product(
+                &pool,
+                workspace_id,
+                CreateProductInput {
+                    name: "Concurrent report product".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let (write_key, write_secret) = create_api_key(
+                &pool,
+                workspace_id,
+                environment.id,
+                Some("Concurrent report writer".into()),
+                Some("write".into()),
+                None,
+            )
+            .await
+            .map_err(test_error)?;
+            let interaction_id = Uuid::new_v4();
+            let capability = test_capability(&write_secret, write_key.id, interaction_id);
+            let first = submit_product_feedback(
+                &pool,
+                &capability,
+                feedback_input("The first simultaneous report described a useful result."),
+            );
+            let second = submit_product_feedback(
+                &pool,
+                &capability,
+                feedback_input("The second simultaneous report must not replace the first."),
+            );
+            let (first, second) = tokio::join!(first, second);
+            let first = first.map_err(test_error)?.1;
+            let second = second.map_err(test_error)?.1;
+            anyhow::ensure!(first.id == second.id);
+            anyhow::ensure!(first.summary == second.summary);
+            let report_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM feedback_reports WHERE interaction_id = $1",
+            )
+            .bind(interaction_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(report_count == 1);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
     async fn feedback_policy_and_key_kind_are_enforced_end_to_end() -> anyhow::Result<()> {
         let database_url = std::env::var("DATABASE_URL")?;
         let pool = PgPoolOptions::new()
@@ -8126,6 +10262,446 @@ mod product_tests {
         .await;
         sqlx::query("DELETE FROM workspaces WHERE id = $1")
             .bind(workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn ask_once_subject_revisions_reject_stale_replayed_and_concurrent_decisions()
+    -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Revision consent ordering").await?;
+
+        let result = async {
+            let (_, environment) = create_product(
+                &pool,
+                workspace.id,
+                CreateProductInput {
+                    name: "Revision consent product".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let (write_key, write_secret) = create_api_key(
+                &pool,
+                workspace.id,
+                environment.id,
+                Some("Consent writer".into()),
+                Some("write".into()),
+                None,
+            )
+            .await
+            .map_err(test_error)?;
+            update_policy(
+                &pool,
+                workspace.id,
+                PolicyInput {
+                    environment_id: environment.id,
+                    feedback_mode: "ask_once".into(),
+                    collect_event_summaries: false,
+                    retention_days: 30,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+
+            let subject = format!("afsub1_{}", "z".repeat(43));
+            let auth = agent_product_auth(&pool, &api_key_headers(&write_secret)?)
+                .await
+                .map_err(test_error)?;
+            let unknown = feedback_consent_state(
+                &pool,
+                &auth,
+                ConsentStateInput {
+                    subject: subject.clone(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(unknown.state == "unknown" && unknown.revision == 0);
+
+            let revision_zero_approval = test_capability_with_subject_revision(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&subject),
+                Some(0),
+            );
+            let approved = record_feedback_consent_decision(
+                &pool,
+                &revision_zero_approval,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                approved.decision == "approved"
+                    && approved.changed
+                    && approved.feedback_action_allowed
+            );
+            let revision_one = feedback_consent_state(
+                &pool,
+                &auth,
+                ConsentStateInput {
+                    subject: subject.clone(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(revision_one.state == "approved" && revision_one.revision == 1);
+
+            let replayed_approval = record_feedback_consent_decision(
+                &pool,
+                &revision_zero_approval,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                replayed_approval.decision == "approved"
+                    && !replayed_approval.changed
+                    && replayed_approval.feedback_action_allowed
+            );
+            let after_replay = feedback_consent_state(
+                &pool,
+                &auth,
+                ConsentStateInput {
+                    subject: subject.clone(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(after_replay.revision == 1);
+
+            let revision_one_issued_at = Utc::now().timestamp();
+            let revision_one_revoke = test_capability_with_subject_revision_issued_at(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&subject),
+                Some(1),
+                revision_one_issued_at,
+            );
+            let delayed_revision_one_approval = test_capability_with_subject_revision_issued_at(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&subject),
+                Some(1),
+                revision_one_issued_at,
+            );
+
+            let revoked = record_feedback_consent_decision(
+                &pool,
+                &revision_one_revoke,
+                ConsentDecisionInput {
+                    decision: "declined".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                revoked.decision == "declined"
+                    && revoked.changed
+                    && !revoked.feedback_action_allowed
+                    && revoked.flipped_from.as_deref() == Some("approved")
+            );
+            let revision_two = feedback_consent_state(
+                &pool,
+                &auth,
+                ConsentStateInput {
+                    subject: subject.clone(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(revision_two.state == "declined" && revision_two.revision == 2);
+
+            let superseded_approval_replay = record_feedback_consent_decision(
+                &pool,
+                &revision_zero_approval,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                superseded_approval_replay.decision == "declined"
+                    && !superseded_approval_replay.changed
+                    && !superseded_approval_replay.feedback_action_allowed
+            );
+
+            let stale_approval = record_feedback_consent_decision(
+                &pool,
+                &delayed_revision_one_approval,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                stale_approval.decision == "declined"
+                    && !stale_approval.changed
+                    && !stale_approval.feedback_action_allowed
+            );
+            let after_stale = feedback_consent_state(
+                &pool,
+                &auth,
+                ConsentStateInput {
+                    subject: subject.clone(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(after_stale.state == "declined" && after_stale.revision == 2);
+
+            let fresh_revision_two_approval = test_capability_with_subject_revision(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&subject),
+                Some(2),
+            );
+            let reapproved = record_feedback_consent_decision(
+                &pool,
+                &fresh_revision_two_approval,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                reapproved.decision == "approved"
+                    && reapproved.changed
+                    && reapproved.feedback_action_allowed
+                    && reapproved.flipped_from.as_deref() == Some("declined")
+            );
+            let revision_three = feedback_consent_state(
+                &pool,
+                &auth,
+                ConsentStateInput {
+                    subject: subject.clone(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(revision_three.state == "approved" && revision_three.revision == 3);
+
+            // The same losing r1 handle remains rejected after the state has
+            // gone approved -> declined -> approved (the ABA case). It may
+            // observe the current state, but cannot reveal a report action.
+            let aba_replay = record_feedback_consent_decision(
+                &pool,
+                &delayed_revision_one_approval,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                aba_replay.decision == "approved"
+                    && !aba_replay.changed
+                    && !aba_replay.feedback_action_allowed
+            );
+
+            let replayed_fresh_approval = record_feedback_consent_decision(
+                &pool,
+                &fresh_revision_two_approval,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                replayed_fresh_approval.decision == "approved"
+                    && !replayed_fresh_approval.changed
+                    && replayed_fresh_approval.feedback_action_allowed
+            );
+            let after_fresh_replay = feedback_consent_state(
+                &pool,
+                &auth,
+                ConsentStateInput {
+                    subject: subject.clone(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(after_fresh_replay.revision == 3);
+
+            // Legacy handles have the same insert-only safety as explicit r0.
+            let legacy_subject = format!("afsub1_{}", "l".repeat(43));
+            let legacy_create = test_capability_with_subject(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&legacy_subject),
+            );
+            let legacy_approved = record_feedback_consent_decision(
+                &pool,
+                &legacy_create,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(legacy_approved.changed && legacy_approved.feedback_action_allowed);
+            let legacy_stale = test_capability_with_subject(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&legacy_subject),
+            );
+            let legacy_decline = record_feedback_consent_decision(
+                &pool,
+                &legacy_stale,
+                ConsentDecisionInput {
+                    decision: "declined".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                legacy_decline.decision == "approved"
+                    && !legacy_decline.changed
+                    && !legacy_decline.feedback_action_allowed
+            );
+            let legacy_current = feedback_consent_state(
+                &pool,
+                &auth,
+                ConsentStateInput {
+                    subject: legacy_subject,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(legacy_current.state == "approved" && legacy_current.revision == 1);
+
+            // Opposite r1 decisions race on a separate subject. The revision
+            // predicate guarantees exactly one winner regardless of arrival
+            // order, and replaying either handle cannot advance revision 2.
+            let concurrent_subject = format!("afsub1_{}", "c".repeat(43));
+            let concurrent_seed = test_capability_with_subject_revision(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&concurrent_subject),
+                Some(0),
+            );
+            record_feedback_consent_decision(
+                &pool,
+                &concurrent_seed,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let concurrent_approval = test_capability_with_subject_revision(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&concurrent_subject),
+                Some(1),
+            );
+            let concurrent_decline = test_capability_with_subject_revision(
+                &write_secret,
+                write_key.id,
+                Uuid::new_v4(),
+                Some(&concurrent_subject),
+                Some(1),
+            );
+            let (approval_result, decline_result) = tokio::join!(
+                record_feedback_consent_decision(
+                    &pool,
+                    &concurrent_approval,
+                    ConsentDecisionInput {
+                        decision: "approved".into(),
+                    },
+                ),
+                record_feedback_consent_decision(
+                    &pool,
+                    &concurrent_decline,
+                    ConsentDecisionInput {
+                        decision: "declined".into(),
+                    },
+                ),
+            );
+            let approval_result = approval_result.map_err(test_error)?;
+            let decline_result = decline_result.map_err(test_error)?;
+            anyhow::ensure!(approval_result.changed ^ decline_result.changed);
+            let (winner, loser, winner_capability, winner_input) = if approval_result.changed {
+                (
+                    &approval_result,
+                    &decline_result,
+                    &concurrent_approval,
+                    "approved",
+                )
+            } else {
+                (
+                    &decline_result,
+                    &approval_result,
+                    &concurrent_decline,
+                    "declined",
+                )
+            };
+            anyhow::ensure!(loser.decision == winner.decision);
+            anyhow::ensure!(!loser.feedback_action_allowed);
+            let concurrent_state = feedback_consent_state(
+                &pool,
+                &auth,
+                ConsentStateInput {
+                    subject: concurrent_subject.clone(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                concurrent_state.state == winner.decision && concurrent_state.revision == 2
+            );
+            let winner_replay = record_feedback_consent_decision(
+                &pool,
+                winner_capability,
+                ConsentDecisionInput {
+                    decision: winner_input.into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(!winner_replay.changed);
+            anyhow::ensure!(winner_replay.feedback_action_allowed == (winner_input == "approved"));
+            let concurrent_after_replay = feedback_consent_state(
+                &pool,
+                &auth,
+                ConsentStateInput {
+                    subject: concurrent_subject,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(concurrent_after_replay.revision == 2);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
             .execute(&pool)
             .await?;
         result
@@ -8568,6 +11144,8 @@ mod product_tests {
             anyhow::ensure!(current_product.name == "Search v2");
             anyhow::ensure!(search_dashboard.interactions.len() == 1);
             anyhow::ensure!(search_dashboard.api_keys.len() == 1);
+            anyhow::ensure!(search_dashboard.api_keys[0].interaction_count == 1);
+            anyhow::ensure!(search_dashboard.api_keys[0].report_count == 0);
 
             let docs_dashboard = dashboard(&pool, context(), Some(docs.id), None)
                 .await

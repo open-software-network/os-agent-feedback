@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "epode-static-docs-edge-example",
+  "main": "worker.js",
+  "compatibility_date": "2026-07-31",
+  "compatibility_flags": ["nodejs_compat"],
+  // Before deployment, add only dedicated public docs paths to `routes`.
+  // Never attach this Worker as a hostname-wide catch-all.
+  "vars": {
+    "DOCS_UPSTREAM_ORIGIN": "https://docs-origin.example.com",
+    "AGENT_FEEDBACK_MODE": "never_ask"
+  }
+}

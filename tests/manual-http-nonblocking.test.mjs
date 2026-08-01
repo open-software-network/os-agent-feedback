@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHmac } from "node:crypto";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import { dirname, resolve } from "node:path";
@@ -58,6 +59,7 @@ test("manual Ask once HTTP stays nonblocking and subject-bound during Epode outa
   const keyId = "1".repeat(32);
   const consentScope = "2".repeat(32);
   const apiKey = `af_live_${keyId}_${consentScope}_${"secret".repeat(5)}`;
+  const productAuthSecret = "manual-http-nonblocking-product-auth";
   const child = spawn("python3", ["server.py"], {
     cwd: resolve(repo, "examples/setup-matrix-manual-http"),
     env: {
@@ -67,15 +69,19 @@ test("manual Ask once HTTP stays nonblocking and subject-bound during Epode outa
       AGENT_FEEDBACK_URL: `http://127.0.0.1:${epodePort}`,
       AGENT_FEEDBACK_MODE: "ask_once",
       AGENT_FEEDBACK_CONSENT_TIMEOUT_MS: "1500",
+      SETUP_MATRIX_PRODUCT_AUTH_SECRET: productAuthSecret,
     },
     stdio: ["ignore", "ignore", "pipe"],
   });
 
   try {
     await waitFor(`http://127.0.0.1:${productPort}/health`, child);
+    const customerRef = "account-during-outage";
+    const payload = Buffer.from(customerRef, "utf8").toString("base64url");
+    const signature = createHmac("sha256", productAuthSecret).update(payload).digest("base64url");
     const started = performance.now();
     const response = await fetch(`http://127.0.0.1:${productPort}/search`, {
-      headers: { "x-customer-ref": "account-during-outage" },
+      headers: { authorization: `Bearer ${payload}.${signature}` },
     });
     const elapsed = performance.now() - started;
     const body = await response.json();

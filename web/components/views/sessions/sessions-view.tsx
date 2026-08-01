@@ -1,15 +1,26 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
+import { IconFilterTimeline } from "central-icons/IconFilterTimeline";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { DetailRail, DetailWorkspace } from "@/components/dashboard/detail-rail";
 import { MetricStrip } from "@/components/dashboard/metric-strip";
-import { EmptyState, ErrorState } from "@/components/dashboard/view-primitives";
+import { EmptyState, ErrorState, NativeSelect } from "@/components/dashboard/view-primitives";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
+import { Label } from "@/components/ui/label";
+import {
+  Popover,
+  PopoverContent,
+  PopoverHeader,
+  PopoverTitle,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -21,14 +32,14 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { apiRequest } from "@/lib/api/client";
 import type {
   DashboardData,
   DashboardSessionDetail,
-  ProductFeedbackReport,
-  ProductInteraction,
-  ProductSession,
+  DashboardSessionSummary,
 } from "@/lib/api/dashboard";
+import { fetchDashboardSessionsPage } from "@/lib/api/dashboard";
 import {
   formatDate,
   formatDuration,
@@ -39,15 +50,87 @@ import {
 import { cn } from "@/lib/utils";
 
 type SessionFilter = "all" | "multi" | "feedback" | "no_feedback";
-
-const impactRank: Record<string, number> = {
-  blocked: 5,
-  hindered: 4,
-  helped_with_friction: 3,
-  neutral: 2,
-  unknown: 1,
-  helped: 0,
+type SessionRange = "all" | "7d" | "30d";
+type SessionConstraints = {
+  operation: string;
+  customerRef: string;
+  impact: string;
+  range: SessionRange;
 };
+
+const emptySessionConstraints: SessionConstraints = {
+  operation: "",
+  customerRef: "",
+  impact: "",
+  range: "all",
+};
+
+function isSessionFilter(value: string | null): value is SessionFilter {
+  return value !== null && ["all", "multi", "feedback", "no_feedback"].includes(value);
+}
+
+function readSessionLocation(): {
+  query: string;
+  filter: SessionFilter;
+  constraints: SessionConstraints;
+} {
+  if (typeof window === "undefined") {
+    return { query: "", filter: "all", constraints: emptySessionConstraints };
+  }
+  const params = new URL(window.location.href).searchParams;
+  const filter = params.get("sessionKind");
+  const impact = params.get("sessionImpact") ?? "";
+  const range = params.get("sessionRange");
+  return {
+    query: params.get("sessionQ") ?? "",
+    filter: isSessionFilter(filter) ? filter : "all",
+    constraints: {
+      operation: params.get("sessionOperation") ?? "",
+      customerRef: params.get("sessionCustomer") ?? "",
+      impact: impact in impactLabels ? impact : "",
+      range: range === "7d" || range === "30d" ? range : "all",
+    },
+  };
+}
+
+function writeSessionLocation(
+  query: string,
+  filter: SessionFilter,
+  constraints: SessionConstraints,
+) {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (query.trim()) url.searchParams.set("sessionQ", query.trim());
+  else url.searchParams.delete("sessionQ");
+  if (filter === "all") url.searchParams.delete("sessionKind");
+  else url.searchParams.set("sessionKind", filter);
+  setSessionParam(url, "sessionOperation", constraints.operation);
+  setSessionParam(url, "sessionCustomer", constraints.customerRef);
+  setSessionParam(url, "sessionImpact", constraints.impact);
+  setSessionParam(url, "sessionRange", constraints.range === "all" ? "" : constraints.range);
+  window.history.replaceState(window.history.state, "", url);
+}
+
+function setSessionParam(url: URL, key: string, value: string) {
+  if (value.trim()) url.searchParams.set(key, value.trim());
+  else url.searchParams.delete(key);
+}
+
+function sessionConstraintCount(constraints: SessionConstraints) {
+  return [
+    constraints.operation,
+    constraints.customerRef,
+    constraints.impact,
+    constraints.range === "all" ? "" : constraints.range,
+  ].filter(Boolean).length;
+}
+
+function sessionRangeStart(range: SessionRange): string | undefined {
+  const days = range === "7d" ? 7 : range === "30d" ? 30 : null;
+  return days === null
+    ? undefined
+    : new Date(Date.now() - days * 24 * 60 * 60 * 1_000).toISOString();
+}
 
 const impactLabels: Record<string, string> = {
   blocked: "Blocked",
@@ -58,11 +141,11 @@ const impactLabels: Record<string, string> = {
   unknown: "Unknown",
 };
 
-function sessionJourney(interactions: ProductInteraction[]) {
-  if (!interactions.length) return "No loaded interactions";
-  if (interactions.length === 1) return interactions[0]?.operation ?? "Single event";
-  if (interactions.length > 3) return `${interactions.length}-step journey`;
-  return `${interactions[0]?.operation} → ${interactions.at(-1)?.operation}`;
+function sessionJourney(session: DashboardSessionSummary) {
+  if (!session.interactionCount) return "No interactions";
+  if (session.interactionCount === 1) return session.firstOperation ?? "Single event";
+  if (session.interactionCount > 3) return `${session.interactionCount}-step journey`;
+  return `${session.firstOperation ?? "Unknown"} → ${session.lastOperation ?? "Unknown"}`;
 }
 
 function elapsedLabel(startedAt: string, occurredAt: string) {
@@ -91,7 +174,6 @@ export function SessionsView({
   selectSession,
   openFeedback,
   openInteraction,
-  loadMore,
   refresh,
 }: {
   data: DashboardData;
@@ -99,12 +181,78 @@ export function SessionsView({
   selectSession: (sessionId: string | null) => void;
   openFeedback: (reportId: string) => void;
   openInteraction: (interactionId: string) => void;
-  loadMore: () => void;
+  /** @deprecated Pagination is now owned by the server-backed list query. */
+  loadMore?: () => void;
   refresh: () => Promise<unknown>;
 }) {
-  const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<SessionFilter>("all");
+  const initialLocation = useMemo(readSessionLocation, []);
+  const [query, setQuery] = useState(initialLocation.query);
+  const [filter, setFilter] = useState<SessionFilter>(initialLocation.filter);
+  const [constraints, setConstraints] = useState(initialLocation.constraints);
+  const debouncedQuery = useDebouncedValue(query, 250);
   const productId = data.currentProduct?.id;
+  const since = useMemo(() => sessionRangeStart(constraints.range), [constraints.range]);
+  const searchSettling = query.trim() !== debouncedQuery.trim();
+  const canSeedSessionList =
+    !query.trim() &&
+    filter === "all" &&
+    sessionConstraintCount(constraints) === 0 &&
+    data.listState.sessionsLoaded === data.listState.sessionsTotal;
+  const sessionPages = useInfiniteQuery({
+    queryKey: ["session-list", data.workspace.id, productId, debouncedQuery, filter, constraints],
+    queryFn: ({ pageParam }) =>
+      fetchDashboardSessionsPage(data.workspace.id, {
+        productId: productId ?? "",
+        q: debouncedQuery.trim() || undefined,
+        kind: filter,
+        impact: constraints.impact ? [constraints.impact] : undefined,
+        operation: constraints.operation.trim() || undefined,
+        customerRef: constraints.customerRef.trim() || undefined,
+        since,
+        limit: 50,
+        cursor: pageParam,
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page) => page.nextCursor ?? undefined,
+    initialData: canSeedSessionList
+      ? {
+          pages: [
+            {
+              sessions: data.sessions,
+              rollup: {
+                sessions: data.listState.sessionsTotal,
+                interactions: data.sessions.reduce(
+                  (total, session) => total + session.interactionCount,
+                  0,
+                ),
+                multiStepSessions: data.sessions.filter((session) => session.interactionCount > 1)
+                  .length,
+                averageInteractions: data.sessions.length
+                  ? data.sessions.reduce((total, session) => total + session.interactionCount, 0) /
+                    data.sessions.length
+                  : 0,
+              },
+              limit: Math.min(100, Math.max(1, data.sessions.length || 50)),
+              nextCursor: null,
+            },
+          ],
+          pageParams: [undefined],
+        }
+      : undefined,
+    initialDataUpdatedAt: 0,
+    enabled: Boolean(productId),
+  });
+  const sessionRows = searchSettling
+    ? []
+    : (sessionPages.data?.pages.flatMap((page) =>
+        Array.isArray(page.sessions) ? page.sessions : [],
+      ) ?? []);
+  const rollup = sessionPages.data?.pages[0]?.rollup ?? {
+    sessions: 0,
+    interactions: 0,
+    multiStepSessions: 0,
+    averageInteractions: 0,
+  };
   const detail = useQuery({
     queryKey: ["session", data.workspace.id, productId, selectedSessionId],
     queryFn: () =>
@@ -115,65 +263,18 @@ export function SessionsView({
     enabled: Boolean(selectedSessionId && productId),
   });
 
-  const interactionsBySession = useMemo(() => {
-    const result = new Map<string, ProductInteraction[]>();
-    for (const interaction of data.interactions) {
-      if (!interaction.sessionId) continue;
-      const interactions = result.get(interaction.sessionId) ?? [];
-      interactions.push(interaction);
-      result.set(interaction.sessionId, interactions);
-    }
-    for (const interactions of result.values()) {
-      interactions.sort((left, right) => left.occurredAt.localeCompare(right.occurredAt));
-    }
-    return result;
-  }, [data.interactions]);
+  useEffect(() => writeSessionLocation(query, filter, constraints), [constraints, filter, query]);
 
-  const reportsBySession = useMemo(() => {
-    const result = new Map<string, ProductFeedbackReport[]>();
-    for (const report of data.reports) {
-      if (!report.sessionId) continue;
-      const reports = result.get(report.sessionId) ?? [];
-      reports.push(report);
-      result.set(report.sessionId, reports);
-    }
-    return result;
-  }, [data.reports]);
-
-  const sessionRows = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    return data.sessions.filter((session) => {
-      const interactions = interactionsBySession.get(session.id) ?? [];
-      const reports = reportsBySession.get(session.id) ?? [];
-      const haystack = [
-        session.refHint,
-        session.source,
-        ...interactions.flatMap((item) => [item.operation, item.surface, item.customerRef]),
-        ...reports.map((report) => report.summary),
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      return (
-        (!needle || haystack.includes(needle)) &&
-        (filter === "all" ||
-          (filter === "multi" && interactions.length > 1) ||
-          (filter === "feedback" && reports.length > 0) ||
-          (filter === "no_feedback" && reports.length === 0))
-      );
-    });
-  }, [data.sessions, filter, interactionsBySession, query, reportsBySession]);
-
-  const loadedInteractions = Array.from(interactionsBySession.values()).reduce(
-    (total, interactions) => total + interactions.length,
-    0,
-  );
-  const multiStep = Array.from(interactionsBySession.values()).filter(
-    (interactions) => interactions.length > 1,
-  ).length;
-  const average = data.sessions.length
-    ? (loadedInteractions / data.sessions.length).toFixed(1)
-    : "0";
+  useEffect(() => {
+    const restore = () => {
+      const location = readSessionLocation();
+      setQuery(location.query);
+      setFilter(location.filter);
+      setConstraints(location.constraints);
+    };
+    window.addEventListener("popstate", restore);
+    return () => window.removeEventListener("popstate", restore);
+  }, []);
 
   return (
     <DetailWorkspace
@@ -195,10 +296,10 @@ export function SessionsView({
     >
       <MetricStrip
         items={[
-          { label: "Proven sessions", value: data.listState.sessionsTotal.toLocaleString() },
-          { label: "Loaded interactions", value: loadedInteractions },
-          { label: "Multi-step", value: multiStep },
-          { label: "Average interactions", value: average },
+          { label: "Proven sessions", value: rollup.sessions.toLocaleString() },
+          { label: "Interactions", value: rollup.interactions.toLocaleString() },
+          { label: "Multi-step", value: rollup.multiStepSessions.toLocaleString() },
+          { label: "Average", value: rollup.averageInteractions.toFixed(1) },
         ]}
       />
       <p className="border-b bg-muted/25 px-4 py-2 text-xs text-muted-foreground">
@@ -231,13 +332,52 @@ export function SessionsView({
             <ToggleGroupItem value="feedback">Has feedback</ToggleGroupItem>
             <ToggleGroupItem value="no_feedback">No feedback</ToggleGroupItem>
           </ToggleGroup>
-          <Button variant="ghost" size="sm" onClick={() => void refresh()}>
+          <SessionConstraintFilters value={constraints} onApply={setConstraints} />
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => void Promise.all([refresh(), sessionPages.refetch()])}
+          >
             Refresh
           </Button>
         </div>
       </div>
+      {sessionConstraintCount(constraints) ? (
+        <div className="flex flex-wrap items-center gap-2 border-b bg-muted/20 px-4 py-2">
+          {constraints.operation ? (
+            <Badge variant="outline">Operation: {constraints.operation}</Badge>
+          ) : null}
+          {constraints.customerRef ? (
+            <Badge variant="outline">Customer: {constraints.customerRef}</Badge>
+          ) : null}
+          {constraints.impact ? (
+            <Badge variant="outline">Impact: {impactLabels[constraints.impact]}</Badge>
+          ) : null}
+          {constraints.range !== "all" ? (
+            <Badge variant="outline">
+              {constraints.range === "7d" ? "Last 7 days" : "Last 30 days"}
+            </Badge>
+          ) : null}
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            onClick={() => setConstraints(emptySessionConstraints)}
+          >
+            Clear constraints
+          </Button>
+        </div>
+      ) : null}
       <section className="min-h-0 flex-1 overflow-auto bg-background" aria-label="Sessions">
-        {sessionRows.length ? (
+        {sessionPages.isError ? (
+          <div className="p-4 text-sm text-destructive" role="alert">
+            Sessions could not be loaded. Use Refresh to try again.
+          </div>
+        ) : sessionPages.isPending || searchSettling ? (
+          <p className="p-4 text-sm text-muted-foreground" role="status">
+            Loading sessions…
+          </p>
+        ) : sessionRows.length ? (
           <Table className="min-w-[760px] table-fixed">
             <TableHeader className="sticky top-0 z-[1] bg-background">
               <TableRow className="hover:bg-background">
@@ -253,8 +393,6 @@ export function SessionsView({
                 <SessionRow
                   key={session.id}
                   session={session}
-                  interactions={interactionsBySession.get(session.id) ?? []}
-                  reports={reportsBySession.get(session.id) ?? []}
                   selected={selectedSessionId === session.id}
                   onOpen={() => selectSession(session.id)}
                 />
@@ -264,28 +402,52 @@ export function SessionsView({
         ) : (
           <div className="h-full bg-canvas p-4">
             <EmptyState
-              title="No matching sessions"
-              description="Clear the search or choose a different session view."
+              title={
+                data.listState.sessionsTotal === 0
+                  ? "No proven sessions yet"
+                  : "No matching sessions"
+              }
+              description={
+                data.listState.sessionsTotal === 0
+                  ? "Sessions appear only after the product supplies a stable application-level reference."
+                  : "Clear the search and constraints or choose a different session view."
+              }
               action={
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    setQuery("");
-                    setFilter("all");
-                  }}
-                >
-                  Clear filters
-                </Button>
+                data.listState.sessionsTotal === 0 ? null : (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setQuery("");
+                      setFilter("all");
+                      setConstraints(emptySessionConstraints);
+                    }}
+                  >
+                    Clear filters
+                  </Button>
+                )
               }
             />
           </div>
         )}
       </section>
-      {data.listState.sessionsLoaded < data.listState.sessionsTotal ? (
-        <div className="shrink-0 border-t bg-background px-4 py-2">
-          <Button variant="outline" size="sm" onClick={loadMore}>
-            Load 100 more
+      {sessionRows.length ? (
+        <div className="flex shrink-0 items-center justify-between gap-3 border-t bg-background px-4 py-2 text-xs text-muted-foreground">
+          <p aria-live="polite">
+            Showing {sessionRows.length.toLocaleString()} of {rollup.sessions.toLocaleString()}{" "}
+            matching sessions. Filters cover all retained sessions.
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!sessionPages.hasNextPage || sessionPages.isFetchingNextPage}
+            onClick={() => void sessionPages.fetchNextPage()}
+          >
+            {sessionPages.isFetchingNextPage
+              ? "Loading…"
+              : sessionPages.hasNextPage
+                ? "Load 50 more"
+                : "All loaded"}
           </Button>
         </div>
       ) : null}
@@ -293,30 +455,131 @@ export function SessionsView({
   );
 }
 
+function SessionConstraintFilters({
+  value,
+  onApply,
+}: {
+  value: SessionConstraints;
+  onApply: (constraints: SessionConstraints) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const activeCount = sessionConstraintCount(value);
+
+  function change(nextOpen: boolean) {
+    setOpen(nextOpen);
+    if (nextOpen) setDraft(value);
+  }
+
+  return (
+    <Popover open={open} onOpenChange={change}>
+      <PopoverTrigger render={<Button type="button" variant="outline" size="sm" />}>
+        <IconFilterTimeline data-icon="inline-start" />
+        Constraints
+        {activeCount ? <Badge variant="secondary">{activeCount}</Badge> : null}
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-[min(22rem,calc(100vw-2rem))]">
+        <PopoverHeader>
+          <PopoverTitle>Filter proven sessions</PopoverTitle>
+        </PopoverHeader>
+        <div className="grid gap-3">
+          <div className="grid gap-1.5">
+            <Label htmlFor="session-operation-filter">Operation</Label>
+            <Input
+              id="session-operation-filter"
+              value={draft.operation}
+              maxLength={160}
+              placeholder="Exact operation"
+              onChange={(event) => setDraft({ ...draft, operation: event.target.value })}
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="session-customer-filter">Customer reference</Label>
+            <Input
+              id="session-customer-filter"
+              value={draft.customerRef}
+              maxLength={160}
+              placeholder="Exact opaque reference"
+              onChange={(event) => setDraft({ ...draft, customerRef: event.target.value })}
+            />
+          </div>
+          <div className="grid gap-1.5 sm:grid-cols-2">
+            <label className="grid gap-1.5 text-sm" htmlFor="session-impact-filter">
+              <span>Contains impact</span>
+              <NativeSelect
+                id="session-impact-filter"
+                value={draft.impact}
+                onChange={(event) => setDraft({ ...draft, impact: event.target.value })}
+              >
+                <option value="">Any impact</option>
+                {Object.entries(impactLabels).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </NativeSelect>
+            </label>
+            <label className="grid gap-1.5 text-sm" htmlFor="session-range-filter">
+              <span>Last seen</span>
+              <NativeSelect
+                id="session-range-filter"
+                value={draft.range}
+                onChange={(event) =>
+                  setDraft({ ...draft, range: event.target.value as SessionRange })
+                }
+              >
+                <option value="all">All retained</option>
+                <option value="7d">Last 7 days</option>
+                <option value="30d">Last 30 days</option>
+              </NativeSelect>
+            </label>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 border-t pt-2.5">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => setDraft(emptySessionConstraints)}
+          >
+            Reset
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => {
+              onApply({
+                ...draft,
+                operation: draft.operation.trim(),
+                customerRef: draft.customerRef.trim(),
+              });
+              setOpen(false);
+            }}
+          >
+            Apply
+          </Button>
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function SessionRow({
   session,
-  interactions,
-  reports,
   selected,
   onOpen,
 }: {
-  session: ProductSession;
-  interactions: ProductInteraction[];
-  reports: ProductFeedbackReport[];
+  session: DashboardSessionSummary;
   selected: boolean;
   onOpen: () => void;
 }) {
-  const strongest = [...reports].sort(
-    (left, right) =>
-      (impactRank[right.impact ?? "unknown"] ?? 0) - (impactRank[left.impact ?? "unknown"] ?? 0),
-  )[0];
-
   return (
     <TableRow
       data-state={selected ? "selected" : undefined}
       aria-selected={selected}
+      aria-label={`Open session ${session.refHint}`}
       tabIndex={0}
-      className="cursor-pointer bg-background hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring data-[state=selected]:bg-selected data-[state=selected]:shadow-[inset_2px_0_0_var(--attention)]"
+      className="cursor-pointer bg-background hover:bg-muted/40 data-[state=selected]:bg-selected data-[state=selected]:shadow-[inset_2px_0_0_var(--attention)]"
       onClick={onOpen}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
@@ -326,21 +589,30 @@ function SessionRow({
       }}
     >
       <TableCell className="h-[66px] overflow-hidden pl-5">
-        <p className="truncate font-mono text-xs font-medium">{session.refHint}</p>
+        <Button
+          variant="link"
+          className="h-auto max-w-full justify-start truncate p-0 font-mono text-xs font-medium"
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpen();
+          }}
+        >
+          {session.refHint}
+        </Button>
         <p className="mt-1 truncate text-xs text-muted-foreground">
           {interfaceLabel(session.source)}
         </p>
       </TableCell>
       <TableCell className="overflow-hidden">
-        <p className="truncate font-mono text-xs">{sessionJourney(interactions)}</p>
+        <p className="truncate font-mono text-xs">{sessionJourney(session)}</p>
         <p className="mt-1 truncate text-xs text-muted-foreground">
-          {interactions[0]?.customerRef ?? "Unknown customer"}
+          {session.customerRef ?? "Unknown customer"}
         </p>
       </TableCell>
-      <TableCell className="text-xs">{interactions.length}</TableCell>
+      <TableCell className="text-xs">{session.interactionCount}</TableCell>
       <TableCell className="text-xs">
-        {reports.length
-          ? `${reports.length} · ${impactLabels[strongest?.impact ?? "unknown"]}`
+        {session.reportCount
+          ? `${session.reportCount} · ${impactLabels[session.strongestImpact ?? "unknown"]}`
           : "None"}
       </TableCell>
       <TableCell
@@ -374,7 +646,7 @@ function SessionInspector({
     <DetailRail open onClose={close} label="Session detail">
       <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-4">
         <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
-          {detail?.session.refHint ?? requestedId}
+          {detail?.session?.refHint ?? requestedId}
         </span>
         <Button variant="ghost" size="icon-sm" aria-label="Close session detail" onClick={close}>
           <IconCrossSmall />
@@ -384,7 +656,7 @@ function SessionInspector({
         <div className="p-5">
           {error ? (
             <ErrorState error={error} onRetry={() => void retry()} />
-          ) : detail ? (
+          ) : detail?.session ? (
             <SessionJourney
               detail={detail}
               openFeedback={openFeedback}
