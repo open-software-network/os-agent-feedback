@@ -23,8 +23,12 @@ describe("PolicyView", () => {
         /without a customer reference, permission is safely requested for each use/i,
       ),
     ).toBeVisible();
-    expect(screen.getByText(/For MCP, Never ask is currently the most reliable choice/i)).toBeVisible();
-    expect(screen.getByText(/verify the exact client versions before enabling them/i)).toBeVisible();
+    expect(
+      screen.getByText(/For MCP, Never ask is currently the most reliable choice/i),
+    ).toBeVisible();
+    expect(
+      screen.getByText(/verify the exact client versions before enabling them/i),
+    ).toBeVisible();
     expect(screen.queryByText(/one agent runtime/i)).not.toBeInTheDocument();
   });
 });
