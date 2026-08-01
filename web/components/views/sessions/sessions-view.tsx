@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { DetailRail, DetailWorkspace } from "@/components/dashboard/detail-rail";
 import { MetricStrip } from "@/components/dashboard/metric-strip";
+import { SignalEvidenceList } from "@/components/dashboard/signal-evidence-list";
 import { EmptyState, ErrorState, NativeSelect } from "@/components/dashboard/view-primitives";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -34,6 +35,11 @@ import {
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { apiRequest } from "@/lib/api/client";
+import {
+  type CustomerSignal,
+  fetchSignalsPage,
+  type IdentityLevel,
+} from "@/lib/api/customer-intelligence";
 import type {
   DashboardData,
   DashboardSessionDetail,
@@ -56,6 +62,15 @@ type SessionConstraints = {
   customerRef: string;
   impact: string;
   range: SessionRange;
+};
+
+type EnrichedSessionSummary = DashboardSessionSummary & {
+  customerId?: string | null;
+  customerDisplayName?: string | null;
+  identityLevel?: IdentityLevel | string | null;
+  desiredOutcome?: string | null;
+  outcomeHealth?: string | null;
+  signalCount?: number;
 };
 
 const emptySessionConstraints: SessionConstraints = {
@@ -173,6 +188,8 @@ export function SessionsView({
   selectedSessionId,
   selectSession,
   openFeedback,
+  openCustomer = () => undefined,
+  openFeature = () => undefined,
   openInteraction,
   refresh,
 }: {
@@ -180,6 +197,8 @@ export function SessionsView({
   selectedSessionId: string | null;
   selectSession: (sessionId: string | null) => void;
   openFeedback: (reportId: string) => void;
+  openCustomer?: (customerId: string) => void;
+  openFeature?: (featureKey: string) => void;
   openInteraction: (interactionId: string) => void;
   /** @deprecated Pagination is now owned by the server-backed list query. */
   loadMore?: () => void;
@@ -262,6 +281,16 @@ export function SessionsView({
       ),
     enabled: Boolean(selectedSessionId && productId),
   });
+  const sessionSignals = useQuery({
+    queryKey: ["session-signals", data.workspace.id, productId, selectedSessionId],
+    queryFn: () =>
+      fetchSignalsPage(data.workspace.id, {
+        productId: productId ?? "",
+        sessionId: selectedSessionId ?? "",
+        limit: 100,
+      }),
+    enabled: Boolean(selectedSessionId && productId),
+  });
 
   useEffect(() => writeSessionLocation(query, filter, constraints), [constraints, filter, query]);
 
@@ -289,7 +318,10 @@ export function SessionsView({
             close={() => selectSession(null)}
             retry={() => detail.refetch()}
             openFeedback={openFeedback}
+            openCustomer={openCustomer}
+            openFeature={openFeature}
             openInteraction={openInteraction}
+            signals={sessionSignals.data?.signals ?? []}
           />
         ) : null
       }
@@ -381,11 +413,12 @@ export function SessionsView({
           <Table className="min-w-[760px] table-fixed">
             <TableHeader className="sticky top-0 z-[1] bg-background">
               <TableRow className="hover:bg-background">
-                <TableHead className="h-9 w-[24%] pl-5 text-xs">Session</TableHead>
-                <TableHead className="h-9 w-[31%] text-xs">Journey</TableHead>
-                <TableHead className="h-9 w-[12%] text-xs">Interactions</TableHead>
-                <TableHead className="h-9 w-[13%] text-xs">Feedback</TableHead>
-                <TableHead className="h-9 w-[20%] pr-5 text-right text-xs">Last seen</TableHead>
+                <TableHead className="h-9 w-[20%] pl-5 text-xs">Session</TableHead>
+                <TableHead className="h-9 w-[20%] text-xs">Customer</TableHead>
+                <TableHead className="h-9 w-[25%] text-xs">Desired outcome</TableHead>
+                <TableHead className="h-9 w-[13%] text-xs">Result</TableHead>
+                <TableHead className="h-9 w-[10%] text-xs">Steps</TableHead>
+                <TableHead className="h-9 w-[12%] pr-5 text-right text-xs">Last seen</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -569,7 +602,7 @@ function SessionRow({
   selected,
   onOpen,
 }: {
-  session: DashboardSessionSummary;
+  session: EnrichedSessionSummary;
   selected: boolean;
   onOpen: () => void;
 }) {
@@ -604,17 +637,24 @@ function SessionRow({
         </p>
       </TableCell>
       <TableCell className="overflow-hidden">
-        <p className="truncate font-mono text-xs">{sessionJourney(session)}</p>
+        <p className="truncate text-xs font-medium">
+          {session.customerDisplayName ?? session.customerRef ?? "Unresolved actor"}
+        </p>
         <p className="mt-1 truncate text-xs text-muted-foreground">
-          {session.customerRef ?? "Unknown customer"}
+          {session.identityLevel ? titleCase(session.identityLevel) : "Identity not resolved"}
         </p>
       </TableCell>
-      <TableCell className="text-xs">{session.interactionCount}</TableCell>
-      <TableCell className="text-xs">
-        {session.reportCount
-          ? `${session.reportCount} · ${impactLabels[session.strongestImpact ?? "unknown"]}`
-          : "None"}
+      <TableCell className="overflow-hidden">
+        <p className="truncate text-xs">{session.desiredOutcome ?? sessionJourney(session)}</p>
+        <p className="mt-1 truncate text-[11px] text-muted-foreground">
+          {session.signalCount ?? session.reportCount} evidence items
+        </p>
       </TableCell>
+      <TableCell className="text-xs">
+        {impactLabels[session.outcomeHealth ?? session.strongestImpact ?? "unknown"] ??
+          titleCase(session.outcomeHealth ?? session.strongestImpact ?? "unknown")}
+      </TableCell>
+      <TableCell className="text-xs">{session.interactionCount}</TableCell>
       <TableCell
         className="pr-5 text-right text-xs text-muted-foreground"
         title={formatDate(session.lastSeenAt)}
@@ -632,7 +672,10 @@ function SessionInspector({
   close,
   retry,
   openFeedback,
+  openCustomer,
+  openFeature,
   openInteraction,
+  signals,
 }: {
   requestedId: string;
   detail?: DashboardSessionDetail;
@@ -640,7 +683,10 @@ function SessionInspector({
   close: () => void;
   retry: () => Promise<unknown>;
   openFeedback: (reportId: string) => void;
+  openCustomer: (customerId: string) => void;
+  openFeature: (featureKey: string) => void;
   openInteraction: (interactionId: string) => void;
+  signals: CustomerSignal[];
 }) {
   return (
     <DetailRail open onClose={close} label="Session detail">
@@ -660,7 +706,10 @@ function SessionInspector({
             <SessionJourney
               detail={detail}
               openFeedback={openFeedback}
+              openCustomer={openCustomer}
+              openFeature={openFeature}
               openInteraction={openInteraction}
+              signals={signals}
             />
           ) : (
             <p className="text-sm text-muted-foreground" role="status">
@@ -676,11 +725,17 @@ function SessionInspector({
 function SessionJourney({
   detail,
   openFeedback,
+  openCustomer,
+  openFeature,
   openInteraction,
+  signals,
 }: {
   detail: DashboardSessionDetail;
   openFeedback: (reportId: string) => void;
+  openCustomer: (customerId: string) => void;
+  openFeature: (featureKey: string) => void;
   openInteraction: (interactionId: string) => void;
+  signals: CustomerSignal[];
 }) {
   const reportsByInteraction = new Map(
     detail.reports.map((report) => [report.interactionId, report]),
@@ -688,6 +743,9 @@ function SessionJourney({
   const interactions = [...detail.interactions].sort((left, right) =>
     left.occurredAt.localeCompare(right.occurredAt),
   );
+  const customerId = signals.find((signal) => signal.customerId)?.customerId ?? null;
+  const desiredOutcome = signals.find((signal) => signal.type === "intent");
+  const outcome = signals.find((signal) => signal.type === "outcome");
 
   return (
     <>
@@ -714,6 +772,38 @@ function SessionJourney({
       <p className="mt-4 text-xs leading-5 text-muted-foreground">
         Epode groups this journey only because the product supplied a stable session reference.
       </p>
+
+      <Separator className="my-5" />
+
+      <section aria-labelledby="session-customer-intelligence-heading">
+        <div className="flex items-center justify-between gap-3">
+          <h3 id="session-customer-intelligence-heading" className="text-xs font-medium">
+            Customer intelligence
+          </h3>
+          {customerId ? (
+            <Button variant="outline" size="xs" onClick={() => openCustomer(customerId)}>
+              Open customer
+            </Button>
+          ) : null}
+        </div>
+        <dl className="mt-3 grid grid-cols-[100px_1fr] gap-x-3 gap-y-3 text-xs">
+          <dt className="text-muted-foreground">Desired outcome</dt>
+          <dd>{desiredOutcome?.summary ?? "No current-task intent shared"}</dd>
+          <dt className="text-muted-foreground">Result</dt>
+          <dd>{outcome?.summary ?? "No outcome signal submitted"}</dd>
+          <dt className="text-muted-foreground">Signals</dt>
+          <dd>{signals.length}</dd>
+        </dl>
+        <div className="mt-4">
+          <SignalEvidenceList
+            signals={signals}
+            empty="No typed customer signals are linked to this session."
+            openFeature={openFeature}
+            openFeedback={openFeedback}
+            openInteraction={openInteraction}
+          />
+        </div>
+      </section>
 
       <Separator className="my-5" />
 

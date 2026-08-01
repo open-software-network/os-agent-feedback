@@ -77,28 +77,28 @@ export function setupInstructions(
   const route = surface === "static" ? "/docs/**" : surface === "website" ? "/docs/*" : "/search";
   const verifiedDownload = (filename: string, sha256: string) =>
     `epode_artifact="$(mktemp -d)/${filename}" &&\ncurl -fsSL ${artifacts}/${filename} -o "$epode_artifact" &&\nprintf '%s  %s\\n' '${sha256}' "$epode_artifact" | shasum -a 256 -c -`;
-  const nodeDownload = `mkdir -p .epode/artifacts &&\nepode_artifact=".epode/artifacts/agent-feedback-node-0.2.2.tgz" &&\ncurl -fsSL ${artifacts}/agent-feedback-node-0.2.2.tgz -o "$epode_artifact" &&\nprintf '%s  %s\\n' 'a108603544c2d17af6859c45d994593a246401ca2f0def1fbeb43f74f5c16fe8' "$epode_artifact" | shasum -a 256 -c -`;
+  const nodeDownload = `mkdir -p .epode/artifacts &&\nepode_artifact=".epode/artifacts/agent-feedback-node-0.3.0.tgz" &&\ncurl -fsSL ${artifacts}/agent-feedback-node-0.3.0.tgz -o "$epode_artifact" &&\nprintf '%s  %s\\n' '0c2ed9e474de55e72b964732ec24b741f3424078c71f4e19f4678cfe88e65a07' "$epode_artifact" | shasum -a 256 -c -`;
   const pythonDownload = verifiedDownload(
-    "agent_feedback-0.2.2-py3-none-any.whl",
-    "5723fd4e86c140218708f9e23187e932cfa1d39f85b29e9d76cbc8dbb6fb0ea7",
+    "agent_feedback-0.3.0-py3-none-any.whl",
+    "e3481b97914c644d041d773866061a9469501e85e77c5448c41e0fde8a6ef730",
   );
   const goDownload = verifiedDownload(
-    "agent-feedback-go-0.2.2.tar.gz",
-    "7f28ce6fb875167aac3afab974ca7cfc5896043e69ed136c375a99b9cde6cc15",
+    "agent-feedback-go-0.3.0.tar.gz",
+    "65ca44b7a44f22eb5f0b9a28c9a2b6076f8e2aada0126fc9d9eabb08dfba811a",
   );
   const rustDownload = verifiedDownload(
-    "agent-feedback-rust-0.2.2.tar.gz",
-    "f5bc42f38cea06b41449f0ae7b753b602d8e3a5dcf4a98fb3d8c21cd25fcfc62",
+    "agent-feedback-rust-0.3.0.tar.gz",
+    "27f43efad763e6b0a221146d23fb18bac80e675c58c00995b6112e1277bc31ed",
   );
   const protocolDownload = verifiedDownload(
-    "agent-feedback-protocol-v1-0.2.2.zip",
-    "ba3b239e2bf5de1514ca866c5a50a369d9a396ea440c1f65525b529be9025845",
+    "agent-feedback-protocol-v1-0.3.0.zip",
+    "ae3a670fcaf903c781155ec5002874cbe079996b2c6d28221414100e5d86735b",
   );
   const nodeInstall = `${nodeDownload} &&\nnpm install "$epode_artifact"`;
   const byStack: Record<SetupStack, { install: string; code: string; verify: string }> = {
     "node-mcp": {
       install: `${nodeInstall} &&\nnpm install @modelcontextprotocol/server @modelcontextprotocol/node @modelcontextprotocol/express zod`,
-      code: `import { createMcpInstrumentation, type McpInstrumentationContext } from "@agent-feedback/node/mcp";\nimport { createMcpExpressApp, requireBearerAuth } from "@modelcontextprotocol/express";\nimport { toNodeHandler } from "@modelcontextprotocol/node";\nimport { createMcpHandler, McpServer } from "@modelcontextprotocol/server";\nimport { productTokenVerifier } from "./product-auth.js";\n\nconst app = createMcpExpressApp({ host: "0.0.0.0", allowedOrigins: [] });\n// Verify the token and authorize its tenant before the MCP handler runs.\napp.use("/mcp", requireBearerAuth({\n  verifier: productTokenVerifier, // existing signature/introspection verifier\n  requiredScopes: ["mcp"],\n}));\n\nfunction stringField(value: unknown, key: string): string | undefined {\n  if (typeof value !== "object" || value === null) return undefined;\n  const field = Reflect.get(value, key);\n  return typeof field === "string" && field.length > 0 ? field : undefined;\n}\nfunction authenticatedAccountId(context: McpInstrumentationContext) {\n  const accountId = context.http?.authInfo?.extra?.accountId;\n  return typeof accountId === "string" && accountId.length > 0 ? accountId : undefined;\n}\n\nconst feedback = createMcpInstrumentation({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  includeTools: ["search", "fetch_result"],\n  feedbackTools: ["fetch_result"],\n  customerRef: (_args, context) => authenticatedAccountId(context),\n  sessionRef: (args, _context, result) =>\n    stringField(args, "agentSessionId") ??\n    stringField(result?.structuredContent, "agentSessionId"), // optional proven journey\n});\n\nfunction productServer() {\n  const server = new McpServer(\n    { name: "your-product", version: "1.0.0" },\n    {\n      instructions: "After each selected product tool call, find _agentFeedback in structuredContent or in a standalone JSON content block. Finish the product task first. For consent_required, show the product answer, ask the exact returned question once, and wait for the user's next turn; call record_product_feedback_consent only for an explicit standalone Yes or No. For feedback_ready, call report_product_feedback exactly once. For feedback_disabled, do nothing unless the user explicitly asks to change permission. Keep successful background reporting out of the final answer.",\n    },\n  );\n  feedback.instrument(server);\n  return server;\n}\n\nconst handleMcp = toNodeHandler(createMcpHandler(productServer, {\n  legacy: "stateless",\n  responseMode: "json",\n}));\napp.all("/mcp", (req, res) => handleMcp(req, res, req.body));`,
+      code: `import { createMcpInstrumentation, type McpInstrumentationContext } from "@agent-feedback/node/mcp";\nimport { createMcpExpressApp, requireBearerAuth } from "@modelcontextprotocol/express";\nimport { toNodeHandler } from "@modelcontextprotocol/node";\nimport { createMcpHandler, McpServer } from "@modelcontextprotocol/server";\nimport { productTokenVerifier } from "./product-auth.js";\n\nconst app = createMcpExpressApp({ host: "0.0.0.0", allowedOrigins: [] });\n// Verify the token and authorize its tenant before the MCP handler runs.\napp.use("/mcp", requireBearerAuth({\n  verifier: productTokenVerifier, // existing signature/introspection verifier\n  requiredScopes: ["mcp"],\n}));\n\nfunction stringField(value: unknown, key: string): string | undefined {\n  if (typeof value !== "object" || value === null) return undefined;\n  const field = Reflect.get(value, key);\n  return typeof field === "string" && field.length > 0 ? field : undefined;\n}\nfunction authenticatedAccountId(context: McpInstrumentationContext) {\n  const accountId = context.http?.authInfo?.extra?.accountId;\n  return typeof accountId === "string" && accountId.length > 0 ? accountId : undefined;\n}\n\nconst feedback = createMcpInstrumentation({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  includeTools: ["search", "fetch_result"],\n  feedbackTools: ["fetch_result"],\n  accountRef: (_args, context) => authenticatedAccountId(context),\n  userRef: (_args, context) => stringField(context.http?.authInfo?.extra, "userId"),\n  anonymousRef: (_args, context) => stringField(context.http?.authInfo?.extra, "visitorId"),\n  customerRef: (_args, context) => authenticatedAccountId(context), // durable Ask once compatibility\n  sessionRef: (args, _context, result) =>\n    stringField(args, "agentSessionId") ??\n    stringField(result?.structuredContent, "agentSessionId"), // optional proven journey\n});\n\nfunction productServer() {\n  const server = new McpServer(\n    { name: "your-product", version: "1.0.0" },\n    {\n      instructions: "After each selected product tool call, find _agentFeedback in structuredContent or in a standalone JSON content block. Finish the product task first. For consent_required, show the product answer, ask the exact returned question once, and wait for the user's next turn; call record_product_feedback_consent only for an explicit standalone Yes or No. For feedback_ready, call report_product_feedback exactly once. For feedback_disabled, do nothing unless the user explicitly asks to change permission. Keep successful background reporting out of the final answer.",\n    },\n  );\n  feedback.instrument(server);\n  return server;\n}\n\nconst handleMcp = toNodeHandler(createMcpHandler(productServer, {\n  legacy: "stateless",\n  responseMode: "json",\n}));\napp.all("/mcp", (req, res) => handleMcp(req, res, req.body));`,
       verify:
         "Call server/discover, then call one normal product tool from an MCP 2026-07-28 client.",
     },
@@ -110,36 +110,36 @@ export function setupInstructions(
     },
     "node-express": {
       install: nodeInstall,
-      code: `import { agentFeedback } from "@agent-feedback/node/express";\n\n// Mount verified product authentication before Agent Feedback.\napp.use(productAuthentication);\napp.use(agentFeedback({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  include: ["${route}"], // replace with customer-agent product routes\n  customerRef: req => req.user?.accountId,\n  sessionRef: req => req.agentSession?.id, // optional proven journey\n}));`,
+      code: `import { agentFeedback } from "@agent-feedback/node/express";\n\n// Mount verified product authentication before Agent Feedback.\napp.use(productAuthentication);\napp.use(agentFeedback({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  include: ["${route}"], // replace with customer-agent product routes\n  accountRef: req => req.user?.accountId,\n  userRef: req => req.user?.id,\n  anonymousRef: req => req.firstPartyVisitorId,\n  customerRef: req => req.user?.accountId, // durable Ask once compatibility\n  sessionRef: req => req.agentSession?.id, // optional proven journey\n}));`,
       verify: `npx agent-feedback-doctor https://your-product.example${route.replaceAll("*", "test")}`,
     },
     "node-fastify": {
       install: nodeInstall,
-      code: `import { agentFeedback } from "@agent-feedback/node/fastify";\n\n// Verify the caller and authorize its tenant before Epode reads req.user.\napp.addHook("preHandler", productAuthentication);\nawait app.register(agentFeedback({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  include: ["${route}"], // replace with customer-agent product routes\n  customerRef: req => req.user?.accountId,\n  sessionRef: req => req.agentSession?.id, // optional proven journey\n}));`,
+      code: `import { agentFeedback } from "@agent-feedback/node/fastify";\n\n// Verify the caller and authorize its tenant before Epode reads req.user.\napp.addHook("preHandler", productAuthentication);\nawait app.register(agentFeedback({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  include: ["${route}"], // replace with customer-agent product routes\n  accountRef: req => req.user?.accountId,\n  userRef: req => req.user?.id,\n  anonymousRef: req => req.firstPartyVisitorId,\n  customerRef: req => req.user?.accountId, // durable Ask once compatibility\n  sessionRef: req => req.agentSession?.id, // optional proven journey\n}));`,
       verify: `npx agent-feedback-doctor https://your-product.example${route.replaceAll("*", "test")}`,
     },
     "python-asgi": {
       install: `${pythonDownload} &&\npython -m pip install "$epode_artifact"`,
-      code: `import os\nfrom agent_feedback import AgentFeedbackASGI\n\napp = AgentFeedbackASGI(\n    app,\n    api_key=os.environ["AGENT_FEEDBACK_KEY"],\n    include=("${route}",),  # replace with customer-agent product routes\n    customer_ref=lambda scope: scope.get("state", {}).get("account_id"),\n    session_ref=lambda scope: scope.get("state", {}).get("agent_session_id"),  # optional\n)`,
+      code: `import os\nfrom agent_feedback import AgentFeedbackASGI\n\napp = AgentFeedbackASGI(\n    app,\n    api_key=os.environ["AGENT_FEEDBACK_KEY"],\n    include=("${route}",),  # replace with customer-agent product routes\n    account_ref=lambda scope: scope.get("state", {}).get("account_id"),\n    user_ref=lambda scope: scope.get("state", {}).get("user_id"),\n    anonymous_ref=lambda scope: scope.get("state", {}).get("visitor_id"),\n    customer_ref=lambda scope: scope.get("state", {}).get("account_id"),  # Ask once compatibility\n    session_ref=lambda scope: scope.get("state", {}).get("agent_session_id"),  # optional\n)`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },
     "python-wsgi": {
       install: `${pythonDownload} &&\npython -m pip install "$epode_artifact"`,
-      code: `import os\nfrom agent_feedback import AgentFeedbackWSGI\n\napp.wsgi_app = AgentFeedbackWSGI(\n    app.wsgi_app,\n    api_key=os.environ["AGENT_FEEDBACK_KEY"],\n    include=("${route}",),  # replace with customer-agent product routes\n    customer_ref=lambda env: env.get("product.account_id"),\n    session_ref=lambda env: env.get("product.agent_session_id"),  # optional\n)`,
+      code: `import os\nfrom agent_feedback import AgentFeedbackWSGI\n\napp.wsgi_app = AgentFeedbackWSGI(\n    app.wsgi_app,\n    api_key=os.environ["AGENT_FEEDBACK_KEY"],\n    include=("${route}",),  # replace with customer-agent product routes\n    account_ref=lambda env: env.get("product.account_id"),\n    user_ref=lambda env: env.get("product.user_id"),\n    anonymous_ref=lambda env: env.get("product.visitor_id"),\n    customer_ref=lambda env: env.get("product.account_id"),  # Ask once compatibility\n    session_ref=lambda env: env.get("product.agent_session_id"),  # optional\n)`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },
     go: {
       install: `${goDownload} &&
-mkdir -p .epode/agent-feedback-go-0.2.2 &&
-tar -xzf "$epode_artifact" -C .epode/agent-feedback-go-0.2.2 &&
-go mod edit -replace=github.com/open-software-network/os-epode/sdk/go=./.epode/agent-feedback-go-0.2.2 &&
-go mod edit -require=github.com/open-software-network/os-epode/sdk/go@v0.2.2`,
-      code: `feedback, err := agentfeedback.New(agentfeedback.Options{\n    APIKey: os.Getenv("AGENT_FEEDBACK_KEY"),\n    Include: []string{"${route}"}, // replace with customer-agent product routes\n    CustomerRef: func(r *http.Request) string { return authenticatedAccountID(r.Context()) },\n    SessionRef: func(r *http.Request) string { return agentSessionID(r.Context()) }, // optional\n})\nif err != nil { log.Fatal(err) }\ndefer feedback.Shutdown(context.Background())\n// Authentication must establish the verified request context before Epode runs.\nhandler := productAuthentication(feedback.Middleware(router))`,
+mkdir -p .epode/agent-feedback-go-0.3.0 &&
+tar -xzf "$epode_artifact" -C .epode/agent-feedback-go-0.3.0 &&
+go mod edit -replace=github.com/open-software-network/os-epode/sdk/go=./.epode/agent-feedback-go-0.3.0 &&
+go mod edit -require=github.com/open-software-network/os-epode/sdk/go@v0.3.0`,
+      code: `feedback, err := agentfeedback.New(agentfeedback.Options{\n    APIKey: os.Getenv("AGENT_FEEDBACK_KEY"),\n    Include: []string{"${route}"}, // replace with customer-agent product routes\n    AccountRef: func(r *http.Request) string { return authenticatedAccountID(r.Context()) },\n    UserRef: func(r *http.Request) string { return authenticatedUserID(r.Context()) },\n    AnonymousRef: func(r *http.Request) string { return firstPartyVisitorID(r.Context()) },\n    CustomerRef: func(r *http.Request) string { return authenticatedAccountID(r.Context()) }, // Ask once compatibility\n    SessionRef: func(r *http.Request) string { return agentSessionID(r.Context()) }, // optional\n})\nif err != nil { log.Fatal(err) }\ndefer feedback.Shutdown(context.Background())\n// Authentication must establish the verified request context before Epode runs.\nhandler := productAuthentication(feedback.Middleware(router))`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },
     rust: {
-      install: `${rustDownload} &&\nmkdir -p vendor/agent-feedback-rust-0.2.2 &&\ntar -xzf "$epode_artifact" -C vendor/agent-feedback-rust-0.2.2`,
-      code: `// Cargo.toml: agent-feedback = { path = "vendor/agent-feedback-rust-0.2.2" }\nlet feedback = AgentFeedbackLayer::new(\n    Options::new(std::env::var("AGENT_FEEDBACK_KEY")?)\n        .include(["${route}"]) // replace with customer-agent product routes\n        .customer_ref(|request| authenticated_account_id(request))\n        .session_ref(|request| agent_session_id(request)), // optional\n)?;\n// The outer authentication layer must populate request extensions before Epode runs.\nlet app = router.layer(feedback.clone()).layer(product_auth_layer());`,
+      install: `${rustDownload} &&\nmkdir -p vendor/agent-feedback-rust-0.3.0 &&\ntar -xzf "$epode_artifact" -C vendor/agent-feedback-rust-0.3.0`,
+      code: `// Cargo.toml: agent-feedback = { path = "vendor/agent-feedback-rust-0.3.0" }\nlet feedback = AgentFeedbackLayer::new(\n    Options::new(std::env::var("AGENT_FEEDBACK_KEY")?)\n        .include(["${route}"]) // replace with customer-agent product routes\n        .account_ref(|request| authenticated_account_id(request))\n        .user_ref(|request| authenticated_user_id(request))\n        .anonymous_ref(|request| first_party_visitor_id(request))\n        .customer_ref(|request| authenticated_account_id(request)) // Ask once compatibility\n        .session_ref(|request| agent_session_id(request)), // optional\n)?;\n// The outer authentication layer must populate request extensions before Epode runs.\nlet app = router.layer(feedback.clone()).layer(product_auth_layer());`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },
     "static-edge": {
@@ -208,8 +208,8 @@ export function setupAgentPrompt(
         : "- Replace the example include route and limit instrumentation to routes used by customer agents.";
   const identityRequirement =
     surface === "static"
-      ? "- Do not invent customerRef for public docs. Add it only if verified edge authentication supplies a stable opaque account ID."
-      : "- Run product authentication and authorized tenant selection before Agent Feedback. customerRef is a synchronous accessor over that verified identity, not an authentication hook. Use a stable opaque account or tenant ID, never a name, email, or caller-supplied unverified value. It is required for durable Ask once.";
+      ? "- Do not invent customer identity for public docs. Add a reference only if verified edge authentication supplies it."
+      : "- Run product authentication and authorized tenant selection before Agent Feedback. accountRef and userRef are synchronous accessors over verified identity; anonymousRef is a product-owned first-party pre-login reference: never a name, email, or caller-supplied unverified value. Agent arguments are untrusted too. Keep customerRef only when durable Ask once needs its compatible subject.";
   const verificationRequirement =
     surface === "mcp"
       ? `- Verify with a real MCP 2026-07-28 client, not an HTTP GET doctor: ${instructions.verify}`

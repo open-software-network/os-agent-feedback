@@ -100,6 +100,11 @@ export type DashboardSessionsListQuery = {
   impact?: string[];
   operation?: string;
   customerRef?: string;
+  customerId?: string;
+  identityLevel?: string[];
+  signalType?: string[];
+  featureKey?: string;
+  outcomeHealth?: string[];
   since?: string;
   until?: string;
   limit?: number;
@@ -146,6 +151,11 @@ export function sessionsListPath(query: DashboardSessionsListQuery): string {
   appendListQuery(params, "impact", query.impact);
   if (query.operation) params.set("operation", query.operation);
   if (query.customerRef) params.set("customerRef", query.customerRef);
+  if (query.customerId) params.set("customerId", query.customerId);
+  appendListQuery(params, "identityLevel", query.identityLevel);
+  appendListQuery(params, "signalType", query.signalType);
+  if (query.featureKey) params.set("featureKey", query.featureKey);
+  appendListQuery(params, "outcomeHealth", query.outcomeHealth);
   if (query.since) params.set("since", query.since);
   if (query.until) params.set("until", query.until);
   if (query.limit !== undefined) params.set("limit", String(query.limit));

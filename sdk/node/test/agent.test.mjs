@@ -5,6 +5,7 @@ import {
   FeedbackSubmissionError,
   feedbackConsentAction,
   feedbackFromResponse,
+  inspectProductFeedback,
   submitFeedbackConsent,
   submitProductFeedback,
 } from "../dist/agent.js";
@@ -72,6 +73,30 @@ const consentEnvelope = {
   expiresAt: new Date(Date.now() + 60_000).toISOString(),
 };
 
+function inspectionResponse(state = "feedback_ready") {
+  return new Response(
+    JSON.stringify({
+      state,
+      configuredMode: state === "feedback_ready" ? "never_ask" : "ask_once",
+      consentPolicy: state === "feedback_ready" ? "none" : "once",
+      productName: "Test product",
+      canonicalQuestion: state === "consent_required" ? "May I send feedback?" : null,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+}
+
+function withInspection(handler, state = "feedback_ready") {
+  return async (url, init) => {
+    if (new URL(String(url)).pathname === "/api/v2/capabilities/introspect") {
+      assert.equal(init.redirect, "error");
+      return inspectionResponse(state);
+    }
+    return handler(url, init);
+  };
+}
+
 test("feedback-aware adapter reads JSON, HTML, and header metadata", () => {
   const headers = new Headers();
   assert.equal(
@@ -104,13 +129,13 @@ test("feedback-aware adapter submits a structured report without a consent attes
     },
     {
       allowedSubmitOrigins: ["https://feedback.test"],
-      fetch: async (url, init) => {
+      fetch: withInspection(async (url, init) => {
         request = { url: String(url), init };
         return new Response('{"accepted":true,"interactionId":"interaction_1"}', {
           status: 200,
           headers: { "content-type": "application/json" },
         });
-      },
+      }),
     },
   );
   assert.equal(result.accepted, true);
@@ -132,7 +157,7 @@ test("feedback-aware adapter retries transient report delivery once with one sta
         { summary: "The product response completed this retried feedback task." },
         {
           allowedSubmitOrigins: ["https://feedback.test"],
-          fetch: async (_url, init) => {
+          fetch: withInspection(async (_url, init) => {
             requests.push(init);
             if (requests.length === 1) {
               const failure = scenario.failure();
@@ -143,7 +168,7 @@ test("feedback-aware adapter retries transient report delivery once with one sta
               JSON.stringify({ accepted: true, interactionId: "interaction_retry" }),
               { status: 200, headers: { "content-type": "application/json" } },
             );
-          },
+          }),
         },
       );
       assert.equal(result.accepted, true);
@@ -166,7 +191,7 @@ test("feedback-aware adapter replays a lost first write without replacing it", a
     },
     {
       allowedSubmitOrigins: ["https://feedback.test"],
-      fetch: async (_url, init) => {
+      fetch: withInspection(async (_url, init) => {
         requests.push(init);
         const idempotencyKey = init.headers["idempotency-key"];
         if (!receipts.has(idempotencyKey)) {
@@ -182,7 +207,7 @@ test("feedback-aware adapter replays a lost first write without replacing it", a
           status: 200,
           headers: { "content-type": "application/json" },
         });
-      },
+      }),
     },
   );
 
@@ -204,10 +229,10 @@ test("feedback-aware adapter exposes an exhausted transient report failure after
         { summary: "The report relay remains unavailable after its bounded retry." },
         {
           allowedSubmitOrigins: ["https://feedback.test"],
-          fetch: async () => {
+          fetch: withInspection(async () => {
             attempts += 1;
             return new Response("{}", { status: 503 });
-          },
+          }),
         },
       ),
     (error) =>
@@ -227,10 +252,10 @@ test("feedback-aware adapter does not retry permanent report failures", async (t
             { summary: "The relay must reject this report without a second attempt." },
             {
               allowedSubmitOrigins: ["https://feedback.test"],
-              fetch: async () => {
+              fetch: withInspection(async () => {
                 attempts += 1;
                 return new Response("{}", { status });
-              },
+              }),
             },
           ),
         (error) =>
@@ -243,18 +268,27 @@ test("feedback-aware adapter does not retry permanent report failures", async (t
   }
 });
 
-test("answer-first consent records only a decision and reveals reporting after approval", async () => {
-  assert.equal(feedbackConsentAction(consentEnvelope), "ask");
+test("answer-first consent resolves authority before asking or deciding", async () => {
+  assert.equal(feedbackConsentAction(consentEnvelope), "skip");
+  const unknown = await inspectProductFeedback(consentEnvelope, {
+    allowedSubmitOrigins: ["https://feedback.test"],
+    fetch: withInspection(
+      async () => assert.fail("inspection must not submit"),
+      "consent_required",
+    ),
+  });
+  assert.equal(unknown.action, "ask");
+  assert.equal(unknown.canonicalQuestion, "May I send feedback?");
   let decisionBody;
   const approved = await submitFeedbackConsent(consentEnvelope, "approved", {
     allowedSubmitOrigins: ["https://feedback.test"],
-    fetch: async (_url, init) => {
+    fetch: withInspection(async (_url, init) => {
       decisionBody = JSON.parse(init.body);
       return new Response(JSON.stringify({ state: "approved", feedback: envelope }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
-    },
+    }, "consent_required"),
   });
   assert.deepEqual(decisionBody, { decision: "approved" });
   assert.equal(approved.state, "approved");
@@ -262,11 +296,14 @@ test("answer-first consent records only a decision and reveals reporting after a
 
   const declined = await submitFeedbackConsent(consentEnvelope, "declined", {
     allowedSubmitOrigins: ["https://feedback.test"],
-    fetch: async () =>
-      new Response('{"state":"declined","feedback":null}', {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
+    fetch: withInspection(
+      async () =>
+        new Response('{"state":"declined","feedback":null}', {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      "consent_required",
+    ),
   });
   assert.equal(declined.state, "declined");
   assert.equal(declined.feedback, undefined);
@@ -274,8 +311,18 @@ test("answer-first consent records only a decision and reveals reporting after a
 
 test("feedback-aware adapter rejects wrong-stage and untrusted contracts", async () => {
   await assert.rejects(
-    submitProductFeedback(consentEnvelope, { summary: "This report summary is long enough." }),
-    /Invalid Agent Feedback submission contract/,
+    submitProductFeedback(
+      consentEnvelope,
+      { summary: "This report summary is long enough." },
+      {
+        allowedSubmitOrigins: ["https://feedback.test"],
+        fetch: withInspection(
+          async () => assert.fail("permission denied before report"),
+          "consent_required",
+        ),
+      },
+    ),
+    /does not allow submission/,
   );
   await assert.rejects(
     submitProductFeedback(
@@ -355,6 +402,20 @@ test("feedback-aware adapter accepts the safe per-use fallback for unscoped ask-
       consentPolicy: "always",
       when: "after_experience_known_and_explicit_user_approval",
     }),
-    "ask",
+    "skip",
   );
+});
+
+test("authoritative inspection suppresses stale Ask-once prompts and enables remembered reports", async () => {
+  for (const [state, action] of [
+    ["declined", "skip"],
+    ["feedback_ready", "submit"],
+    ["consent_required", "ask"],
+  ]) {
+    const result = await inspectProductFeedback(consentEnvelope, {
+      allowedSubmitOrigins: ["https://feedback.test"],
+      fetch: withInspection(async () => assert.fail("inspection must not submit"), state),
+    });
+    assert.equal(result.action, action);
+  }
 });

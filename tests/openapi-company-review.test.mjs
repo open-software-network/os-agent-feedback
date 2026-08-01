@@ -151,13 +151,22 @@ test("the current Epode OpenAPI compiles reproducibly to a review-only manifest"
 
   assert.deepEqual(first, second);
   assert.equal(first.source.sha256, expectedDigest);
-  assert.equal(first.summary.totalOperations, 44);
-  assert.equal(first.summary.readOnlyGetOrHead, 18);
+  assert.equal(first.summary.totalOperations, 49);
+  assert.equal(first.summary.readOnlyGetOrHead, 23);
   assert.equal(first.summary.eligibleForCompanyReview, 1);
-  assert.equal(first.summary.excludedByPolicy, 43);
+  assert.equal(first.summary.excludedByPolicy, 48);
   assert.equal(first.summary.approvedForIr, 0);
   assert.equal(first.upstream.status, "company_input_required");
   assert.deepEqual(first.upstream.usablePinnedBaseUrls, []);
   assert.equal(first.authentication.schemes.length, 3);
+  for (const path of [
+    "/api/dashboard/customers",
+    "/api/dashboard/customers/{customer_id}",
+    "/api/dashboard/features",
+    "/api/dashboard/features/{feature_key}",
+    "/api/dashboard/signals",
+  ]) {
+    assert.ok(first.operations.some((operation) => operation.path === path));
+  }
   assert.ok(first.operations.every((operation) => operation.defaultDecision === "exclude"));
 });

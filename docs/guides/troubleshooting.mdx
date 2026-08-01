@@ -28,8 +28,9 @@ description: "Diagnose missing telemetry, missing feedback, consent errors, and 
     `feedback_ready` contract returned after approval. Never add consent fields to the report body.
   </Accordion>
   <Accordion title="Ask once keeps asking">
-    Configure `customerRef` from a stable opaque account or tenant ID supplied by your product authentication.
-    Do not use a name or email. Without `customerRef`, Ask once safely becomes per-interaction permission and the SDK logs a warning.
+    Configure `customerRef` from the same stable opaque account or tenant ID used for verified `accountRef`.
+    Do not pair it with `userRef` alone or use a name, email, caller value, prompt, or agent argument. Without
+    `customerRef`, Ask once safely becomes per-interaction permission and the SDK logs a warning.
     For HTTP products, install Epode Companion so the agent verifies each capability and checks Epode's remembered
     state before asking. The company's product response never waits on that check.
   </Accordion>

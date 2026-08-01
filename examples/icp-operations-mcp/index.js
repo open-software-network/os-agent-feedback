@@ -10,9 +10,15 @@ const feedback = createMcpInstrumentation({
   endpoint: process.env.AGENT_FEEDBACK_URL,
   includeTools: ["send_email", "create_payment_link", "update_issue"],
   feedbackTools: ["send_email", "create_payment_link", "update_issue"],
-  sessionRef: (arguments_) => arguments_?.workflowId,
-  // In production this comes from verified OAuth context, never tool input.
-  customerRef: (_arguments, context) => context.http?.authInfo?.extra?.accountId || "acct_operations_demo",
+  sessionRef: (_arguments, context) => context.http?.authInfo?.extra?.sessionId,
+  // Identity and durable grouping come from verified OAuth context, never tool input.
+  accountRef: (_arguments, context) => context.http?.authInfo?.extra?.accountId,
+  userRef: (_arguments, context) => context.http?.authInfo?.extra?.userId,
+  anonymousRef: (_arguments, context) => context.http?.authInfo?.extra?.anonymousId,
+  customerRef:
+    process.env.AGENT_FEEDBACK_MODE === "ask_once"
+      ? (_arguments, context) => context.http?.authInfo?.extra?.accountId
+      : undefined,
 });
 
 function productServer() {
@@ -37,5 +43,26 @@ function productServer() {
 
 const handleMcp = toNodeHandler(createMcpHandler(productServer, { legacy: "stateless", responseMode: "json" }));
 app.get("/health", (_request, response) => response.json({ ok: true }));
+app.use("/mcp", (request, response, next) => {
+  if (request.get("authorization") !== "Bearer demo-mcp-customer-token") {
+    return response.status(401).json({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32001, message: "Unauthorized" },
+    });
+  }
+  request.auth = {
+    token: "verified-operations-oauth",
+    clientId: "operations-client",
+    scopes: [],
+    extra: {
+      accountId: "acct_operations_demo",
+      userId: "user_operations_demo",
+      anonymousId: "anon_operations_demo",
+      sessionId: "workflow_ops_8",
+    },
+  };
+  next();
+});
 app.all("/mcp", (request, response) => handleMcp(request, response, request.body));
 app.listen(Number(process.env.PORT || 4205), "127.0.0.1");

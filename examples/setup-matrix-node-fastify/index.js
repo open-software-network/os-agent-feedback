@@ -23,13 +23,23 @@ app.addHook("preHandler", async (request, reply) => {
   if (!/^[A-Za-z0-9_.:-]{1,160}$/.test(accountId)) {
     return reply.code(401).send({ error: "unauthorized" });
   }
-  request.auth = { accountId };
+  request.auth = {
+    accountId,
+    userId: `user.${accountId}`,
+    anonymousId: `anon.${accountId}`,
+  };
 });
 await app.register(agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
   endpoint: process.env.AGENT_FEEDBACK_URL,
   include: ["/search", "/docs/*"],
-  customerRef: (request) => request.auth?.accountId,
+  accountRef: (request) => request.auth?.accountId,
+  userRef: (request) => request.auth?.userId,
+  anonymousRef: (request) => request.auth?.anonymousId,
+  customerRef:
+    process.env.AGENT_FEEDBACK_MODE === "ask_once"
+      ? (request) => request.auth?.accountId
+      : undefined,
 }));
 app.get("/search", async () => ({ stack: "node-fastify", answer: "fastify-result" }));
 app.get("/docs/test", async (_request, reply) => reply.type("text/html").send("<!doctype html><html><head><title>Fastify docs</title></head><body>fastify-docs-result</body></html>"));

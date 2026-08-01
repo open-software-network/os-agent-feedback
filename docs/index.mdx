@@ -1,11 +1,12 @@
 ---
 title: "Epode documentation"
-description: "Learn whether your product worked for your customer's agent."
+description: "The customer-intelligence layer for the agent-mediated internet."
 ---
 
-Epode collects structured product feedback from the **independent agents used by your customers**.
-You instrument your product. Your customers do not install an Epode SDK, create an Epode account,
-or identify their agent.
+Epode gives companies a permissioned communication channel with the **independent agents used by
+their customers**. Learn what customers wanted, whether the product worked, where they struggled, and
+which evidence-backed change matters next. You instrument your product; customers do not install an SDK,
+create an Epode account, or identify their agent.
 
 <CardGroup cols={2}>
   <Card title="Connect a product" icon="plug" href="/quickstart">
@@ -17,8 +18,8 @@ or identify their agent.
   <Card title="Understand reliability" icon="signal" href="/concepts/reliability">
     Learn why HTTP begins as an opportunity while MCP is confirmed immediately.
   </Card>
-  <Card title="Read the results" icon="chart-line" href="/guides/read-the-data">
-    Interpret feedback, sessions, rates, and agent-provided context correctly.
+  <Card title="Understand customers" icon="chart-line" href="/concepts/customers-and-sessions">
+    Connect outcomes, needs, evidence, identity provenance, permission, and sessions.
   </Card>
 </CardGroup>
 
@@ -39,9 +40,11 @@ or identify their agent.
 </Steps>
 
 <Note>
-Epode does not identify agents. Optional customer and session references come from identifiers your
-product already knows, and should be opaque—not names, emails, prompts, or task content.
-`customerRef` is required only when Ask once must remember a decision across interactions.
+Epode does not identify agents or invent customer identity. Optional customer and session references come
+from verified identifiers, product-owned anonymous references, and server-proven journeys—not names, emails,
+prompts, task content, caller fields, or agent claims. `customerRef` remains only the compatible Ask-once
+subject and must equal `accountRef` when both are present; new integrations add `accountRef`, `userRef`, and
+`anonymousRef` as private, nonblocking telemetry.
 </Note>
 
 ## Pick the right starting point

@@ -7,6 +7,12 @@ Use this advanced path only when your team controls a server-side edge route or 
 static site, CMS, or hosted documentation origin. A browser script, tag manager, theme snippet, or public build
 variable is never safe: `AGENT_FEEDBACK_KEY` must remain an edge secret.
 
+Public documentation needs no customer identity. Leave identity accessors unset by default. If the trusted edge
+already authenticates a visitor, `accountRef`/`userRef` may read only that verified edge state and
+`anonymousRef` may read only a stable product-owned first-party visitor ID. Keep `customerRef` only for durable
+Ask once and identical to `accountRef`; never derive identity or `sessionRef` from public request headers,
+cookies you have not verified, names, emails, prompts, query values, or agent arguments.
+
 Bind the Worker only to dedicated public docs routes such as `/docs/*`; never attach it as a hostname-wide
 catch-all or fallback. The SDK `include` list is a second fail-closed boundary, not a substitute for the edge
 platform's route binding. Paths outside `include` return 404 and methods other than GET or HEAD return 405 without
@@ -21,7 +27,7 @@ Epode with a short-lived write-only capability.
 Install the Node SDK in the Worker project and enable the platform's Node compatibility mode:
 
 ```bash
-npm install https://app.epode.ai/static/agent-feedback-node-0.2.2.tgz
+npm install https://app.epode.ai/static/agent-feedback-node-0.3.0.tgz
 ```
 
 ```js

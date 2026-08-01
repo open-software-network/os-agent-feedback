@@ -8,8 +8,10 @@ use std::collections::BTreeMap;
 use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sqlx::{Executor, PgPool, Postgres, Transaction};
+use sha2::Sha256;
+use sqlx::{Acquire, Executor, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
@@ -20,16 +22,19 @@ use crate::{
         IssueCount, IssueFindingRollup, IssueTemplateData, contains_sensitive_report_text,
     },
     models::{
-        ApiKeyPublic, CapabilityInspectionResponse, ConsentDecisionInput, ConsentStateInput,
-        ConsentStateResponse, CreateProductInput, CreateTeamInvitationInput, DashboardContext,
-        DashboardData, DashboardFeedbackFacets, DashboardFeedbackFilters, DashboardFeedbackPage,
-        DashboardListState, DashboardSessionDetail, DashboardSessionFilters,
-        DashboardSessionRollup, DashboardSessionSummary, DashboardSessionsPage, DeleteProductInput,
-        FeedbackFindingInput, FeedbackInteractionItem, FeedbackInteractionsPage,
-        FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackOperationSummary,
-        FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse, FeedbackSummary,
-        FeedbackSurfaceSummary, FeedbackWindow, GithubIssueLink, InsightCount, Insights,
-        InteractionTelemetryInput, MergeReportGroupsResponse, PolicyInput, Product,
+        ApiKeyPublic, CapabilityInspectionResponse, ConsentDecisionInput, ConsentEventSummary,
+        ConsentGrant, ConsentStateInput, ConsentStateResponse, CreateProductInput,
+        CreateTeamInvitationInput, CustomerDetailCounts, CustomerFacets, CustomerIdentifier,
+        CustomerRollup, CustomerSignal, CustomerSummary, DashboardContext, DashboardCustomerDetail,
+        DashboardCustomerFilters, DashboardCustomersPage, DashboardData, DashboardFeedbackFacets,
+        DashboardFeedbackFilters, DashboardFeedbackPage, DashboardListState,
+        DashboardSessionDetail, DashboardSessionFilters, DashboardSessionRollup,
+        DashboardSessionSummary, DashboardSessionsPage, DashboardSignalFilters,
+        DashboardSignalsPage, DeleteProductInput, FeedbackFindingInput, FeedbackInteractionItem,
+        FeedbackInteractionsPage, FeedbackListInteractionsInput, FeedbackListReportsInput,
+        FeedbackOperationSummary, FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse,
+        FeedbackSummary, FeedbackSurfaceSummary, FeedbackWindow, GithubIssueLink, InsightCount,
+        Insights, InteractionTelemetryInput, MergeReportGroupsResponse, PolicyInput, Product,
         ProductActivationMilestones, ProductAuth, ProductEnvironment, ProductFeedbackReport,
         ProductFeedbackReportInput, ProductFeedbackReportWithInteraction, ProductGithubRepo,
         ProductGithubRepoInput, ProductInteraction, ProductReportGroup, ProductSession,
@@ -3088,6 +3093,696 @@ pub(crate) async fn dashboard_sessions_page(
     })
 }
 
+fn validate_customer_filters(filters: &DashboardCustomerFilters) -> Result<(), ApiError> {
+    validate_feedback_values(
+        filters.identity_levels.as_deref(),
+        &["verified", "pseudonymous", "ephemeral"],
+        "identityLevel",
+    )?;
+    validate_feedback_values(
+        filters.outcome_health.as_deref(),
+        &["healthy", "at_risk", "unknown"],
+        "outcomeHealth",
+    )?;
+    validate_feedback_values(
+        filters.signal_types.as_deref(),
+        &[
+            "outcome",
+            "intent",
+            "friction",
+            "preference",
+            "constraint",
+            "feature_need",
+            "alternative_considered",
+            "workaround",
+            "satisfaction",
+            "likelihood_to_reuse",
+        ],
+        "signalType",
+    )?;
+    validate_feedback_values(
+        filters.consent_states.as_deref(),
+        &["approved", "declined", "revoked", "unknown"],
+        "consentState",
+    )?;
+    validate_dashboard_text(filters.query.as_deref(), "query", 200)?;
+    if filters
+        .since
+        .zip(filters.until)
+        .is_some_and(|(since, until)| since > until)
+    {
+        return Err(ApiError::bad_request("since must not be after until"));
+    }
+    if filters
+        .segments
+        .as_ref()
+        .is_some_and(|segments| segments.is_empty() || segments.len() > 20)
+    {
+        return Err(ApiError::bad_request("Invalid segment filter"));
+    }
+    Ok(())
+}
+
+async fn customer_facets(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    retained_since: DateTime<Utc>,
+) -> Result<CustomerFacets, ApiError> {
+    let rows = sqlx::query_as::<_, (String, String, i64)>(
+        r"WITH product_customers AS (
+          SELECT customer.id, customer.identity_level, customer.segments
+          FROM customers customer
+          WHERE customer.workspace_id = $1
+            AND customer.merged_into_customer_id IS NULL
+            AND EXISTS (
+              SELECT 1 FROM customer_identifiers identifier
+              WHERE identifier.workspace_id = $1 AND identifier.product_id = $2
+                AND identifier.customer_id = customer.id
+            )
+        ), outcomes AS (
+          SELECT customer.id,
+            COALESCE((
+              SELECT CASE
+                WHEN signal.attributes ->> 'impact' IN ('blocked', 'hindered') THEN 'at_risk'
+                WHEN signal.attributes ->> 'impact' IN ('helped', 'helped_with_friction') THEN 'healthy'
+                ELSE 'unknown' END
+              FROM customer_signals signal
+              WHERE signal.workspace_id = $1 AND signal.product_id = $2
+                AND signal.customer_id = customer.id
+                AND signal.signal_type = 'outcome' AND signal.collected_at >= $3
+                AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
+              ORDER BY signal.collected_at DESC, signal.id DESC LIMIT 1
+            ), 'unknown') AS outcome_health
+          FROM product_customers customer
+        ), consents AS (
+          SELECT customer.id,
+            COALESCE((
+              SELECT grant_row.state FROM consent_grants grant_row
+              WHERE grant_row.workspace_id = $1 AND grant_row.product_id = $2
+                AND grant_row.customer_id = customer.id
+                AND grant_row.scope = 'share_outcome'
+                AND (grant_row.expires_at IS NULL OR grant_row.expires_at > NOW())
+              ORDER BY grant_row.updated_at DESC, grant_row.id DESC LIMIT 1
+            ), 'unknown') AS consent_state
+          FROM product_customers customer
+        ), facet_values AS (
+          SELECT 'identity_level'::TEXT AS facet, identity_level AS value, id AS evidence_id
+          FROM product_customers
+          UNION ALL SELECT 'outcome_health', outcome_health, id FROM outcomes
+          UNION ALL SELECT 'consent_state', consent_state, id FROM consents
+          UNION ALL SELECT 'segment', segment, customer.id
+            FROM product_customers customer CROSS JOIN LATERAL UNNEST(customer.segments) segment
+          UNION ALL SELECT 'signal_type', signal.signal_type, signal.id
+            FROM customer_signals signal
+            WHERE signal.workspace_id = $1 AND signal.product_id = $2
+              AND signal.collected_at >= $3
+              AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
+        )
+        SELECT facet, value, COUNT(DISTINCT evidence_id)::BIGINT
+        FROM facet_values WHERE value IS NOT NULL AND value <> ''
+        GROUP BY facet, value ORDER BY facet, COUNT(DISTINCT evidence_id) DESC, value",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(retained_since)
+    .fetch_all(pool)
+    .await?;
+    let mut facets = CustomerFacets::default();
+    for (facet, name, count) in rows {
+        let item = InsightCount { name, count };
+        match facet.as_str() {
+            "identity_level" => facets.identity_level.push(item),
+            "outcome_health" => facets.outcome_health.push(item),
+            "signal_type" => facets.signal_type.push(item),
+            "consent_state" => facets.consent_state.push(item),
+            "segment" => facets.segment.push(item),
+            _ => {}
+        }
+    }
+    Ok(facets)
+}
+
+pub(crate) async fn dashboard_customers_page(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    filters: DashboardCustomerFilters,
+) -> Result<DashboardCustomersPage, ApiError> {
+    validate_customer_filters(&filters)?;
+    let environment = dashboard_environment_for_product(pool, workspace_id, product_id).await?;
+    let retained_since = Utc::now() - Duration::days(environment.retention_days.into());
+    let since = filters
+        .since
+        .filter(|since| *since > retained_since)
+        .unwrap_or(retained_since);
+    let limit = dashboard_list_limit(filters.limit)?;
+    let page_size = usize::try_from(limit).map_err(ApiError::internal)?;
+    let cursor = decode_feedback_cursor(filters.cursor.as_deref(), retained_since)?;
+    let cursor_last_activity_at = cursor.as_ref().map(|cursor| cursor.occurred_at);
+    let cursor_id = cursor.as_ref().map(|cursor| cursor.id);
+    let search = filters.query.as_deref().map(dashboard_search_pattern);
+
+    let mut customers = sqlx::query_as::<_, CustomerSummary>(
+        r"WITH summaries AS (
+          SELECT customer.id, customer.kind, customer.parent_customer_id,
+            (SELECT COUNT(*) FROM customers member
+              WHERE member.workspace_id = customer.workspace_id
+                AND member.parent_customer_id = customer.id
+                AND member.merged_into_customer_id IS NULL)::BIGINT AS member_count,
+            COALESCE(customer.display_name, user_identifier.display_hint,
+              account_identifier.display_hint, any_identifier.display_hint,
+              CASE WHEN customer.identity_level = 'pseudonymous'
+                THEN 'Anonymous customer' ELSE 'Customer' END) AS display_name,
+            customer.identity_level, customer.identity_confidence,
+            account_identifier.display_hint AS account_ref_hint,
+            user_identifier.display_hint AS user_ref_hint,
+            customer.segments,
+            COALESCE(activity.last_activity_at, customer.last_seen_at) AS last_activity_at,
+            COALESCE(outcome.outcome_health, 'unknown') AS outcome_health,
+            COALESCE(activity.signal_count, 0)::BIGINT AS signal_count,
+            COALESCE(activity.session_count, 0)::BIGINT AS session_count,
+            COALESCE(activity.active_need_count, 0)::BIGINT AS active_need_count,
+            COALESCE(consent.consent_state, 'unknown') AS consent_state
+          FROM customers customer
+          JOIN LATERAL (
+            SELECT identifier.display_hint
+            FROM customer_identifiers identifier
+            WHERE identifier.workspace_id = $1 AND identifier.product_id = $2
+              AND identifier.customer_id = customer.id
+            ORDER BY identifier.created_at, identifier.id LIMIT 1
+          ) any_identifier ON TRUE
+          LEFT JOIN LATERAL (
+            SELECT identifier.display_hint
+            FROM customer_identifiers identifier
+            WHERE identifier.workspace_id = $1 AND identifier.product_id = $2
+              AND identifier.customer_id = customer.id AND identifier.kind = 'account_ref'
+            ORDER BY identifier.created_at, identifier.id LIMIT 1
+          ) account_identifier ON TRUE
+          LEFT JOIN LATERAL (
+            SELECT identifier.display_hint
+            FROM customer_identifiers identifier
+            WHERE identifier.workspace_id = $1 AND identifier.product_id = $2
+              AND identifier.customer_id = customer.id AND identifier.kind = 'user_ref'
+            ORDER BY identifier.created_at, identifier.id LIMIT 1
+          ) user_identifier ON TRUE
+          LEFT JOIN LATERAL (
+            SELECT MAX(interaction.occurred_at) AS last_activity_at,
+              COUNT(signal.id)::BIGINT AS signal_count,
+              COUNT(DISTINCT interaction.session_id)::BIGINT AS session_count,
+              COUNT(signal.id) FILTER (WHERE signal.signal_type IN ('feature_need', 'friction')
+                AND (signal.expires_at IS NULL OR signal.expires_at > NOW()))::BIGINT
+                AS active_need_count
+            FROM interactions_v2 interaction
+            LEFT JOIN customer_signals signal
+              ON signal.interaction_id = interaction.id
+              AND signal.workspace_id = interaction.workspace_id
+              AND signal.product_id = $2
+              AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
+            WHERE interaction.workspace_id = $1
+              AND interaction.environment_id IN (
+                SELECT id FROM product_environments
+                WHERE workspace_id = $1 AND product_id = $2
+              )
+              AND interaction.customer_id = customer.id
+              AND interaction.occurred_at >= $3
+              AND ($4::TIMESTAMPTZ IS NULL OR interaction.occurred_at <= $4)
+          ) activity ON TRUE
+          LEFT JOIN LATERAL (
+            SELECT CASE
+              WHEN signal.attributes ->> 'impact' IN ('blocked', 'hindered') THEN 'at_risk'
+              WHEN signal.attributes ->> 'impact' IN ('helped', 'helped_with_friction') THEN 'healthy'
+              ELSE 'unknown' END AS outcome_health
+            FROM customer_signals signal
+            WHERE signal.workspace_id = $1 AND signal.product_id = $2
+              AND signal.customer_id = customer.id AND signal.signal_type = 'outcome'
+              AND signal.collected_at >= $3
+              AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
+            ORDER BY signal.collected_at DESC, signal.id DESC LIMIT 1
+          ) outcome ON TRUE
+          LEFT JOIN LATERAL (
+            SELECT grant_row.state AS consent_state FROM consent_grants grant_row
+            WHERE grant_row.workspace_id = $1 AND grant_row.product_id = $2
+              AND grant_row.customer_id = customer.id
+              AND grant_row.scope = 'share_outcome'
+              AND (grant_row.expires_at IS NULL OR grant_row.expires_at > NOW())
+            ORDER BY grant_row.updated_at DESC, grant_row.id DESC LIMIT 1
+          ) consent ON TRUE
+          WHERE customer.workspace_id = $1 AND customer.merged_into_customer_id IS NULL
+        )
+        SELECT * FROM summaries
+        WHERE last_activity_at IS NOT NULL
+          AND ($4::TIMESTAMPTZ IS NULL OR last_activity_at <= $4)
+          AND ($5::TEXT IS NULL OR display_name ILIKE $5 ESCAPE '\'
+            OR COALESCE(account_ref_hint, '') ILIKE $5 ESCAPE '\'
+            OR COALESCE(user_ref_hint, '') ILIKE $5 ESCAPE '\')
+          AND ($6::TEXT[] IS NULL OR identity_level = ANY($6))
+          AND ($7::TEXT[] IS NULL OR outcome_health = ANY($7))
+          AND ($8::TEXT[] IS NULL OR consent_state = ANY($8))
+          AND ($9::TEXT[] IS NULL OR segments && $9)
+          AND ($10::TEXT[] IS NULL OR EXISTS (
+            SELECT 1 FROM customer_signals signal
+            WHERE signal.workspace_id = $1 AND signal.product_id = $2
+              AND signal.customer_id = summaries.id AND signal.signal_type = ANY($10)
+              AND signal.collected_at >= $3
+              AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
+          ))
+          AND ($11::TIMESTAMPTZ IS NULL OR (last_activity_at, id) < ($11, $12))
+        ORDER BY last_activity_at DESC, id DESC LIMIT $13",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(since)
+    .bind(filters.until)
+    .bind(search)
+    .bind(filters.identity_levels)
+    .bind(filters.outcome_health)
+    .bind(filters.consent_states)
+    .bind(filters.segments)
+    .bind(filters.signal_types)
+    .bind(cursor_last_activity_at)
+    .bind(cursor_id)
+    .bind(limit + 1)
+    .fetch_all(pool)
+    .await?;
+    let next_cursor = if customers.len() > page_size {
+        let last = &customers[page_size - 1];
+        Some(encode_feedback_cursor(last.last_activity_at, last.id)?)
+    } else {
+        None
+    };
+    customers.truncate(page_size);
+
+    let (customer_count, verified, pseudonymous, ephemeral, active, at_risk) =
+        sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64)>(
+            r"SELECT COUNT(DISTINCT customer.id),
+              COUNT(DISTINCT customer.id) FILTER (WHERE customer.identity_level = 'verified'),
+              COUNT(DISTINCT customer.id) FILTER (WHERE customer.identity_level = 'pseudonymous'),
+              COUNT(DISTINCT customer.id) FILTER (WHERE customer.identity_level = 'ephemeral'),
+              COUNT(DISTINCT customer.id) FILTER (
+                WHERE customer.last_seen_at >= NOW() - INTERVAL '30 days'),
+              COUNT(DISTINCT customer.id) FILTER (WHERE EXISTS (
+                SELECT 1 FROM customer_signals signal
+                WHERE signal.workspace_id = $1 AND signal.product_id = $2
+                  AND signal.customer_id = customer.id AND signal.signal_type = 'outcome'
+                  AND signal.attributes ->> 'impact' IN ('blocked', 'hindered')
+                  AND signal.collected_at >= $3
+                  AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
+              ))
+            FROM customers customer
+            WHERE customer.workspace_id = $1 AND customer.merged_into_customer_id IS NULL
+              AND EXISTS (SELECT 1 FROM customer_identifiers identifier
+                WHERE identifier.workspace_id = $1 AND identifier.product_id = $2
+                  AND identifier.customer_id = customer.id)",
+        )
+        .bind(workspace_id)
+        .bind(product_id)
+        .bind(retained_since)
+        .fetch_one(pool)
+        .await?;
+    let unclassified = sqlx::query_scalar::<_, i64>(
+        r"SELECT COUNT(*) FROM interactions_v2
+        WHERE workspace_id = $1 AND environment_id IN (
+          SELECT id FROM product_environments WHERE workspace_id = $1 AND product_id = $2
+        ) AND customer_id IS NULL AND occurred_at >= $3",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(retained_since)
+    .fetch_one(pool)
+    .await?;
+    Ok(DashboardCustomersPage {
+        customers,
+        rollup: CustomerRollup {
+            customers: customer_count,
+            verified,
+            pseudonymous,
+            ephemeral,
+            unclassified,
+            active,
+            at_risk,
+        },
+        facets: customer_facets(pool, workspace_id, product_id, retained_since).await?,
+        limit,
+        next_cursor,
+    })
+}
+
+fn validate_signal_filters(filters: &DashboardSignalFilters) -> Result<(), ApiError> {
+    validate_feedback_values(
+        filters.signal_types.as_deref(),
+        &[
+            "outcome",
+            "intent",
+            "friction",
+            "preference",
+            "constraint",
+            "feature_need",
+            "alternative_considered",
+            "workaround",
+            "satisfaction",
+            "likelihood_to_reuse",
+        ],
+        "type",
+    )?;
+    validate_feedback_values(
+        filters.provenances.as_deref(),
+        &[
+            "agent_reports_user_statement",
+            "agent_reports_current_task",
+            "agent_inference",
+            "product_activity",
+            "company_assertion",
+        ],
+        "provenance",
+    )?;
+    validate_dashboard_text(filters.query.as_deref(), "query", 200)?;
+    validate_dashboard_text(filters.feature_key.as_deref(), "featureKey", 64)?;
+    if filters
+        .since
+        .zip(filters.until)
+        .is_some_and(|(since, until)| since > until)
+    {
+        return Err(ApiError::bad_request("since must not be after until"));
+    }
+    Ok(())
+}
+
+pub(crate) async fn dashboard_signals_page(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    filters: DashboardSignalFilters,
+) -> Result<DashboardSignalsPage, ApiError> {
+    validate_signal_filters(&filters)?;
+    let environment = dashboard_environment_for_product(pool, workspace_id, product_id).await?;
+    let retained_since = Utc::now() - Duration::days(environment.retention_days.into());
+    let since = filters
+        .since
+        .filter(|since| *since > retained_since)
+        .unwrap_or(retained_since);
+    let limit = dashboard_list_limit(filters.limit)?;
+    let page_size = usize::try_from(limit).map_err(ApiError::internal)?;
+    let cursor = decode_feedback_cursor(filters.cursor.as_deref(), retained_since)?;
+    let cursor_collected_at = cursor.as_ref().map(|cursor| cursor.occurred_at);
+    let cursor_id = cursor.as_ref().map(|cursor| cursor.id);
+    let search = filters.query.as_deref().map(dashboard_search_pattern);
+    let total = sqlx::query_scalar::<_, i64>(
+        r"SELECT COUNT(*) FROM customer_signals signal
+        WHERE signal.workspace_id = $1 AND signal.product_id = $2
+          AND signal.collected_at >= $3
+          AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
+          AND ($4::TIMESTAMPTZ IS NULL OR signal.collected_at <= $4)
+          AND ($5::TEXT IS NULL OR signal.summary ILIKE $5 ESCAPE '\'
+            OR COALESCE(signal.detail, '') ILIKE $5 ESCAPE '\')
+          AND ($6::UUID IS NULL OR signal.customer_id = $6)
+          AND ($7::TEXT IS NULL OR signal.feature_key = $7)
+          AND ($8::UUID IS NULL OR signal.session_id = $8)
+          AND ($9::TEXT[] IS NULL OR signal.signal_type = ANY($9))
+          AND ($10::TEXT[] IS NULL OR signal.provenance = ANY($10))",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(since)
+    .bind(filters.until)
+    .bind(&search)
+    .bind(filters.customer_id)
+    .bind(&filters.feature_key)
+    .bind(filters.session_id)
+    .bind(&filters.signal_types)
+    .bind(&filters.provenances)
+    .fetch_one(pool)
+    .await?;
+    let mut signals = sqlx::query_as::<_, CustomerSignal>(
+        r"SELECT signal.id, signal.customer_id, signal.session_id,
+          signal.interaction_id, signal.feedback_report_id, signal.feature_key,
+          signal.signal_type, signal.summary, signal.detail, signal.provenance,
+          signal.confidence, signal.collected_at, signal.expires_at,
+          signal.consent_scope, grant_row.state AS consent_state
+        FROM customer_signals signal
+        LEFT JOIN consent_grants grant_row
+          ON grant_row.id = signal.consent_grant_id
+          AND grant_row.workspace_id = signal.workspace_id
+        WHERE signal.workspace_id = $1 AND signal.product_id = $2
+          AND signal.collected_at >= $3
+          AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
+          AND ($4::TIMESTAMPTZ IS NULL OR signal.collected_at <= $4)
+          AND ($5::TEXT IS NULL OR signal.summary ILIKE $5 ESCAPE '\'
+            OR COALESCE(signal.detail, '') ILIKE $5 ESCAPE '\')
+          AND ($6::UUID IS NULL OR signal.customer_id = $6)
+          AND ($7::TEXT IS NULL OR signal.feature_key = $7)
+          AND ($8::UUID IS NULL OR signal.session_id = $8)
+          AND ($9::TEXT[] IS NULL OR signal.signal_type = ANY($9))
+          AND ($10::TEXT[] IS NULL OR signal.provenance = ANY($10))
+          AND ($11::TIMESTAMPTZ IS NULL OR
+            (signal.collected_at, signal.id) < ($11, $12))
+        ORDER BY signal.collected_at DESC, signal.id DESC LIMIT $13",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(since)
+    .bind(filters.until)
+    .bind(search)
+    .bind(filters.customer_id)
+    .bind(filters.feature_key)
+    .bind(filters.session_id)
+    .bind(filters.signal_types)
+    .bind(filters.provenances)
+    .bind(cursor_collected_at)
+    .bind(cursor_id)
+    .bind(limit + 1)
+    .fetch_all(pool)
+    .await?;
+    let next_cursor = if signals.len() > page_size {
+        let last = &signals[page_size - 1];
+        Some(encode_feedback_cursor(last.collected_at, last.id)?)
+    } else {
+        None
+    };
+    signals.truncate(page_size);
+    Ok(DashboardSignalsPage {
+        signals,
+        total,
+        limit,
+        next_cursor,
+    })
+}
+
+async fn dashboard_customer_summary_by_id(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    customer_id: Uuid,
+    retained_since: DateTime<Utc>,
+) -> Result<CustomerSummary, ApiError> {
+    sqlx::query_as::<_, CustomerSummary>(
+        r"SELECT customer.id, customer.kind, customer.parent_customer_id,
+          (SELECT COUNT(*) FROM customers member
+            WHERE member.workspace_id = customer.workspace_id
+              AND member.parent_customer_id = customer.id
+              AND member.merged_into_customer_id IS NULL)::BIGINT AS member_count,
+          COALESCE(customer.display_name, user_identifier.display_hint,
+            account_identifier.display_hint, any_identifier.display_hint,
+            CASE WHEN customer.identity_level = 'pseudonymous'
+              THEN 'Anonymous customer' ELSE 'Customer' END) AS display_name,
+          customer.identity_level, customer.identity_confidence,
+          account_identifier.display_hint AS account_ref_hint,
+          user_identifier.display_hint AS user_ref_hint, customer.segments,
+          COALESCE(activity.last_activity_at, customer.last_seen_at) AS last_activity_at,
+          COALESCE(outcome.outcome_health, 'unknown') AS outcome_health,
+          COALESCE(activity.signal_count, 0)::BIGINT AS signal_count,
+          COALESCE(activity.session_count, 0)::BIGINT AS session_count,
+          COALESCE(activity.active_need_count, 0)::BIGINT AS active_need_count,
+          COALESCE(consent.consent_state, 'unknown') AS consent_state
+        FROM customers customer
+        JOIN LATERAL (SELECT identifier.display_hint FROM customer_identifiers identifier
+          WHERE identifier.workspace_id = $1 AND identifier.product_id = $2
+            AND identifier.customer_id = customer.id
+          ORDER BY identifier.created_at, identifier.id LIMIT 1) any_identifier ON TRUE
+        LEFT JOIN LATERAL (SELECT identifier.display_hint FROM customer_identifiers identifier
+          WHERE identifier.workspace_id = $1 AND identifier.product_id = $2
+            AND identifier.customer_id = customer.id AND identifier.kind = 'account_ref'
+          ORDER BY identifier.created_at, identifier.id LIMIT 1) account_identifier ON TRUE
+        LEFT JOIN LATERAL (SELECT identifier.display_hint FROM customer_identifiers identifier
+          WHERE identifier.workspace_id = $1 AND identifier.product_id = $2
+            AND identifier.customer_id = customer.id AND identifier.kind = 'user_ref'
+          ORDER BY identifier.created_at, identifier.id LIMIT 1) user_identifier ON TRUE
+        LEFT JOIN LATERAL (SELECT MAX(interaction.occurred_at) AS last_activity_at,
+          COUNT(signal.id)::BIGINT AS signal_count,
+          COUNT(DISTINCT interaction.session_id)::BIGINT AS session_count,
+          COUNT(signal.id) FILTER (WHERE signal.signal_type IN ('feature_need', 'friction')
+            AND (signal.expires_at IS NULL OR signal.expires_at > NOW()))::BIGINT active_need_count
+          FROM interactions_v2 interaction LEFT JOIN customer_signals signal
+            ON signal.interaction_id = interaction.id AND signal.workspace_id = interaction.workspace_id
+            AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
+          WHERE interaction.workspace_id = $1 AND interaction.customer_id = customer.id
+            AND interaction.environment_id IN (SELECT id FROM product_environments
+              WHERE workspace_id = $1 AND product_id = $2)
+            AND interaction.occurred_at >= $4) activity ON TRUE
+        LEFT JOIN LATERAL (SELECT CASE
+          WHEN signal.attributes ->> 'impact' IN ('blocked', 'hindered') THEN 'at_risk'
+          WHEN signal.attributes ->> 'impact' IN ('helped', 'helped_with_friction') THEN 'healthy'
+          ELSE 'unknown' END outcome_health FROM customer_signals signal
+          WHERE signal.workspace_id = $1 AND signal.product_id = $2
+            AND signal.customer_id = customer.id AND signal.signal_type = 'outcome'
+            AND signal.collected_at >= $4
+            AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
+          ORDER BY signal.collected_at DESC, signal.id DESC LIMIT 1) outcome ON TRUE
+        LEFT JOIN LATERAL (SELECT grant_row.state consent_state FROM consent_grants grant_row
+          WHERE grant_row.workspace_id = $1 AND grant_row.product_id = $2
+            AND grant_row.customer_id = customer.id AND grant_row.scope = 'share_outcome'
+            AND (grant_row.expires_at IS NULL OR grant_row.expires_at > NOW())
+          ORDER BY grant_row.updated_at DESC, grant_row.id DESC LIMIT 1) consent ON TRUE
+        WHERE customer.id = $3 AND customer.workspace_id = $1
+          AND customer.merged_into_customer_id IS NULL",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(customer_id)
+    .bind(retained_since)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| ApiError::not_found("Customer not found for product"))
+}
+
+pub(crate) async fn dashboard_customer_by_id(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    customer_id: Uuid,
+) -> Result<DashboardCustomerDetail, ApiError> {
+    let environment = dashboard_environment_for_product(pool, workspace_id, product_id).await?;
+    let retained_since = Utc::now() - Duration::days(environment.retention_days.into());
+    let customer = dashboard_customer_summary_by_id(
+        pool,
+        workspace_id,
+        product_id,
+        customer_id,
+        retained_since,
+    )
+    .await?;
+    let identifiers = sqlx::query_as::<_, CustomerIdentifier>(
+        r"SELECT id, kind, display_hint, identity_level, provenance, verified_at
+        FROM customer_identifiers WHERE workspace_id = $1 AND product_id = $2
+          AND customer_id = $3 ORDER BY created_at, id",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(customer_id)
+    .fetch_all(pool)
+    .await?;
+    let signal_page = dashboard_signals_page(
+        pool,
+        workspace_id,
+        product_id,
+        DashboardSignalFilters {
+            customer_id: Some(customer_id),
+            limit: Some(100),
+            ..DashboardSignalFilters::default()
+        },
+    )
+    .await?;
+    let sessions = sqlx::query_as::<_, DashboardSessionSummary>(
+        r"SELECT session.id, session.workspace_id, session.environment_id,
+          session.source, session.ref_hint, session.started_at, session.last_seen_at,
+          session.created_at, activity.interaction_count, activity.report_count,
+          activity.first_operation, activity.last_operation, activity.customer_ref,
+          activity.strongest_impact
+        FROM sessions_v2 session
+        CROSS JOIN LATERAL (SELECT COUNT(interaction.id)::BIGINT interaction_count,
+          COUNT(report.id)::BIGINT report_count,
+          (ARRAY_AGG(interaction.operation ORDER BY interaction.occurred_at,
+            interaction.client_sequence NULLS LAST, interaction.id))[1] first_operation,
+          (ARRAY_AGG(interaction.operation ORDER BY interaction.occurred_at DESC,
+            interaction.client_sequence DESC NULLS LAST, interaction.id DESC))[1] last_operation,
+          (ARRAY_AGG(interaction.customer_ref ORDER BY interaction.occurred_at)
+            FILTER (WHERE interaction.customer_ref IS NOT NULL))[1] customer_ref,
+          (ARRAY_AGG(report.impact ORDER BY CASE report.impact
+            WHEN 'blocked' THEN 5 WHEN 'hindered' THEN 4
+            WHEN 'helped_with_friction' THEN 3 WHEN 'neutral' THEN 2
+            WHEN 'unknown' THEN 1 WHEN 'helped' THEN 0 ELSE -1 END DESC)
+            FILTER (WHERE report.impact IS NOT NULL))[1] strongest_impact
+          FROM interactions_v2 interaction
+          LEFT JOIN feedback_reports report ON report.interaction_id = interaction.id
+          WHERE interaction.session_id = session.id AND interaction.customer_id = $3
+            AND interaction.occurred_at >= $4) activity
+        WHERE session.workspace_id = $1 AND session.environment_id IN (
+          SELECT id FROM product_environments WHERE workspace_id = $1 AND product_id = $2)
+          AND activity.interaction_count > 0
+        ORDER BY session.last_seen_at DESC, session.id DESC LIMIT 100",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(customer_id)
+    .bind(retained_since)
+    .fetch_all(pool)
+    .await?;
+    let consent = sqlx::query_as::<_, ConsentGrant>(
+        r"SELECT id, scope,
+          CASE WHEN state <> 'revoked' AND expires_at <= NOW() THEN 'expired' ELSE state END AS state,
+          basis, decided_at, expires_at, revoked_at, revision
+        FROM consent_grants WHERE workspace_id = $1 AND product_id = $2
+          AND customer_id = $3
+        ORDER BY updated_at DESC, id DESC",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(customer_id)
+    .fetch_all(pool)
+    .await?;
+    let consent_history = sqlx::query_as::<_, ConsentEventSummary>(
+        r"SELECT event.id, event.scope, event.prior_state, event.state, event.basis,
+          event.revision, event.source, event.decided_at, event.created_at
+        FROM consent_events event
+        JOIN consent_grants grant_row ON grant_row.id = event.consent_grant_id
+          AND grant_row.workspace_id = event.workspace_id
+        WHERE event.workspace_id = $1 AND event.product_id = $2
+          AND grant_row.customer_id = $3
+        ORDER BY event.created_at DESC, event.id DESC LIMIT 100",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(customer_id)
+    .fetch_all(pool)
+    .await?;
+    let (signal_count, session_count, feature_count) = sqlx::query_as::<_, (i64, i64, i64)>(
+        r"SELECT
+              (SELECT COUNT(*) FROM customer_signals signal
+                WHERE signal.workspace_id = $1 AND signal.product_id = $2
+                  AND signal.customer_id = $3 AND signal.collected_at >= $4
+                  AND (signal.expires_at IS NULL OR signal.expires_at > NOW())),
+              (SELECT COUNT(DISTINCT interaction.session_id) FROM interactions_v2 interaction
+                WHERE interaction.workspace_id = $1 AND interaction.customer_id = $3
+                  AND interaction.environment_id IN (SELECT id FROM product_environments
+                    WHERE workspace_id = $1 AND product_id = $2)
+                  AND interaction.occurred_at >= $4),
+              (SELECT COUNT(DISTINCT signal.feature_key) FROM customer_signals signal
+                WHERE signal.workspace_id = $1 AND signal.product_id = $2
+                  AND signal.customer_id = $3 AND signal.collected_at >= $4
+                  AND signal.feature_key IS NOT NULL
+                  AND (signal.expires_at IS NULL OR signal.expires_at > NOW()))",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(customer_id)
+    .bind(retained_since)
+    .fetch_one(pool)
+    .await?;
+    Ok(DashboardCustomerDetail {
+        counts: CustomerDetailCounts {
+            signals: signal_count,
+            sessions: session_count,
+            features: feature_count,
+        },
+        customer,
+        identifiers,
+        signals: signal_page.signals,
+        sessions,
+        consent,
+        consent_history,
+    })
+}
+
 #[allow(
     clippy::cast_precision_loss,
     reason = "database row counts are intentionally converted to f64 for display-only rates"
@@ -3458,8 +4153,57 @@ pub(crate) async fn purge_expired_product_data(
     .bind(limit)
     .fetch_one(pool)
     .await?;
-    u64::try_from(removed_interactions + removed_sessions + removed_consent_interactions)
-        .map_err(ApiError::internal)
+    let removed_explicitly_expired_signals = sqlx::query_scalar::<_, i64>(
+        r"WITH doomed AS (
+          SELECT id FROM customer_signals
+          WHERE expires_at IS NOT NULL AND expires_at <= NOW()
+          ORDER BY expires_at, id LIMIT $1
+        ), removed AS (
+          DELETE FROM customer_signals signal USING doomed
+          WHERE signal.id = doomed.id RETURNING 1
+        ) SELECT COUNT(*) FROM removed",
+    )
+    .bind(limit)
+    .fetch_one(pool)
+    .await?;
+    let removed_orphan_customers = sqlx::query_scalar::<_, i64>(
+        r"WITH doomed AS (
+          SELECT customer.id FROM customers customer
+          WHERE customer.identity_level IN ('pseudonymous', 'ephemeral')
+            AND customer.merged_into_customer_id IS NULL
+            AND NOT EXISTS (SELECT 1 FROM interactions_v2 interaction
+              WHERE interaction.workspace_id = customer.workspace_id
+                AND interaction.customer_id = customer.id)
+            AND NOT EXISTS (SELECT 1 FROM customer_signals signal
+              WHERE signal.workspace_id = customer.workspace_id
+                AND signal.customer_id = customer.id
+                AND (signal.expires_at IS NULL OR signal.expires_at > NOW()))
+            AND NOT EXISTS (SELECT 1 FROM consent_grants grant_row
+              WHERE grant_row.workspace_id = customer.workspace_id
+                AND grant_row.customer_id = customer.id
+                AND grant_row.state = 'approved'
+                AND (grant_row.expires_at IS NULL OR grant_row.expires_at > NOW()))
+            AND NOT EXISTS (SELECT 1 FROM customer_resolution_events resolution
+              WHERE resolution.workspace_id = customer.workspace_id
+                AND (resolution.from_customer_id = customer.id
+                  OR resolution.to_customer_id = customer.id))
+          ORDER BY customer.last_seen_at, customer.id LIMIT $1
+        ), removed AS (
+          DELETE FROM customers customer USING doomed
+          WHERE customer.id = doomed.id RETURNING 1
+        ) SELECT COUNT(*) FROM removed",
+    )
+    .bind(limit)
+    .fetch_one(pool)
+    .await?;
+    u64::try_from(
+        removed_interactions
+            + removed_sessions
+            + removed_consent_interactions
+            + removed_explicitly_expired_signals
+            + removed_orphan_customers,
+    )
+    .map_err(ApiError::internal)
 }
 
 #[allow(
@@ -3752,7 +4496,7 @@ pub(crate) async fn dashboard_with_limits(
     .await?;
     let interactions = sqlx::query_as::<_, ProductInteraction>(
         r"SELECT id, workspace_id, environment_id, api_key_id, session_id, surface, operation,
-        status_code, duration_ms, customer_ref, classification, confirmation_method,
+        status_code, duration_ms, customer_ref, customer_id, classification, confirmation_method,
         runtime_hint, runtime_hint_source, occurred_at, created_at, updated_at
         FROM interactions_v2 WHERE environment_id = $1 AND occurred_at >= $2
         ORDER BY occurred_at DESC LIMIT $3",
@@ -4023,7 +4767,7 @@ pub(crate) async fn dashboard_interaction_by_id(
 ) -> Result<ProductInteraction, ApiError> {
     sqlx::query_as::<_, ProductInteraction>(
         r"SELECT i.id, i.workspace_id, i.environment_id, i.api_key_id, i.session_id,
-        i.surface, i.operation, i.status_code, i.duration_ms, i.customer_ref,
+        i.surface, i.operation, i.status_code, i.duration_ms, i.customer_ref, i.customer_id,
         i.classification, i.confirmation_method, i.runtime_hint, i.runtime_hint_source,
         i.occurred_at, i.created_at, i.updated_at
         FROM interactions_v2 i JOIN product_environments e ON e.id = i.environment_id
@@ -4059,7 +4803,7 @@ pub(crate) async fn dashboard_session_by_id(
     .ok_or_else(|| ApiError::not_found("Session not found"))?;
     let interactions = sqlx::query_as::<_, ProductInteraction>(
         r"SELECT i.id, i.workspace_id, i.environment_id, i.api_key_id, i.session_id, i.surface,
-        i.operation, i.status_code, i.duration_ms, i.customer_ref, i.classification,
+        i.operation, i.status_code, i.duration_ms, i.customer_ref, i.customer_id, i.classification,
         i.confirmation_method, i.runtime_hint, i.runtime_hint_source,
         i.occurred_at, i.created_at, i.updated_at
         FROM interactions_v2 i
@@ -4168,14 +4912,457 @@ fn scoped_session_ref_hash(customer_scope_hash: &[u8], session_ref_hash: &[u8]) 
     sha256_bytes(&material)
 }
 
-fn customer_scope_hash(customer_ref: Option<&str>) -> Vec<u8> {
+fn customer_scope_hash(customer_ref: Option<&str>, customer_id: Option<Uuid>) -> Vec<u8> {
     customer_ref.map_or_else(
-        || sha256("scope:anonymous"),
+        || {
+            customer_id.map_or_else(
+                || sha256("scope:anonymous"),
+                |customer_id| sha256(&format!("scope:resolved-customer:{customer_id}")),
+            )
+        },
+        // Preserve the pre-customer-intelligence session hash for existing
+        // customerRef integrations so a rolling deployment cannot fork their
+        // session continuity.
         |customer_ref| sha256(&format!("scope:customer:{customer_ref}")),
     )
 }
 
+fn validate_identity_ref(value: Option<&str>, field: &str) -> Result<Option<String>, ApiError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty()
+        || value.len() > 160
+        || value.trim() != value
+        || value.contains('@')
+        || value.chars().any(char::is_whitespace)
+        || !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_.:".contains(character))
+    {
+        return Err(ApiError::bad_request(format!(
+            "{field} must be a bounded opaque identifier, never a name or email"
+        )));
+    }
+    Ok(Some(value.to_owned()))
+}
+
+#[derive(Debug)]
+#[allow(
+    clippy::struct_field_names,
+    reason = "wire-compatible identity fields intentionally retain the Ref suffix"
+)]
+struct ValidatedIdentityRefs {
+    customer_ref: Option<String>,
+    account_ref: Option<String>,
+    user_ref: Option<String>,
+    anonymous_ref: Option<String>,
+}
+
+fn validate_identity_refs(
+    input: &InteractionTelemetryInput,
+) -> Result<ValidatedIdentityRefs, ApiError> {
+    let refs = ValidatedIdentityRefs {
+        customer_ref: validate_identity_ref(input.customer_ref.as_deref(), "customerRef")?,
+        account_ref: validate_identity_ref(input.account_ref.as_deref(), "accountRef")?,
+        user_ref: validate_identity_ref(input.user_ref.as_deref(), "userRef")?,
+        anonymous_ref: validate_identity_ref(input.anonymous_ref.as_deref(), "anonymousRef")?,
+    };
+    if let Some(customer_ref) = refs.customer_ref.as_deref()
+        && (refs.account_ref.as_deref() != Some(customer_ref) || refs.account_ref.is_none())
+        && (refs.account_ref.is_some() || refs.user_ref.is_some())
+    {
+        return Err(ApiError::bad_request(
+            "customerRef may accompany richer identity only when it exactly matches accountRef",
+        ));
+    }
+    Ok(refs)
+}
+
+fn customer_identifier_hash(
+    identity_hmac_secret: &[u8],
+    workspace_id: Uuid,
+    product_id: Uuid,
+    kind: &str,
+    value: &str,
+) -> Result<Vec<u8>, ApiError> {
+    if identity_hmac_secret.len() < 32 {
+        return Err(ApiError::internal(
+            "EPODE_IDENTITY_HMAC_SECRET must contain at least 32 bytes",
+        ));
+    }
+    let mut mac = Hmac::<Sha256>::new_from_slice(identity_hmac_secret)
+        .map_err(|_| ApiError::internal("Invalid identity HMAC secret"))?;
+    mac.update(b"customer-identifier-v1\0");
+    mac.update(workspace_id.as_bytes());
+    mac.update(b"\0");
+    mac.update(product_id.as_bytes());
+    mac.update(b"\0");
+    mac.update(kind.as_bytes());
+    mac.update(b"\0");
+    mac.update(value.as_bytes());
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
+fn customer_identifier_hint(kind: &str, ref_hash: &[u8]) -> String {
+    let encoded = URL_SAFE_NO_PAD.encode(ref_hash);
+    format!("{}-{}", kind.trim_end_matches("_ref"), &encoded[..8])
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ResolvedCustomerRow {
+    id: Uuid,
+    kind: String,
+    identity_level: String,
+    parent_customer_id: Option<Uuid>,
+    merged_into_customer_id: Option<Uuid>,
+}
+
+async fn existing_customer_for_identifier(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    kind: &str,
+    ref_hash: &[u8],
+) -> Result<Option<ResolvedCustomerRow>, ApiError> {
+    sqlx::query_as::<_, ResolvedCustomerRow>(
+        r"SELECT customer.id, customer.kind, customer.identity_level,
+          customer.parent_customer_id, customer.merged_into_customer_id
+        FROM customer_identifiers identifier
+        JOIN customers customer
+          ON customer.id = identifier.customer_id
+          AND customer.workspace_id = identifier.workspace_id
+        WHERE identifier.workspace_id = $1 AND identifier.product_id = $2
+          AND identifier.kind = $3 AND identifier.ref_hash = $4
+        FOR UPDATE OF customer",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(kind)
+    .bind(ref_hash)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(Into::into)
+}
+
+async fn upsert_customer_identifier(
+    tx: &mut Transaction<'_, Postgres>,
+    auth: &ProductAuth,
+    identity_hmac_secret: &[u8],
+    kind: &str,
+    value: &str,
+    parent_customer_id: Option<Uuid>,
+    occurred_at: DateTime<Utc>,
+) -> Result<Uuid, ApiError> {
+    let workspace_id = auth.workspace.id;
+    let product_id = auth.environment.product_id;
+    let ref_hash =
+        customer_identifier_hash(identity_hmac_secret, workspace_id, product_id, kind, value)?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(encode($1::BYTEA, 'hex'), 0))")
+        .bind(&ref_hash)
+        .execute(&mut **tx)
+        .await?;
+    if let Some(existing) =
+        existing_customer_for_identifier(tx, workspace_id, product_id, kind, &ref_hash).await?
+    {
+        let customer_id = existing.merged_into_customer_id.unwrap_or(existing.id);
+        if kind == "user_ref"
+            && existing.parent_customer_id.is_some()
+            && existing.parent_customer_id != parent_customer_id
+        {
+            return Err(ApiError::conflict(
+                "userRef is already linked to a different accountRef",
+            ));
+        }
+        sqlx::query(
+            r"UPDATE customers SET
+              parent_customer_id = COALESCE(parent_customer_id, $3),
+              first_seen_at = LEAST(first_seen_at, $4),
+              last_seen_at = GREATEST(last_seen_at, $4), updated_at = NOW()
+            WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(customer_id)
+        .bind(workspace_id)
+        .bind(parent_customer_id)
+        .bind(occurred_at)
+        .execute(&mut **tx)
+        .await?;
+        return Ok(customer_id);
+    }
+
+    let (customer_kind, identity_level, confidence, provenance, verified_at) = match kind {
+        "account_ref" => (
+            "account",
+            "verified",
+            1.0,
+            "company_authenticated",
+            Some(occurred_at),
+        ),
+        "user_ref" => (
+            "user",
+            "verified",
+            1.0,
+            "company_authenticated",
+            Some(occurred_at),
+        ),
+        "workspace_ref" => (
+            "workspace",
+            "verified",
+            1.0,
+            "company_authenticated",
+            Some(occurred_at),
+        ),
+        "customer_ref" => (
+            "generic",
+            "verified",
+            1.0,
+            "company_authenticated",
+            Some(occurred_at),
+        ),
+        "anonymous_ref" => (
+            "anonymous",
+            "pseudonymous",
+            1.0,
+            "first_party_anonymous",
+            None,
+        ),
+        _ => return Err(ApiError::internal("Invalid customer identifier kind")),
+    };
+    let customer_id = Uuid::new_v4();
+    sqlx::query(
+        r"INSERT INTO customers
+        (id, workspace_id, kind, identity_level, identity_confidence,
+         parent_customer_id, first_seen_at, last_seen_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $7)",
+    )
+    .bind(customer_id)
+    .bind(workspace_id)
+    .bind(customer_kind)
+    .bind(identity_level)
+    .bind(confidence)
+    .bind(parent_customer_id)
+    .bind(occurred_at)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r"INSERT INTO customer_identifiers
+        (id, workspace_id, product_id, customer_id, kind, ref_hash,
+         display_hint, identity_level, provenance, verified_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(customer_id)
+    .bind(kind)
+    .bind(&ref_hash)
+    .bind(customer_identifier_hint(kind, &ref_hash))
+    .bind(identity_level)
+    .bind(provenance)
+    .bind(verified_at)
+    .execute(&mut **tx)
+    .await?;
+    Ok(customer_id)
+}
+
+async fn merge_anonymous_customer(
+    tx: &mut Transaction<'_, Postgres>,
+    auth: &ProductAuth,
+    anonymous_customer_id: Uuid,
+    known_customer_id: Uuid,
+) -> Result<(), ApiError> {
+    if anonymous_customer_id == known_customer_id {
+        return Ok(());
+    }
+    let anonymous = sqlx::query_as::<_, ResolvedCustomerRow>(
+        r"SELECT id, kind, identity_level, parent_customer_id, merged_into_customer_id
+        FROM customers WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
+    )
+    .bind(anonymous_customer_id)
+    .bind(auth.workspace.id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| ApiError::conflict("anonymousRef belongs to another workspace"))?;
+    if anonymous.kind != "anonymous" || anonymous.identity_level != "pseudonymous" {
+        return Err(ApiError::conflict(
+            "anonymousRef is not a pseudonymous customer",
+        ));
+    }
+    if let Some(merged_into) = anonymous.merged_into_customer_id {
+        return if merged_into == known_customer_id {
+            Ok(())
+        } else {
+            Err(ApiError::conflict(
+                "anonymousRef is already linked to a different customer",
+            ))
+        };
+    }
+    let known_level = sqlx::query_scalar::<_, String>(
+        "SELECT identity_level FROM customers WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
+    )
+    .bind(known_customer_id)
+    .bind(auth.workspace.id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| ApiError::conflict("verified customer belongs to another workspace"))?;
+    if known_level != "verified" {
+        return Err(ApiError::conflict(
+            "anonymousRef can only resolve to a verified customer",
+        ));
+    }
+
+    sqlx::query(
+        r"UPDATE customer_identifiers SET customer_id = $2, updated_at = NOW()
+        WHERE workspace_id = $1 AND product_id = $3 AND customer_id = $4",
+    )
+    .bind(auth.workspace.id)
+    .bind(known_customer_id)
+    .bind(auth.environment.product_id)
+    .bind(anonymous_customer_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r"UPDATE interactions_v2 SET customer_id = $2, updated_at = NOW()
+        WHERE workspace_id = $1 AND environment_id IN (
+          SELECT id FROM product_environments
+          WHERE workspace_id = $1 AND product_id = $3
+        ) AND customer_id = $4",
+    )
+    .bind(auth.workspace.id)
+    .bind(known_customer_id)
+    .bind(auth.environment.product_id)
+    .bind(anonymous_customer_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r"UPDATE customer_signals SET customer_id = $2
+        WHERE workspace_id = $1 AND product_id = $3 AND customer_id = $4",
+    )
+    .bind(auth.workspace.id)
+    .bind(known_customer_id)
+    .bind(auth.environment.product_id)
+    .bind(anonymous_customer_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r"UPDATE consent_grants SET customer_id = $2, updated_at = NOW()
+        WHERE workspace_id = $1 AND product_id = $3 AND customer_id = $4",
+    )
+    .bind(auth.workspace.id)
+    .bind(known_customer_id)
+    .bind(auth.environment.product_id)
+    .bind(anonymous_customer_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r"UPDATE customers SET merged_into_customer_id = $2, updated_at = NOW()
+        WHERE id = $1 AND workspace_id = $3",
+    )
+    .bind(anonymous_customer_id)
+    .bind(known_customer_id)
+    .bind(auth.workspace.id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r"INSERT INTO customer_resolution_events
+        (id, workspace_id, product_id, from_customer_id, to_customer_id,
+         method, provenance, confidence, api_key_id)
+        VALUES ($1, $2, $3, $4, $5, 'company_deterministic',
+          'company_authenticated', 1, $6)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(auth.workspace.id)
+    .bind(auth.environment.product_id)
+    .bind(anonymous_customer_id)
+    .bind(known_customer_id)
+    .bind(auth.api_key_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn resolve_telemetry_customer(
+    tx: &mut Transaction<'_, Postgres>,
+    auth: &ProductAuth,
+    identity_hmac_secret: &[u8],
+    refs: &ValidatedIdentityRefs,
+    occurred_at: DateTime<Utc>,
+) -> Result<Option<Uuid>, ApiError> {
+    let account_customer_id = if let Some(account_ref) = refs.account_ref.as_deref() {
+        Some(
+            upsert_customer_identifier(
+                tx,
+                auth,
+                identity_hmac_secret,
+                "account_ref",
+                account_ref,
+                None,
+                occurred_at,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let known_customer_id = if let Some(user_ref) = refs.user_ref.as_deref() {
+        Some(
+            upsert_customer_identifier(
+                tx,
+                auth,
+                identity_hmac_secret,
+                "user_ref",
+                user_ref,
+                account_customer_id,
+                occurred_at,
+            )
+            .await?,
+        )
+    } else if let Some(account_customer_id) = account_customer_id {
+        Some(account_customer_id)
+    } else if let Some(customer_ref) = refs.customer_ref.as_deref() {
+        Some(
+            upsert_customer_identifier(
+                tx,
+                auth,
+                identity_hmac_secret,
+                "customer_ref",
+                customer_ref,
+                None,
+                occurred_at,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let anonymous_customer_id = if let Some(anonymous_ref) = refs.anonymous_ref.as_deref() {
+        Some(
+            upsert_customer_identifier(
+                tx,
+                auth,
+                identity_hmac_secret,
+                "anonymous_ref",
+                anonymous_ref,
+                None,
+                occurred_at,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    if let (Some(anonymous_customer_id), Some(known_customer_id)) =
+        (anonymous_customer_id, known_customer_id)
+    {
+        merge_anonymous_customer(tx, auth, anonymous_customer_id, known_customer_id).await?;
+        Ok(Some(known_customer_id))
+    } else {
+        Ok(known_customer_id.or(anonymous_customer_id))
+    }
+}
+
 fn validate_telemetry(input: &InteractionTelemetryInput) -> Result<(), ApiError> {
+    validate_identity_refs(input)?;
     if !["http_json", "http_html", "http_headers", "mcp"].contains(&input.surface.as_str()) {
         return Err(ApiError::bad_request("Invalid interaction surface"));
     }
@@ -4263,6 +5450,7 @@ fn validate_telemetry(input: &InteractionTelemetryInput) -> Result<(), ApiError>
 pub(crate) async fn ingest_telemetry_batch(
     pool: &PgPool,
     auth: &ProductAuth,
+    identity_hmac_secret: &[u8],
     input: TelemetryBatchInput,
 ) -> Result<TelemetryBatchResult, ApiError> {
     let event_count = input.events.len();
@@ -4274,17 +5462,21 @@ pub(crate) async fn ingest_telemetry_batch(
     let mut accepted = 0;
     let mut dropped = 0;
     let mut accepted_confirmed_interaction = false;
+    let mut accepted_interaction_ids = Vec::with_capacity(event_count);
     let mut changed_interaction_ids = Vec::with_capacity(event_count);
     let mut session_evidence_by_interaction = BTreeMap::new();
     let mut events = input.events;
     events.sort_by_key(|event| event.interaction_id);
     let mut tx = pool.begin().await?;
     for event in events {
-        match ingest_telemetry_event(&mut tx, auth, event).await {
+        let mut event_tx = tx.begin().await?;
+        match ingest_telemetry_event(&mut event_tx, auth, identity_hmac_secret, event).await {
             Ok(result) => {
+                event_tx.commit().await?;
                 if result.grouping_facts_changed {
                     changed_interaction_ids.push(result.interaction_id);
                 }
+                accepted_interaction_ids.push(result.interaction_id);
                 let evidence = session_evidence_by_interaction
                     .entry(result.interaction_id)
                     .or_insert(None);
@@ -4295,19 +5487,19 @@ pub(crate) async fn ingest_telemetry_batch(
                 accepted += 1;
             }
             Err(error) if error.status.is_client_error() => {
-                // Every client-error path in `ingest_telemetry_event` either
-                // validates before the upsert or is the conflict result of an
-                // upsert that changed no row. Continuing therefore cannot
-                // preserve a partial event write and does not need a nested
-                // transaction. Avoiding per-event savepoints also keeps a
-                // cancelled request from desynchronizing SQLx's local
-                // transaction depth from PostgreSQL while releasing one.
+                event_tx.rollback().await?;
+                // A dropped identity/session event must be fully atomic even
+                // when the rest of its bounded batch remains acceptable.
                 dropped += 1;
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                event_tx.rollback().await?;
+                return Err(error);
+            }
         }
     }
     correlate_telemetry_sessions(&mut tx, auth, session_evidence_by_interaction).await?;
+    reconcile_signal_links_for_interactions(&mut tx, auth, &accepted_interaction_ids).await?;
     regroup_changed_interaction_reports(&mut tx, &changed_interaction_ids).await?;
     if accepted > 0 {
         record_product_activation(
@@ -4322,6 +5514,36 @@ pub(crate) async fn ingest_telemetry_batch(
     }
     tx.commit().await?;
     Ok(TelemetryBatchResult { accepted, dropped })
+}
+
+async fn reconcile_signal_links_for_interactions(
+    tx: &mut Transaction<'_, Postgres>,
+    auth: &ProductAuth,
+    interaction_ids: &[Uuid],
+) -> Result<(), ApiError> {
+    if interaction_ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        r"UPDATE customer_signals signal SET
+          customer_id = COALESCE(signal.customer_id, interaction.customer_id),
+          session_id = COALESCE(signal.session_id, interaction.session_id)
+        FROM interactions_v2 interaction
+        WHERE signal.workspace_id = $1 AND signal.product_id = $2
+          AND signal.interaction_id = interaction.id
+          AND interaction.workspace_id = signal.workspace_id
+          AND interaction.environment_id = $3
+          AND interaction.id = ANY($4)
+          AND ((signal.customer_id IS NULL AND interaction.customer_id IS NOT NULL)
+            OR (signal.session_id IS NULL AND interaction.session_id IS NOT NULL))",
+    )
+    .bind(auth.workspace.id)
+    .bind(auth.environment.product_id)
+    .bind(auth.environment.id)
+    .bind(interaction_ids)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -4341,6 +5563,7 @@ struct AcceptedTelemetryEvent {
 async fn ingest_telemetry_event(
     tx: &mut Transaction<'_, Postgres>,
     auth: &ProductAuth,
+    identity_hmac_secret: &[u8],
     event: InteractionTelemetryInput,
 ) -> Result<AcceptedTelemetryEvent, ApiError> {
     validate_telemetry(&event)?;
@@ -4352,8 +5575,12 @@ async fn ingest_telemetry_event(
             "occurredAt is outside the accepted window",
         ));
     }
-    let customer_ref = opaque_ref(event.customer_ref);
+    let identity_refs = validate_identity_refs(&event)?;
     let session_evidence = session_evidence(event.session_ref, event.session_source)?;
+    let customer_id =
+        resolve_telemetry_customer(tx, auth, identity_hmac_secret, &identity_refs, occurred_at)
+            .await?;
+    let customer_ref = identity_refs.customer_ref;
     let confirmed = event.surface == "mcp";
     let classification = if confirmed {
         "confirmed".to_string()
@@ -4373,10 +5600,10 @@ async fn ingest_telemetry_event(
         upserted AS (
           INSERT INTO interactions_v2
         (id, workspace_id, environment_id, api_key_id, session_id, surface, operation, status_code,
-         duration_ms, customer_ref, classification, confirmation_method, runtime_hint,
+         duration_ms, customer_ref, customer_id, classification, confirmation_method, runtime_hint,
          runtime_hint_source, client_sequence, occurred_at)
         SELECT COALESCE(p.id, input.id), $2, $3, $4, $5, $6, $7, $8,
-          $9, $10, $11, $12, $13, $14, $15, $16
+          $9, $10, $11, $12, $13, $14, $15, $16, $17
         FROM (VALUES ($1::uuid)) AS input(id)
         LEFT JOIN previous p ON p.id = input.id
         ON CONFLICT (id) DO UPDATE SET
@@ -4387,6 +5614,7 @@ async fn ingest_telemetry_event(
           status_code = COALESCE(interactions_v2.status_code, EXCLUDED.status_code),
           duration_ms = COALESCE(interactions_v2.duration_ms, EXCLUDED.duration_ms),
           customer_ref = COALESCE(interactions_v2.customer_ref, EXCLUDED.customer_ref),
+          customer_id = COALESCE(interactions_v2.customer_id, EXCLUDED.customer_id),
           classification = CASE WHEN interactions_v2.classification = 'confirmed' THEN 'confirmed' ELSE EXCLUDED.classification END,
           confirmation_method = CASE WHEN EXCLUDED.confirmation_method = 'mcp' THEN 'mcp'
             ELSE COALESCE(interactions_v2.confirmation_method, EXCLUDED.confirmation_method) END,
@@ -4400,6 +5628,10 @@ async fn ingest_telemetry_event(
           END,
           updated_at = NOW()
         WHERE interactions_v2.environment_id = EXCLUDED.environment_id
+          AND (interactions_v2.customer_id IS NULL OR EXCLUDED.customer_id IS NULL
+            OR interactions_v2.customer_id = EXCLUDED.customer_id)
+          AND (interactions_v2.customer_ref IS NULL OR EXCLUDED.customer_ref IS NULL
+            OR interactions_v2.customer_ref = EXCLUDED.customer_ref)
           RETURNING id, surface, operation, status_code
         )
         SELECT u.id,
@@ -4421,6 +5653,7 @@ async fn ingest_telemetry_event(
     .bind(event.status_code)
     .bind(event.duration_ms)
     .bind(customer_ref)
+    .bind(customer_id)
     .bind(classification)
     .bind(confirmation_method)
     .bind(event.runtime_hint.map(|value| clean(&value, 200)))
@@ -4444,6 +5677,7 @@ struct InteractionSessionState {
     interaction_id: Uuid,
     occurred_at: DateTime<Utc>,
     customer_ref: Option<String>,
+    customer_id: Option<Uuid>,
     session_id: Option<Uuid>,
     session_source: Option<String>,
     session_ref_hash: Option<Vec<u8>>,
@@ -4470,7 +5704,7 @@ async fn correlate_telemetry_sessions(
 ) -> Result<(), ApiError> {
     let interaction_ids = evidence_by_interaction.keys().copied().collect::<Vec<_>>();
     let states = sqlx::query_as::<_, InteractionSessionState>(
-        r"SELECT i.id AS interaction_id, i.occurred_at, i.customer_ref, i.session_id,
+        r"SELECT i.id AS interaction_id, i.occurred_at, i.customer_ref, i.customer_id, i.session_id,
           s.source AS session_source, COALESCE(s.raw_ref_hash, s.ref_hash) AS session_ref_hash,
           s.customer_scope_hash AS session_customer_scope_hash
         FROM interactions_v2 i
@@ -4491,7 +5725,8 @@ async fn correlate_telemetry_sessions(
         let evidence = evidence_by_interaction
             .remove(&state.interaction_id)
             .flatten();
-        let desired_customer_scope_hash = customer_scope_hash(state.customer_ref.as_deref());
+        let desired_customer_scope_hash =
+            customer_scope_hash(state.customer_ref.as_deref(), state.customer_id);
         let (session_source, session_ref_hash) = if state.session_id.is_some() {
             let source = state.session_source.clone().ok_or_else(|| {
                 ApiError::internal("linked telemetry interaction has no session source")
@@ -4517,7 +5752,10 @@ async fn correlate_telemetry_sessions(
             session_ref_hash: session_ref_hash.clone(),
             customer_scope_hash: desired_customer_scope_hash,
             sort_source: session_source,
-            sort_customer_scope_hash: customer_scope_hash(state.customer_ref.as_deref()),
+            sort_customer_scope_hash: customer_scope_hash(
+                state.customer_ref.as_deref(),
+                state.customer_id,
+            ),
             sort_ref_hash: session_ref_hash,
         });
     }
@@ -4767,6 +6005,78 @@ pub(crate) struct ConsentDecisionOutcome {
     pub(crate) flipped_from: Option<String>,
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the consent audit write keeps every CAS fact explicit at its two call sites"
+)]
+async fn dual_write_share_outcome_consent(
+    tx: &mut Transaction<'_, Postgres>,
+    environment_id: Uuid,
+    subject: &str,
+    state: &str,
+    revision: i64,
+    decided_at: DateTime<Utc>,
+    expires_at: Option<DateTime<Utc>>,
+    prior_state: Option<&str>,
+    source: &str,
+) -> Result<(), ApiError> {
+    let (workspace_id, product_id) = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT workspace_id, product_id FROM product_environments WHERE id = $1",
+    )
+    .bind(environment_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let grant_id = Uuid::new_v4();
+    let grant_id = sqlx::query_scalar::<_, Uuid>(
+        r"INSERT INTO consent_grants
+        (id, workspace_id, product_id, environment_id, subject, scope, state,
+         basis, revision, decided_at, expires_at)
+        VALUES ($1, $2, $3, $4, $5, 'share_outcome', $6,
+          'user_consent', $7, $8, $9)
+        ON CONFLICT (environment_id, subject, scope) DO UPDATE SET
+          state = EXCLUDED.state, revision = EXCLUDED.revision,
+          decided_at = EXCLUDED.decided_at, expires_at = EXCLUDED.expires_at,
+          revoked_at = NULL, updated_at = NOW()
+        WHERE consent_grants.revision < EXCLUDED.revision
+        RETURNING id",
+    )
+    .bind(grant_id)
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(environment_id)
+    .bind(subject)
+    .bind(state)
+    .bind(revision)
+    .bind(decided_at)
+    .bind(expires_at)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| {
+        ApiError::internal("Consent grant revision did not advance after winning CAS")
+    })?;
+    sqlx::query(
+        r"INSERT INTO consent_events
+        (id, workspace_id, product_id, environment_id, consent_grant_id,
+         subject, scope, prior_state, state, basis, revision, source, decided_at)
+        VALUES ($1, $2, $3, $4, $5, $6, 'share_outcome', $7, $8,
+          'user_consent', $9, $10, $11)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(environment_id)
+    .bind(grant_id)
+    .bind(subject)
+    .bind(prior_state)
+    .bind(state)
+    .bind(revision)
+    .bind(source)
+    .bind(decided_at)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 pub(crate) async fn record_feedback_consent_decision(
     pool: &PgPool,
     capability: &str,
@@ -4981,6 +6291,48 @@ pub(crate) async fn record_feedback_consent_decision(
                 )
             }
         };
+    if changed
+        && key.1 == "ask_once"
+        && let Some(subject) = claims.s.as_deref()
+    {
+        let revision = sqlx::query_scalar::<_, i64>(
+            r"SELECT revision FROM feedback_consent_subjects
+            WHERE environment_id = $1 AND subject = $2",
+        )
+        .bind(key.2)
+        .bind(subject)
+        .fetch_one(&mut *tx)
+        .await?;
+        dual_write_share_outcome_consent(
+            &mut tx,
+            key.2,
+            subject,
+            &decision,
+            revision,
+            decided_at,
+            None,
+            flipped_from.as_deref(),
+            "feedback_consent",
+        )
+        .await?;
+    } else if changed && key.1 == "ask_always" {
+        let interaction_subject = format!("afint1_{}", claims.i.simple());
+        let expires_at = DateTime::from_timestamp(claims.exp, 0)
+            .ok_or_else(|| ApiError::internal("Capability expiry is invalid"))?;
+        dual_write_share_outcome_consent(
+            &mut tx,
+            key.2,
+            &interaction_subject,
+            &decision,
+            1,
+            decided_at,
+            Some(expires_at),
+            None,
+            "feedback_consent",
+        )
+        .await?;
+    }
+
     // The protocol-tool path is only claimed when server-side telemetry
     // confirmed this interaction as an MCP tool call. Absence of telemetry is
     // indistinguishable from a plain HTTP interaction, so this stays false for
@@ -5039,6 +6391,19 @@ pub(crate) struct RegroupSummary {
     pub(crate) unchanged: u64,
     pub(crate) skipped: u64,
     pub(crate) skipped_findings: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CustomerIntelligenceBackfillSummary {
+    pub(crate) interactions_scanned: u64,
+    pub(crate) interactions_linked: u64,
+    pub(crate) reports_scanned: u64,
+    pub(crate) reports_projected: u64,
+    pub(crate) consent_subjects_scanned: u64,
+    pub(crate) consent_grants_projected: u64,
+    /// True only when every bounded source query returned fewer rows than the
+    /// batch limit. Callers can safely repeat until this becomes true.
+    pub(crate) exhausted: bool,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -5380,6 +6745,379 @@ pub(crate) async fn regroup_report_groups(
     Ok(summary)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the typed signal projection is a private explicit mapping from immutable report evidence"
+)]
+async fn project_feedback_signal(
+    tx: &mut Transaction<'_, Postgres>,
+    interaction: &ProductInteraction,
+    report: &ProductFeedbackReport,
+    product_id: Uuid,
+    source_item_key: &str,
+    signal_type: &str,
+    summary: &str,
+    detail: Option<&str>,
+    feature_key: Option<&str>,
+    attributes: &serde_json::Value,
+    consent_grant_id: Option<Uuid>,
+    collection_basis: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        r"INSERT INTO customer_signals
+        (id, workspace_id, product_id, customer_id, session_id, interaction_id,
+         feedback_report_id, feature_key, source_item_key, signal_type, summary,
+         detail, attributes, provenance, confidence, collection_basis,
+         consent_grant_id, consent_scope, collected_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+          'agent_reports_current_task', $14, $15, $16,
+          CASE WHEN $16::UUID IS NULL THEN NULL ELSE 'share_outcome' END, $17)
+        ON CONFLICT (workspace_id, feedback_report_id, source_item_key) DO UPDATE SET
+          customer_id = COALESCE(EXCLUDED.customer_id, customer_signals.customer_id),
+          session_id = COALESCE(EXCLUDED.session_id, customer_signals.session_id),
+          consent_grant_id = COALESCE(EXCLUDED.consent_grant_id,
+            customer_signals.consent_grant_id),
+          consent_scope = COALESCE(EXCLUDED.consent_scope,
+            customer_signals.consent_scope),
+          collection_basis = CASE
+            WHEN EXCLUDED.consent_grant_id IS NOT NULL THEN EXCLUDED.collection_basis
+            ELSE customer_signals.collection_basis END",
+    )
+    .bind(Uuid::new_v4())
+    .bind(report.workspace_id)
+    .bind(product_id)
+    .bind(interaction.customer_id)
+    .bind(interaction.session_id)
+    .bind(interaction.id)
+    .bind(report.id)
+    .bind(feature_key)
+    .bind(source_item_key)
+    .bind(signal_type)
+    .bind(clean(summary, 700))
+    .bind(detail.map(|value| clean(value, 700)))
+    .bind(attributes)
+    .bind(report.confidence)
+    .bind(collection_basis)
+    .bind(consent_grant_id)
+    .bind(report.created_at)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn project_feedback_signals(
+    tx: &mut Transaction<'_, Postgres>,
+    interaction: &ProductInteraction,
+    report: &ProductFeedbackReport,
+    product_id: Uuid,
+    feedback_mode: &str,
+) -> Result<(), ApiError> {
+    let consent_grant_id = sqlx::query_scalar::<_, Uuid>(
+        r"SELECT grant_row.id
+        FROM feedback_consent_interactions interaction_consent
+        JOIN consent_grants grant_row
+          ON grant_row.environment_id = interaction_consent.environment_id
+          AND grant_row.subject = COALESCE(
+            interaction_consent.subject,
+            'afint1_' || REPLACE(interaction_consent.interaction_id::TEXT, '-', '')
+          )
+          AND grant_row.scope = 'share_outcome'
+          AND grant_row.state = 'approved'
+          AND (grant_row.expires_at IS NULL OR grant_row.expires_at > NOW())
+        WHERE interaction_consent.interaction_id = $1
+          AND interaction_consent.environment_id = $2
+          AND interaction_consent.decision = 'approved'",
+    )
+    .bind(interaction.id)
+    .bind(interaction.environment_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let collection_basis = if feedback_mode == "never_ask" {
+        "provider_feedback_policy"
+    } else {
+        "user_consent"
+    };
+    project_feedback_signal(
+        tx,
+        interaction,
+        report,
+        product_id,
+        "outcome",
+        "outcome",
+        &report.summary,
+        None,
+        None,
+        &serde_json::json!({ "impact": report.impact }),
+        consent_grant_id,
+        collection_basis,
+    )
+    .await?;
+
+    let findings = serde_json::from_value::<Vec<FeedbackFindingInput>>(report.findings.clone())
+        .map_err(|_| ApiError::internal("Stored feedback findings are invalid"))?;
+    for (index, finding) in findings.into_iter().enumerate() {
+        let signal_type = match finding.kind.as_str() {
+            "friction" | "defect" => "friction",
+            "gap" | "suggestion" => "feature_need",
+            "strength" => "satisfaction",
+            "uncertainty" => "constraint",
+            _ => "outcome",
+        };
+        project_feedback_signal(
+            tx,
+            interaction,
+            report,
+            product_id,
+            &format!("finding:{}", index + 1),
+            signal_type,
+            &finding.detail,
+            Some(&finding.detail),
+            Some(&finding.topic),
+            &serde_json::json!({
+                "findingKind": finding.kind,
+                "topic": finding.topic,
+                "severity": finding.severity,
+            }),
+            consent_grant_id,
+            collection_basis,
+        )
+        .await?;
+    }
+    if let Some(workaround) = report.workaround.as_ref() {
+        let used = workaround
+            .get("used")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let detail = workaround.get("detail").and_then(serde_json::Value::as_str);
+        project_feedback_signal(
+            tx,
+            interaction,
+            report,
+            product_id,
+            "workaround",
+            "workaround",
+            if used {
+                "A workaround was used"
+            } else {
+                "A workaround was considered"
+            },
+            detail,
+            None,
+            workaround,
+            consent_grant_id,
+            collection_basis,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn backfill_customer_intelligence(
+    pool: &PgPool,
+    identity_hmac_secret: &[u8],
+    batch_size: i64,
+) -> Result<CustomerIntelligenceBackfillSummary, ApiError> {
+    let limit = batch_size.clamp(1, 1_000);
+    let mut summary = CustomerIntelligenceBackfillSummary::default();
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtext('epode-customer-intelligence-backfill-v1'))",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    let interactions = sqlx::query_as::<_, ProductInteraction>(
+        r"SELECT id, workspace_id, environment_id, api_key_id, session_id,
+          surface, operation, status_code, duration_ms, customer_ref, customer_id,
+          classification, confirmation_method, runtime_hint, runtime_hint_source,
+          occurred_at, created_at, updated_at
+        FROM interactions_v2
+        WHERE customer_ref IS NOT NULL AND customer_id IS NULL
+        ORDER BY occurred_at, id LIMIT $1 FOR UPDATE",
+    )
+    .bind(limit)
+    .fetch_all(&mut *tx)
+    .await?;
+    let interaction_batch_exhausted =
+        interactions.len() < usize::try_from(limit).map_err(ApiError::internal)?;
+    summary.interactions_scanned = u64::try_from(interactions.len()).map_err(ApiError::internal)?;
+    for interaction in interactions {
+        let workspace = sqlx::query_as::<_, Workspace>("SELECT * FROM workspaces WHERE id = $1")
+            .bind(interaction.workspace_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let environment = sqlx::query_as::<_, ProductEnvironment>(
+            "SELECT * FROM product_environments WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(interaction.environment_id)
+        .bind(interaction.workspace_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let refs = ValidatedIdentityRefs {
+            customer_ref: interaction.customer_ref.clone(),
+            account_ref: None,
+            user_ref: None,
+            anonymous_ref: None,
+        };
+        let customer_id = resolve_telemetry_customer(
+            &mut tx,
+            &ProductAuth {
+                workspace,
+                environment,
+                api_key_id: interaction.api_key_id.unwrap_or_else(Uuid::nil),
+            },
+            identity_hmac_secret,
+            &refs,
+            interaction.occurred_at,
+        )
+        .await?
+        .ok_or_else(|| ApiError::internal("Legacy customerRef did not resolve a customer"))?;
+        let linked = sqlx::query(
+            r"UPDATE interactions_v2 SET customer_id = $2, updated_at = NOW()
+            WHERE id = $1 AND workspace_id = $3 AND customer_id IS NULL",
+        )
+        .bind(interaction.id)
+        .bind(customer_id)
+        .bind(interaction.workspace_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        summary.interactions_linked += linked;
+    }
+
+    let report_ids = sqlx::query_scalar::<_, Uuid>(
+        r"SELECT report.id FROM feedback_reports report
+        WHERE NOT EXISTS (
+          SELECT 1 FROM customer_signals signal
+          WHERE signal.workspace_id = report.workspace_id
+            AND signal.feedback_report_id = report.id
+            AND signal.source_item_key = 'outcome'
+        ) OR EXISTS (
+          SELECT 1 FROM customer_signals signal
+          JOIN interactions_v2 interaction ON interaction.id = report.interaction_id
+          JOIN feedback_consent_interactions interaction_consent
+            ON interaction_consent.interaction_id = interaction.id
+            AND interaction_consent.environment_id = interaction.environment_id
+            AND interaction_consent.decision = 'approved'
+          JOIN consent_grants grant_row
+            ON grant_row.environment_id = interaction.environment_id
+            AND grant_row.subject = interaction_consent.subject
+            AND grant_row.scope = 'share_outcome' AND grant_row.state = 'approved'
+          WHERE signal.workspace_id = report.workspace_id
+            AND signal.feedback_report_id = report.id
+            AND signal.consent_grant_id IS NULL
+        )
+        ORDER BY report.created_at, report.id LIMIT $1 FOR UPDATE",
+    )
+    .bind(limit)
+    .fetch_all(&mut *tx)
+    .await?;
+    let report_batch_exhausted =
+        report_ids.len() < usize::try_from(limit).map_err(ApiError::internal)?;
+    summary.reports_scanned = u64::try_from(report_ids.len()).map_err(ApiError::internal)?;
+    for report_id in &report_ids {
+        let report = sqlx::query_as::<_, ProductFeedbackReport>(
+            "SELECT * FROM feedback_reports WHERE id = $1",
+        )
+        .bind(*report_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let interaction = sqlx::query_as::<_, ProductInteraction>(
+            r"SELECT id, workspace_id, environment_id, api_key_id, session_id,
+              surface, operation, status_code, duration_ms, customer_ref, customer_id,
+              classification, confirmation_method, runtime_hint, runtime_hint_source,
+              occurred_at, created_at, updated_at
+            FROM interactions_v2 WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(report.interaction_id)
+        .bind(report.workspace_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let (product_id, feedback_mode) = sqlx::query_as::<_, (Uuid, String)>(
+            r"SELECT product_id, feedback_mode FROM product_environments
+            WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(interaction.environment_id)
+        .bind(interaction.workspace_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        project_feedback_signals(&mut tx, &interaction, &report, product_id, &feedback_mode)
+            .await?;
+        summary.reports_projected += 1;
+    }
+
+    let consent_subjects = sqlx::query_as::<_, (Uuid, String, String, DateTime<Utc>, i64)>(
+        r"SELECT subject.environment_id, subject.subject, subject.decision,
+          subject.decided_at, subject.revision
+        FROM feedback_consent_subjects subject
+        WHERE NOT EXISTS (
+          SELECT 1 FROM consent_grants grant_row
+          WHERE grant_row.environment_id = subject.environment_id
+            AND grant_row.subject = subject.subject
+            AND grant_row.scope = 'share_outcome'
+        )
+        ORDER BY subject.updated_at, subject.environment_id, subject.subject
+        LIMIT $1 FOR UPDATE",
+    )
+    .bind(limit)
+    .fetch_all(&mut *tx)
+    .await?;
+    let consent_batch_exhausted =
+        consent_subjects.len() < usize::try_from(limit).map_err(ApiError::internal)?;
+    summary.consent_subjects_scanned =
+        u64::try_from(consent_subjects.len()).map_err(ApiError::internal)?;
+    for (environment_id, subject, decision, decided_at, revision) in consent_subjects {
+        dual_write_share_outcome_consent(
+            &mut tx,
+            environment_id,
+            &subject,
+            &decision,
+            revision,
+            decided_at,
+            None,
+            None,
+            "migration",
+        )
+        .await?;
+        let customer_ids = sqlx::query_scalar::<_, Uuid>(
+            r"SELECT DISTINCT interaction.customer_id
+            FROM feedback_consent_interactions interaction_consent
+            JOIN interactions_v2 interaction
+              ON interaction.id = interaction_consent.interaction_id
+              AND interaction.environment_id = interaction_consent.environment_id
+            WHERE interaction_consent.environment_id = $1
+              AND interaction_consent.subject = $2
+              AND interaction.customer_id IS NOT NULL",
+        )
+        .bind(environment_id)
+        .bind(&subject)
+        .fetch_all(&mut *tx)
+        .await?;
+        if customer_ids.len() > 1 {
+            return Err(ApiError::conflict(
+                "Consent subject maps to multiple customers during backfill",
+            ));
+        }
+        if let Some(customer_id) = customer_ids.first() {
+            sqlx::query(
+                r"UPDATE consent_grants SET customer_id = $3, updated_at = NOW()
+                WHERE environment_id = $1 AND subject = $2
+                  AND scope = 'share_outcome' AND customer_id IS NULL",
+            )
+            .bind(environment_id)
+            .bind(&subject)
+            .bind(customer_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        summary.consent_grants_projected += 1;
+    }
+    summary.exhausted =
+        interaction_batch_exhausted && report_batch_exhausted && consent_batch_exhausted;
+    tx.commit().await?;
+    Ok(summary)
+}
+
 pub(crate) async fn submit_product_feedback(
     pool: &PgPool,
     capability: &str,
@@ -5605,7 +7343,7 @@ pub(crate) async fn submit_product_feedback(
           updated_at = NOW()
         WHERE interactions_v2.environment_id = EXCLUDED.environment_id
         RETURNING id, workspace_id, environment_id, api_key_id, session_id, surface, operation,
-          status_code, duration_ms, customer_ref, classification, confirmation_method,
+          status_code, duration_ms, customer_ref, customer_id, classification, confirmation_method,
           runtime_hint, runtime_hint_source, occurred_at, created_at, updated_at",
     )
     .bind(claims.i)
@@ -5617,6 +7355,41 @@ pub(crate) async fn submit_product_feedback(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| ApiError::conflict("interactionId belongs to another product environment"))?;
+
+    let grant_subject = claims
+        .s
+        .clone()
+        .or_else(|| (key.2 == "ask_always").then(|| format!("afint1_{}", claims.i.simple())));
+    if let (Some(subject), Some(customer_id)) = (grant_subject.as_deref(), interaction.customer_id)
+    {
+        let conflicting = sqlx::query_scalar::<_, bool>(
+            r"SELECT EXISTS (
+              SELECT 1 FROM consent_grants
+              WHERE environment_id = $1 AND subject = $2 AND scope = 'share_outcome'
+                AND customer_id IS NOT NULL AND customer_id <> $3
+            )",
+        )
+        .bind(key.3)
+        .bind(subject)
+        .bind(customer_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if conflicting {
+            return Err(ApiError::conflict(
+                "Consent subject is already linked to a different customer",
+            ));
+        }
+        sqlx::query(
+            r"UPDATE consent_grants SET customer_id = $3, updated_at = NOW()
+            WHERE environment_id = $1 AND subject = $2 AND scope = 'share_outcome'
+              AND customer_id IS NULL",
+        )
+        .bind(key.3)
+        .bind(subject)
+        .bind(customer_id)
+        .execute(&mut *tx)
+        .await?;
+    }
 
     let inserted_report = sqlx::query_as::<_, ProductFeedbackReport>(
         r"INSERT INTO feedback_reports
@@ -5647,6 +7420,7 @@ pub(crate) async fn submit_product_feedback(
         .bind(claims.i)
         .fetch_one(&mut *tx)
         .await?;
+        project_feedback_signals(&mut tx, &interaction, &existing, key.4, &key.2).await?;
         tx.commit().await?;
         return Ok((interaction, existing));
     };
@@ -5664,6 +7438,7 @@ pub(crate) async fn submit_product_feedback(
         },
     )
     .await?;
+    project_feedback_signals(&mut tx, &interaction, &report, key.4, &key.2).await?;
     tx.commit().await?;
     Ok((interaction, report))
 }
@@ -5685,6 +7460,16 @@ mod product_tests {
     use crate::models::{ConsentDecisionInput, CurrentUser};
 
     use super::*;
+
+    const TEST_IDENTITY_HMAC_SECRET: &[u8] = b"epode-test-identity-hmac-secret-32-bytes-minimum";
+
+    async fn ingest_telemetry_batch(
+        pool: &PgPool,
+        auth: &ProductAuth,
+        input: TelemetryBatchInput,
+    ) -> Result<TelemetryBatchResult, ApiError> {
+        super::ingest_telemetry_batch(pool, auth, TEST_IDENTITY_HMAC_SECRET, input).await
+    }
 
     fn test_error(error: ApiError) -> anyhow::Error {
         let ApiError { status, message } = error;
@@ -5789,6 +7574,9 @@ mod product_tests {
             status_code: Some(503),
             duration_ms: Some(25),
             customer_ref: None,
+            account_ref: None,
+            user_ref: None,
+            anonymous_ref: None,
             classification: Some("confirmed".into()),
             confirmation_method: Some("mcp".into()),
             runtime_hint: None,
@@ -5811,6 +7599,9 @@ mod product_tests {
             status_code: Some(200),
             duration_ms: Some(25),
             customer_ref: None,
+            account_ref: None,
+            user_ref: None,
+            anonymous_ref: None,
             classification: None,
             confirmation_method: None,
             runtime_hint: None,
@@ -5921,6 +7712,9 @@ mod product_tests {
             status_code: Some(200),
             duration_ms: Some(10),
             customer_ref: None,
+            account_ref: None,
+            user_ref: None,
+            anonymous_ref: None,
             classification: Some("confirmed".into()),
             confirmation_method: Some("mcp".into()),
             runtime_hint: None,
@@ -8844,6 +10638,9 @@ mod product_tests {
                 status_code: Some(200),
                 duration_ms: Some(10),
                 customer_ref: None,
+                account_ref: None,
+                user_ref: None,
+                anonymous_ref: None,
                 classification: classification.map(str::to_owned),
                 confirmation_method: method.map(str::to_owned),
                 runtime_hint: None,
@@ -9338,7 +11135,7 @@ mod product_tests {
             )
             .await
             .map_err(test_error)?;
-            anyhow::ensure!(malformed.accepted == 2 && malformed.dropped == 0);
+            anyhow::ensure!(malformed.accepted == 1 && malformed.dropped == 1);
             let malformed_rows: Vec<(Uuid, Option<Uuid>, Option<String>)> = sqlx::query_as(
                 r"SELECT id, session_id, customer_ref FROM interactions_v2
                 WHERE id = ANY($1) ORDER BY id",
@@ -9346,16 +11143,18 @@ mod product_tests {
             .bind(vec![malformed_session_id, malformed_customer_id])
             .fetch_all(&pool)
             .await?;
-            anyhow::ensure!(malformed_rows.len() == 2);
-            anyhow::ensure!(malformed_rows.iter().all(|(_, session_id, customer_ref)| {
-                session_id.is_none() && customer_ref.is_none()
-            }));
+            anyhow::ensure!(malformed_rows.len() == 1);
+            anyhow::ensure!(
+                malformed_rows[0].0 == malformed_session_id
+                    && malformed_rows[0].1.is_none()
+                    && malformed_rows[0].2.is_none()
+            );
             let malformed_count: i64 =
                 sqlx::query_scalar("SELECT COUNT(*) FROM interactions_v2 WHERE id = ANY($1)")
                     .bind(vec![malformed_session_id, malformed_customer_id])
                     .fetch_one(&pool)
                     .await?;
-            anyhow::ensure!(malformed_count == 2);
+            anyhow::ensure!(malformed_count == 1);
             let session_count: i64 =
                 sqlx::query_scalar("SELECT COUNT(*) FROM sessions_v2 WHERE workspace_id = $1")
                     .bind(workspace.id)
@@ -11072,6 +12871,9 @@ mod product_tests {
                         status_code: Some(200),
                         duration_ms: Some(12),
                         customer_ref: None,
+                        account_ref: None,
+                        user_ref: None,
+                        anonymous_ref: None,
                         classification: Some("unclassified".into()),
                         confirmation_method: None,
                         runtime_hint: None,
@@ -11256,6 +13058,815 @@ mod product_tests {
 
         sqlx::query("DELETE FROM workspaces WHERE id = $1")
             .bind(workspace_id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[test]
+    fn customer_identity_refs_and_hmac_are_fail_closed_and_tenant_scoped() -> anyhow::Result<()> {
+        let base = http_telemetry_event(Uuid::new_v4(), Utc::now());
+        anyhow::ensure!(validate_identity_refs(&base).is_ok());
+        for value in [
+            "",
+            " customer",
+            "customer ",
+            "customer name",
+            "person@example.com",
+        ] {
+            let mut malformed = base.clone();
+            malformed.customer_ref = Some(value.into());
+            anyhow::ensure!(validate_identity_refs(&malformed).is_err());
+        }
+        let mut conflicting = base;
+        conflicting.customer_ref = Some("legacy_1".into());
+        conflicting.user_ref = Some("user_1".into());
+        anyhow::ensure!(validate_identity_refs(&conflicting).is_err());
+        conflicting.account_ref = Some("account_1".into());
+        anyhow::ensure!(validate_identity_refs(&conflicting).is_err());
+        conflicting.customer_ref = Some("account_1".into());
+        anyhow::ensure!(validate_identity_refs(&conflicting).is_ok());
+
+        let workspace = Uuid::new_v4();
+        let product = Uuid::new_v4();
+        let hash = customer_identifier_hash(
+            TEST_IDENTITY_HMAC_SECRET,
+            workspace,
+            product,
+            "user_ref",
+            "user_1",
+        )
+        .map_err(test_error)?;
+        anyhow::ensure!(hash.len() == 32);
+        anyhow::ensure!(
+            hash == customer_identifier_hash(
+                TEST_IDENTITY_HMAC_SECRET,
+                workspace,
+                product,
+                "user_ref",
+                "user_1",
+            )
+            .map_err(test_error)?
+        );
+        anyhow::ensure!(
+            hash != customer_identifier_hash(
+                TEST_IDENTITY_HMAC_SECRET,
+                Uuid::new_v4(),
+                product,
+                "user_ref",
+                "user_1",
+            )
+            .map_err(test_error)?
+        );
+        anyhow::ensure!(
+            customer_identifier_hash(b"too-short", workspace, product, "user_ref", "user_1")
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn customer_identity_resolution_is_progressive_and_tenant_scoped() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace_a = telemetry_test_workspace(&pool, "Identity tenant A").await?;
+        let (product_a, auth_a) =
+            telemetry_test_product(&pool, &workspace_a, "Identity product A").await?;
+        let workspace_b = telemetry_test_workspace(&pool, "Identity tenant B").await?;
+        let (product_b, auth_b) =
+            telemetry_test_product(&pool, &workspace_b, "Identity product B").await?;
+
+        let result = async {
+            let anonymous_interaction_id = Uuid::new_v4();
+            let mut anonymous =
+                http_telemetry_event(anonymous_interaction_id, Utc::now() - Duration::seconds(2));
+            anonymous.anonymous_ref = Some("browser_installation_1".into());
+            let accepted = ingest_telemetry_batch(
+                &pool,
+                &auth_a,
+                TelemetryBatchInput {
+                    events: vec![anonymous],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(accepted.accepted == 1 && accepted.dropped == 0);
+            let anonymous_customer_id = sqlx::query_scalar::<_, Uuid>(
+                "SELECT customer_id FROM interactions_v2 WHERE id = $1",
+            )
+            .bind(anonymous_interaction_id)
+            .fetch_one(&pool)
+            .await?;
+
+            let verified_interaction_id = Uuid::new_v4();
+            let mut verified = http_telemetry_event(verified_interaction_id, Utc::now());
+            verified.user_ref = Some("user_42".into());
+            verified.account_ref = Some("account_7".into());
+            verified.customer_ref = Some("account_7".into());
+            verified.anonymous_ref = Some("browser_installation_1".into());
+            ingest_telemetry_batch(
+                &pool,
+                &auth_a,
+                TelemetryBatchInput {
+                    events: vec![verified],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let verified_customer_id = sqlx::query_scalar::<_, Uuid>(
+                "SELECT customer_id FROM interactions_v2 WHERE id = $1",
+            )
+            .bind(verified_interaction_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(verified_customer_id != anonymous_customer_id);
+            let prior_customer_id = sqlx::query_scalar::<_, Uuid>(
+                "SELECT customer_id FROM interactions_v2 WHERE id = $1",
+            )
+            .bind(anonymous_interaction_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(prior_customer_id == verified_customer_id);
+            let (level, parent_customer_id) = sqlx::query_as::<_, (String, Option<Uuid>)>(
+                "SELECT identity_level, parent_customer_id FROM customers WHERE id = $1",
+            )
+            .bind(verified_customer_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(level == "verified" && parent_customer_id.is_some());
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM customer_resolution_events WHERE from_customer_id = $1 AND to_customer_id = $2",
+                )
+                .bind(anonymous_customer_id)
+                .bind(verified_customer_id)
+                .fetch_one(&pool)
+                .await?
+                    == 1
+            );
+
+            let isolated_interaction_id = Uuid::new_v4();
+            let mut isolated = http_telemetry_event(isolated_interaction_id, Utc::now());
+            isolated.user_ref = Some("user_42".into());
+            ingest_telemetry_batch(
+                &pool,
+                &auth_b,
+                TelemetryBatchInput {
+                    events: vec![isolated],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let isolated_customer_id = sqlx::query_scalar::<_, Uuid>(
+                "SELECT customer_id FROM interactions_v2 WHERE id = $1",
+            )
+            .bind(isolated_interaction_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(isolated_customer_id != verified_customer_id);
+
+            let customers = dashboard_customers_page(
+                &pool,
+                workspace_a.id,
+                product_a.id,
+                DashboardCustomerFilters::default(),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                customers
+                    .customers
+                    .iter()
+                    .any(|customer| customer.id == verified_customer_id)
+            );
+            anyhow::ensure!(customers.rollup.verified == 2);
+            dashboard_customers_page(
+                &pool,
+                workspace_a.id,
+                product_a.id,
+                DashboardCustomerFilters {
+                    query: Some("user\\_%".into()),
+                    ..DashboardCustomerFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let detail = dashboard_customer_by_id(
+                &pool,
+                workspace_a.id,
+                product_a.id,
+                verified_customer_id,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(detail.customer.identity_level == "verified");
+            anyhow::ensure!(detail.customer.kind == "user");
+            anyhow::ensure!(detail.customer.parent_customer_id.is_some());
+            anyhow::ensure!(detail.customer.member_count == 0);
+            anyhow::ensure!(detail.identifiers.len() == 2);
+            anyhow::ensure!(
+                dashboard_customer_by_id(
+                    &pool,
+                    workspace_b.id,
+                    product_b.id,
+                    verified_customer_id,
+                )
+                .await
+                .is_err()
+            );
+            let signals = dashboard_signals_page(
+                &pool,
+                workspace_a.id,
+                product_a.id,
+                DashboardSignalFilters {
+                    customer_id: Some(verified_customer_id),
+                    ..DashboardSignalFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(signals.total == 0 && signals.signals.is_empty());
+            dashboard_signals_page(
+                &pool,
+                workspace_a.id,
+                product_a.id,
+                DashboardSignalFilters {
+                    query: Some("signal\\_%".into()),
+                    ..DashboardSignalFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+
+            let customer_count_before = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM customers WHERE workspace_id = $1",
+            )
+            .bind(workspace_a.id)
+            .fetch_one(&pool)
+            .await?;
+            let mut invalid_session = http_telemetry_event(Uuid::new_v4(), Utc::now());
+            invalid_session.user_ref = Some("must_not_persist".into());
+            invalid_session.session_ref = Some("valid_session".into());
+            invalid_session.session_source = Some("invalid_source".into());
+            let invalid_session_result = ingest_telemetry_batch(
+                &pool,
+                &auth_a,
+                TelemetryBatchInput {
+                    events: vec![invalid_session],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(invalid_session_result.dropped == 1);
+            let mut conflicting_replay =
+                http_telemetry_event(verified_interaction_id, Utc::now());
+            conflicting_replay.user_ref = Some("different_user".into());
+            let replay_result = ingest_telemetry_batch(
+                &pool,
+                &auth_a,
+                TelemetryBatchInput {
+                    events: vec![conflicting_replay],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(replay_result.dropped == 1);
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM customers WHERE workspace_id = $1",
+                )
+                .bind(workspace_a.id)
+                .fetch_one(&pool)
+                .await?
+                    == customer_count_before
+            );
+
+            let conflicting_interaction_id = Uuid::new_v4();
+            let mut conflicting = http_telemetry_event(conflicting_interaction_id, Utc::now());
+            conflicting.customer_ref = Some("legacy_42".into());
+            conflicting.user_ref = Some("user_42".into());
+            let rejected = ingest_telemetry_batch(
+                &pool,
+                &auth_a,
+                TelemetryBatchInput {
+                    events: vec![conflicting],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(rejected.accepted == 0 && rejected.dropped == 1);
+            anyhow::ensure!(
+                !sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM interactions_v2 WHERE id = $1)",
+                )
+                .bind(conflicting_interaction_id)
+                .fetch_one(&pool)
+                .await?
+            );
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        for workspace in [&workspace_a, &workspace_b] {
+            sqlx::query("DELETE FROM workspaces WHERE id = $1")
+                .bind(workspace.id)
+                .execute(&pool)
+                .await?;
+        }
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn feedback_projects_idempotent_signals_and_winning_consent_cas_only()
+    -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Signal projection tenant").await?;
+        let (_product, mut environment) = create_product(
+            &pool,
+            workspace.id,
+            CreateProductInput {
+                name: "Signals".into(),
+            },
+        )
+        .await
+        .map_err(test_error)?;
+        environment = update_policy(
+            &pool,
+            workspace.id,
+            PolicyInput {
+                environment_id: environment.id,
+                feedback_mode: "ask_once".into(),
+                collect_event_summaries: false,
+                retention_days: 30,
+            },
+        )
+        .await
+        .map_err(test_error)?;
+        let (key, secret) = create_api_key(
+            &pool,
+            workspace.id,
+            environment.id,
+            Some("Signals write".into()),
+            None,
+            None,
+        )
+        .await
+        .map_err(test_error)?;
+        let auth = ProductAuth {
+            workspace: workspace.clone(),
+            environment: environment.clone(),
+            api_key_id: key.id,
+        };
+        let result = async {
+            let interaction_id = Uuid::new_v4();
+            let mut event = http_telemetry_event(interaction_id, Utc::now());
+            event.customer_ref = Some("customer_42".into());
+            ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![event],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let subject = format!("afsub1_{}", "A".repeat(43));
+            let approval = test_capability_with_subject_revision(
+                &secret,
+                key.id,
+                interaction_id,
+                Some(&subject),
+                Some(0),
+            );
+            let decision = record_feedback_consent_decision(
+                &pool,
+                &approval,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(decision.changed && decision.feedback_action_allowed);
+            let mut feedback = feedback_input_with_finding(
+                "The search worked after one recoverable issue.",
+                "search_recovery",
+            );
+            feedback.workaround = Some(crate::models::FeedbackWorkaroundInput {
+                used: true,
+                detail: Some("Retried with a narrower search term.".into()),
+            });
+            let (_, report) = submit_product_feedback(&pool, &approval, feedback)
+                .await
+                .map_err(test_error)?;
+            let customer_id = sqlx::query_scalar::<_, Uuid>(
+                "SELECT customer_id FROM interactions_v2 WHERE id = $1",
+            )
+            .bind(interaction_id)
+            .fetch_one(&pool)
+            .await?;
+            let signal_rows = sqlx::query_as::<_, (String, String, Option<Uuid>, Option<String>)>(
+                r"SELECT signal_type, provenance, consent_grant_id, consent_scope
+                FROM customer_signals WHERE workspace_id = $1 AND feedback_report_id = $2
+                ORDER BY source_item_key",
+            )
+            .bind(workspace.id)
+            .bind(report.id)
+            .fetch_all(&pool)
+            .await?;
+            anyhow::ensure!(signal_rows.len() == 3);
+            anyhow::ensure!(signal_rows.iter().all(|row| {
+                row.1 == "agent_reports_current_task"
+                    && row.2.is_some()
+                    && row.3.as_deref() == Some("share_outcome")
+            }));
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, Option<Uuid>>(
+                    r"SELECT customer_id FROM consent_grants
+                    WHERE environment_id = $1 AND subject = $2 AND scope = 'share_outcome'",
+                )
+                .bind(environment.id)
+                .bind(&subject)
+                .fetch_one(&pool)
+                .await?
+                    == Some(customer_id)
+            );
+
+            let (_, retry_report) = submit_product_feedback(
+                &pool,
+                &approval,
+                feedback_input("A retry must return the original report."),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(retry_report.id == report.id);
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM customer_signals WHERE feedback_report_id = $1",
+                )
+                .bind(report.id)
+                .fetch_one(&pool)
+                .await?
+                    == 3
+            );
+
+            let revoke = test_capability_with_subject_revision(
+                &secret,
+                key.id,
+                Uuid::new_v4(),
+                Some(&subject),
+                Some(1),
+            );
+            anyhow::ensure!(
+                record_feedback_consent_decision(
+                    &pool,
+                    &revoke,
+                    ConsentDecisionInput {
+                        decision: "declined".into(),
+                    },
+                )
+                .await
+                .map_err(test_error)?
+                .changed
+            );
+            let stale = test_capability_with_subject_revision(
+                &secret,
+                key.id,
+                Uuid::new_v4(),
+                Some(&subject),
+                Some(1),
+            );
+            let stale_result = record_feedback_consent_decision(
+                &pool,
+                &stale,
+                ConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(!stale_result.changed && !stale_result.feedback_action_allowed);
+            let (grant_state, grant_revision, event_count) =
+                sqlx::query_as::<_, (String, i64, i64)>(
+                    r"SELECT grant_row.state, grant_row.revision,
+                      (SELECT COUNT(*) FROM consent_events event
+                        WHERE event.consent_grant_id = grant_row.id)::BIGINT
+                    FROM consent_grants grant_row
+                    WHERE grant_row.environment_id = $1 AND grant_row.subject = $2
+                      AND grant_row.scope = 'share_outcome'",
+                )
+                .bind(environment.id)
+                .bind(&subject)
+                .fetch_one(&pool)
+                .await?;
+            anyhow::ensure!(grant_state == "declined" && grant_revision == 2 && event_count == 2);
+
+            update_policy(
+                &pool,
+                workspace.id,
+                PolicyInput {
+                    environment_id: environment.id,
+                    feedback_mode: "ask_always".into(),
+                    collect_event_summaries: false,
+                    retention_days: 30,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let always_interaction_id = Uuid::new_v4();
+            let mut always_event = http_telemetry_event(always_interaction_id, Utc::now());
+            always_event.customer_ref = Some("customer_42".into());
+            ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![always_event],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let always_capability = test_capability(&secret, key.id, always_interaction_id);
+            anyhow::ensure!(
+                record_feedback_consent_decision(
+                    &pool,
+                    &always_capability,
+                    ConsentDecisionInput {
+                        decision: "approved".into(),
+                    },
+                )
+                .await
+                .map_err(test_error)?
+                .changed
+            );
+            let (_, always_report) = submit_product_feedback(
+                &pool,
+                &always_capability,
+                feedback_input("Ask always permission remains linked evidence."),
+            )
+            .await
+            .map_err(test_error)?;
+            let (always_basis, always_scope, always_state) =
+                sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+                    r"SELECT signal.collection_basis, signal.consent_scope, grant_row.state
+                    FROM customer_signals signal
+                    LEFT JOIN consent_grants grant_row ON grant_row.id = signal.consent_grant_id
+                    WHERE signal.feedback_report_id = $1 AND signal.source_item_key = 'outcome'",
+                )
+                .bind(always_report.id)
+                .fetch_one(&pool)
+                .await?;
+            anyhow::ensure!(
+                always_basis == "user_consent"
+                    && always_scope.as_deref() == Some("share_outcome")
+                    && always_state.as_deref() == Some("approved")
+            );
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn customer_intelligence_backfill_is_bounded_and_idempotent() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Backfill tenant").await?;
+        let (product, auth) = telemetry_test_product(&pool, &workspace, "Backfill product").await?;
+        let result = async {
+            let interaction_id = Uuid::new_v4();
+            sqlx::query(
+                r"INSERT INTO interactions_v2
+                (id, workspace_id, environment_id, api_key_id, surface, operation,
+                 status_code, customer_ref, classification, occurred_at)
+                VALUES ($1, $2, $3, $4, 'http_json', '/legacy', 200,
+                  'legacy_customer_1', 'unclassified', NOW())",
+            )
+            .bind(interaction_id)
+            .bind(workspace.id)
+            .bind(auth.environment.id)
+            .bind(auth.api_key_id)
+            .execute(&pool)
+            .await?;
+            let report_id = Uuid::new_v4();
+            sqlx::query(
+                r"INSERT INTO feedback_reports
+                (id, workspace_id, interaction_id, summary, impact, confidence, findings)
+                VALUES ($1, $2, $3, 'Legacy report should become typed evidence.',
+                  'helped_with_friction', 0.8, $4)",
+            )
+            .bind(report_id)
+            .bind(workspace.id)
+            .bind(interaction_id)
+            .bind(serde_json::json!([{
+                "kind": "gap",
+                "topic": "legacy_gap",
+                "severity": "major",
+                "detail": "A legacy gap was observed."
+            }]))
+            .execute(&pool)
+            .await?;
+            let subject = format!("afsub1_{}", "B".repeat(43));
+            sqlx::query(
+                r"INSERT INTO feedback_consent_subjects
+                (environment_id, subject, decision, revision)
+                VALUES ($1, $2, 'approved', 1)",
+            )
+            .bind(auth.environment.id)
+            .bind(&subject)
+            .execute(&pool)
+            .await?;
+
+            let first = backfill_customer_intelligence(&pool, TEST_IDENTITY_HMAC_SECRET, 1)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(!first.exhausted);
+            anyhow::ensure!(
+                first.interactions_scanned == 1
+                    && first.interactions_linked == 1
+                    && first.reports_scanned == 1
+                    && first.reports_projected == 1
+                    && first.consent_subjects_scanned == 1
+                    && first.consent_grants_projected == 1
+            );
+            let second = backfill_customer_intelligence(&pool, TEST_IDENTITY_HMAC_SECRET, 1)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(second.exhausted);
+            anyhow::ensure!(
+                second.interactions_scanned == 0
+                    && second.reports_scanned == 0
+                    && second.consent_subjects_scanned == 0
+            );
+            let counts = sqlx::query_as::<_, (i64, i64, i64)>(
+                r"SELECT
+                  (SELECT COUNT(*) FROM customers WHERE workspace_id = $1),
+                  (SELECT COUNT(*) FROM customer_signals WHERE workspace_id = $1
+                    AND feedback_report_id = $2),
+                  (SELECT COUNT(*) FROM consent_grants WHERE workspace_id = $1
+                    AND product_id = $3 AND scope = 'share_outcome')",
+            )
+            .bind(workspace.id)
+            .bind(report_id)
+            .bind(product.id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(counts == (1, 2, 1));
+            let third = backfill_customer_intelligence(&pool, TEST_IDENTITY_HMAC_SECRET, 10)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(third.exhausted);
+            let unchanged = sqlx::query_as::<_, (i64, i64, i64)>(
+                r"SELECT
+                  (SELECT COUNT(*) FROM customers WHERE workspace_id = $1),
+                  (SELECT COUNT(*) FROM customer_signals WHERE workspace_id = $1),
+                  (SELECT COUNT(*) FROM consent_events WHERE workspace_id = $1)",
+            )
+            .bind(workspace.id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(unchanged == (1, 2, 1));
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn customer_intelligence_retention_removes_expired_optional_data_only()
+    -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Retention tenant").await?;
+        let (product, auth) =
+            telemetry_test_product(&pool, &workspace, "Retention product").await?;
+        let result = async {
+            let interaction_id = Uuid::new_v4();
+            let mut event = http_telemetry_event(interaction_id, Utc::now());
+            event.anonymous_ref = Some("retained_browser".into());
+            ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![event],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let retained_customer_id = sqlx::query_scalar::<_, Uuid>(
+                "SELECT customer_id FROM interactions_v2 WHERE id = $1",
+            )
+            .bind(interaction_id)
+            .fetch_one(&pool)
+            .await?;
+            let expired_signal_id = Uuid::new_v4();
+            sqlx::query(
+                r"INSERT INTO customer_signals
+                (id, workspace_id, product_id, customer_id, interaction_id,
+                 source_item_key, signal_type, summary, provenance,
+                 collection_basis, collected_at, expires_at)
+                VALUES ($1, $2, $3, $4, $5, 'expired_preference', 'preference',
+                  'An expired preference', 'company_assertion',
+                  'required_product_data', NOW() - INTERVAL '2 days',
+                  NOW() - INTERVAL '1 day')",
+            )
+            .bind(expired_signal_id)
+            .bind(workspace.id)
+            .bind(product.id)
+            .bind(retained_customer_id)
+            .bind(interaction_id)
+            .execute(&pool)
+            .await?;
+            let orphan_pseudonymous_id = Uuid::new_v4();
+            let verified_id = Uuid::new_v4();
+            for (id, kind, level) in [
+                (orphan_pseudonymous_id, "anonymous", "pseudonymous"),
+                (verified_id, "generic", "verified"),
+            ] {
+                sqlx::query(
+                    r"INSERT INTO customers
+                    (id, workspace_id, kind, identity_level, identity_confidence,
+                     first_seen_at, last_seen_at)
+                    VALUES ($1, $2, $3, $4, 1, NOW(), NOW())",
+                )
+                .bind(id)
+                .bind(workspace.id)
+                .bind(kind)
+                .bind(level)
+                .execute(&pool)
+                .await?;
+            }
+            anyhow::ensure!(
+                purge_expired_product_data(&pool, 100)
+                    .await
+                    .map_err(test_error)?
+                    >= 2
+            );
+            anyhow::ensure!(
+                !sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM customer_signals WHERE id = $1)",
+                )
+                .bind(expired_signal_id)
+                .fetch_one(&pool)
+                .await?
+            );
+            anyhow::ensure!(
+                !sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM customers WHERE id = $1)",
+                )
+                .bind(orphan_pseudonymous_id)
+                .fetch_one(&pool)
+                .await?
+            );
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM customers WHERE id = $1)",
+                )
+                .bind(verified_id)
+                .fetch_one(&pool)
+                .await?
+            );
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM customers WHERE id = $1)",
+                )
+                .bind(retained_customer_id)
+                .fetch_one(&pool)
+                .await?
+            );
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
             .execute(&pool)
             .await?;
         result

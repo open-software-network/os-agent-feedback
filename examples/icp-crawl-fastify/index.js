@@ -10,7 +10,11 @@ app.addHook("onRequest", async (request, reply) => {
   if (request.headers.authorization !== "Bearer demo-crawl-team-token") {
     return reply.code(401).send({ error: "unauthorized" });
   }
-  request.productAuth = { accountId: "team_crawl_9" };
+  request.productAuth = {
+    accountId: "team_crawl_9",
+    userId: "user_crawl_3",
+    anonymousId: "anon_crawl_12",
+  };
 });
 const feedback = agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
@@ -19,7 +23,13 @@ const feedback = agentFeedback({
   // Polling is not an outcome. Only a terminal crawl result should ask the
   // customer agent to evaluate the product.
   shouldInstrument: (_request, response) => response.body?.status === "completed",
-  customerRef: (request) => request.productAuth?.accountId,
+  accountRef: (request) => request.productAuth?.accountId,
+  userRef: (request) => request.productAuth?.userId,
+  anonymousRef: (request) => request.productAuth?.anonymousId,
+  customerRef:
+    process.env.AGENT_FEEDBACK_MODE === "ask_once"
+      ? (request) => request.productAuth?.accountId
+      : undefined,
   sessionRef: (request) => request.params?.id,
 });
 await app.register(feedback);

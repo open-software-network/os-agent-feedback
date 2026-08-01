@@ -1,6 +1,6 @@
 # `@agent-feedback/node`
 
-Collect one structured feedback report from the independent customer agents using your product. The SDK never identifies an agent or sends prompts or product payloads. Telemetry and Ask once state resolution never block the HTTP response. Eligible Ask once responses always carry a subject-bound receipt; Epode Companion verifies that receipt and resolves the remembered decision before it asks or reports.
+Collect one structured feedback report from the independent customer agents using your product. The SDK never invents customer or agent identity and never sends prompts or product payloads. Optional customer references come only from your authenticated, server-side context. Telemetry and Ask once state resolution never block the HTTP response. Eligible Ask once responses always carry a subject-bound receipt; Epode Companion verifies that receipt and resolves the remembered decision before it asks or reports.
 
 There are two reliability levels:
 
@@ -15,7 +15,7 @@ There are two reliability levels:
 Until the npm registry release is connected, install the signed build directly from the production service:
 
 ```sh
-npm install https://app.epode.ai/static/agent-feedback-node-0.2.2.tgz
+npm install https://app.epode.ai/static/agent-feedback-node-0.3.0.tgz
 ```
 
 ```ts
@@ -24,9 +24,18 @@ import { agentFeedback } from "@agent-feedback/node/express";
 app.use(agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY!,
   include: ["/search", "/docs/*"],
+  accountRef: req => req.user?.accountId,
+  userRef: req => req.user?.id,
+  anonymousRef: req => req.firstPartyVisitorId,
   customerRef: req => req.user?.accountId, // stable opaque ID; required for durable Ask once
 }));
 ```
+
+Use `accountRef` and `userRef` for new integrations. `anonymousRef` supports a first-party pre-login
+journey, and co-supplying it after authentication authorizes deterministic progressive resolution.
+`customerRef` remains the compatible opaque Ask-once subject and legacy customer reference. Never
+derive any of these from agent arguments, names, emails, or untrusted raw request values. They travel
+only in background telemetry and are never exposed to the agent.
 
 Compatible JSON objects receive `_agentFeedback`. HTML receives an embedded `application/json` handoff. Arrays and scalar JSON responses use `Agent-Feedback` and `Link` headers. Errors, redirects, streams, binary responses, assets, health routes, and unrelated routes are untouched. These HTTP opportunities remain unclassified unless the scoped receipt returns.
 
@@ -128,8 +137,8 @@ Agent runtimes that want deterministic HTTP/HTML feedback can explicitly consume
 
 ```ts
 import {
-  feedbackConsentAction,
   feedbackFromResponse,
+  inspectProductFeedback,
   submitFeedbackConsent,
   submitProductFeedback,
 } from "@agent-feedback/node/agent";
@@ -139,17 +148,15 @@ const body = await response.json();
 const feedback = feedbackFromResponse(response, body);
 
 if (feedback) {
-  let reportContract = feedback;
-  const action = feedbackConsentAction(feedback);
-  if (action === "ask") {
-    const approved = await askUser(feedback.requiredAction.question);
+  const inspection = await inspectProductFeedback(feedback);
+  if (inspection.action === "ask") {
+    const approved = await askUser(inspection.canonicalQuestion);
     const decision = await submitFeedbackConsent(feedback, approved ? "approved" : "declined");
-    if (!decision.feedback) return;
-    reportContract = decision.feedback;
+    if (decision.state !== "approved") return;
   }
-  if (feedbackConsentAction(reportContract) !== "submit") return;
+  if (inspection.action === "skip") return;
   await submitProductFeedback(
-    reportContract,
+    feedback,
     {
       summary: "The product completed the task, but required a retry.",
       impact: "helped_with_friction",
@@ -161,7 +168,7 @@ if (feedback) {
 }
 ```
 
-The adapter requires an allow-listed HTTPS destination and submits only the structured report fields. In Ask once mode, Epode stores only the decision and the SDK-derived opaque subject; the agent runtime has no consent preference store.
+The adapter requires an allow-listed HTTPS destination, never follows redirects, and submits only the structured report fields. `inspectProductFeedback`, `submitFeedbackConsent`, and `submitProductFeedback` all resolve the current capability state before side effects, so a stale response cannot repeat a permission question or overwrite a remembered decision. In Ask once mode, Epode stores only the decision and the SDK-derived opaque subject; the agent runtime has no consent preference store.
 
 ## Verify the whole loop
 

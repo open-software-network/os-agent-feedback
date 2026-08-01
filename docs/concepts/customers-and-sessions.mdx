@@ -1,24 +1,64 @@
 ---
-title: "Customers and sessions"
-description: "Add optional product context without identifying agents or guessing journeys."
+title: "Customers, identity, and evidence"
+description: "Build progressive customer intelligence without inventing identity or guessing journeys."
 ---
 
-You do not need to know who the customer's agent is.
+Epode is identity-aware, but never identity-inventing. Companies can attach their own authenticated
+customer references and first-party anonymous references. Epode never identifies the customer's agent,
+uses behavioral similarity as proof, or silently merges people.
 
-## Customer grouping
+## Progressive customer identity
 
-`customerRef` is an optional opaque identifier derived from authentication your product already has.
-Good values are internal account or tenant IDs. Do not send names, email addresses, prompts, or task text.
-Epode stores this value with interaction telemetry so your dashboard can group usage by customer. The
-agent-facing feedback envelope receives only an HMAC-derived consent subject, never the raw reference.
+Customer activity can be verified, pseudonymous, ephemeral, or unresolved:
+
+- `accountRef` represents an authenticated organization, tenant, or workspace.
+- `userRef` represents an authenticated end user.
+- `anonymousRef` represents a stable, product-owned pre-login visitor.
+- `customerRef` remains only the compatible Ask-once subject. When richer identity is present it must exactly
+  equal `accountRef`; never pair it with `userRef` alone or with a different account.
+
+References are server-side telemetry only. Do not send names, email addresses, prompts, task text, caller
+fields, tool arguments, or agent-provided identity claims. Epode stores a keyed, product-scoped representation and a bounded display
+hint; the agent-facing feedback envelope never receives a raw identity reference.
 
 ```ts
 app.use(agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
   include: ["/search"],
-  customerRef: req => req.user?.accountId,
+  accountRef: req => req.user?.accountId,
+  userRef: req => req.user?.id,
+  anonymousRef: req => req.firstPartyVisitorId,
+  customerRef: req => req.user?.accountId, // exact accountRef; durable Ask once only
+  sessionRef: req => req.agentSession?.id, // server/product-proven journey only
 }));
 ```
+
+When a request legitimately contains both `anonymousRef` and an authenticated `userRef`, Epode can link
+the earlier pseudonymous journey to the verified customer. That deterministic link is company-authorized,
+auditable, and product-scoped. Conflicts fail closed. Similar behavior may suggest a relationship but never
+performs a verified merge.
+
+## Typed signals and provenance
+
+Accepted outcome feedback becomes evidence-backed signals such as outcome, friction, feature need,
+workaround, satisfaction, or intent. Every signal links to the exact session, interaction, or feedback
+report that supports it and labels how it was obtained:
+
+- `agent_reports_user_statement`
+- `agent_reports_current_task`
+- `agent_inference`
+- `product_activity`
+- `company_assertion`
+
+An inference is never displayed as a confirmed user fact. Corrections create new evidence rather than
+silently rewriting history.
+
+## Scoped permission
+
+Permission is purpose-specific: sharing an outcome does not authorize remembering preferences or
+personalization. The initial customer-intelligence release preserves the existing feedback workflow and
+maps it only to `share_outcome`. Preference sharing, durable memory, and personalization remain denied until
+they are separately authorized. Ask-once decisions keep their monotonic revision and revocation history.
 
 ## Session continuity
 
@@ -40,4 +80,5 @@ period immediately. Feedback, interactions, and sessions outside the window stop
 physically removed by the scheduled purge, which can take up to one purge interval.
 
 The HMAC-derived Ask-once permission decision is intentionally separate from telemetry retention. It survives
-until the permission is explicitly changed or the product is deleted.
+until the permission is explicitly changed or the product is deleted. Expired signals stop contributing to
+active customer intelligence even when policy permits retaining their audit record.

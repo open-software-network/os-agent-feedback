@@ -98,6 +98,7 @@ jobs:
             workflows:
               - ".github/workflows/**"
               - "scripts/railway-deploy-image.sh"
+              - "scripts/verify-migration-ledger.sh"
               - "scripts/verify-public-integration-surface.sh"
 
   backend:
@@ -225,7 +226,7 @@ jobs:
             --no-save \
             --package-lock=false \
             wrangler@4.118.0 \
-            "$GITHUB_WORKSPACE/backend/public/agent-feedback-node-0.2.2.tgz"
+            "$GITHUB_WORKSPACE/backend/public/agent-feedback-node-0.3.0.tgz"
       - name: Check entry points
         run: |
           node --check examples/node-express/src/index.js

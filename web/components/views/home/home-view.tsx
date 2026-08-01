@@ -1,8 +1,11 @@
+"use client";
+
+import { useQuery } from "@tanstack/react-query";
 import { IconArrowUpRight } from "central-icons/IconArrowUpRight";
 import type { ReactNode } from "react";
 
+import { IdentityBadge, OutcomeHealth } from "@/components/dashboard/intelligence-badges";
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
 import {
   Table,
   TableBody,
@@ -11,347 +14,303 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import type { DashboardData } from "@/lib/api/dashboard";
 import {
-  formatDuration,
-  interfaceLabel,
-  isEditor,
-  relativeDate,
-  titleCase,
-} from "@/lib/dashboard/format";
-import { reportFindings } from "@/lib/dashboard/reports";
-import { cn } from "@/lib/utils";
-
-type InsightCount = { name: string; count: number };
-type VisibleDashboardView = "feedback" | "sessions" | "setup";
-type DashboardScope = Record<string, string>;
-
-const impactTone: Record<string, string> = {
-  blocked: "bg-impact-negative",
-  hindered: "bg-impact-warning",
-  helped_with_friction: "bg-impact-caution",
-  helped: "bg-impact-positive",
-  neutral: "bg-muted-foreground",
-  unknown: "bg-border",
-  unspecified: "bg-border",
-};
+  type FeatureSummary,
+  fetchCustomersPage,
+  fetchFeaturesPage,
+} from "@/lib/api/customer-intelligence";
+import type { DashboardData } from "@/lib/api/dashboard";
+import { isEditor, relativeDate, titleCase } from "@/lib/dashboard/format";
 
 export function HomeView({
   data,
+  openCustomer = () => undefined,
+  openFeature = () => undefined,
   openFeedback,
   refresh,
 }: {
   data: DashboardData;
+  openCustomer?: (customerId: string) => void;
+  openFeature?: (featureKey: string) => void;
   openFeedback: (reportId: string) => void;
   refresh: () => Promise<unknown>;
 }) {
-  const insights = data.insights;
-  const needsSetup = insights.opportunities === 0 && isEditor(data.currentRole);
-  const feedbackGap = Math.max(insights.confirmedInteractions - insights.reports, 0);
-  const topBlockingTopic = insights.blockingTopics[0];
-  const blockingByTopic = new Map(
-    insights.blockingTopics.map((topic) => [topic.name, topic.count]),
-  );
-  const leadingBlockerReport = topBlockingTopic
-    ? data.reports.find((report) =>
-        reportFindings(report).some(
-          (finding) => finding.severity === "blocking" && finding.topic === topBlockingTopic.name,
-        ),
-      )
-    : undefined;
-  const recentThreshold = Date.now() - insights.windowDays * 24 * 60 * 60 * 1000;
-  const recentReports = data.reports
-    .filter((report) => new Date(report.occurredAt).getTime() >= recentThreshold)
-    .slice(0, 5);
-  const comparison = [
-    {
-      label: "Opportunities",
-      recent: insights.recentOpportunities,
-      previous: insights.previousOpportunities,
-    },
-    {
-      label: "Confirmed",
-      recent: insights.recentConfirmedInteractions,
-      previous: insights.previousConfirmedInteractions,
-    },
-    {
-      label: "Reports",
-      recent: insights.recentReports,
-      previous: insights.previousReports,
-    },
-  ];
-  const feedbackRange = insightRange(insights.windowDays);
+  const productId = data.currentProduct?.id;
+  const customers = useQuery({
+    queryKey: ["home-customers", data.workspace.id, productId],
+    queryFn: () => fetchCustomersPage(data.workspace.id, { productId: productId ?? "", limit: 8 }),
+    enabled: Boolean(productId),
+  });
+  const features = useQuery({
+    queryKey: ["home-features", data.workspace.id, productId],
+    queryFn: () => fetchFeaturesPage(data.workspace.id, { productId: productId ?? "", limit: 8 }),
+    enabled: Boolean(productId),
+  });
+  const customerPage = customers.data;
+  const featurePage = features.data;
+  const featureItems = Array.isArray(featurePage?.features) ? featurePage.features : [];
+  const customerItems = Array.isArray(customerPage?.customers) ? customerPage.customers : [];
+  const leadingFeature = featureItems[0];
+  const needsSetup = data.insights.opportunities === 0 && isEditor(data.currentRole);
+  const recentReports = data.reports.slice(0, 5);
+  const outcomeReports = data.insights.reports;
+  const helpedReports = data.insights.impacts
+    .filter((impact) => impact.name === "helped" || impact.name === "healthy")
+    .reduce((total, impact) => total + impact.count, 0);
+  const outcomeSuccessRate = outcomeReports
+    ? Math.round((helpedReports / outcomeReports) * 100)
+    : null;
 
-  function openLeadingFeedback() {
-    if (leadingBlockerReport) {
-      openFeedback(leadingBlockerReport.id);
-      return;
-    }
-    if (topBlockingTopic) {
-      navigateToDashboardView("feedback", {
-        topic: topBlockingTopic.name,
-        severity: "blocking",
-        range: feedbackRange,
-      });
-      return;
-    }
-    navigateToDashboardView("feedback");
+  async function refreshHome() {
+    await Promise.all([refresh(), customers.refetch(), features.refetch()]);
   }
 
   return (
     <div className="mx-auto grid max-w-6xl gap-5">
-      <section aria-labelledby="current-readout-title" className="border bg-background">
+      <section aria-labelledby="customer-readout-title" className="border bg-background">
         <div className="grid lg:grid-cols-[minmax(0,1fr)_22rem]">
           <div className="p-5 md:p-6">
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <span aria-hidden="true" className="size-1.5 bg-attention" />
-                Last {insights.windowDays} days
+                Customer intelligence · last {data.insights.windowDays} days
               </div>
-              <Button variant="ghost" size="sm" onClick={() => void refresh()}>
+              <Button variant="ghost" size="sm" onClick={() => void refreshHome()}>
                 Refresh
               </Button>
             </div>
-            <h2 id="current-readout-title" className="mt-4 max-w-2xl text-2xl font-medium">
-              {readoutHeadline(insights)}
+            <h2 id="customer-readout-title" className="mt-4 max-w-2xl text-2xl font-medium">
+              {readoutHeadline(leadingFeature, customerPage?.rollup?.atRisk ?? 0, data)}
             </h2>
             <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">
-              {readoutDetail(insights)}
-            </p>
-            <p className="mt-4 text-xs text-muted-foreground">
-              {countLabel(
-                feedbackGap,
-                "confirmed use without feedback",
-                "confirmed uses without feedback",
-              )}{" "}
-              ·{" "}
-              {countLabel(
-                insights.reportsWithWorkarounds,
-                "report with a workaround",
-                "reports with workarounds",
-              )}
+              {readoutDetail(leadingFeature, customerPage?.rollup?.atRisk ?? 0, data)}
             </p>
             <div className="mt-6 flex flex-wrap gap-2">
               {needsSetup ? (
                 <Button onClick={() => navigateToDashboardView("setup")}>Finish setup</Button>
               ) : null}
-              <Button variant="outline" onClick={openLeadingFeedback}>
-                {topBlockingTopic ? "Review leading blocker" : "Browse feedback"}
-                <IconArrowUpRight data-icon="inline-end" />
-              </Button>
+              {leadingFeature ? (
+                <Button variant="outline" onClick={() => openFeature(leadingFeature.key)}>
+                  Review evidence
+                  <IconArrowUpRight data-icon="inline-end" />
+                </Button>
+              ) : (
+                <Button variant="outline" onClick={() => navigateToDashboardView("features")}>
+                  Explore features
+                  <IconArrowUpRight data-icon="inline-end" />
+                </Button>
+              )}
             </div>
           </div>
-
           <div className="border-t p-5 lg:border-t-0 lg:border-l">
-            <h3 className="text-sm font-medium">Recent comparison</h3>
+            <h3 className="text-sm font-medium">Evidence coverage</h3>
             <p className="mt-1 text-xs text-muted-foreground">
-              Two {insights.comparisonDays}-day periods
+              Collection health, not a claim about customer identity
             </p>
-            <Table className="mt-3 text-xs">
-              <TableHeader>
-                <TableRow className="hover:bg-transparent">
-                  <TableHead className="h-8 px-0 text-muted-foreground">Signal</TableHead>
-                  <TableHead className="h-8 px-1 text-right text-muted-foreground">
-                    Recent
-                  </TableHead>
-                  <TableHead className="h-8 px-1 text-right text-muted-foreground">Prior</TableHead>
-                  <TableHead className="h-8 px-0 text-right text-muted-foreground">
-                    Change
-                  </TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {comparison.map((item) => (
-                  <TableRow key={item.label} className="hover:bg-transparent">
-                    <TableCell className="px-0 py-2">{item.label}</TableCell>
-                    <TableCell className="px-1 py-2 text-right">{item.recent}</TableCell>
-                    <TableCell className="px-1 py-2 text-right text-muted-foreground">
-                      {item.previous}
-                    </TableCell>
-                    <TableCell className="px-0 py-2 text-right">
-                      {formatDelta(item.recent, item.previous)}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+            <dl className="mt-4 grid gap-3 text-xs">
+              <CompactMetric label="Opportunities" value={data.insights.opportunities} />
+              <CompactMetric
+                label="Confirmed interactions"
+                value={data.insights.confirmedInteractions}
+              />
+              <CompactMetric label="Outcome reports" value={data.insights.reports} />
+              <CompactMetric label="Review coverage" value={`${data.insights.reviewRate}%`} />
+            </dl>
           </div>
         </div>
       </section>
 
-      <section aria-labelledby="evidence-pipeline-title" className="border bg-background">
-        <SectionHeader id="evidence-pipeline-title" title="Evidence pipeline" />
-        <dl className="grid sm:grid-cols-3 sm:divide-x">
-          <PipelineStage
-            label="Opportunities"
-            value={insights.opportunities}
-            detail="Eligible responses"
+      <section aria-labelledby="customer-health-title" className="border bg-background">
+        <SectionHeader id="customer-health-title" title="Customer health" />
+        <dl className="grid sm:grid-cols-2 lg:grid-cols-4 lg:divide-x">
+          <Metric
+            label="Customers observed"
+            value={customerPage?.rollup?.customers ?? 0}
+            detail="Known and anonymous actors"
           />
-          <PipelineStage
-            label="Confirmed"
-            value={insights.confirmedInteractions}
-            detail={`${insights.confirmationRate}% confirmation`}
+          <Metric
+            label="Verified customers"
+            value={customerPage?.rollup?.verified ?? 0}
+            detail="Company-authorized identity"
           />
-          <PipelineStage
-            label="Reports"
-            value={insights.reports}
-            detail={`${insights.reviewRate}% coverage`}
+          <Metric
+            label="At risk"
+            value={customerPage?.rollup?.atRisk ?? 0}
+            detail="Blocked or hindered outcomes"
+          />
+          <Metric
+            label="Outcome success"
+            value={outcomeSuccessRate === null ? "—" : `${outcomeSuccessRate}%`}
+            detail="Helped outcomes among reports"
           />
         </dl>
       </section>
 
-      <section aria-labelledby="feedback-patterns-title" className="border bg-background">
-        <SectionHeader id="feedback-patterns-title" title="Feedback patterns" />
-        <div className="grid lg:grid-cols-[minmax(0,3fr)_minmax(16rem,2fr)]">
-          <div className="border-b p-4 lg:border-r lg:border-b-0">
-            <h3 className="text-sm font-medium">Top topics</h3>
-            <CountList
-              items={insights.topics}
-              empty="No topics reported yet."
-              metadata={(item) => {
-                const blockingCount = blockingByTopic.get(item.name);
-                return blockingCount ? `${blockingCount} blocking` : null;
-              }}
-              onSelect={(item) =>
-                navigateToDashboardView("feedback", {
-                  topic: item.name,
-                  range: feedbackRange,
-                })
-              }
-            />
-          </div>
-          <div className="divide-y">
-            <div className="p-4">
-              <h3 className="text-sm font-medium">Impact</h3>
-              <CountList
-                items={insights.impacts}
-                empty="No impact data yet."
-                showTone
-                onSelect={(item) =>
-                  navigateToDashboardView("feedback", {
-                    impact: item.name,
-                    range: feedbackRange,
-                  })
-                }
-              />
-            </div>
-            <div className="p-4">
-              <h3 className="text-sm font-medium">Finding types</h3>
-              <CountList
-                items={insights.findingKinds}
-                empty="No findings reported yet."
-                onSelect={(item) =>
-                  navigateToDashboardView("feedback", {
-                    kind: item.name,
-                    range: feedbackRange,
-                  })
-                }
-              />
-            </div>
-          </div>
-        </div>
-
-        <Separator />
-
-        <div>
-          <div className="flex flex-wrap items-end justify-between gap-3 px-4 pt-4 pb-2">
-            <h3 className="text-sm font-medium">Recent feedback</h3>
-            <span className="text-xs text-muted-foreground">{recentReports.length} shown</span>
-          </div>
-          {recentReports.length ? (
-            <Table className="min-w-[680px]">
-              <TableHeader>
-                <TableRow className="hover:bg-transparent">
-                  <TableHead className="pl-4">Summary</TableHead>
-                  <TableHead>Impact</TableHead>
-                  <TableHead>Operation</TableHead>
-                  <TableHead className="pr-4 text-right">When</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {recentReports.map((report) => (
-                  <TableRow key={report.id}>
-                    <TableCell className="max-w-md pl-4">
-                      <Button
-                        variant="link"
-                        className="h-auto justify-start whitespace-normal p-0 text-left"
-                        onClick={() => openFeedback(report.id)}
-                      >
-                        {report.summary}
-                      </Button>
-                    </TableCell>
-                    <TableCell>{titleCase(report.impact ?? "unknown")}</TableCell>
-                    <TableCell className="font-mono text-xs">{report.operation}</TableCell>
-                    <TableCell className="pr-4 text-right text-muted-foreground">
-                      {relativeDate(report.occurredAt)}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          ) : (
-            <p className="px-4 py-8 text-sm text-muted-foreground">No feedback in this window.</p>
-          )}
-        </div>
-      </section>
-
-      <section aria-labelledby="usage-reliability-title" className="border bg-background">
+      <section aria-labelledby="needs-title" className="border bg-background">
         <SectionHeader
-          id="usage-reliability-title"
-          title="Usage and reliability"
+          id="needs-title"
+          title="Needs and opportunities"
+          description="Ranked by affected customers and linked evidence"
           action={
-            <Button variant="ghost" size="sm" onClick={() => navigateToDashboardView("sessions")}>
-              Explore sessions
+            <Button variant="ghost" size="sm" onClick={() => navigateToDashboardView("features")}>
+              View all features
               <IconArrowUpRight data-icon="inline-end" />
             </Button>
           }
         />
-        <div className="grid lg:grid-cols-[minmax(0,3fr)_minmax(16rem,2fr)]">
-          <div className="border-b p-4 lg:border-r lg:border-b-0">
-            <h3 className="text-sm font-medium">Top operations</h3>
-            <CountList
-              items={insights.topOperations}
-              empty="No operations recorded yet."
-              technical
-              onSelect={(item) =>
-                navigateToDashboardView("sessions", {
-                  sessionOperation: item.name,
-                  sessionRange: feedbackRange,
-                })
-              }
-            />
-          </div>
-          <div className="p-4">
-            <h3 className="text-sm font-medium">Surfaces</h3>
-            <CountList
-              items={insights.surfaces}
-              empty="No surfaces recorded yet."
-              label={interfaceLabel}
-            />
-            <Separator className="my-4" />
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <h3 className="text-sm font-medium">Latency</h3>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Across interactions that supplied timing
-                </p>
-              </div>
-              <dl className="grid grid-cols-2 gap-5 text-sm">
-                <div>
-                  <dt className="text-xs text-muted-foreground">P50</dt>
-                  <dd className="mt-1 font-medium">{formatDuration(insights.p50DurationMs)}</dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-muted-foreground">P95</dt>
-                  <dd className="mt-1 font-medium">{formatDuration(insights.p95DurationMs)}</dd>
-                </div>
-              </dl>
-            </div>
-            <p className="mt-4 border-t pt-3 text-xs text-muted-foreground">
-              {data.listState.sessionsTotal} sessions recorded
-            </p>
-          </div>
-        </div>
+        {features.isError ? (
+          <p className="px-4 py-6 text-sm text-destructive" role="alert">
+            Feature intelligence could not be loaded.
+          </p>
+        ) : features.isPending ? (
+          <p className="px-4 py-6 text-sm text-muted-foreground">Loading customer needs…</p>
+        ) : featureItems.length ? (
+          <Table className="min-w-[720px]">
+            <TableHeader>
+              <TableRow className="hover:bg-transparent">
+                <TableHead className="pl-4">Need or opportunity</TableHead>
+                <TableHead>Customers</TableHead>
+                <TableHead>Evidence</TableHead>
+                <TableHead>Impact</TableHead>
+                <TableHead className="pr-4 text-right">Change</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {featureItems.slice(0, 6).map((feature) => (
+                <TableRow key={feature.key}>
+                  <TableCell className="max-w-lg pl-4">
+                    <Button
+                      variant="link"
+                      className="h-auto justify-start whitespace-normal p-0 text-left"
+                      onClick={() => openFeature(feature.key)}
+                    >
+                      {feature.title}
+                    </Button>
+                    <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">
+                      {feature.summary}
+                    </p>
+                  </TableCell>
+                  <TableCell>{feature.affectedCustomerCount}</TableCell>
+                  <TableCell>{feature.evidenceCount}</TableCell>
+                  <TableCell>
+                    <OutcomeHealth value={feature.strongestImpact} />
+                  </TableCell>
+                  <TableCell className="pr-4 text-right text-muted-foreground">
+                    {feature.trend === null
+                      ? "—"
+                      : `${feature.trend > 0 ? "+" : ""}${feature.trend}%`}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        ) : (
+          <p className="px-4 py-8 text-sm text-muted-foreground">
+            No evidence-backed customer needs yet.
+          </p>
+        )}
+      </section>
+
+      <section aria-labelledby="customers-title" className="border bg-background">
+        <SectionHeader
+          id="customers-title"
+          title="Customers requiring attention"
+          description="Identity level and outcome health stay explicitly separate"
+          action={
+            <Button variant="ghost" size="sm" onClick={() => navigateToDashboardView("customers")}>
+              View all customers
+              <IconArrowUpRight data-icon="inline-end" />
+            </Button>
+          }
+        />
+        {customers.isError ? (
+          <p className="px-4 py-6 text-sm text-destructive" role="alert">
+            Customer intelligence could not be loaded.
+          </p>
+        ) : customers.isPending ? (
+          <p className="px-4 py-6 text-sm text-muted-foreground">Loading customers…</p>
+        ) : customerItems.length ? (
+          <Table className="min-w-[680px]">
+            <TableHeader>
+              <TableRow className="hover:bg-transparent">
+                <TableHead className="pl-4">Customer</TableHead>
+                <TableHead>Identity</TableHead>
+                <TableHead>Outcome</TableHead>
+                <TableHead>Needs</TableHead>
+                <TableHead className="pr-4 text-right">Last active</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {customerItems.slice(0, 6).map((customer) => (
+                <TableRow key={customer.id}>
+                  <TableCell className="pl-4">
+                    <Button
+                      variant="link"
+                      className="h-auto justify-start p-0 text-left"
+                      onClick={() => openCustomer(customer.id)}
+                    >
+                      {customer.displayName}
+                    </Button>
+                  </TableCell>
+                  <TableCell>
+                    <IdentityBadge level={customer.identityLevel} />
+                  </TableCell>
+                  <TableCell>
+                    <OutcomeHealth value={customer.outcomeHealth} />
+                  </TableCell>
+                  <TableCell>{customer.activeNeedCount}</TableCell>
+                  <TableCell className="pr-4 text-right text-muted-foreground">
+                    {relativeDate(customer.lastActivityAt)}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        ) : (
+          <p className="px-4 py-8 text-sm text-muted-foreground">No customers observed yet.</p>
+        )}
+      </section>
+
+      <section aria-labelledby="recent-evidence-title" className="border bg-background">
+        <SectionHeader
+          id="recent-evidence-title"
+          title="Recent outcome evidence"
+          description="Feedback remains evidence throughout the product"
+        />
+        {recentReports.length ? (
+          <Table className="min-w-[680px]">
+            <TableHeader>
+              <TableRow className="hover:bg-transparent">
+                <TableHead className="pl-4">Summary</TableHead>
+                <TableHead>Impact</TableHead>
+                <TableHead>Operation</TableHead>
+                <TableHead className="pr-4 text-right">When</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {recentReports.map((report) => (
+                <TableRow key={report.id}>
+                  <TableCell className="max-w-md pl-4">
+                    <Button
+                      variant="link"
+                      className="h-auto justify-start whitespace-normal p-0 text-left"
+                      onClick={() => openFeedback(report.id)}
+                    >
+                      {report.summary}
+                    </Button>
+                  </TableCell>
+                  <TableCell>{titleCase(report.impact ?? "unknown")}</TableCell>
+                  <TableCell className="font-mono text-xs">{report.operation}</TableCell>
+                  <TableCell className="pr-4 text-right text-muted-foreground">
+                    {relativeDate(report.occurredAt)}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        ) : (
+          <p className="px-4 py-8 text-sm text-muted-foreground">No outcome evidence yet.</p>
+        )}
       </section>
     </div>
   );
@@ -381,9 +340,9 @@ function SectionHeader({
   );
 }
 
-function PipelineStage({ label, value, detail }: { label: string; value: number; detail: string }) {
+function Metric({ label, value, detail }: { label: string; value: ReactNode; detail: string }) {
   return (
-    <div className="min-w-0 border-b p-4 last:border-b-0 sm:border-b-0">
+    <div className="min-w-0 border-b p-4 last:border-b-0 lg:border-b-0">
       <dt className="text-xs text-muted-foreground">{label}</dt>
       <dd className="mt-2 text-2xl font-medium">{value}</dd>
       <p className="mt-2 max-w-sm text-xs leading-5 text-muted-foreground">{detail}</p>
@@ -391,150 +350,42 @@ function PipelineStage({ label, value, detail }: { label: string; value: number;
   );
 }
 
-function CountList({
-  items,
-  empty,
-  metadata,
-  label,
-  onSelect,
-  showTone = false,
-  technical = false,
-}: {
-  items: InsightCount[];
-  empty: string;
-  metadata?: (item: InsightCount) => string | null;
-  label?: (value: string) => string;
-  onSelect?: (item: InsightCount) => void;
-  showTone?: boolean;
-  technical?: boolean;
-}) {
-  if (!items.length) {
-    return <p className="mt-3 text-sm text-muted-foreground">{empty}</p>;
-  }
-
+function CompactMetric({ label, value }: { label: string; value: ReactNode }) {
   return (
-    <ol className="mt-2 divide-y">
-      {items.slice(0, 6).map((item) => {
-        const secondary = metadata?.(item);
-        return (
-          <li
-            key={item.name}
-            className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 py-2.5 text-sm"
-          >
-            <div className="flex min-w-0 items-center gap-2">
-              {showTone ? (
-                <span
-                  aria-hidden="true"
-                  className={cn(
-                    "size-1.5 shrink-0 rounded-[1px]",
-                    impactTone[item.name] ?? "bg-muted-foreground",
-                  )}
-                />
-              ) : null}
-              {onSelect ? (
-                <button
-                  type="button"
-                  className={cn(
-                    "min-w-0 truncate text-left underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                    technical && "font-mono text-xs",
-                  )}
-                  onClick={() => onSelect(item)}
-                >
-                  {technical ? item.name : (label?.(item.name) ?? titleCase(item.name))}
-                </button>
-              ) : (
-                <span className={cn("truncate", technical && "font-mono text-xs")}>
-                  {technical ? item.name : (label?.(item.name) ?? titleCase(item.name))}
-                </span>
-              )}
-              {secondary ? (
-                <span className="shrink-0 text-xs text-impact-negative">{secondary}</span>
-              ) : null}
-            </div>
-            <span className="text-xs text-muted-foreground">{item.count}</span>
-          </li>
-        );
-      })}
-    </ol>
+    <div className="flex items-center justify-between gap-4 border-b pb-2 last:border-b-0 last:pb-0">
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="font-medium">{value}</dd>
+    </div>
   );
 }
 
-function readoutHeadline(insights: DashboardData["insights"]): string {
-  if (insights.opportunities === 0) return "No product activity has been recorded yet.";
-  if (insights.reportsWithBlockers > 0) {
-    return `${countLabel(insights.reportsWithBlockers, "report contained", "reports contained")} blocking findings.`;
+function readoutHeadline(feature: FeatureSummary | undefined, atRisk: number, data: DashboardData) {
+  if (feature) return `${feature.title} is the leading customer need.`;
+  if (atRisk > 0)
+    return `${atRisk} ${atRisk === 1 ? "customer needs" : "customers need"} attention.`;
+  if (data.insights.confirmedInteractions > 0)
+    return "Customer activity is arriving without enough semantic evidence yet.";
+  return "No customer intelligence has been collected yet.";
+}
+
+function readoutDetail(feature: FeatureSummary | undefined, atRisk: number, data: DashboardData) {
+  if (feature) {
+    return `${feature.affectedCustomerCount} customers are affected across ${feature.evidenceCount} evidence items. Open the feature to inspect the exact signals and journeys behind this result.`;
   }
-  if (insights.reports > 0) return "No blocking findings were reported.";
-  return "Product activity is arriving without feedback yet.";
-}
-
-function readoutDetail(insights: DashboardData["insights"]): string {
-  const topBlockingTopic = insights.blockingTopics[0];
-  if (topBlockingTopic) {
-    return `${titleCase(topBlockingTopic.name)} is the leading blocking topic with ${countLabel(topBlockingTopic.count, "finding", "findings")}.`;
+  if (atRisk > 0) return "Review the exact outcomes, needs, and sessions behind the at-risk group.";
+  if (data.insights.confirmedInteractions > 0) {
+    return "Confirmed product use exists, but customer intent and outcome reports are still sparse.";
   }
-  if (insights.reports > 0) {
-    return `${countLabel(insights.reports, "report captures", "reports capture")} agent outcomes in this window.`;
-  }
-  if (insights.confirmedInteractions > 0) {
-    return `${countLabel(insights.confirmedInteractions, "interaction is", "interactions are")} confirmed, with no feedback reports in this window.`;
-  }
-  return "Complete setup and send a product request to begin building evidence.";
+  return "Finish setup and send a product request to begin collecting permissioned evidence.";
 }
 
-function countLabel(count: number, singular: string, plural: string): string {
-  return `${count} ${count === 1 ? singular : plural}`;
-}
+type VisibleDashboardView = "customers" | "features" | "sessions" | "setup";
 
-function formatDelta(current: number, previous: number): string {
-  const change = current - previous;
-  if (change === 0) return "0";
-  return `${change > 0 ? "+" : ""}${change}`;
-}
-
-function insightRange(windowDays: number): string {
-  if (windowDays === 7) return "7d";
-  if (windowDays === 30) return "30d";
-  return "all";
-}
-
-function navigateToDashboardView(view: VisibleDashboardView, scope: DashboardScope = {}) {
+function navigateToDashboardView(view: VisibleDashboardView) {
   const url = new URL(window.location.href);
   url.searchParams.set("view", view);
-  url.searchParams.delete("report");
-  url.searchParams.delete("session");
-  url.searchParams.delete("interaction");
-  const scopedParameters =
-    view === "feedback"
-      ? [
-          "q",
-          "status",
-          "impact",
-          "surface",
-          "topic",
-          "kind",
-          "severity",
-          "tag",
-          "assignee",
-          "workaround",
-          "range",
-          "group",
-        ]
-      : view === "sessions"
-        ? [
-            "sessionQ",
-            "sessionKind",
-            "sessionOperation",
-            "sessionCustomer",
-            "sessionImpact",
-            "sessionRange",
-          ]
-        : [];
-  for (const parameter of scopedParameters) url.searchParams.delete(parameter);
-  for (const [parameter, value] of Object.entries(scope)) {
-    if (value && !(parameter === "range" && value === "30d")) {
-      url.searchParams.set(parameter, value);
-    }
+  for (const parameter of ["customer", "feature", "report", "session", "interaction"]) {
+    url.searchParams.delete(parameter);
   }
   window.history.pushState({}, "", url);
   window.dispatchEvent(new PopStateEvent("popstate"));

@@ -65,9 +65,16 @@ type Options struct {
 	Exclude      []string
 	FeedbackMode FeedbackMode
 	CacheMode    HTTPCacheMode
-	CustomerRef  func(*http.Request) string
-	SessionRef   func(*http.Request) string
-	RuntimeHint  func(*http.Request) string
+	// AccountRef and UserRef are company-authenticated identifiers. AnonymousRef
+	// is a stable first-party pre-authentication identifier. None are exposed in
+	// the agent-visible feedback capability.
+	AccountRef   func(*http.Request) string
+	UserRef      func(*http.Request) string
+	AnonymousRef func(*http.Request) string
+	// CustomerRef is the legacy opaque identity extractor.
+	CustomerRef func(*http.Request) string
+	SessionRef  func(*http.Request) string
+	RuntimeHint func(*http.Request) string
 	// Operation may return a product-owned normalized route template. When it
 	// is unset, Go 1.22+ ServeMux Request.Pattern is preferred over the raw path.
 	Operation     func(*http.Request) string
@@ -163,6 +170,9 @@ type TelemetryEvent struct {
 	Operation         string `json:"operation"`
 	StatusCode        int    `json:"statusCode,omitempty"`
 	DurationMS        int64  `json:"durationMs,omitempty"`
+	AccountRef        string `json:"accountRef,omitempty"`
+	UserRef           string `json:"userRef,omitempty"`
+	AnonymousRef      string `json:"anonymousRef,omitempty"`
 	CustomerRef       string `json:"customerRef,omitempty"`
 	Classification    string `json:"classification"`
 	RuntimeHint       string `json:"runtimeHint,omitempty"`
@@ -470,7 +480,7 @@ func (r *Runtime) lookupConsentSubject(subject string) string {
 	}
 	request.Header.Set("Authorization", "Bearer "+r.options.APIKey)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", "agent-feedback-go/0.2.2")
+	request.Header.Set("User-Agent", "agent-feedback-go/0.3.0")
 	response, err := r.options.HTTPClient.Do(request)
 	if err != nil {
 		return "unavailable"
@@ -698,7 +708,7 @@ drain:
 	headers := http.Header{
 		"Authorization": []string{"Bearer " + r.options.APIKey},
 		"Content-Type":  []string{"application/json"},
-		"User-Agent":    []string{"agent-feedback-go/0.2.2"},
+		"User-Agent":    []string{"agent-feedback-go/0.3.0"},
 	}
 	url := r.options.Endpoint + "/api/v2/telemetry/batches"
 	var deliveryError error
@@ -962,6 +972,18 @@ func (r *Runtime) Middleware(next http.Handler) http.Handler {
 				return
 			}
 			customerRef := ""
+			accountRef := ""
+			userRef := ""
+			anonymousRef := ""
+			if r.options.AccountRef != nil {
+				accountRef = strings.TrimSpace(r.options.AccountRef(request))
+			}
+			if r.options.UserRef != nil {
+				userRef = strings.TrimSpace(r.options.UserRef(request))
+			}
+			if r.options.AnonymousRef != nil {
+				anonymousRef = strings.TrimSpace(r.options.AnonymousRef(request))
+			}
 			if r.options.CustomerRef != nil {
 				customerRef = strings.TrimSpace(r.options.CustomerRef(request))
 			}
@@ -985,6 +1007,7 @@ func (r *Runtime) Middleware(next http.Handler) http.Handler {
 				Surface:       "http_headers", Operation: NormalizeOperation(request.URL.Path),
 				StatusCode: status, DurationMS: time.Since(started).Milliseconds(),
 				Classification: "unclassified", OccurredAt: prepared.OccurredAt,
+				AccountRef: accountRef, UserRef: userRef, AnonymousRef: anonymousRef,
 				CustomerRef: customerRef,
 			}
 			if r.options.SessionRef != nil {
@@ -1044,6 +1067,18 @@ func (r *Runtime) Middleware(next http.Handler) http.Handler {
 			return
 		}
 		customerRef := ""
+		accountRef := ""
+		userRef := ""
+		anonymousRef := ""
+		if r.options.AccountRef != nil {
+			accountRef = strings.TrimSpace(r.options.AccountRef(request))
+		}
+		if r.options.UserRef != nil {
+			userRef = strings.TrimSpace(r.options.UserRef(request))
+		}
+		if r.options.AnonymousRef != nil {
+			anonymousRef = strings.TrimSpace(r.options.AnonymousRef(request))
+		}
 		if r.options.CustomerRef != nil {
 			customerRef = strings.TrimSpace(r.options.CustomerRef(request))
 		}
@@ -1100,6 +1135,9 @@ func (r *Runtime) Middleware(next http.Handler) http.Handler {
 			StatusCode: status, DurationMS: time.Since(started).Milliseconds(),
 			Classification: "unclassified", OccurredAt: prepared.OccurredAt,
 		}
+		event.AccountRef = accountRef
+		event.UserRef = userRef
+		event.AnonymousRef = anonymousRef
 		event.CustomerRef = customerRef
 		if r.options.SessionRef != nil {
 			event.SessionRef = strings.TrimSpace(r.options.SessionRef(request))

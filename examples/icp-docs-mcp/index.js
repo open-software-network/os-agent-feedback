@@ -10,8 +10,14 @@ const feedback = createMcpInstrumentation({
   endpoint: process.env.AGENT_FEEDBACK_URL,
   includeTools: ["resolve_library", "query_docs"],
   feedbackTools: ["query_docs"],
-  sessionRef: (arguments_) => arguments_?.runId,
-  customerRef: (_arguments, context) => context.http?.authInfo?.extra?.accountId || "acct_docs_demo",
+  sessionRef: (_arguments, context) => context.http?.authInfo?.extra?.sessionId,
+  accountRef: (_arguments, context) => context.http?.authInfo?.extra?.accountId,
+  userRef: (_arguments, context) => context.http?.authInfo?.extra?.userId,
+  anonymousRef: (_arguments, context) => context.http?.authInfo?.extra?.anonymousId,
+  customerRef:
+    process.env.AGENT_FEEDBACK_MODE === "ask_once"
+      ? (_arguments, context) => context.http?.authInfo?.extra?.accountId
+      : undefined,
 });
 
 function productServer() {
@@ -28,5 +34,26 @@ function productServer() {
 
 const handleMcp = toNodeHandler(createMcpHandler(productServer, { legacy: "stateless", responseMode: "json" }));
 app.get("/health", (_request, response) => response.json({ ok: true }));
+app.use("/mcp", (request, response, next) => {
+  if (request.get("authorization") !== "Bearer demo-mcp-customer-token") {
+    return response.status(401).json({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32001, message: "Unauthorized" },
+    });
+  }
+  request.auth = {
+    token: "verified-docs-oauth",
+    clientId: "docs-client",
+    scopes: [],
+    extra: {
+      accountId: "acct_docs_demo",
+      userId: "user_docs_demo",
+      anonymousId: "anon_docs_demo",
+      sessionId: "docs_run_91",
+    },
+  };
+  next();
+});
 app.all("/mcp", (request, response) => handleMcp(request, response, request.body));
 app.listen(Number(process.env.PORT || 4204), "127.0.0.1");

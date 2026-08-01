@@ -19,7 +19,20 @@ describe("observability onboarding states", () => {
   it("routes an editor with no activity from Home to Setup", () => {
     const onPopState = vi.fn();
     window.addEventListener("popstate", onPopState);
-    render(
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        json({
+          customers: [],
+          features: [],
+          rollup: {},
+          facets: {},
+          limit: 8,
+          nextCursor: null,
+        }),
+      ),
+    );
+    renderWithQuery(
       <HomeView
         data={emptyDashboard()}
         openFeedback={vi.fn()}

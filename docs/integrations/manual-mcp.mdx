@@ -15,8 +15,8 @@ may restate the action. Never mutate a strict business schema or emit two machin
 ## Download the contract
 
 ```bash
-curl -fsSLO https://app.epode.ai/static/agent-feedback-protocol-v1-0.2.2.zip
-unzip agent-feedback-protocol-v1-0.2.2.zip
+curl -fsSLO https://app.epode.ai/static/agent-feedback-protocol-v1-0.3.0.zip
+unzip agent-feedback-protocol-v1-0.3.0.zip
 ```
 
 ## Required behavior
@@ -30,7 +30,11 @@ you verify the exact client versions you support. Never infer approval when a cl
 3. Require matching `MCP-Protocol-Version`, `Mcp-Method`, and, for named calls, `Mcp-Name`.
 4. Require current protocol metadata in `params._meta` for every request.
 5. Return `resultType: "complete"`, server identity metadata, and deterministic tool-list cache hints.
-6. Emit confirmed telemetry when a normal product tool completes.
+6. Emit confirmed telemetry when a normal product tool completes. Add `accountRef`/`userRef` only from verified
+   product authentication, `anonymousRef` only from a product-owned first-party pre-login ID, and `sessionRef`
+   only from server/product state that already proves a journey. Keep `customerRef` only for durable Ask once;
+   when `accountRef` is present it must be the exact same opaque account ID. Never pair `customerRef` with
+   `userRef` alone or derive any reference from names, emails, prompts, caller inputs, or tool arguments.
 7. Register both `record_product_feedback_consent` and `report_product_feedback` with strict input schemas.
 8. Decorate a schema-less object result at `structuredContent._agentFeedback`; for a tool with
    `outputSchema`, preserve its structured result and use the standalone JSON `TextContent` location. Include
@@ -47,8 +51,9 @@ If delivery returns `retryable: true`, tell the agent to retry exactly once with
 Do not retry validation, consent, or other non-retryable failures.
 
 <Warning>
-Do not treat MCP client information or a transport connection as agent identity. Do not create transport
-sessions for modern requests.
+Do not treat MCP client information, agent claims, or a transport connection as customer or agent identity.
+Do not create transport sessions for modern requests. Private telemetry references never enter the tool result's
+agent-facing feedback envelope.
 </Warning>
 
 ## Verify

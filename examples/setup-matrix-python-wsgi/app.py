@@ -47,6 +47,8 @@ class ProductAuthMiddleware:
             ])
             return [body]
         environ["verified.account_id"] = account_id
+        environ["verified.user_id"] = f"user.{account_id}"
+        environ["verified.anonymous_id"] = f"anon.{account_id}"
         return self.app(environ, start_response)
 
 @app.get("/search")
@@ -66,7 +68,14 @@ instrumented = AgentFeedbackWSGI(
     api_key=os.environ["AGENT_FEEDBACK_KEY"],
     endpoint=os.environ.get("AGENT_FEEDBACK_URL", "https://app.epode.ai"),
     include=("/search", "/docs/*"),
-    customer_ref=lambda environ: environ.get("verified.account_id"),
+    account_ref=lambda environ: environ.get("verified.account_id"),
+    user_ref=lambda environ: environ.get("verified.user_id"),
+    anonymous_ref=lambda environ: environ.get("verified.anonymous_id"),
+    customer_ref=(
+        (lambda environ: environ.get("verified.account_id"))
+        if os.getenv("AGENT_FEEDBACK_MODE") == "ask_once"
+        else None
+    ),
 )
 app.wsgi_app = ProductAuthMiddleware(instrumented)
 

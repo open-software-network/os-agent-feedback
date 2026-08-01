@@ -16,7 +16,7 @@ const scratch = await mkdtemp(join(tmpdir(), "epode-icp-lab-"));
 const children = new Set();
 let databaseUrl = process.env.ICP_LAB_DATABASE_URL || "";
 const selectedScenarios = new Set(
-  (process.env.ICP_LAB_SCENARIOS || "search,consent,crawl,static,browser,docs,operations")
+  (process.env.ICP_LAB_SCENARIOS || "search,customer,consent,crawl,static,browser,docs,operations")
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean),
@@ -149,13 +149,38 @@ async function observations(client, expectedMinimum) {
   return rows;
 }
 
+function readCustomerIntelligence(client) {
+  const raw = database(client, "read-customer-intelligence")
+    .split("\n")
+    .findLast((line) => line.trim().startsWith("{"));
+  return JSON.parse(raw || "{}");
+}
+
+async function customerIntelligence(client, expectedSignalCount) {
+  let result = {};
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    result = readCustomerIntelligence(client);
+    if (
+      (result.signals || []).length >= expectedSignalCount &&
+      (result.customers || []).length > 0 &&
+      (result.interactions || []).length > 0 &&
+      result.interactions.every((interaction) => interaction.customerId && interaction.sessionId) &&
+      result.signals.every((signal) => signal.customerId && signal.sessionId)
+    ) {
+      return result;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 1_000));
+  }
+  return result;
+}
+
 async function prepareExample(name) {
   const target = join(scratch, name);
   await cp(join(repo, "examples", name), target, { recursive: true });
   const manifestPath = join(target, "package.json");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   manifest.dependencies["@agent-feedback/node"] =
-    `${backendUrl}/static/agent-feedback-node-0.2.2.tgz`;
+    process.env.ICP_LAB_NODE_SDK_SPEC || `${backendUrl}/static/agent-feedback-node-0.3.0.tgz`;
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund"], {
     cwd: target,
@@ -248,6 +273,7 @@ async function mcpPost(url, body) {
   const response = await fetch(url, {
     method: "POST",
     headers: {
+      authorization: "Bearer demo-mcp-customer-token",
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
       "mcp-protocol-version": MCP_VERSION,
@@ -330,7 +356,9 @@ async function searchApiScenario() {
     const rows = await observations(client, 1);
     assert.equal(rows.length, 1, JSON.stringify(rows));
     assert.equal(rows[0].operation, "/v1/search", child.log);
-    assert.equal(rows[0].customerRef, "acct_search_42");
+    assert.equal(rows[0].customerRef, null);
+    assert.ok(rows[0].customerId);
+    assert.equal(rows[0].identityLevel, "verified");
     assert.equal(rows[0].classification, "confirmed");
     assert.ok(rows[0].sessionId);
     console.log(
@@ -339,6 +367,208 @@ async function searchApiScenario() {
   } finally {
     await stop(child);
     database(client, "delete");
+  }
+}
+
+async function customerIdentityResolutionScenario() {
+  const primary = identity("customer-intelligence-resolution");
+  const isolated = identity("customer-intelligence-isolation");
+  database(primary, "seed");
+  database(isolated, "seed");
+  let primaryApp;
+  let isolatedApp;
+  try {
+    primaryApp = await runExample("icp-search-express", 4210, primary);
+    const anonymousHeaders = {
+      "agent-feedback-request": "1",
+      authorization: "Bearer demo-search-anonymous-token",
+      "x-customer-ref": "spoofed-by-agent",
+    };
+    let response = await fetch(`${primaryApp.base}/v1/search?q=saved+filters`, {
+      headers: anonymousHeaders,
+    });
+    let body = await response.json();
+    let envelope = httpEnvelope(response, body);
+    assert.ok(envelope);
+    await submitHttp(envelope, {
+      summary: "The anonymous evaluator needed saved filters before adopting the search API.",
+      impact: "hindered",
+      confidence: 0.91,
+      findings: [
+        {
+          kind: "gap",
+          topic: "saved_filters",
+          severity: "major",
+          detail: "The evaluator could not persist a useful filter set between searches.",
+        },
+      ],
+    });
+
+    response = await fetch(`${primaryApp.base}/v1/search?q=saved+filters`, {
+      headers: {
+        "agent-feedback-request": "1",
+        authorization: "Bearer demo-search-workspace-token",
+        "x-user-ref": "spoofed-by-agent",
+      },
+    });
+    body = await response.json();
+    envelope = httpEnvelope(response, body);
+    assert.ok(envelope);
+    await submitHttp(envelope, {
+      summary:
+        "After sign-in the same customer completed search, but saved filters still required a workaround.",
+      impact: "helped_with_friction",
+      confidence: 0.96,
+      findings: [
+        {
+          kind: "friction",
+          topic: "saved_filters",
+          severity: "major",
+          detail: "The authenticated customer rebuilt the same filters manually.",
+        },
+      ],
+      workaround: { used: true, detail: "The customer repeated the filters in the next request." },
+    });
+
+    // Exercise the inverse ordering explicitly: wait until background
+    // telemetry has persisted the interaction before the report arrives.
+    response = await fetch(`${primaryApp.base}/v1/search?q=bulk+export`, {
+      headers: {
+        "agent-feedback-request": "1",
+        authorization: "Bearer demo-search-workspace-token",
+      },
+    });
+    body = await response.json();
+    envelope = httpEnvelope(response, body);
+    assert.ok(envelope);
+    const beforeThirdReport = await observations(primary, 3);
+    assert.equal(beforeThirdReport.length, 3, JSON.stringify(beforeThirdReport));
+    assert.equal(
+      beforeThirdReport.find((row) => row.id === capabilityClaims(envelope.submit.authorization).i)
+        ?.summary,
+      null,
+      "the inverse-order interaction should be persisted before its report",
+    );
+    await submitHttp(envelope, {
+      summary: "The authenticated customer also requested a bulk export for search results.",
+      impact: "helped_with_friction",
+      confidence: 0.93,
+      findings: [
+        {
+          kind: "suggestion",
+          topic: "bulk_export",
+          severity: "minor",
+          detail: "A bulk export would remove a manual copy step from the workflow.",
+        },
+      ],
+    });
+
+    const primaryIntelligence = await customerIntelligence(primary, 7);
+    assert.equal(primaryIntelligence.interactions.length, 3, JSON.stringify(primaryIntelligence));
+    const resolvedCustomerIds = new Set(
+      primaryIntelligence.interactions.map((interaction) => interaction.customerId),
+    );
+    assert.equal(resolvedCustomerIds.size, 1, JSON.stringify(primaryIntelligence));
+    const resolvedCustomerId = [...resolvedCustomerIds][0];
+    assert.ok(resolvedCustomerId);
+    assert.ok(
+      primaryIntelligence.customers.some(
+        (customer) =>
+          customer.identityLevel === "pseudonymous" &&
+          customer.mergedIntoCustomerId === resolvedCustomerId,
+      ),
+      JSON.stringify(primaryIntelligence),
+    );
+    assert.ok(
+      primaryIntelligence.customers.some(
+        (customer) => customer.id === resolvedCustomerId && customer.identityLevel === "verified",
+      ),
+      JSON.stringify(primaryIntelligence),
+    );
+    assert.deepEqual(
+      new Set(primaryIntelligence.identifiers.map((identifier) => identifier.kind)),
+      new Set(["account_ref", "user_ref", "anonymous_ref"]),
+    );
+    assert.equal(primaryIntelligence.resolutions.length, 1);
+    assert.equal(primaryIntelligence.resolutions[0].method, "company_deterministic");
+    assert.equal(primaryIntelligence.resolutions[0].provenance, "company_authenticated");
+    assert.equal(Number(primaryIntelligence.resolutions[0].confidence), 1);
+    assert.ok(
+      primaryIntelligence.signals.every(
+        (signal) =>
+          signal.customerId === resolvedCustomerId &&
+          signal.interactionId &&
+          signal.feedbackReportId &&
+          signal.provenance === "agent_reports_current_task",
+      ),
+      JSON.stringify(primaryIntelligence.signals),
+    );
+    assert.deepEqual(
+      new Set(primaryIntelligence.signals.map((signal) => signal.signalType)),
+      new Set(["outcome", "feature_need", "friction", "workaround"]),
+    );
+    assert.deepEqual(primaryIntelligence.features, [
+      {
+        featureKey: "bulk_export",
+        signalCount: 1,
+        customerCount: 1,
+        sessionCount: 1,
+      },
+      {
+        featureKey: "saved_filters",
+        signalCount: 2,
+        customerCount: 1,
+        sessionCount: 1,
+      },
+    ]);
+    assert.equal(primaryIntelligence.sessions.length, 1);
+    assert.ok(
+      primaryIntelligence.sessions.every(
+        (session) => session.customerCount === 1 && session.interactionCount >= 1,
+      ),
+    );
+    assert.equal(
+      primaryIntelligence.sessions.reduce((total, session) => total + session.interactionCount, 0),
+      3,
+    );
+
+    isolatedApp = await runExample("icp-search-express", 4211, isolated);
+    response = await fetch(`${isolatedApp.base}/v1/search?q=saved+filters`, {
+      headers: anonymousHeaders,
+    });
+    body = await response.json();
+    envelope = httpEnvelope(response, body);
+    await submitHttp(envelope, {
+      summary: "A separate tenant evaluated saved filters anonymously.",
+      impact: "neutral",
+      findings: [
+        {
+          kind: "gap",
+          topic: "saved_filters",
+          detail: "The separate tenant also evaluated saved filters.",
+        },
+      ],
+    });
+    const isolatedIntelligence = await customerIntelligence(isolated, 2);
+    assert.equal(isolatedIntelligence.resolutions.length, 0);
+    assert.equal(isolatedIntelligence.interactions.length, 1);
+    assert.equal(isolatedIntelligence.customers.length, 1);
+    assert.equal(isolatedIntelligence.customers[0].identityLevel, "pseudonymous");
+    assert.notEqual(
+      isolatedIntelligence.interactions[0].customerId,
+      resolvedCustomerId,
+      "the same first-party anonymous value must not merge across workspaces",
+    );
+    assert.doesNotMatch(JSON.stringify(primaryIntelligence), /spoofed-by-agent/);
+    assert.doesNotMatch(JSON.stringify(isolatedIntelligence), /spoofed-by-agent/);
+    console.log(
+      "PASS customer intelligence: anonymous-to-known resolution, typed signals, feature/session evidence, and tenant isolation",
+    );
+  } finally {
+    await stop(primaryApp?.child);
+    await stop(isolatedApp?.child);
+    database(primary, "delete");
+    database(isolated, "delete");
   }
 }
 
@@ -464,7 +694,10 @@ async function consentPolicyScenario() {
       rows.some((row) => row.classification === "unclassified"),
       JSON.stringify(rows),
     );
-    assert.ok(rows.every((row) => row.customerRef === "acct_search_42"));
+    assert.ok(rows.some((row) => row.customerRef === "acct_search_42"));
+    assert.ok(rows.some((row) => row.customerRef === null));
+    assert.ok(rows.every((row) => row.customerId));
+    assert.ok(rows.every((row) => row.identityLevel === "verified"));
     assert.doesNotMatch(JSON.stringify(rows), /acct_spoofed_by_caller/);
     console.log(
       "PASS consent policy API: verified auth binding, Ask once memory, per-use consent, idempotent decisions and reports",
@@ -520,7 +753,9 @@ async function crawlApiScenario() {
     const rows = await observations(client, 1);
     assert.equal(rows.length, 1, JSON.stringify(rows));
     assert.equal(rows[0].operation, "/v1/crawls/:id");
-    assert.equal(rows[0].customerRef, "team_crawl_9");
+    assert.equal(rows[0].customerRef, null);
+    assert.ok(rows[0].customerId);
+    assert.equal(rows[0].identityLevel, "verified");
     console.log(
       "PASS crawl API: async polling suppressed, terminal outcome instrumented, friction preserved",
     );
@@ -681,7 +916,7 @@ async function browserMcpScenario() {
     assert.equal(rows.filter((row) => row.summary).length, 1);
     assert.ok(rows.every((row) => row.classification === "confirmed"));
     console.log(
-      "PASS browser MCP: full five-tool trace, returned session ID grouping, one journey-level report",
+      "PASS browser MCP: full five-tool trace, verified OAuth journey grouping, one journey-level report",
     );
   } finally {
     await stop(child);
@@ -800,10 +1035,9 @@ async function operationsMcpScenario() {
       [200, 500],
     );
     assert.equal(new Set(rows.map((row) => row.sessionId)).size, 1);
-    assert.equal(
-      rows.every((row) => row.customerRef === "acct_operations_demo"),
-      true,
-    );
+    assert.ok(rows.every((row) => row.customerRef === null));
+    assert.ok(rows.every((row) => row.customerId));
+    assert.ok(rows.every((row) => row.identityLevel === "verified"));
     assert.equal(rows.filter((row) => row.summary).length, 2);
     assert.doesNotMatch(JSON.stringify(rows), /buyer@example\.com/);
     console.log(
@@ -852,6 +1086,7 @@ try {
     await waitFor(`${backendUrl}/api/health`, undefined, 60_000);
   }
   if (selectedScenarios.has("search")) await searchApiScenario();
+  if (selectedScenarios.has("customer")) await customerIdentityResolutionScenario();
   if (selectedScenarios.has("consent")) await consentPolicyScenario();
   if (selectedScenarios.has("crawl")) await crawlApiScenario();
   if (selectedScenarios.has("static")) await staticEdgeScenario();

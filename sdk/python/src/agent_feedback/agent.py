@@ -6,8 +6,14 @@ import re
 import urllib.request
 from typing import Any, Mapping
 from urllib.parse import urlparse
+from urllib.error import HTTPError
 
 from .core import DEFAULT_ENDPOINT
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        return None
 
 
 def _valid_manage_consent(value: Any, current: str) -> bool:
@@ -133,14 +139,76 @@ def feedback_from_response(headers: Mapping[str, str], body: Any) -> dict[str, A
 
 
 def feedback_consent_action(feedback: Mapping[str, Any]) -> str:
-    """Resolve Epode's server-managed response state."""
+    """Resolve only actions safe from the response snapshot.
+
+    Ask-once permission must be resolved with inspect_product_feedback first.
+    """
     if not _valid(feedback):
         return "skip"
     if feedback.get("state") == "feedback_ready":
         return "submit"
-    if feedback.get("state") == "consent_required":
-        return "ask"
     return "skip"
+
+
+def _feedback_capability(feedback: Mapping[str, Any]) -> tuple[str, str]:
+    if not _valid(feedback):
+        raise ValueError("Invalid Agent Feedback contract")
+    action = feedback.get("submit") if feedback.get("state") == "feedback_ready" else feedback.get("requiredAction", {}).get("submitDecision")
+    if not isinstance(action, dict):
+        raise ValueError("Invalid Agent Feedback contract")
+    parsed = urlparse(str(action.get("url", "")))
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise ValueError("Agent Feedback inspection requires HTTPS")
+    return str(action["authorization"]), f"{parsed.scheme}://{parsed.netloc}"
+
+
+def inspect_product_feedback(
+    feedback: Mapping[str, Any],
+    *,
+    allowed_submit_origins: tuple[str, ...] = (DEFAULT_ENDPOINT,),
+    sender: Any = None,
+    timeout: float = 5,
+) -> dict[str, Any]:
+    """Resolve current permission before asking, deciding, or reporting."""
+    authorization, origin = _feedback_capability(feedback)
+    allowed = {f"{urlparse(value).scheme}://{urlparse(value).netloc}" for value in allowed_submit_origins}
+    if origin not in allowed:
+        raise ValueError(f"Refusing to inspect feedback at untrusted origin {origin}")
+    url = f"{origin}/api/v2/capabilities/introspect"
+    headers = {
+        "authorization": authorization,
+        "content-type": "application/json",
+        "user-agent": "agent-feedback-python-agent/0.3.0",
+    }
+    data = b"{}"
+    if sender:
+        body = sender(url, headers, data)
+    else:
+        request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
+                body = json.loads(response.read())
+        except HTTPError as error:
+            if error.code == 410:
+                return {"action": "skip", "state": "feedback_disabled"}
+            raise ValueError(f"Feedback inspection failed with HTTP {error.code}") from error
+    if not isinstance(body, dict):
+        raise ValueError("Epode returned an invalid feedback inspection")
+    state = body.get("state")
+    if state not in {"feedback_ready", "consent_required", "declined"}:
+        raise ValueError("Epode returned an invalid feedback inspection")
+    if not all(isinstance(body.get(name), str) for name in ("configuredMode", "consentPolicy", "productName", "expiresAt")):
+        raise ValueError("Epode returned an incomplete feedback inspection")
+    result = dict(body)
+    if state == "feedback_ready":
+        result.update({"action": "submit", "submit": {"url": f"{origin}/api/v2/reports", "authorization": authorization}})
+    elif state == "declined":
+        result["action"] = "skip"
+    else:
+        if not isinstance(body.get("canonicalQuestion"), str) or not body["canonicalQuestion"]:
+            raise ValueError("Epode did not return the canonical permission question")
+        result["action"] = "ask"
+    return result
 
 
 def submit_feedback_consent(
@@ -149,27 +217,37 @@ def submit_feedback_consent(
     *,
     allowed_submit_origins: tuple[str, ...] = (DEFAULT_ENDPOINT,),
     sender: Any = None,
+    timeout: float = 5,
 ) -> dict[str, Any]:
     if not _valid(feedback) or feedback.get("state") != "consent_required":
         raise ValueError("Invalid Agent Feedback consent contract")
     if decision not in {"approved", "declined"}:
         raise ValueError("decision must be approved or declined")
+    inspection = inspect_product_feedback(
+        feedback,
+        allowed_submit_origins=allowed_submit_origins,
+        sender=sender,
+        timeout=timeout,
+    )
+    if inspection["state"] == "declined":
+        return {"state": "declined"}
+    if inspection["state"] == "feedback_ready":
+        return {"state": "approved"}
+    if inspection["state"] != "consent_required":
+        raise ValueError("Feedback permission is no longer available")
     action = feedback["requiredAction"]["submitDecision"]
-    url = str(action["url"])
-    parsed = urlparse(url)
-    allowed = {(urlparse(value).scheme, urlparse(value).netloc) for value in allowed_submit_origins}
-    if parsed.scheme != "https" or (parsed.scheme, parsed.netloc) not in allowed:
-        raise ValueError(f"Refusing to submit a consent decision to untrusted origin {parsed.scheme}://{parsed.netloc}")
+    _, origin = _feedback_capability(feedback)
+    url = f"{origin}/api/v2/consent/decisions"
     headers = {
         "authorization": str(action["authorization"]),
         "content-type": "application/json",
-        "user-agent": "agent-feedback-python-agent/0.2.2",
+        "user-agent": "agent-feedback-python-agent/0.3.0",
     }
     data = json.dumps({"decision": decision}, separators=(",", ":")).encode()
     if sender:
         return sender(url, headers, data)
     request = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=5) as response:
+    with urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
         return json.loads(response.read())
 
 
@@ -179,9 +257,18 @@ def submit_product_feedback(
     *,
     allowed_submit_origins: tuple[str, ...] = (DEFAULT_ENDPOINT,),
     sender: Any = None,
+    timeout: float = 5,
 ) -> dict[str, Any]:
-    if not _valid(feedback) or feedback.get("state") != "feedback_ready":
+    if not _valid(feedback):
         raise ValueError("Invalid Agent Feedback submission contract")
+    inspection = inspect_product_feedback(
+        feedback,
+        allowed_submit_origins=allowed_submit_origins,
+        sender=sender,
+        timeout=timeout,
+    )
+    if inspection["state"] != "feedback_ready" or not isinstance(inspection.get("submit"), dict):
+        raise ValueError("Current Agent Feedback permission does not allow submission")
     summary = str(report.get("summary", "")).strip()
     if not 8 <= len(summary) <= 700:
         raise ValueError("summary must contain 8 to 700 characters")
@@ -208,15 +295,15 @@ def submit_product_feedback(
         raise ValueError("workaround must contain used")
     if isinstance(workaround, dict) and workaround.get("used") and not str(workaround.get("detail", "")).strip():
         raise ValueError("workaround detail is required when a workaround was used")
-    url = str(feedback["submit"]["url"])
+    url = str(inspection["submit"]["url"])
     parsed = urlparse(url)
     allowed = {(urlparse(value).scheme, urlparse(value).netloc) for value in allowed_submit_origins}
     if parsed.scheme != "https" or (parsed.scheme, parsed.netloc) not in allowed:
         raise ValueError(f"Refusing to submit feedback to untrusted origin {parsed.scheme}://{parsed.netloc}")
     headers = {
-        "authorization": str(feedback["submit"]["authorization"]),
+        "authorization": str(inspection["submit"]["authorization"]),
         "content-type": "application/json",
-        "user-agent": "agent-feedback-python-agent/0.2.2",
+        "user-agent": "agent-feedback-python-agent/0.3.0",
     }
     body = {
         "summary": summary,
@@ -229,5 +316,5 @@ def submit_product_feedback(
     if sender:
         return sender(url, headers, data)
     request = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=5) as response:
+    with urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
         return json.loads(response.read())

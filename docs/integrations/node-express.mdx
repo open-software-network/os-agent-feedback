@@ -6,7 +6,7 @@ description: "Instrument selected Express JSON and HTML responses with one globa
 ## Install
 
 ```bash
-npm install https://app.epode.ai/static/agent-feedback-node-0.2.2.tgz express
+npm install https://app.epode.ai/static/agent-feedback-node-0.3.0.tgz express
 ```
 
 Node 20 or newer is required.
@@ -14,7 +14,7 @@ Node 20 or newer is required.
 ## Configure once
 
 Run product authentication and authorized tenant selection first, then register Epode before the
-included route handlers. `customerRef` only reads identity your product already verified.
+included route handlers. Identity accessors only read state your product already verified or owns.
 
 ```ts
 import express from "express";
@@ -27,7 +27,11 @@ app.use(selectAuthorizedTenant);
 app.use(agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
   include: ["/search", "/docs/*"],
-  customerRef: req => req.user?.accountId, // required for durable Ask once; optional otherwise
+  accountRef: req => req.user?.accountId,
+  userRef: req => req.user?.id,
+  anonymousRef: req => req.firstPartyVisitorId,
+  customerRef: req => req.user?.accountId, // durable Ask once compatibility
+  sessionRef: req => req.agentSession?.id, // optional server-issued journey
 }));
 
 app.get("/search", async (req, res) => {
@@ -53,8 +57,11 @@ app.use(agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
   include: ["/v1/search"],
   cacheMode: "request",
+  accountRef: req => req.user?.accountId,
+  userRef: req => req.user?.id,
+  anonymousRef: req => req.firstPartyVisitorId,
   customerRef: req => req.user?.accountId,
-  sessionRef: req => req.get("x-agent-run-id"),
+  sessionRef: req => req.agentSession?.id,
 }));
 ```
 
@@ -78,12 +85,13 @@ app.use(agentFeedback({
   include: ["/v1/crawls/*"],
   shouldInstrument: (_req, response) =>
     response.body?.status === "completed",
-  sessionRef: req => req.get("x-agent-run-id"),
+  sessionRef: req => req.authorizedCrawl?.id,
 }));
 ```
 
 Creation responses, in-progress polls, and failures remain untouched. The terminal result asks for one
-assessment after the agent can judge the experience.
+assessment after the agent can judge the experience. `authorizedCrawl.id` must be the server-loaded job the
+authenticated caller is allowed to access—not a raw header, query value, or unverified body field.
 
 ## Server-rendered HTML
 

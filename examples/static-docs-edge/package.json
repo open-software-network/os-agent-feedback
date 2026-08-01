@@ -7,7 +7,7 @@
     "check": "wrangler deploy --dry-run"
   },
   "dependencies": {
-    "@agent-feedback/node": "https://app.epode.ai/static/agent-feedback-node-0.2.2.tgz"
+    "@agent-feedback/node": "https://app.epode.ai/static/agent-feedback-node-0.3.0.tgz"
   },
   "devDependencies": {
     "wrangler": "^4.28.1"

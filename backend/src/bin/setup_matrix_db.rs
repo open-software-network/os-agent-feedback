@@ -17,6 +17,9 @@ struct StoredRow {
     operation: String,
     classification: String,
     confirmation_method: Option<String>,
+    customer_ref: Option<String>,
+    customer_id: Option<Uuid>,
+    identity_level: Option<String>,
     summary: String,
     impact: Option<String>,
     findings: serde_json::Value,
@@ -30,6 +33,8 @@ struct ObservationRow {
     operation: String,
     status_code: Option<i32>,
     customer_ref: Option<String>,
+    customer_id: Option<Uuid>,
+    identity_level: Option<String>,
     classification: String,
     confirmation_method: Option<String>,
     session_id: Option<Uuid>,
@@ -108,8 +113,11 @@ async fn main() -> anyhow::Result<()> {
         "read" => {
             let rows = sqlx::query_as::<_, StoredRow>(
                 r"SELECT i.id, i.surface, i.operation, i.classification, i.confirmation_method,
+                i.customer_ref, i.customer_id, customer.identity_level,
                 r.summary, r.impact, r.findings, r.workaround
                 FROM interactions_v2 i JOIN feedback_reports r ON r.interaction_id = i.id
+                LEFT JOIN customers customer
+                  ON customer.id = i.customer_id AND customer.workspace_id = i.workspace_id
                 WHERE i.workspace_id = $1 ORDER BY r.summary",
             )
             .bind(workspace_id)
@@ -118,6 +126,8 @@ async fn main() -> anyhow::Result<()> {
             let output: Vec<_> = rows.into_iter().map(|row| json!({
                 "id": row.id, "surface": row.surface, "operation": row.operation,
                 "classification": row.classification, "confirmationMethod": row.confirmation_method,
+                "customerRef": row.customer_ref, "customerId": row.customer_id,
+                "identityLevel": row.identity_level,
                 "summary": row.summary, "impact": row.impact,
                 "findings": row.findings, "workaround": row.workaround,
             })).collect();
@@ -126,10 +136,13 @@ async fn main() -> anyhow::Result<()> {
         "read-observations" => {
             let rows = sqlx::query_as::<_, ObservationRow>(
                 r"SELECT i.id, i.surface, i.operation, i.status_code, i.customer_ref,
+                i.customer_id, customer.identity_level,
                 i.classification, i.confirmation_method, i.session_id,
                 s.source AS session_source, s.ref_hint AS session_hint, r.summary
                 FROM interactions_v2 i
                 LEFT JOIN sessions_v2 s ON s.id = i.session_id
+                LEFT JOIN customers customer
+                  ON customer.id = i.customer_id AND customer.workspace_id = i.workspace_id
                 LEFT JOIN feedback_reports r ON r.interaction_id = i.id
                 WHERE i.workspace_id = $1
                 ORDER BY i.occurred_at, i.client_sequence NULLS LAST, i.id",
@@ -146,6 +159,8 @@ async fn main() -> anyhow::Result<()> {
                         "operation": row.operation,
                         "statusCode": row.status_code,
                         "customerRef": row.customer_ref,
+                        "customerId": row.customer_id,
+                        "identityLevel": row.identity_level,
                         "classification": row.classification,
                         "confirmationMethod": row.confirmation_method,
                         "sessionId": row.session_id,
@@ -155,6 +170,127 @@ async fn main() -> anyhow::Result<()> {
                     })
                 })
                 .collect();
+            println!("{}", serde_json::to_string(&output)?);
+        }
+        "read-customer-intelligence" => {
+            let product_id = uuid("SETUP_MATRIX_PRODUCT_ID")?;
+            let output = sqlx::query_scalar::<_, serde_json::Value>(
+                r"SELECT jsonb_build_object(
+                  'customers', COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id', customer.id,
+                      'kind', customer.kind,
+                      'identityLevel', customer.identity_level,
+                      'parentCustomerId', customer.parent_customer_id,
+                      'mergedIntoCustomerId', customer.merged_into_customer_id
+                    ) ORDER BY customer.created_at, customer.id)
+                    FROM customers customer
+                    WHERE customer.workspace_id = $1
+                  ), '[]'::JSONB),
+                  'identifiers', COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'customerId', identifier.customer_id,
+                      'kind', identifier.kind,
+                      'identityLevel', identifier.identity_level,
+                      'provenance', identifier.provenance
+                    ) ORDER BY identifier.kind, identifier.created_at)
+                    FROM customer_identifiers identifier
+                    WHERE identifier.workspace_id = $1 AND identifier.product_id = $2
+                  ), '[]'::JSONB),
+                  'resolutions', COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'fromCustomerId', resolution.from_customer_id,
+                      'toCustomerId', resolution.to_customer_id,
+                      'method', resolution.method,
+                      'provenance', resolution.provenance,
+                      'confidence', resolution.confidence
+                    ) ORDER BY resolution.created_at)
+                    FROM customer_resolution_events resolution
+                    WHERE resolution.workspace_id = $1 AND resolution.product_id = $2
+                  ), '[]'::JSONB),
+                  'interactions', COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id', interaction.id,
+                      'customerId', interaction.customer_id,
+                      'sessionId', interaction.session_id,
+                      'operation', interaction.operation,
+                      'classification', interaction.classification
+                    ) ORDER BY interaction.occurred_at, interaction.id)
+                    FROM interactions_v2 interaction
+                    WHERE interaction.workspace_id = $1 AND interaction.environment_id IN (
+                      SELECT id FROM product_environments
+                      WHERE workspace_id = $1 AND product_id = $2
+                    )
+                  ), '[]'::JSONB),
+                  'signals', COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id', signal.id,
+                      'customerId', signal.customer_id,
+                      'sessionId', signal.session_id,
+                      'interactionId', signal.interaction_id,
+                      'feedbackReportId', signal.feedback_report_id,
+                      'signalType', signal.signal_type,
+                      'featureKey', signal.feature_key,
+                      'provenance', signal.provenance,
+                      'confidence', signal.confidence,
+                      'collectionBasis', signal.collection_basis
+                    ) ORDER BY signal.collected_at, signal.id)
+                    FROM customer_signals signal
+                    WHERE signal.workspace_id = $1 AND signal.product_id = $2
+                      AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
+                  ), '[]'::JSONB),
+                  'features', COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'featureKey', grouped.feature_key,
+                      'signalCount', grouped.signal_count,
+                      'customerCount', grouped.customer_count,
+                      'sessionCount', grouped.session_count
+                    ) ORDER BY grouped.feature_key)
+                    FROM (
+                      SELECT signal.feature_key, COUNT(*)::BIGINT AS signal_count,
+                        COUNT(DISTINCT signal.customer_id)::BIGINT AS customer_count,
+                        COUNT(DISTINCT signal.session_id)::BIGINT AS session_count
+                      FROM customer_signals signal
+                      WHERE signal.workspace_id = $1 AND signal.product_id = $2
+                        AND signal.feature_key IS NOT NULL
+                        AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
+                      GROUP BY signal.feature_key
+                    ) grouped
+                  ), '[]'::JSONB),
+                  'sessions', COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id', session.id,
+                      'interactionCount', session.interaction_count,
+                      'customerCount', session.customer_count,
+                      'signalCount', session.signal_count
+                    ) ORDER BY session.id)
+                    FROM (
+                      SELECT session_row.id,
+                        COUNT(DISTINCT interaction.id)::BIGINT AS interaction_count,
+                        COUNT(DISTINCT interaction.customer_id)::BIGINT AS customer_count,
+                        COUNT(DISTINCT signal.id)::BIGINT AS signal_count
+                      FROM sessions_v2 session_row
+                      LEFT JOIN interactions_v2 interaction
+                        ON interaction.session_id = session_row.id
+                        AND interaction.workspace_id = session_row.workspace_id
+                      LEFT JOIN customer_signals signal
+                        ON signal.interaction_id = interaction.id
+                        AND signal.workspace_id = interaction.workspace_id
+                        AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
+                      WHERE session_row.workspace_id = $1
+                        AND session_row.environment_id IN (
+                          SELECT id FROM product_environments
+                          WHERE workspace_id = $1 AND product_id = $2
+                        )
+                      GROUP BY session_row.id
+                    ) session
+                  ), '[]'::JSONB)
+                )",
+            )
+            .bind(workspace_id)
+            .bind(product_id)
+            .fetch_one(&pool)
+            .await?;
             println!("{}", serde_json::to_string(&output)?);
         }
         "delete" => {

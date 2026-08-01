@@ -346,11 +346,40 @@ test("setup communicates the HTTP and MCP evidence models separately", () => {
   assert.match(dashboardScript, /never delay the product response/);
   assert.match(dashboardScript, /MCP 2026-07-28 is stateless/);
   assert.match(dashboardScript, /createMcpInstrumentation/);
-  assert.match(dashboardScript, /context\.http\?\.authInfo\?\.extra\?\.accountId/);
+  assert.match(dashboardScript, /verifiedField\(context, "accountId"\)/);
+  assert.match(dashboardScript, /accountRef: \(_args, context\)/);
+  assert.match(dashboardScript, /userRef: \(_args, context\)/);
+  assert.match(dashboardScript, /anonymousRef: \(_args, context\)/);
+  assert.match(
+    dashboardScript,
+    /customerRef: \(_args, context\) => verifiedField\(context, "accountId"\)/,
+  );
+  assert.match(
+    dashboardScript,
+    /sessionRef: \(_args, context\) => verifiedField\(context, "journeyId"\)/,
+  );
   assert.match(dashboardScript, /createMcpHandler/);
   assert.match(dashboardScript, /server\/discover/);
   assert.match(dashboardScript, /Mcp-Method/);
   assert.match(dashboardScript, /Mcp-Name/);
+});
+
+test("setup teaches progressive identity without trusting callers or agents", () => {
+  for (const field of ["accountRef", "userRef", "anonymousRef", "customerRef", "sessionRef"]) {
+    assert.match(dashboardScript, new RegExp(field));
+  }
+  assert.match(dashboardScript, /customerRef only for durable Ask once compatibility/);
+  assert.match(dashboardScript, /exactly equal to accountRef/);
+  assert.match(dashboardScript, /never pair it with userRef alone/);
+  assert.match(dashboardScript, /sessionRef only from server\/product state/);
+  assert.match(
+    dashboardScript,
+    /never use names, emails, caller input, prompts, or agent\/tool arguments/i,
+  );
+  assert.doesNotMatch(
+    dashboardScript,
+    /sessionRef: (?:req|request|args)[\s\S]{0,90}(?:get\("x-|\.headers|\.query|\.body|\bargs\.)/,
+  );
 });
 
 test("every enabled setup choice has a fresh executable E2E example", async () => {

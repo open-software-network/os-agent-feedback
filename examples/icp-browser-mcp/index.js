@@ -11,9 +11,14 @@ const feedback = createMcpInstrumentation({
   includeTools: ["browser_*"],
   // One report for the completed browser journey, not one report per click.
   feedbackTools: ["browser_close"],
-  sessionRef: (arguments_, _context, result) =>
-    arguments_?.sessionId || result?.structuredContent?.sessionId,
-  customerRef: (_arguments, context) => context.http?.authInfo?.extra?.accountId || "acct_browser_demo",
+  sessionRef: (_arguments, context) => context.http?.authInfo?.extra?.sessionId,
+  accountRef: (_arguments, context) => context.http?.authInfo?.extra?.accountId,
+  userRef: (_arguments, context) => context.http?.authInfo?.extra?.userId,
+  anonymousRef: (_arguments, context) => context.http?.authInfo?.extra?.anonymousId,
+  customerRef:
+    process.env.AGENT_FEEDBACK_MODE === "ask_once"
+      ? (_arguments, context) => context.http?.authInfo?.extra?.accountId
+      : undefined,
   runtimeHint: (_arguments, context) => context.clientInfo?.name,
 });
 
@@ -44,5 +49,26 @@ function productServer() {
 
 const handleMcp = toNodeHandler(createMcpHandler(productServer, { legacy: "stateless", responseMode: "json" }));
 app.get("/health", (_request, response) => response.json({ ok: true }));
+app.use("/mcp", (request, response, next) => {
+  if (request.get("authorization") !== "Bearer demo-mcp-customer-token") {
+    return response.status(401).json({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32001, message: "Unauthorized" },
+    });
+  }
+  request.auth = {
+    token: "verified-browser-oauth",
+    clientId: "browser-client",
+    scopes: [],
+    extra: {
+      accountId: "acct_browser_demo",
+      userId: "user_browser_demo",
+      anonymousId: "anon_browser_demo",
+      sessionId: "browser_run_77",
+    },
+  };
+  next();
+});
 app.all("/mcp", (request, response) => handleMcp(request, response, request.body));
 app.listen(Number(process.env.PORT || 4203), "127.0.0.1");

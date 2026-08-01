@@ -1,6 +1,11 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { dashboardFixture } from "@/components/dashboard/test-fixture";
+import {
+  customersPageFixture,
+  dashboardFixture,
+  featureDetailFixture,
+  featuresPageFixture,
+} from "@/components/dashboard/test-fixture";
 import { Providers } from "@/components/providers";
 import Home from "./page";
 
@@ -38,11 +43,10 @@ describe("dashboard data flow", () => {
       expect.any(Object),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Feedback" }));
-    expect(await screen.findByRole("heading", { name: "Feedback" })).toBeVisible();
-    expect(
-      screen.getByRole("row", { name: /Search results omitted the newest document/ }),
-    ).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Feedback" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Features" }));
+    expect(await screen.findByRole("heading", { name: "Features" })).toBeVisible();
+    expect(await screen.findByRole("row", { name: /Fresh results after indexing/ })).toBeVisible();
   });
 
   it("keeps shown-once product keys in page memory instead of browser storage", async () => {
@@ -246,11 +250,8 @@ describe("dashboard data flow", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Feedback" }));
     fireEvent.click(
-      await screen.findByRole("row", {
-        name: /Search results omitted the newest document/,
-      }),
+      screen.getByRole("button", { name: "Search results omitted the newest document" }),
     );
     expect(
       await screen.findByRole("heading", { name: "Search results omitted the newest document" }),
@@ -270,7 +271,7 @@ describe("dashboard data flow", () => {
         screen.queryByRole("heading", { name: "Search results omitted the newest document" }),
       ).not.toBeInTheDocument(),
     );
-    expect(screen.getByRole("heading", { name: "Feedback" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Home" })).toBeVisible();
   });
 
   it("surfaces an invalid invitation and removes it from the URL", async () => {
@@ -353,7 +354,7 @@ describe("dashboard data flow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(await screen.findByText("Product renamed.")).toBeVisible();
 
-    fireEvent.click(screen.getByRole("button", { name: "Feedback" }));
+    fireEvent.click(screen.getByRole("button", { name: "Features" }));
 
     expect(screen.queryByText("Product renamed.")).not.toBeInTheDocument();
   });
@@ -375,6 +376,18 @@ function feedbackApiResponse(
       limit: 50,
       nextCursor: null,
     });
+  }
+  if (path.startsWith("/api/dashboard/customers?")) {
+    return json(customersPageFixture());
+  }
+  if (path.startsWith("/api/dashboard/features/")) {
+    return json(featureDetailFixture());
+  }
+  if (path.startsWith("/api/dashboard/features?")) {
+    return json(featuresPageFixture());
+  }
+  if (path.startsWith("/api/dashboard/signals?")) {
+    return json({ signals: [], total: 0, limit: 100, nextCursor: null });
   }
   if (path.startsWith("/api/dashboard/sessions?")) {
     const interactions = data.sessions.reduce(

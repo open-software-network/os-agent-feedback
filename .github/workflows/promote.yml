@@ -228,6 +228,12 @@ jobs:
           fi
           api_variables="$(railway variables --project "$RAILWAY_PROJECT_ID" --environment production --service "$API_SERVICE" --json)"
           web_variables="$(railway variables --project "$RAILWAY_PROJECT_ID" --environment production --service "$WEB_SERVICE" --json)"
+          for key in DATABASE_URL EPODE_IDENTITY_HMAC_SECRET OS_ACCOUNTS_URL OS_ACCOUNTS_API_URL OS_ACCOUNTS_CLIENT_ID; do
+            if ! jq -e --arg key "$key" 'has($key)' <<<"$api_variables" >/dev/null; then
+              echo "::error::$API_SERVICE is missing required production variable $key."
+              exit 1
+            fi
+          done
           jq -e --arg web "$WEB_ORIGIN" \
             '.PUBLIC_BASE_URL == $web and .WEB_APP_URL == $web' <<<"$api_variables" >/dev/null || {
             echo "::error::$API_SERVICE must use the public web origin for PUBLIC_BASE_URL and WEB_APP_URL."

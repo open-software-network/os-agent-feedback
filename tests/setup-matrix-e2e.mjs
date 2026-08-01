@@ -1013,7 +1013,7 @@ async function prepareNode(fixtureName) {
   const manifestPath = join(target, "package.json");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   manifest.dependencies["@agent-feedback/node"] =
-    `${backendUrl}/static/agent-feedback-node-0.2.2.tgz`;
+    process.env.SETUP_MATRIX_NODE_SDK_SPEC || `${backendUrl}/static/agent-feedback-node-0.3.0.tgz`;
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   run("npm", ["install", "--ignore-scripts"], { cwd: target });
   return target;
@@ -1053,7 +1053,7 @@ async function prepareGo() {
     ],
     { cwd: target },
   );
-  run("go", ["mod", "edit", "-require=github.com/open-software-network/os-epode/sdk/go@v0.2.2"], {
+  run("go", ["mod", "edit", "-require=github.com/open-software-network/os-epode/sdk/go@v0.3.0"], {
     cwd: target,
   });
   run("go", ["mod", "tidy"], { cwd: target });
@@ -1079,7 +1079,7 @@ async function prepareManual(fixtureName) {
   await cp(join(repo, "examples", fixtureName), target, { recursive: true });
   run(
     "curl",
-    ["-fsS", "-o", "protocol.zip", `${backendUrl}/static/agent-feedback-protocol-v1-0.2.2.zip`],
+    ["-fsS", "-o", "protocol.zip", `${backendUrl}/static/agent-feedback-protocol-v1-0.3.0.zip`],
     { cwd: target },
   );
   run("unzip", ["-q", "protocol.zip"], { cwd: target });
@@ -1323,12 +1323,22 @@ try {
     );
     assert.equal(row.classification, "confirmed");
     assert.equal(row.confirmationMethod, contract.confirmationMethod);
+    assert.ok(row.customerId, `missing resolved customer for ${row.summary}`);
+    assert.equal(row.identityLevel, "verified", `unverified customer for ${row.summary}`);
+    if (/ask.once/i.test(row.summary)) {
+      assert.ok(row.customerRef, `Ask once compatibility subject missing for ${row.summary}`);
+    } else {
+      assert.equal(row.customerRef, null, `legacy customerRef leaked into ${row.summary}`);
+    }
     assert.equal(row.impact, "helped_with_friction");
     assert.equal(row.findings.length, 2);
     assert.equal(row.workaround.used, true);
   }
   console.log(
     `PASS persistence: all ${expected.size} Setup and consent permutations stored the exact structured report on the correct confirmed interaction`,
+  );
+  console.log(
+    "PASS identity: verified product auth resolved account/user/anonymous references; only Ask once emitted the legacy compatibility subject",
   );
   console.log(
     `PASS setup matrix E2E: ${

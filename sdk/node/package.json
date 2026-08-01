@@ -1,6 +1,6 @@
 {
   "name": "@agent-feedback/node",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Collect structured product feedback from the customer agents using your Node product.",
   "repository": {
     "type": "git",

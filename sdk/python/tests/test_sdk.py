@@ -14,6 +14,7 @@ from agent_feedback import (
     AgentFeedbackOptions,
     feedback_consent_action,
     feedback_from_response,
+    inspect_product_feedback,
     sign_capability,
     submit_feedback_consent,
     submit_product_feedback,
@@ -171,6 +172,9 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
             app,
             api_key=KEY,
             cache_mode="private",
+            account_ref=lambda _scope: "org_verified",
+            user_ref=lambda _scope: "user_verified",
+            anonymous_ref=lambda _scope: "anon_verified",
             sender=lambda _url, _headers, body: telemetry.append(json.loads(body)),
         )
 
@@ -192,7 +196,11 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
             send,
         )
         self.assertTrue(middleware.shutdown())
-        self.assertEqual(telemetry[0]["events"][0]["operation"], "/accounts/{account}")
+        event = telemetry[0]["events"][0]
+        self.assertEqual(event["operation"], "/accounts/{account}")
+        self.assertEqual(event["accountRef"], "org_verified")
+        self.assertEqual(event["userRef"], "user_verified")
+        self.assertEqual(event["anonymousRef"], "anon_verified")
 
     async def test_asgi_existing_html_marker_uses_fresh_header_fallback(self) -> None:
         original = b'<html><head></head><body><script ID="AGENT-FEEDBACK">owned</script></body></html>'
@@ -1725,7 +1733,16 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         }
         sent: list[dict] = []
 
-        def sender(_url, _headers, body):
+        def sender(url, _headers, body):
+            if url.endswith("/api/v2/capabilities/introspect"):
+                return {
+                    "state": "feedback_ready",
+                    "configuredMode": "never_ask",
+                    "consentPolicy": "none",
+                    "productName": "Test product",
+                    "canonicalQuestion": None,
+                    "expiresAt": "2099-01-01T00:00:00Z",
+                }
             sent.append(json.loads(body))
             return {"accepted": True}
 
@@ -1767,24 +1784,57 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(per_use_envelope["mode"], "ask_always")
         self.assertEqual(per_use_envelope["configuredMode"], "ask_once")
         self.assertEqual(per_use_envelope["consentPolicy"], "always")
-        self.assertEqual(feedback_consent_action(per_use_envelope), "ask")
+        self.assertEqual(feedback_consent_action(per_use_envelope), "skip")
         self.assertNotIn("future uses", per_use_envelope["requiredAction"]["question"])
         self.assertIn("about this use", per_use_envelope["requiredAction"]["question"])
-        self.assertEqual(feedback_consent_action(envelope), "ask")
-        with self.assertRaisesRegex(ValueError, "Invalid Agent Feedback submission contract"):
+        self.assertEqual(feedback_consent_action(envelope), "skip")
+        unknown = inspect_product_feedback(
+            envelope,
+            allowed_submit_origins=("https://feedback.test",),
+            sender=lambda *_: {
+                "state": "consent_required",
+                "configuredMode": "ask_once",
+                "consentPolicy": "once",
+                "productName": "Test product",
+                "canonicalQuestion": "May I send feedback?",
+                "expiresAt": "2099-01-01T00:00:00Z",
+            },
+        )
+        self.assertEqual(unknown["action"], "ask")
+        for state, action in (("declined", "skip"), ("feedback_ready", "submit")):
+            current = inspect_product_feedback(
+                envelope,
+                allowed_submit_origins=("https://feedback.test",),
+                sender=lambda *_args, state=state: {
+                    "state": state,
+                    "configuredMode": "ask_once",
+                    "consentPolicy": "once" if state == "declined" else "none",
+                    "productName": "Test product",
+                    "canonicalQuestion": None,
+                    "expiresAt": "2099-01-01T00:00:00Z",
+                },
+            )
+            self.assertEqual(current["action"], action)
+        with self.assertRaisesRegex(ValueError, "does not allow submission"):
             submit_product_feedback(
                 envelope,
                 {"summary": "The product completed the task.", "impact": "helped"},
                 allowed_submit_origins=("https://feedback.test",),
-                sender=lambda *_: {"accepted": True},
+                sender=lambda *_: unknown,
             )
         approved_envelope = AgentFeedback(AgentFeedbackOptions(api_key=KEY)).prepare()["envelope"]
         decision_body: list[dict] = []
+        def decision_sender(url, _headers, body):
+            if url.endswith("/api/v2/capabilities/introspect"):
+                return unknown
+            decision_body.append(json.loads(body))
+            return {"state": "approved", "feedback": approved_envelope}
+
         decision = submit_feedback_consent(
             envelope,
             "approved",
             allowed_submit_origins=("https://feedback.test",),
-            sender=lambda _url, _headers, body: decision_body.append(json.loads(body)) or {"state": "approved", "feedback": approved_envelope},
+            sender=decision_sender,
         )
         self.assertEqual(decision_body[0], {"decision": "approved"})
         self.assertEqual(feedback_consent_action(decision["feedback"]), "submit")
@@ -1818,7 +1868,7 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("submit", always_envelope)
         self.assertNotIn("future uses", always_envelope["requiredAction"]["question"])
         self.assertIn("after the product answer", always_envelope["instruction"])
-        self.assertEqual(feedback_consent_action(always_envelope), "ask")
+        self.assertEqual(feedback_consent_action(always_envelope), "skip")
         always.shutdown()
 
     def test_agent_helper_rejects_malformed_consent_contracts(self) -> None:

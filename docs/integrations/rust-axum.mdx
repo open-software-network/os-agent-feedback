@@ -8,17 +8,17 @@ description: "Add Epode as a Tower layer around selected Axum routes."
 Until the crate registry release is available, vendor the production artifact:
 
 ```bash
-epode_artifact="$(mktemp -d)/agent-feedback-rust-0.2.2.tar.gz" &&
-curl -fsSL https://app.epode.ai/static/agent-feedback-rust-0.2.2.tar.gz -o "$epode_artifact" &&
-printf '%s  %s\n' 'f5bc42f38cea06b41449f0ae7b753b602d8e3a5dcf4a98fb3d8c21cd25fcfc62' "$epode_artifact" \
+epode_artifact="$(mktemp -d)/agent-feedback-rust-0.3.0.tar.gz" &&
+curl -fsSL https://app.epode.ai/static/agent-feedback-rust-0.3.0.tar.gz -o "$epode_artifact" &&
+printf '%s  %s\n' '27f43efad763e6b0a221146d23fb18bac80e675c58c00995b6112e1277bc31ed' "$epode_artifact" \
   | shasum -a 256 -c - &&
-mkdir -p vendor/agent-feedback-rust-0.2.2 &&
-tar -xzf "$epode_artifact" -C vendor/agent-feedback-rust-0.2.2
+mkdir -p vendor/agent-feedback-rust-0.3.0 &&
+tar -xzf "$epode_artifact" -C vendor/agent-feedback-rust-0.3.0
 ```
 
 ```toml
 [dependencies]
-agent-feedback = { path = "vendor/agent-feedback-rust-0.2.2" }
+agent-feedback = { path = "vendor/agent-feedback-rust-0.3.0" }
 ```
 
 ## Configure once
@@ -34,7 +34,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let feedback = AgentFeedbackLayer::new(
         Options::new(std::env::var("AGENT_FEEDBACK_KEY")?)
             .include(["/search", "/docs/**"])
-            .customer_ref(|request| authenticated_account_id(request)),
+            .account_ref(|request| authenticated_account_id(request))
+            .user_ref(|request| authenticated_user_id(request))
+            .anonymous_ref(|request| first_party_visitor_id(request))
+            .customer_ref(|request| authenticated_account_id(request)) // durable Ask once compatibility
+            .session_ref(|request| product_journey_id(request)), // optional server-issued journey
     )?;
 
     let app = Router::new()
@@ -48,7 +52,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 The last Axum layer added executes first. Keep product authentication outermost so it inserts the
-verified account or tenant extension before the Epode layer resolves `customer_ref`.
+verified account/user and product-owned visitor/journey extensions before Epode resolves the accessors.
+Never derive identity or grouping from names, emails, prompts, request fields, or agent arguments.
 
 ## Server-rendered HTML
 
