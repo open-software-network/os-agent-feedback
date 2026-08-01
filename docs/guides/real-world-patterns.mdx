@@ -16,6 +16,7 @@ an agent identity or an Epode-only session.
 | Authenticated multi-tenant API | Successful outcome-bearing routes | Each result the customer agent can judge | Existing tenant ID plus optional workflow ID |
 | Streaming or binary API | A later finite JSON summary, if one exists | Never the byte stream itself | Existing request or job ID |
 | Serverless API | The same outcome boundary as a long-lived server | Each finite result | Existing run ID; flush telemetry with `waitUntil` |
+| Static site or hosted docs | Finite HTML through a trusted reverse proxy | Agent-requested documentation page | None unless verified edge authentication supplies one |
 
 ## Search APIs with shared caching
 
@@ -29,6 +30,13 @@ can discover request mode and make one opt-in refetch. The refetch preserves the
 context, adds only `Agent-Feedback-Request: 1`, and stops on redirects; the public body is unchanged.
 
 [Run the search example](https://github.com/open-software-network/os-epode/tree/main/examples/icp-search-express)
+
+## Static sites, CMSs, and hosted documentation
+
+When your team controls the public edge route, use the [static docs trusted-edge proxy](/integrations/static-edge).
+It preserves the upstream body and ordinary public cache policy, keeps the product key in an edge secret, and
+sends feedback reports directly to Epode. If you cannot control the public response route, keep the site
+uninstrumented; client JavaScript is not a safe fallback.
 
 ## Async APIs
 

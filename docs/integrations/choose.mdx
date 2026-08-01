@@ -15,8 +15,8 @@ Choose the **surface your customer's agent uses**, not the framework the agent i
   <Card title="MCP server" icon="plug" href="/integrations/node-mcp">
     Register an explicit feedback tool. Product-tool calls are confirmed immediately.
   </Card>
-  <Card title="Static site or CMS" icon="cloud">
-    Direct integration is not yet supported. If you already control a trusted edge response, use the language-neutral protocol there—not in browser code.
+  <Card title="Static site or hosted docs" icon="cloud" href="/integrations/static-edge">
+    Use the advanced trusted-edge proxy when your team controls the public response route.
   </Card>
 </CardGroup>
 
@@ -34,7 +34,7 @@ Choose the **surface your customer's agent uses**, not the framework the agent i
 | Other backend | [Protocol](/integrations/manual-http) | [Protocol](/integrations/manual-http#html) | [Protocol](/integrations/manual-mcp) |
 
 <Note>
-Static-site and CMS integration is not yet a supported Setup path. Never add `AGENT_FEEDBACK_KEY` to a
-static bundle. A team that already owns a trusted server or edge response can implement the advanced
-[language-neutral HTTP protocol](/integrations/manual-http) there.
+Static-site integration requires a trusted reverse proxy controlled by your team. Never add
+`AGENT_FEEDBACK_KEY` to a static bundle. If the platform cannot route its public hostname through your edge,
+direct integration remains unsupported.
 </Note>

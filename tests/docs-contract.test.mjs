@@ -161,6 +161,29 @@ test("real-world guidance covers the initial ICP outcome boundaries", async () =
   assert.match(content, /Agent-Feedback-Request: 1/);
   assert.match(content, /feedbackTools/);
   assert.match(content, /verified API or OAuth context/);
+  assert.match(content, /Static site or hosted docs/);
+  assert.match(content, /static docs trusted-edge proxy/);
+});
+
+test("static-site guidance requires a trusted edge and ships an executable proxy", async () => {
+  const content = await read("docs/integrations/static-edge.mdx");
+  for (const expected of [
+    "createStaticDocsProxy",
+    "@agent-feedback/node/edge",
+    "DOCS_UPSTREAM_ORIGIN",
+    "Agent-Feedback-Request: 1",
+    "private, no-store",
+    "never in `wrangler.jsonc`",
+    "advanced-only",
+  ]) {
+    assert.ok(content.includes(expected), `static edge docs omit ${expected}`);
+  }
+  const example = await read("examples/static-docs-edge/worker.js");
+  assert.match(example, /createStaticDocsProxy/);
+  assert.match(example, /env\.AGENT_FEEDBACK_KEY/);
+  assert.doesNotMatch(example, /af_live_/);
+  assert.ok(navigationPages(docsConfig.navigation).includes("integrations/static-edge"));
+  assert.match(dashboard, /"static-edge"/);
 });
 
 test("Mintlify excludes internal engineering notes from publishing", () => {

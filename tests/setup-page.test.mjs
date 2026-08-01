@@ -78,7 +78,7 @@ test("dashboard action notices are ephemeral fixed toasts", () => {
 
 test("products exist before integration setup without an environment picker", () => {
   assert.match(dashboardHtml, /id="product-scope"/);
-  assert.match(dashboardHtml, /app\.js\?v=20260731-privacy/);
+  assert.match(dashboardHtml, /app\.js\?v=20260801-edge/);
   assert.match(dashboardScript, /Create your first product/);
   assert.match(dashboardScript, /id="product-select"/);
   assert.match(dashboardScript, /\+ New product/);
@@ -94,7 +94,11 @@ test("setup starts with the selected product integration", () => {
   assert.match(dashboardScript, /MCP server/);
   assert.match(dashboardScript, /HTTP API/);
   assert.match(dashboardScript, /Server-rendered website/);
-  assert.match(dashboardScript, /Static site or CMS/);
+  assert.match(dashboardScript, /Static site \/ hosted docs/);
+  assert.match(dashboardScript, /Trusted edge proxy/);
+  assert.match(dashboardScript, /createStaticDocsProxy/);
+  assert.match(dashboardScript, /"static-edge"/);
+  assert.doesNotMatch(dashboardScript, /Edge integration coming soon/);
   assert.match(dashboardScript, /setupStackOptions\[setupSurface\]/);
   assert.doesNotMatch(dashboardScript, /Run backend contract test/);
 });

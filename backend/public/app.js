@@ -548,10 +548,9 @@ const setupSurfaceCopy = {
     detail: "The server injects machine-readable feedback instructions without exposing your private key in browser code.",
   },
   static: {
-    name: "Static site or CMS",
-    summary: "Edge integration coming soon",
-    detail: "Static and no-code sites need a server or edge adapter because a private product key cannot live in browser JavaScript.",
-    disabled: true,
+    name: "Static site / hosted docs",
+    summary: "Advanced trusted-edge proxy",
+    detail: "Proxy finite HTML through an edge route your team controls. The private product key never enters browser JavaScript.",
   },
 };
 
@@ -578,11 +577,14 @@ const setupStackOptions = {
     ["rust", "Rust", "Axum and Tower layer."],
     ["manual-http", "Another stack", "Use the language-neutral HTML protocol."],
   ],
+  static: [
+    ["static-edge", "Trusted edge proxy", "Cloudflare Worker-compatible, header-only handoff."],
+  ],
 };
 
 function setupInstructions() {
   const artifacts = `${location.origin}/static`;
-  const route = setupSurface === "website" ? "/docs/*" : "/search";
+  const route = setupSurface === "static" ? "/docs/**" : setupSurface === "website" ? "/docs/*" : "/search";
   const nodeInstall = `npm install ${artifacts}/agent-feedback-node-0.1.0.tgz`;
   const environment = `AGENT_FEEDBACK_KEY=${apiSecret || "paste_product_key_here"}\nAGENT_FEEDBACK_MODE=${dashboard.currentEnvironment?.feedbackMode || "never_ask"}`;
   const instructions = {
@@ -640,6 +642,24 @@ function setupInstructions() {
       advanced: `.session_ref(|request| agent_session_id(request)) // optional journey grouping`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },
+    "static-edge": {
+      name: "Trusted edge proxy",
+      install: nodeInstall,
+      code: `import { createStaticDocsProxy } from "@agent-feedback/node/edge";
+
+let proxy;
+export default {
+  fetch(request, env, context) {
+    proxy ??= createStaticDocsProxy({
+      apiKey: env.AGENT_FEEDBACK_KEY,
+      upstreamOrigin: "https://your-docs-origin.example",
+      include: ["/docs", "/docs/**"],
+    });
+    return proxy.fetch(request, context);
+  },
+};`,
+      verify: "Compare an ordinary docs response with one carrying Agent-Feedback-Request: 1. The bodies must be identical; only the opted-in response has Agent-Feedback.",
+    },
     "manual-http": {
       name: "Language-neutral HTTP protocol",
       install: `curl -O ${artifacts}/agent-feedback-protocol-v1.zip`,
@@ -659,7 +679,8 @@ function setupConnectionStatus(apiKeyId) {
 
 function setupAgentPrompt(integration) {
   const surface = setupSurfaceCopy[setupSurface];
-  return `Add Agent Feedback to this repository.\n\nProduct surface: ${surface.name}\nIntegration: ${integration.name}\n\nRequirements:\n- Use AGENT_FEEDBACK_KEY from the server environment. It is already configured; never print or expose it.\n- Install the official package with: ${integration.install}\n- Configure the integration once using this reference:\n\n${integration.code}\n\n- For HTTP or HTML, change include routes in code to only the product surfaces used by customer agents.\n- Keep customerRef wired to a stable opaque account ID. Epode needs it to remember Ask once approval or refusal; never use a name or email.\n- Do not put the product key in browser JavaScript.\n- Do not change existing response shapes, error handling, streams, or binary responses.\n- Verify unknown, approved, and declined consent states when AGENT_FEEDBACK_MODE=ask_once.\n- Start the product and make one real request or MCP tool call so the connection can be verified.\n\nProtocol: ${location.origin}/.well-known/agent-feedback-v1.json`;
+  const identityRequirement = setupSurface === "static" ? "- Do not invent customerRef for public documentation. Add it only from verified edge authentication." : "- Keep customerRef wired to a stable opaque account ID. Epode needs it to remember Ask once approval or refusal; never use a name or email.";
+  return `Add Agent Feedback to this repository.\n\nProduct surface: ${surface.name}\nIntegration: ${integration.name}\n\nRequirements:\n- Use AGENT_FEEDBACK_KEY from the server environment. It is already configured; never print or expose it.\n- Install the official package with: ${integration.install}\n- Configure the integration once using this reference:\n\n${integration.code}\n\n- For HTTP or HTML, change include routes in code to only the product surfaces used by customer agents.\n${identityRequirement}\n- Do not put the product key in browser JavaScript.\n- Do not change existing response shapes, error handling, streams, or binary responses.\n- Verify unknown, approved, and declined consent states when AGENT_FEEDBACK_MODE=ask_once.\n- Start the product and make one real request or MCP tool call so the connection can be verified.\n\nProtocol: ${location.origin}/.well-known/agent-feedback-v1.json`;
 }
 
 function readKeyClientSnippets() {
@@ -697,7 +718,7 @@ function setupView() {
   const connected = status.interactions.length > 0;
   const reviewed = status.reports.length > 0;
   const stacks = setupStackOptions[setupSurface].map(([id, name, copy]) => `<button class="choice-card" data-setup-stack="${esc(id)}" aria-pressed="${setupStack === id}"><strong>${esc(name)}</strong><span>${esc(copy)}</span></button>`).join("");
-  const surfaces = Object.entries(setupSurfaceCopy).map(([id, item]) => `<button class="choice-card surface-card" data-setup-surface="${esc(id)}" aria-pressed="${setupSurface === id}" ${item.disabled ? "disabled" : ""}><strong>${esc(item.name)}</strong><span>${esc(item.summary)}</span>${item.disabled ? "<small>COMING SOON</small>" : ""}</button>`).join("");
+  const surfaces = Object.entries(setupSurfaceCopy).map(([id, item]) => `<button class="choice-card surface-card" data-setup-surface="${esc(id)}" aria-pressed="${setupSurface === id}"><strong>${esc(item.name)}</strong><span>${esc(item.summary)}</span></button>`).join("");
   const ready = `<div class="connection-created"><b>Installation ready</b><span>${setupKey ? `${esc(setupKey.prefix)}…` : "Preparing the product key…"}</span></div>`;
   const legacyKey = isLegacyKeyPrefix(setupKey?.prefix);
   const createKeyButton = setupKey ? `<button class="button" data-revoke-key="${esc(setupKey.id)}">Create new key</button>` : "";
@@ -706,7 +727,8 @@ function setupView() {
   const agentPrompt = setupAgentPrompt(integration);
   const installMode = `<div class="install-methods"><button data-install-mode="agent" aria-pressed="${setupInstallMode === "agent"}">Use a coding agent</button><button data-install-mode="manual" aria-pressed="${setupInstallMode === "manual"}">Manual setup</button></div>`;
   const agentInstall = `<div class="install-panel"><p>Copy this prompt into the coding agent that has access to your product repository. It receives the exact integration and verification requirements, but never the product key.</p><div class="copy-block"><pre><code>${esc(agentPrompt)}</code></pre><button class="button primary" data-copy="${esc(agentPrompt)}">Copy setup prompt</button></div></div>`;
-  const manualInstall = `<div class="install-panel"><h3>Install</h3><div class="copy-block"><pre><code>${esc(integration.install)}</code></pre><button class="button" data-copy="${esc(integration.install)}">Copy</button></div><h3>Configure once</h3><p><b>customerRef</b> must be a stable opaque ID from your existing authentication. Epode needs it to remember Ask once approval or refusal; never use a name or email.</p><div class="copy-block"><pre><code>${esc(integration.code)}</code></pre><button class="button" data-copy="${esc(integration.code)}">Copy</button></div>${integration.advanced ? `<details><summary>Optional session grouping</summary><p>Only supply a session reference when your product already has proof that interactions belong together.</p><pre><code>${esc(integration.advanced)}</code></pre></details>` : ""}</div>`;
+  const identityCopy = setupSurface === "static" ? "Public documentation needs no customerRef. Add one only when verified edge authentication supplies a stable opaque account ID." : "<b>customerRef</b> must be a stable opaque ID from your existing authentication. Epode needs it to remember Ask once approval or refusal; never use a name or email.";
+  const manualInstall = `<div class="install-panel"><h3>Install</h3><div class="copy-block"><pre><code>${esc(integration.install)}</code></pre><button class="button" data-copy="${esc(integration.install)}">Copy</button></div><h3>Configure once</h3><p>${identityCopy}</p><div class="copy-block"><pre><code>${esc(integration.code)}</code></pre><button class="button" data-copy="${esc(integration.code)}">Copy</button></div>${integration.advanced ? `<details><summary>Optional session grouping</summary><p>Only supply a session reference when your product already has proof that interactions belong together.</p><pre><code>${esc(integration.advanced)}</code></pre></details>` : ""}</div>`;
   const installStep = `<section class="setup-step"><div class="step-number">2</div><div class="step-body"><p class="eyebrow">INSTALL</p><h2>Install ${esc(integration.name)}</h2><p>Your installation is ready. Telemetry and Ask once state refreshes run in the background and never delay the product response.</p>${secret}<h3>Set the server environment variable</h3><div class="copy-block"><pre><code>${esc(integration.environment)}</code></pre><button class="button" data-copy="${esc(integration.environment)}">Copy</button></div>${installMode}${setupInstallMode === "agent" ? agentInstall : manualInstall}<p><a class="text-link" href="https://docs.epode.ai" target="_blank" rel="noreferrer">Read the integration docs →</a> · <a class="text-link" href="/.well-known/agent-feedback-v1.json" target="_blank" rel="noreferrer">Protocol contract →</a></p></div></section>`;
   const surfaceResult = setupSurface === "mcp" ? "A normal MCP tool call will appear as a confirmed interaction." : "A successful response will appear as an opportunity. It becomes confirmed if the agent submits feedback.";
   const companionInstall = `codex plugin marketplace add open-software-network/os-epode\ncodex plugin add epode-companion@epode`;

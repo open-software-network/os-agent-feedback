@@ -30,6 +30,11 @@ export const SETUP_SURFACES = {
       "manual-http",
     ],
   },
+  static: {
+    name: "Static site / hosted docs",
+    description: "Proxy finite HTML through a trusted edge without exposing the product key.",
+    stacks: ["static-edge"],
+  },
 } as const;
 
 export type SetupSurface = keyof typeof SETUP_SURFACES;
@@ -42,6 +47,7 @@ export type SetupStack =
   | "python-wsgi"
   | "go"
   | "rust"
+  | "static-edge"
   | "manual-http";
 
 const STACK_NAMES: Record<SetupStack, string> = {
@@ -53,6 +59,7 @@ const STACK_NAMES: Record<SetupStack, string> = {
   "python-wsgi": "Python · WSGI",
   go: "Go · net/http",
   rust: "Rust · Axum/Tower",
+  "static-edge": "Trusted edge proxy",
   "manual-http": "Another HTTP stack",
 };
 
@@ -66,7 +73,7 @@ export function setupInstructions(
   origin: string,
 ): { install: string; code: string; verify: string } {
   const artifacts = `${origin}/static`;
-  const route = surface === "website" ? "/docs/*" : "/search";
+  const route = surface === "static" ? "/docs/**" : surface === "website" ? "/docs/*" : "/search";
   const nodeInstall = `npm install ${artifacts}/agent-feedback-node-0.1.0.tgz`;
   const byStack: Record<SetupStack, { install: string; code: string; verify: string }> = {
     "node-mcp": {
@@ -110,6 +117,24 @@ export function setupInstructions(
       install: `mkdir -p vendor/agent-feedback-rust\ncurl -fsSL ${artifacts}/agent-feedback-rust-0.1.0.tar.gz | tar -xz -C vendor/agent-feedback-rust`,
       code: `let feedback = AgentFeedbackLayer::new(\n    Options::new(std::env::var("AGENT_FEEDBACK_KEY")?)\n        .include(["${route}"]),\n)?;\nlet app = router.layer(feedback);`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
+    },
+    "static-edge": {
+      install: nodeInstall,
+      code: `import { createStaticDocsProxy } from "@agent-feedback/node/edge";
+
+let proxy;
+export default {
+  fetch(request, env, context) {
+    proxy ??= createStaticDocsProxy({
+      apiKey: env.AGENT_FEEDBACK_KEY,
+      upstreamOrigin: "https://your-docs-origin.example",
+      include: ["/docs", "/docs/**"],
+    });
+    return proxy.fetch(request, context);
+  },
+};`,
+      verify:
+        "Compare an ordinary docs response with one carrying Agent-Feedback-Request: 1; their bodies must be identical.",
     },
     "manual-http": {
       install: `curl -O ${artifacts}/agent-feedback-protocol-v1.zip`,

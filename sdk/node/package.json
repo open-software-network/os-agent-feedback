@@ -32,6 +32,10 @@
     "./agent": {
       "types": "./dist/agent.d.ts",
       "import": "./dist/agent.js"
+    },
+    "./edge": {
+      "types": "./dist/edge.d.ts",
+      "import": "./dist/edge.js"
     }
   },
   "files": [

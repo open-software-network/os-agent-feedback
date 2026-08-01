@@ -1,0 +1,78 @@
+---
+title: "Static sites and hosted docs at the edge"
+description: "Add feedback to finite static HTML through a trusted reverse proxy without exposing the product key."
+---
+
+Use this advanced path only when your team controls a server-side edge route or reverse proxy in front of the
+static site, CMS, or hosted documentation origin. A browser script, tag manager, theme snippet, or public build
+variable is never safe: `AGENT_FEEDBACK_KEY` must remain an edge secret.
+
+If the hosting platform cannot route the site's public hostname through infrastructure you control, direct
+integration is still unsupported. Do not proxy customer feedback through your origin; reports go directly to
+Epode with a short-lived write-only capability.
+
+## Cloudflare Worker-compatible proxy
+
+Install the Node SDK in the Worker project and enable the platform's Node compatibility mode:
+
+```bash
+npm install https://app.epode.ai/static/agent-feedback-node-0.1.0.tgz
+```
+
+```js
+import { createStaticDocsProxy } from "@agent-feedback/node/edge";
+
+let proxy;
+
+export default {
+  fetch(request, env, context) {
+    proxy ??= createStaticDocsProxy({
+      apiKey: env.AGENT_FEEDBACK_KEY,
+      feedbackMode: env.AGENT_FEEDBACK_MODE || "never_ask",
+      upstreamOrigin: env.DOCS_UPSTREAM_ORIGIN,
+      include: ["/docs", "/docs/**"],
+    });
+    return proxy.fetch(request, context);
+  },
+};
+```
+
+The public route and `DOCS_UPSTREAM_ORIGIN` must be different HTTPS origins to prevent recursion. Store the
+product key with the edge platform's secret manager, never in `wrangler.jsonc`, source control, client JavaScript,
+or the static site's build environment.
+
+## Cache and routing behavior
+
+Ordinary HTML stays byte-for-byte identical and retains its public cache policy and content encoding. The proxy
+adds `Vary: Agent-Feedback-Request` plus a same-public-URL discovery marker. The one opted-in refetch receives the
+same body with a private `Agent-Feedback` capability header. Configure a CDN outside the proxy to honor `Vary` or
+include `Agent-Feedback-Request` in its cache key; otherwise leave that outer cache disabled for the proxied route.
+
+Static HTML with or without `Content-Length` is supported. Explicit transfer-encoded streams, attachments,
+declared bodies over 1 MiB, non-HTML bodies, errors, redirects, and pre-instrumented responses receive no feedback
+contract. Same-upstream redirects are rewritten to the public origin. Other redirects from the trusted upstream
+pass through unchanged to preserve existing login or download flows and may intentionally leave the proxy origin.
+
+Epode telemetry is scheduled with the edge lifecycle hook. Epode timeout or outage may drop telemetry but never
+changes or delays the upstream response. The capability is signed locally; the product key is sent only to Epode's
+telemetry and optional consent-state endpoints, never to the docs origin or customer agent.
+
+## Verify
+
+Check both variants before routing production traffic:
+
+```bash
+curl -i https://docs.example.com/docs/start
+curl -i -H 'Agent-Feedback-Request: 1' https://docs.example.com/docs/start
+```
+
+The first response remains publicly cacheable and contains no `Agent-Feedback`, `afr2_`, or product key. The second
+has the identical body, `Cache-Control: private, no-store`, and an `Agent-Feedback` header. Then simulate an invalid
+Epode endpoint and confirm the docs response still succeeds.
+
+[Run the complete trusted-edge example](https://github.com/open-software-network/os-epode/tree/main/examples/static-docs-edge)
+
+<Note>
+This closes the integration gap for teams that already control the public edge route. It remains an advanced-only
+option and does not make a third-party no-code site programmable.
+</Note>

@@ -45,6 +45,32 @@ await app.register(agentFeedback({
 }));
 ```
 
+## Static sites and hosted docs at a trusted edge
+
+`createStaticDocsProxy` provides a Cloudflare Worker-compatible reverse proxy for finite static HTML. It keeps
+the product key in the edge runtime, leaves the upstream body byte-for-byte, preserves ordinary public caching,
+and gives only an explicit `Agent-Feedback-Request: 1` refetch a private capability header. Reports still submit
+directly to Epode; the edge is not a feedback relay.
+
+```ts
+import { createStaticDocsProxy } from "@agent-feedback/node/edge";
+
+let proxy;
+export default {
+  fetch(request, env, context) {
+    proxy ??= createStaticDocsProxy({
+      apiKey: env.AGENT_FEEDBACK_KEY,
+      upstreamOrigin: "https://docs-origin.example.com",
+      include: ["/docs", "/docs/**"],
+    });
+    return proxy.fetch(request, context);
+  },
+};
+```
+
+The upstream and public origins must differ. Explicit streams, attachments, non-HTML and error responses remain
+untouched. Store the key with the edge platform's secret manager, never in a static build or client script.
+
 ## MCP 2026-07-28
 
 The current MCP transport is stateless and creates a fresh server for each HTTP request. Create one process-level Epode runtime so telemetry remains batched, then instrument each server before registering business tools:
