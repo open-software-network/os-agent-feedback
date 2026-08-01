@@ -45,6 +45,46 @@ describe("dashboard data flow", () => {
     ).toBeVisible();
   });
 
+  it("keeps shown-once product keys in page memory instead of browser storage", async () => {
+    window.history.replaceState({}, "", "/?view=setup");
+    const base = dashboardFixture();
+    const data = dashboardFixture({
+      apiKeys: [],
+      insights: {
+        ...base.insights,
+        opportunities: 0,
+        confirmedInteractions: 0,
+        reports: 0,
+      },
+    });
+    const secret = "af_live_memory_only_secret";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input) === "/api/settings/api-keys" && init?.method === "POST") {
+          return Promise.resolve(json({ apiKey: base.apiKeys[0], secret, shownOnce: true }));
+        }
+        return Promise.resolve(feedbackApiResponse(String(input), data) ?? json(data));
+      }),
+    );
+
+    render(
+      <Providers>
+        <Home />
+      </Providers>,
+    );
+
+    expect((await screen.findAllByText(secret)).length).toBeGreaterThan(0);
+    const storedValues = Array.from({ length: window.sessionStorage.length }, (_, index) => {
+      const key = window.sessionStorage.key(index);
+      return key ? window.sessionStorage.getItem(key) : null;
+    });
+    expect(storedValues).not.toContain(secret);
+    expect(Object.keys(window.sessionStorage)).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/agent-feedback:(?:product|read)-key:/)]),
+    );
+  });
+
   it("recovers from a removed team saved only in local storage", async () => {
     const staleTeam = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const data = dashboardFixture();

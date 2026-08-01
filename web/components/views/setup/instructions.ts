@@ -78,45 +78,45 @@ export function setupInstructions(
   const nodeInstall = `npm install ${artifacts}/agent-feedback-node-0.2.0.tgz`;
   const byStack: Record<SetupStack, { install: string; code: string; verify: string }> = {
     "node-mcp": {
-      install: `${nodeInstall}\nnpm install @modelcontextprotocol/server @modelcontextprotocol/node @modelcontextprotocol/express`,
-      code: `import { createMcpInstrumentation } from "@agent-feedback/node/mcp";\n\nconst feedback = createMcpInstrumentation({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n});\nfeedback.instrument(productMcpServer);`,
+      install: `${nodeInstall}\nnpm install @modelcontextprotocol/server @modelcontextprotocol/node @modelcontextprotocol/express zod`,
+      code: `import { createMcpInstrumentation } from "@agent-feedback/node/mcp";\n\nconst feedback = createMcpInstrumentation({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  includeTools: ["search", "fetch_result"],\n  customerRef: (_args, context) => context.http?.authInfo?.extra?.accountId,\n  sessionRef: (_args, _context, result) =>\n    result?.structuredContent?.agentSessionId, // optional product-proven journey\n});\nfeedback.instrument(productMcpServer);`,
       verify:
         "Call server/discover, then call one normal product tool from an MCP 2026-07-28 client.",
     },
     "manual-mcp": {
-      install: `curl -O ${artifacts}/agent-feedback-protocol-v1.zip`,
-      code: "Implement stateless MCP 2026-07-28, server/discover, confirmed telemetry, _agentFeedback results, and report_product_feedback.",
+      install: `curl -fsSLO ${artifacts}/agent-feedback-protocol-v1.zip`,
+      code: "1. Implement stateless MCP 2026-07-28 and server/discover.\n2. Validate MCP-Protocol-Version, Mcp-Method, and Mcp-Name.\n3. Emit confirmed telemetry and add _agentFeedback to selected product-tool results.\n4. Register record_product_feedback_consent and report_product_feedback with strict schemas.",
       verify:
         "Verify discovery, stateless headers, one product tool call, and one feedback report.",
     },
     "node-express": {
       install: nodeInstall,
-      code: `import { agentFeedback } from "@agent-feedback/node/express";\n\napp.use(agentFeedback({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  include: ["${route}"],\n}));`,
+      code: `import { agentFeedback } from "@agent-feedback/node/express";\n\napp.use(agentFeedback({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  include: ["${route}"], // replace with customer-agent product routes\n  customerRef: req => req.user?.accountId,\n  sessionRef: req => req.agentSession?.id, // optional proven journey\n}));`,
       verify: `npx agent-feedback-doctor https://your-product.example${route.replaceAll("*", "test")}`,
     },
     "node-fastify": {
       install: nodeInstall,
-      code: `import { agentFeedback } from "@agent-feedback/node/fastify";\n\nawait app.register(agentFeedback({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  include: ["${route}"],\n}));`,
+      code: `import { agentFeedback } from "@agent-feedback/node/fastify";\n\nawait app.register(agentFeedback({\n  apiKey: process.env.AGENT_FEEDBACK_KEY,\n  include: ["${route}"], // replace with customer-agent product routes\n  customerRef: req => req.user?.accountId,\n  sessionRef: req => req.agentSession?.id, // optional proven journey\n}));`,
       verify: `npx agent-feedback-doctor https://your-product.example${route.replaceAll("*", "test")}`,
     },
     "python-asgi": {
-      install: `pip install ${artifacts}/agent_feedback-0.2.0-py3-none-any.whl`,
-      code: `app = AgentFeedbackASGI(\n    app,\n    api_key=os.environ["AGENT_FEEDBACK_KEY"],\n    include=("${route}",),\n)`,
+      install: `python -m pip install ${artifacts}/agent_feedback-0.2.0-py3-none-any.whl`,
+      code: `import os\nfrom agent_feedback import AgentFeedbackASGI\n\napp = AgentFeedbackASGI(\n    app,\n    api_key=os.environ["AGENT_FEEDBACK_KEY"],\n    include=("${route}",),  # replace with customer-agent product routes\n    customer_ref=lambda scope: scope.get("state", {}).get("account_id"),\n    session_ref=lambda scope: scope.get("state", {}).get("agent_session_id"),  # optional\n)`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },
     "python-wsgi": {
-      install: `pip install ${artifacts}/agent_feedback-0.2.0-py3-none-any.whl`,
-      code: `app.wsgi_app = AgentFeedbackWSGI(\n    app.wsgi_app,\n    api_key=os.environ["AGENT_FEEDBACK_KEY"],\n    include=("${route}",),\n)`,
+      install: `python -m pip install ${artifacts}/agent_feedback-0.2.0-py3-none-any.whl`,
+      code: `import os\nfrom agent_feedback import AgentFeedbackWSGI\n\napp.wsgi_app = AgentFeedbackWSGI(\n    app.wsgi_app,\n    api_key=os.environ["AGENT_FEEDBACK_KEY"],\n    include=("${route}",),  # replace with customer-agent product routes\n    customer_ref=lambda env: env.get("product.account_id"),\n    session_ref=lambda env: env.get("product.agent_session_id"),  # optional\n)`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },
     go: {
       install: "go get github.com/open-software-network/os-epode/sdk/go@v0.2.0",
-      code: `feedback, err := agentfeedback.New(agentfeedback.Options{\n    APIKey: os.Getenv("AGENT_FEEDBACK_KEY"),\n    Include: []string{"${route}"},\n})\nhandler := feedback.Middleware(router)`,
+      code: `feedback, err := agentfeedback.New(agentfeedback.Options{\n    APIKey: os.Getenv("AGENT_FEEDBACK_KEY"),\n    Include: []string{"${route}"}, // replace with customer-agent product routes\n    CustomerRef: func(r *http.Request) string { return authenticatedAccountID(r.Context()) },\n    SessionRef: func(r *http.Request) string { return agentSessionID(r.Context()) }, // optional\n})\nif err != nil { log.Fatal(err) }\ndefer feedback.Shutdown(context.Background())\nhandler := feedback.Middleware(router)`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },
     rust: {
       install: `mkdir -p vendor/agent-feedback-rust\ncurl -fsSL ${artifacts}/agent-feedback-rust-0.2.0.tar.gz | tar -xz -C vendor/agent-feedback-rust`,
-      code: `let feedback = AgentFeedbackLayer::new(\n    Options::new(std::env::var("AGENT_FEEDBACK_KEY")?)\n        .include(["${route}"]),\n)?;\nlet app = router.layer(feedback);`,
+      code: `let feedback = AgentFeedbackLayer::new(\n    Options::new(std::env::var("AGENT_FEEDBACK_KEY")?)\n        .include(["${route}"]) // replace with customer-agent product routes\n        .customer_ref(|request| authenticated_account_id(request))\n        .session_ref(|request| agent_session_id(request)), // optional\n)?;\nlet app = router.layer(feedback.clone());`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },
     "static-edge": {
@@ -136,11 +136,11 @@ export default {
   },
 };`,
       verify:
-        "Confirm an adjacent path returns 404 and POST returns 405 without reaching upstream; then compare ordinary and opted-in docs responses: their bodies must be identical.",
+        "Confirm an adjacent path returns 404 and POST returns 405 without reaching upstream; then compare ordinary and opted-in docs responses: their bodies must be identical, and only the opted-in response has Agent-Feedback.",
     },
     "manual-http": {
-      install: `curl -O ${artifacts}/agent-feedback-protocol-v1.zip`,
-      code: `GET ${origin}/.well-known/agent-feedback-v1.json\n\nSign a capability, add the feedback envelope to eligible 2xx responses, and queue opportunity telemetry.`,
+      install: `curl -fsSLO ${artifacts}/agent-feedback-protocol-v1.zip`,
+      code: `GET ${origin}/.well-known/agent-feedback-v1.json\n\n1. Keep the product key server-side and sign a short-lived scoped capability.\n2. Derive Ask once state only from a stable opaque authenticated customer ID.\n3. Add the current feedback action to selected eligible 2xx responses.\n4. Queue opportunity telemetry without delaying or failing the product response.\n5. Preserve response bodies, caching, errors, streams, and binary responses.`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")} and inspect the feedback envelope.`,
     },
   };
@@ -179,7 +179,13 @@ export function setupAgentPrompt(
   const routeBoundaryRequirement =
     surface === "static"
       ? "- Bind the Worker only to dedicated public docs routes at the edge, never a hostname-wide catch-all. Treat include as a second fail-closed boundary."
-      : "- Limit HTTP or HTML integration to routes used by customer agents.";
+      : surface === "mcp"
+        ? "- Set includeTools to only customer-facing product tools whose use should appear in Epode."
+        : "- Replace the example include route and limit instrumentation to routes used by customer agents.";
+  const identityRequirement =
+    surface === "static"
+      ? "- Do not invent customerRef for public docs. Add it only if verified edge authentication supplies a stable opaque account ID."
+      : "- Derive customerRef only from verified product authentication. Use a stable opaque account or tenant ID, never a name, email, or caller-supplied unverified value. It is required for durable Ask once.";
   return `Add Agent Feedback to this repository.
 
 Product surface: ${SETUP_SURFACES[surface].name}
@@ -193,9 +199,12 @@ Requirements:
 ${instructions.code}
 
 ${routeBoundaryRequirement}
+${identityRequirement}
+- Add sessionRef only when your product already has proof that interactions belong to one journey; never infer continuity.
 - Never put the product key in browser JavaScript.
 - Preserve response shapes, errors, streams, and binary responses.
-- Make one real request or MCP tool call to verify the connection.
+- Verify unknown, approved, and declined states when AGENT_FEEDBACK_MODE=ask_once.
+- Make one real request or MCP tool call and prove the first opportunity, first confirmed interaction, and first report in Setup.
 
 Protocol: ${origin}/.well-known/agent-feedback-v1.json`;
 }

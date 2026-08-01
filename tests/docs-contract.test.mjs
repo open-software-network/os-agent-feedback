@@ -326,6 +326,25 @@ test("docs and dashboard publish the same install artifacts and feedback modes",
   }
 });
 
+test("company onboarding docs preserve key safety and the three activation milestones", async () => {
+  const [quickstart, verification, privacy, configuration] = await Promise.all([
+    read("docs/quickstart.mdx"),
+    read("docs/guides/verify.mdx"),
+    read("docs/reference/privacy-security.mdx"),
+    read("docs/reference/configuration.mdx"),
+  ]);
+
+  for (const milestone of ["First opportunity", "First confirmed interaction", "First report"]) {
+    assert.match(quickstart, new RegExp(milestone, "i"));
+    assert.match(verification, new RegExp(milestone, "i"));
+  }
+  assert.match(verification, /Recover by milestone/);
+  assert.match(privacy, /does not persist the full secret in\s+browser storage/i);
+  assert.match(privacy, /deployment secret manager/i);
+  assert.match(configuration, /`sessionRef` \/ `session_ref`/);
+  assert.match(configuration, /omit it rather than infer continuity/i);
+});
+
 test("the HTTP reference publishes the complete report shape", async () => {
   const content = await read("docs/reference/http-envelope.mdx");
   for (const field of ["impacts", "findingKinds", "findingSeverities", "maxFindings"]) {

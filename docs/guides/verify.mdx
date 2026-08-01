@@ -5,6 +5,9 @@ description: "Prove response safety, telemetry delivery, classification, and fee
 
 Verification should test the whole loop, not only whether a field appeared in one response.
 
+Setup reports three independent milestones: **First opportunity**, **First confirmed interaction**, and
+**First report**. Do not treat the first as proof of the other two.
+
 ## HTTP and server-rendered HTML
 
 <Steps>
@@ -35,6 +38,20 @@ For Node:
 npx agent-feedback-doctor https://your-product.example/search?q=epode-test
 ```
 
+The doctor sends a real synthetic report in Never ask, so use a dedicated test request and expect that labeled
+report in Epode. In an ask mode it validates the answer-first contract but never fabricates user approval.
+
+For a request-mode cached route, inspect the opted-in variant explicitly:
+
+```bash
+curl -fsS -H 'Agent-Feedback-Request: 1' \
+  'https://your-product.example/search?q=epode-test'
+```
+
+For an authenticated product route, add only that product's test authentication header. Never send
+`AGENT_FEEDBACK_KEY` to the product URL or put it in a query string. Confirm the ordinary authenticated request
+still works before checking the feedback handoff.
+
 ## MCP
 
 Call `server/discover`, `tools/list`, and one normal product tool. Confirm the product tool creates a confirmed MCP
@@ -52,3 +69,15 @@ successful response must resolve to the same stored report.
 - Include a prompt, transcript, credential, raw payload, or unknown field and expect rejection.
 - Test an excluded route, error, stream, binary, JSON array, and scalar response.
 - Gracefully stop the process and check whether the SDK reports any terminal telemetry flush error.
+- For serverless or edge isolates, verify the platform lifecycle hook keeps bounded telemetry work alive; a frozen
+  isolate may drop an opportunity even though feedback submission still works.
+
+## Recover by milestone
+
+- **No opportunity:** verify the current write key is deployed, startup has no key-validation warning, the exact
+  path matches `include`, the response is an eligible 2xx result, and `AGENT_FEEDBACK_ENABLED` is not `false`.
+- **Opportunity but no confirmation:** the company-side HTTP integration works. Exercise the response with a
+  feedback-aware runtime; generic HTTP clients may ignore the action. An MCP product-tool call should confirm
+  immediately, so check protocol/version/header validation if it does not.
+- **Confirmed but no report:** follow only the action returned for the current state. Ask modes require a real user
+  decision, and approval returns a separate `feedback_ready` action before reporting.

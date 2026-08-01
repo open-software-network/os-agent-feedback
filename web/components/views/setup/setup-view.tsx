@@ -72,8 +72,16 @@ export function SetupView({
   const integration = setupInstructions(stack, surface, origin);
   const agentPrompt = setupAgentPrompt(surface, stack, integration, origin);
   const activeReadClient = READ_CLIENTS[readClient];
-  const keyInteractionCount = writeKeys.reduce((total, key) => total + key.interactionCount, 0);
-  const keyReportCount = writeKeys.reduce((total, key) => total + key.reportCount, 0);
+  const opportunityCount = data.insights.opportunities;
+  const confirmedCount = data.insights.confirmedInteractions;
+  const reportCount = data.insights.reports;
+  const activationDescription = reportCount
+    ? "End-to-end feedback loop proven"
+    : confirmedCount
+      ? "Agent use confirmed"
+      : opportunityCount
+        ? "Product route connected"
+        : "Not connected";
   const editor = isEditor(data.currentRole);
   const readForm = useForm<z.infer<typeof readKeySchema>>({
     resolver: zodResolver(readKeySchema),
@@ -210,7 +218,7 @@ export function SetupView({
         <PageHeader
           eyebrow="Setup"
           title={`Connect ${data.currentProduct.name}`}
-          description={keyInteractionCount ? "Receiving data" : "Not connected"}
+          description={activationDescription}
         />
       )}
       <Metrics
@@ -219,8 +227,9 @@ export function SetupView({
             label: "Product key",
             value: writeKey ? "Ready" : creatingWriteKey ? "Preparing" : "Missing",
           },
-          { label: "Telemetry", value: keyInteractionCount ? "Connected" : "Waiting" },
-          { label: "Agent feedback", value: keyReportCount ? "Received" : "Waiting" },
+          { label: "First opportunity", value: opportunityCount ? "Received" : "Waiting" },
+          { label: "First confirmed", value: confirmedCount ? "Received" : "Waiting" },
+          { label: "First report", value: reportCount ? "Received" : "Waiting" },
         ]}
       />
       {error ? <StatusMessage tone="error">{error}</StatusMessage> : null}
@@ -260,7 +269,12 @@ export function SetupView({
 
       <Panel title={`2. Install ${stackName(stack)}`}>
         {secrets?.write ? (
-          <SecretCallout label="Save this server-side key now" secret={secrets.write} copy={copy} />
+          <SecretCallout
+            label="Save this server-side key now"
+            secret={secrets.write}
+            description="Move it directly into your deployment secret manager. Never put it in a repository, shell history, browser code, mobile app, or MCP client."
+            copy={copy}
+          />
         ) : writeKey ? (
           <p className="text-sm text-muted-foreground">
             {writeKey.prefix}… is ready. Rotate it if the full value was not saved.
@@ -284,6 +298,11 @@ export function SetupView({
         <CodeBlock label="Coding-agent setup prompt" value={agentPrompt} copy={copy} />
         <CodeBlock label="Install" value={integration.install} copy={copy} />
         <CodeBlock label="Configure once" value={integration.code} copy={copy} />
+        <p className="text-sm text-muted-foreground">
+          Replace the example route or tool names before deploying. Derive customerRef only from a
+          stable opaque ID established by your product authentication. Add sessionRef only for a
+          journey your product already knows belongs together.
+        </p>
         <p className="text-sm">Verify: {integration.verify}</p>
         <p className="text-sm">
           <a className="underline" href="https://docs.epode.ai" target="_blank" rel="noreferrer">
@@ -301,17 +320,58 @@ export function SetupView({
         </p>
       </Panel>
 
-      <Panel title="3. Verify">
-        <p>
-          {keyInteractionCount
-            ? `${keyInteractionCount} interaction(s) received.`
-            : "Waiting for the first interaction."}
-        </p>
-        <p>
-          {keyReportCount
-            ? `${keyReportCount} feedback report(s) received.`
-            : "Waiting for agent feedback."}
-        </p>
+      <Panel title="3. Prove activation">
+        <ol className="flex flex-col gap-3">
+          <ActivationMilestone
+            complete={opportunityCount > 0}
+            title="First opportunity"
+            detail={
+              opportunityCount
+                ? `${opportunityCount} product interaction(s) observed.`
+                : "Waiting for an eligible 2xx response on an included route or a selected MCP product-tool call."
+            }
+          />
+          <ActivationMilestone
+            complete={confirmedCount > 0}
+            title="First confirmed interaction"
+            detail={
+              confirmedCount
+                ? `${confirmedCount} interaction(s) have proof of agent use.`
+                : "MCP confirms a normal product-tool call immediately. HTTP confirms when a feedback capability returns with a report."
+            }
+          />
+          <ActivationMilestone
+            complete={reportCount > 0}
+            title="First feedback report"
+            detail={
+              reportCount
+                ? `${reportCount} structured report(s) received; the end-to-end loop is proven.`
+                : "Waiting for a feedback-aware agent to follow the current action. Ask modes require a real user decision; the doctor never impersonates one."
+            }
+          />
+        </ol>
+        {!opportunityCount ? (
+          <StatusMessage>
+            Next: deploy the current write key, call the exact included route or tool, and check
+            again. If it stays waiting, verify AGENT_FEEDBACK_ENABLED is not false, the include
+            pattern matches, and the response is eligible.
+          </StatusMessage>
+        ) : !confirmedCount ? (
+          <StatusMessage>
+            The company-side connection works. Next: exercise it with a feedback-aware customer
+            agent. A generic HTTP client creates only an unconfirmed opportunity.
+          </StatusMessage>
+        ) : !reportCount ? (
+          <StatusMessage>
+            Agent use is confirmed. Next: complete the returned feedback action; in an ask mode,
+            approval must come from the user before a report is available.
+          </StatusMessage>
+        ) : (
+          <StatusMessage>
+            Activation complete: transport, agent-use evidence, and structured feedback are all
+            visible for this product.
+          </StatusMessage>
+        )}
         <Button variant="outline" onClick={() => void refresh()}>
           Check now
         </Button>
@@ -372,7 +432,12 @@ export function SetupView({
         </form>
         {secrets?.read ? (
           <>
-            <SecretCallout label="Save this read key now" secret={secrets.read} copy={copy} />
+            <SecretCallout
+              label="Save this read key now"
+              secret={secrets.read}
+              description="Put it in the MCP client's secret or environment facility. It can read this product's feedback but cannot instrument product traffic or submit reports."
+              copy={copy}
+            />
             <CodeBlock
               label="Client environment"
               value={`AGENT_FEEDBACK_READ_KEY=${secrets.read}`}
@@ -448,10 +513,12 @@ function releaseWriteKeyEnsure(environmentId: string) {
 function SecretCallout({
   label,
   secret,
+  description,
   copy,
 }: {
   label: string;
   secret: string;
+  description: string;
   copy: (value: string) => Promise<void>;
 }) {
   return (
@@ -459,12 +526,36 @@ function SecretCallout({
       <div>
         <strong>{label}</strong>
         <code className="mt-1 block break-all">{secret}</code>
-        <small className="text-muted-foreground">This secret is shown once.</small>
+        <small className="block max-w-3xl text-muted-foreground">
+          This secret is shown only for this page load and cannot be recovered. {description}
+        </small>
       </div>
       <Button type="button" variant="outline" onClick={() => void copy(secret)}>
         Copy key
       </Button>
     </div>
+  );
+}
+
+function ActivationMilestone({
+  complete,
+  title,
+  detail,
+}: {
+  complete: boolean;
+  title: string;
+  detail: string;
+}) {
+  return (
+    <li className="flex gap-3 rounded-lg border p-3">
+      <span aria-hidden="true" className="font-medium">
+        {complete ? "✓" : "○"}
+      </span>
+      <span>
+        <strong className="block">{title}</strong>
+        <small className="text-muted-foreground">{detail}</small>
+      </span>
+    </li>
   );
 }
 

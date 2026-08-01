@@ -181,7 +181,7 @@ export function DashboardApp() {
       setView("home");
     }
     if (data.currentEnvironment && secrets?.environmentId !== data.currentEnvironment.id) {
-      setSecrets(recallSecrets(data.currentEnvironment.id));
+      setSecrets({ environmentId: data.currentEnvironment.id });
     }
   }, [data, productId, secrets?.environmentId, view, workspaceId]);
 
@@ -213,7 +213,6 @@ export function DashboardApp() {
     (kind: "write" | "read", secret: string) => {
       const environmentId = data?.currentEnvironment?.id;
       if (!environmentId || !secret) return;
-      persistSecret(environmentId, kind, secret);
       setSecrets((current) => ({
         environmentId,
         ...(current?.environmentId === environmentId ? current : {}),
@@ -296,7 +295,6 @@ export function DashboardApp() {
   if (!data) return null;
 
   async function productCreated(created: ProductCreatedResponse) {
-    persistSecret(created.environment.id, "write", created.secret);
     setSecrets({ environmentId: created.environment.id, write: created.secret });
     setProductId(created.product.id);
     clearSelection();
@@ -502,31 +500,5 @@ function localStorageValue(key: string): string {
     return window.localStorage.getItem(key) ?? "";
   } catch {
     return "";
-  }
-}
-
-function secretStorageKey(environmentId: string, kind: "write" | "read"): string {
-  return kind === "read"
-    ? `agent-feedback:read-key:${environmentId}`
-    : `agent-feedback:product-key:${environmentId}`;
-}
-
-function persistSecret(environmentId: string, kind: "write" | "read", secret: string) {
-  try {
-    window.sessionStorage.setItem(secretStorageKey(environmentId, kind), secret);
-  } catch {
-    // Private browsing may disable storage; React state keeps the secret visible this page load.
-  }
-}
-
-function recallSecrets(environmentId: string): ShownSecrets {
-  try {
-    return {
-      environmentId,
-      write: window.sessionStorage.getItem(secretStorageKey(environmentId, "write")) || undefined,
-      read: window.sessionStorage.getItem(secretStorageKey(environmentId, "read")) || undefined,
-    };
-  } catch {
-    return { environmentId };
   }
 }

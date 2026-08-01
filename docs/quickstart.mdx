@@ -26,6 +26,10 @@ a public repository, or an MCP client configuration.
     AGENT_FEEDBACK_MODE=never_ask
     ```
 
+    Move the write key directly into your deployment secret manager. Do not leave it in shell history,
+    a committed `.env` file, browser storage, a mobile app, or an MCP client. Setup keeps a newly created
+    secret only for the current page load; Epode cannot recover it later.
+
     `never_ask` asks the agent to submit its own assessment without interrupting the human.
     [Compare all feedback modes](/concepts/feedback-modes).
 
@@ -46,11 +50,18 @@ a public repository, or an MCP client configuration.
     app.use(agentFeedback({
       apiKey: process.env.AGENT_FEEDBACK_KEY,
       include: ["/search", "/docs/*"],
+      customerRef: req => req.user?.accountId,
+      sessionRef: req => req.agentSession?.id, // optional, only for proven continuity
     }));
     ```
+
+    Replace the example routes. Instrument only successful product surfaces that customer agents actually use.
+    `customerRef` must come from verified product authentication and be a stable opaque account or tenant ID;
+    never use a name, email, or caller-supplied unverified value. Add `sessionRef` only when your product already
+    knows that multiple interactions belong to one journey.
   </Step>
   <Step title="Send one real product request">
-    Call an included route and confirm the original response still works. An eligible JSON object
+    Call the exact included route and confirm the original response still works. An eligible JSON object
     has an additional `_agentFeedback` field; HTML and immutable JSON shapes use the documented
     HTML/header handoff.
   </Step>
@@ -89,11 +100,14 @@ response continues to work either way.
 
 ## What success looks like
 
-- **Setup** says telemetry is connected.
-- HTTP/HTML produces an opportunity; returning feedback confirms it.
-- An MCP product-tool call is confirmed immediately.
-- **Feedback** shows the structured report and links it to the product interaction.
+- **First opportunity:** the deployed product key and selected route/tool produced telemetry.
+- **First confirmed interaction:** MCP proves a product-tool call immediately; HTTP/HTML becomes confirmed when
+  its feedback capability returns with a report.
+- **First report:** **Feedback** shows the structured report linked to the confirmed product interaction.
 - If you supplied a stable session reference, **Sessions** shows the linked journey.
+
+These are separate activation milestones. An HTTP opportunity proves the company-side connection, but it does not
+prove that a customer agent followed the feedback action.
 
 <Note>
 The doctor's synthetic report proves your company-side connection. For HTTP and websites, also test one fresh

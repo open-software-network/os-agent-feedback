@@ -163,4 +163,20 @@ The adapter requires an allow-listed HTTPS destination and submits only the stru
 npx agent-feedback-doctor https://your-product.example/search?q=test
 ```
 
-In `never_ask` mode, the doctor verifies response injection and submits a real synthetic review with the scoped receipt. In either consent mode, it validates the consent contract but does not submit a review because a diagnostic cannot impersonate user approval. Set `AGENT_FEEDBACK_ENABLED=false` as an emergency kill switch.
+The doctor sends `Agent-Feedback-Request: 1`, so the same command verifies request-mode handoffs without
+compromising shared caches. For a product route protected by your own authentication, keep that test credential
+in an environment variable and pass only its header mapping:
+
+```sh
+export PRODUCT_TEST_AUTHORIZATION="Bearer $PRODUCT_TEST_TOKEN"
+npx agent-feedback-doctor \
+  --header-env Authorization=PRODUCT_TEST_AUTHORIZATION \
+  https://your-product.example/private-search?q=test
+```
+
+The doctor refuses an `af_live_...` or `af_read_...` value, never forwards product-route headers to Epode, and
+never follows a redirect with authentication. Do not use `AGENT_FEEDBACK_KEY` here.
+
+In `never_ask` mode, the doctor verifies response injection and submits a real synthetic review with the scoped
+receipt. In either consent mode, it validates the consent contract but does not submit a review because a
+diagnostic cannot impersonate user approval. Set `AGENT_FEEDBACK_ENABLED=false` as an emergency kill switch.

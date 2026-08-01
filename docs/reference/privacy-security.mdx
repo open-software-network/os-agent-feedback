@@ -23,6 +23,11 @@ it to create a scoped `afr2_...` capability locally. A capability never contains
 product response, prompt, or personal identity. Ask-once capabilities do contain a public key ID and a
 pseudonymous HMAC-derived consent subject so Epode can remember the choice for that product scope.
 
+Setup shows a newly created or rotated key only for the current page load and does not persist the full secret in
+browser storage. Move it directly into a deployment secret manager. Never paste it into shell history, CI output,
+a committed `.env` file, browser or mobile code, an MCP client, a product-auth header, or a support message. If the
+value is lost, rotate it; Epode cannot reveal it again.
+
 ## Capability
 
 - scoped to one interaction;

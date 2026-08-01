@@ -7,11 +7,20 @@ description: "Diagnose missing telemetry, missing feedback, consent errors, and 
   <Accordion title="Setup says no telemetry">
     Confirm the deployed process has a current `af_live_...` write key, the request hits an included route,
     the response is eligible 2xx JSON/HTML/header content, and `AGENT_FEEDBACK_ENABLED` is not `false`.
-    Send a real request, wait for the background queue, then use **Check now**.
+    Check startup logs for key validation errors and Setup for the key's last-used timestamp. For
+    `cacheMode: "request"` / `cache_mode="request"`, send `Agent-Feedback-Request: 1`. Async-job adapters should
+    instrument only the terminal successful result. Send a real request, allow the bounded background queue to
+    flush, then use **Check now**.
   </Accordion>
   <Accordion title="I see opportunities but no feedback">
     This is expected for generic HTTP agents, which may ignore response-side side-effect instructions.
-    Verify the contract with the doctor or a feedback-aware runtime. MCP is the reliable explicit-tool path.
+    The opportunity proves the company-side connection, not customer-agent handling. Verify the contract with the
+    doctor or a feedback-aware runtime. MCP is the reliable explicit-tool path.
+  </Accordion>
+  <Accordion title="I see a confirmed interaction but no report">
+    MCP confirms a product-tool call before feedback is submitted. Follow only the feedback action returned by that
+    call. In an ask mode, record an actual explicit approved or declined decision; approval returns a separate
+    `feedback_ready` action. A confirmation without a report is therefore a valid intermediate state.
   </Accordion>
   <Accordion title="The report is rejected for consent">
     Ensure Collection policy and deployed `AGENT_FEEDBACK_MODE` match. An ask-mode response must first contain
@@ -26,11 +35,19 @@ description: "Diagnose missing telemetry, missing feedback, consent errors, and 
   </Accordion>
   <Accordion title="My response was not modified">
     Errors, redirects, streams, binaries, assets, health routes, excluded routes, and unsafe bodies are intentionally
-    untouched. JSON arrays and scalar values use headers instead of body mutation.
+    untouched. JSON arrays and scalar values use headers instead of body mutation. Shared-cache-safe mode leaves a
+    public cacheable response untouched; use request mode and send `Agent-Feedback-Request: 1` when that route needs
+    an opted-in private handoff.
   </Accordion>
   <Accordion title="The SDK says the key is invalid">
     Create a new write key in Setup. Old key formats cannot sign `afr2_` capabilities. Rotate keys through the
     dashboard; the prior key overlaps for one hour so you can deploy safely.
+  </Accordion>
+  <Accordion title="Telemetry is intermittent on serverless or edge">
+    Product responses fail open, so a frozen isolate may drop best-effort opportunity telemetry. Pass the platform
+    lifecycle hook (`waitUntil` or its equivalent), keep the included work bounded, and test the deployed runtime.
+    Feedback reports submit directly through their scoped capability and can still succeed when an opportunity batch
+    was dropped.
   </Accordion>
   <Accordion title="MCP requests fail version or header checks">
     Modern requests must use `2026-07-28`, carry matching version/method/name headers and request metadata, and

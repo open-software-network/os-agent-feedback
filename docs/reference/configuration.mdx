@@ -35,6 +35,7 @@ and align the SDK option with it to avoid confusion.
 | `include` | Route patterns that receive feedback contracts |
 | `feedbackMode` / `feedback_mode` | Explicit mode override |
 | `customerRef` / `customer_ref` | Stable opaque product-auth account or tenant ID; required for durable Ask once |
+| `sessionRef` / `session_ref` | Optional product-proven journey reference; omit it rather than infer continuity |
 | `consentTimeoutMs` / `consent_timeout` / `AGENT_FEEDBACK_CONSENT_TIMEOUT_MS` | Timeout for optional consent-cache warming or protocol-specific lookups (default 750 ms). HTTP product responses never await it. |
 | `endpoint` | Override Epode origin in tests |
 
@@ -47,4 +48,6 @@ successful responses are intended for customer agents.
 ## Key rotation
 
 Rotate a key from Setup. The previous key remains valid for one hour so you can deploy the replacement without
-dropping product traffic. Consent is product-scoped, so rotating a key does not expose or change the raw customer reference.
+dropping product traffic. Put the new value directly into the deployment secret manager and keep it out of browser
+storage, shell history, CI logs, repositories, MCP clients, and product-auth requests. Consent is product-scoped, so
+rotating a key does not expose or change the raw customer reference.

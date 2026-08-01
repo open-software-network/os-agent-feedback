@@ -831,9 +831,9 @@ describe("dashboard view behavior", () => {
       />,
     );
 
-    expect(screen.getByText("Receiving data")).toBeVisible();
-    expect(screen.getByText("1 interaction(s) received.")).toBeVisible();
-    expect(screen.getByText("1 feedback report(s) received.")).toBeVisible();
+    expect(screen.getByText("End-to-end feedback loop proven")).toBeVisible();
+    expect(screen.getByText("1 product interaction(s) observed.")).toBeVisible();
+    expect(screen.getByText(/1 structured report\(s\) received/)).toBeVisible();
     expect(screen.getByText(/Feedback received/)).toBeVisible();
     expect(screen.queryByText("Never seen")).not.toBeInTheDocument();
   });
@@ -866,13 +866,54 @@ describe("dashboard view behavior", () => {
       />,
     );
 
-    expect(screen.getByText("Receiving data")).toBeVisible();
-    expect(screen.getByText("1 interaction(s) received.")).toBeVisible();
-    expect(screen.getByText("1 feedback report(s) received.")).toBeVisible();
+    expect(screen.getByText("End-to-end feedback loop proven")).toBeVisible();
+    expect(screen.getByText("1 product interaction(s) observed.")).toBeVisible();
+    expect(screen.getByText(/1 structured report\(s\) received/)).toBeVisible();
     expect(screen.getAllByText(/af_live_5678efab/).length).toBeGreaterThan(0);
     expect(screen.getByText(/af_live_1234abcd/)).toBeVisible();
     expect(screen.getByText(/Never seen/)).toBeVisible();
     expect(screen.getByText(/Feedback received/)).toBeVisible();
+  });
+
+  it.each([
+    [0, 0, 0, "Not connected", /Next: deploy the current write key/],
+    [1, 0, 0, "Product route connected", /company-side connection works/],
+    [1, 1, 0, "Agent use confirmed", /Agent use is confirmed/],
+    [1, 1, 1, "End-to-end feedback loop proven", /Activation complete/],
+  ] as const)("separates opportunity, confirmation, and report activation at %i/%i/%i", (opportunities, confirmedInteractions, reports, description, nextAction) => {
+    const base = dashboardFixture();
+    const writeKey = base.apiKeys[0];
+    const data = dashboardFixture({
+      apiKeys: [
+        {
+          ...writeKey,
+          interactionCount: opportunities,
+          reportCount: reports,
+        },
+      ],
+      insights: {
+        ...base.insights,
+        opportunities,
+        confirmedInteractions,
+        reports,
+      },
+    });
+
+    renderWithQuery(
+      <SetupView
+        data={data}
+        secrets={null}
+        rememberSecret={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        setNotice={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(description)).toBeVisible();
+    expect(screen.getAllByText("First opportunity")).toHaveLength(2);
+    expect(screen.getByText("First confirmed interaction")).toBeVisible();
+    expect(screen.getByText("First feedback report")).toBeVisible();
+    expect(screen.getByText(nextAction)).toBeVisible();
   });
 
   it("does not auto-recreate a removed write key and offers manual recovery", async () => {
