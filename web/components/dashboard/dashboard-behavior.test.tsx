@@ -1147,7 +1147,7 @@ describe("dashboard view behavior", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
     expect(await screen.findByText(group.explanation)).toBeVisible();
-    expect(screen.queryByText(group.groupKey)).not.toBeInTheDocument();
+    expect(screen.getByText(group.groupKey)).toBeVisible();
     fireEvent.click(screen.getByRole("tab", { name: "Reports" }));
     expect(
       screen.getByRole("row", { name: /Search results omitted the newest document/ }),

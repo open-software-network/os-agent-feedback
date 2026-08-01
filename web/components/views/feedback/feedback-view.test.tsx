@@ -10,6 +10,10 @@ import type { ProductReportGroup } from "@/lib/api/groups";
 import { createEmptyFilters } from "./feedback-filters";
 import { FeedbackView, filterFeedbackReports } from "./feedback-view";
 
+const mergeSourceGroupKey = "a".repeat(32);
+const mergeTargetGroupKey = "b".repeat(32);
+const mergeOtherGroupKey = "c".repeat(32);
+
 describe("FeedbackView", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -391,8 +395,8 @@ describe("FeedbackView", () => {
 
     expect(await screen.findByText(second.explanation)).toBeVisible();
     expect(screen.getByText(first.explanation)).toBeVisible();
-    expect(screen.queryByText(first.groupKey)).not.toBeInTheDocument();
-    expect(screen.queryByText(second.groupKey)).not.toBeInTheDocument();
+    expect(screen.getByText(first.groupKey)).toBeVisible();
+    expect(screen.getByText(second.groupKey)).toBeVisible();
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes("offset=50"))).toBe(true);
     for (const [, init] of fetchMock.mock.calls) {
       expect(new Headers(init.headers).get("x-workspace-id")).toBe(data.workspace.id);
@@ -487,13 +491,556 @@ describe("FeedbackView", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
     fireEvent.click(await screen.findByRole("button", { name: "File GitHub issue" }));
 
-    expect(await screen.findByText(message, { exact: false })).toBeVisible();
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      `GitHub issue filing for ${group.groupKey}: ${message}`,
+    );
     groupVisible = false;
     fireEvent.click(screen.getByRole("button", { name: "Check again" }));
 
     expect(await screen.findByText("No signals yet")).toBeVisible();
     expect(screen.queryByText(group.groupKey)).not.toBeInTheDocument();
     expect(screen.queryByText(message, { exact: false })).not.toBeInTheDocument();
+  });
+
+  it("names the group on a non-409 filing failure", async () => {
+    const data = dashboardFixture();
+    const productId = data.currentProduct?.id ?? "";
+    const group = reportGroup({ groupKey: "d".repeat(32) });
+    const message = "GitHub issue filing is temporarily unavailable";
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === `/api/products/${productId}/github-repo`) {
+        return Promise.resolve(json(repositoryMapping(productId)));
+      }
+      if (path === groupsPath(productId, 50, 0)) {
+        return Promise.resolve(json({ groups: [group], hasMore: false, limit: 50, offset: 0 }));
+      }
+      if (path === issuePath(group.groupKey) && init?.method === "POST") {
+        return Promise.resolve(json({ error: message }, 500));
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderFeedback(data);
+    fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
+    fireEvent.click(await screen.findByRole("button", { name: "File GitHub issue" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      `GitHub issue filing for ${group.groupKey}: ${message}`,
+    );
+    expect(screen.queryByRole("button", { name: "Check again" })).not.toBeInTheDocument();
+  });
+
+  it("merges the acted-on source into the selected survivor and removes the source row", async () => {
+    const data = dashboardFixture();
+    const productId = data.currentProduct?.id ?? "";
+    const source = reportGroup({
+      groupKey: mergeSourceGroupKey,
+      explanation: "Grouped stale search results.",
+      reportCount: 3,
+    });
+    const target = reportGroup({
+      groupKey: mergeTargetGroupKey,
+      explanation: "Grouped freshness failures.",
+      reportCount: 5,
+    });
+    let merged = false;
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === `/api/products/${productId}/github-repo`) {
+        return Promise.resolve(json(repositoryMapping(productId)));
+      }
+      if (path === groupsPath(productId, 50, 0)) {
+        return Promise.resolve(
+          json({
+            groups: merged ? [{ ...target, reportCount: 8 }] : [source, target],
+            hasMore: merged,
+            limit: 50,
+            offset: 0,
+          }),
+        );
+      }
+      if (path === groupsPath(productId, 50, 50)) {
+        return Promise.resolve(json({ groups: [], hasMore: false, limit: 50, offset: 50 }));
+      }
+      if (path === mergePath(source.groupKey) && init?.method === "POST") {
+        merged = true;
+        return Promise.resolve(
+          json({ reportsMoved: source.reportCount, targetGroupKey: target.groupKey }),
+        );
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderFeedback(data);
+    fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
+    fireEvent.click(await screen.findByRole("button", { name: `Merge signal ${source.groupKey}` }));
+
+    const targetPicker = screen.getByRole("combobox", {
+      name: `Signal that survives merge of ${source.groupKey}`,
+    });
+    expect(
+      Array.from(targetPicker.querySelectorAll("option")).some(
+        (option) => option.value === source.groupKey,
+      ),
+    ).toBe(false);
+    fireEvent.change(targetPicker, { target: { value: target.groupKey } });
+    expect(screen.getAllByText(source.groupKey)).toHaveLength(2);
+    expect(screen.getAllByText(target.groupKey)).toHaveLength(3);
+    fireEvent.click(screen.getByRole("button", { name: `Merge away into ${target.groupKey}` }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      `Merged away ${source.groupKey} and moved 3 reports into ${target.groupKey}, which survives.`,
+    );
+    expect(
+      screen.queryByRole("button", { name: `Merge signal ${source.groupKey}` }),
+    ).not.toBeInTheDocument();
+    expect(screen.getAllByText(source.groupKey)).toHaveLength(1);
+    expect(screen.getByText(source.groupKey).closest('[role="status"]')).toBeInTheDocument();
+    expect(screen.getAllByText(target.groupKey)).toHaveLength(2);
+
+    const mergeCalls = fetchMock.mock.calls.filter(
+      ([input, init]) => String(input) === mergePath(source.groupKey) && init?.method === "POST",
+    );
+    expect(mergeCalls).toHaveLength(1);
+    expect(new Headers(mergeCalls[0][1].headers).get("x-workspace-id")).toBe(data.workspace.id);
+    expect(JSON.parse(String(mergeCalls[0][1].body))).toEqual({ intoGroupKey: target.groupKey });
+
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([input]) => String(input) === groupsPath(productId, 50, 50)),
+      ).toBe(true),
+    );
+    expect(
+      screen.queryByText(new RegExp(`Merged away ${source.groupKey}`)),
+    ).not.toBeInTheDocument();
+  });
+
+  it.each([
+    "Source GitHub issue #42 and target GitHub issue #43 are both filed; close one on GitHub before merging",
+    `A GitHub issue filing is still in progress for ${mergeSourceGroupKey} (pending); retry the merge once it settles`,
+  ])("renders the merge 409 verbatim and reconciles without closing the form: %s", async (message) => {
+    const data = dashboardFixture();
+    const productId = data.currentProduct?.id ?? "";
+    const source = reportGroup({ groupKey: mergeSourceGroupKey });
+    const target = reportGroup({ groupKey: mergeTargetGroupKey });
+    let groupLoads = 0;
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === `/api/products/${productId}/github-repo`) {
+        return Promise.resolve(json(repositoryMapping(productId)));
+      }
+      if (path === groupsPath(productId, 50, 0)) {
+        groupLoads += 1;
+        return Promise.resolve(
+          json({ groups: [source, target], hasMore: false, limit: 50, offset: 0 }),
+        );
+      }
+      if (path === mergePath(source.groupKey) && init?.method === "POST") {
+        return Promise.resolve(json({ error: message }, 409));
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderFeedback(data);
+    fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
+    fireEvent.click(await screen.findByRole("button", { name: `Merge signal ${source.groupKey}` }));
+    fireEvent.change(
+      screen.getByRole("combobox", {
+        name: `Signal that survives merge of ${source.groupKey}`,
+      }),
+      { target: { value: target.groupKey } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: `Merge away into ${target.groupKey}` }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      `Merge source ${source.groupKey}: ${message}`,
+    );
+    expect(screen.getByText(message, { exact: false })).toBeVisible();
+    expect(
+      screen.getByRole("combobox", {
+        name: `Signal that survives merge of ${source.groupKey}`,
+      }),
+    ).toBeEnabled();
+    const loadsBeforeCheck = groupLoads;
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+    await waitFor(() => expect(groupLoads).toBeGreaterThan(loadsBeforeCheck));
+    await waitFor(() =>
+      expect(screen.queryByText(message, { exact: false })).not.toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: `Merge away into ${target.groupKey}` }));
+    expect(await screen.findByText(message, { exact: false })).toBeVisible();
+    expect(
+      fetchMock.mock.calls.filter(
+        ([input, init]) => String(input) === mergePath(source.groupKey) && init?.method === "POST",
+      ),
+    ).toHaveLength(2);
+  });
+
+  it("clears a selected target that disappears from the current listing", async () => {
+    const data = dashboardFixture();
+    const productId = data.currentProduct?.id ?? "";
+    const source = reportGroup({ groupKey: mergeSourceGroupKey });
+    const target = reportGroup({ groupKey: mergeTargetGroupKey });
+    const other = reportGroup({ groupKey: mergeOtherGroupKey });
+    const message = `Target feedback group is already merged into ${other.groupKey}; merge into that final target directly`;
+    let targetVisible = true;
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === `/api/products/${productId}/github-repo`) {
+        return Promise.resolve(json(repositoryMapping(productId)));
+      }
+      if (path === groupsPath(productId, 50, 0)) {
+        return Promise.resolve(
+          json({
+            groups: targetVisible ? [source, target, other] : [source, other],
+            hasMore: false,
+            limit: 50,
+            offset: 0,
+          }),
+        );
+      }
+      if (path === mergePath(source.groupKey) && init?.method === "POST") {
+        return Promise.resolve(json({ error: message }, 409));
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderFeedback(data);
+    fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
+    fireEvent.click(await screen.findByRole("button", { name: `Merge signal ${source.groupKey}` }));
+    const targetPicker = screen.getByRole("combobox", {
+      name: `Signal that survives merge of ${source.groupKey}`,
+    });
+    fireEvent.change(targetPicker, { target: { value: target.groupKey } });
+    fireEvent.click(screen.getByRole("button", { name: `Merge away into ${target.groupKey}` }));
+    expect(await screen.findByText(message, { exact: false })).toBeVisible();
+
+    targetVisible = false;
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+
+    await waitFor(() => expect(targetPicker).toHaveValue(""));
+    expect(
+      Array.from(targetPicker.querySelectorAll("option")).some(
+        (option) => option.value === target.groupKey,
+      ),
+    ).toBe(false);
+    expect(screen.getByRole("button", { name: "Choose a surviving signal" })).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: `Merge away into ${target.groupKey}` }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps merge confirmation visible when the refetched listing is empty", async () => {
+    const data = dashboardFixture();
+    const productId = data.currentProduct?.id ?? "";
+    const source = reportGroup({ groupKey: mergeSourceGroupKey, reportCount: 2 });
+    const target = reportGroup({ groupKey: mergeTargetGroupKey });
+    let merged = false;
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === `/api/products/${productId}/github-repo`) {
+        return Promise.resolve(json(repositoryMapping(productId)));
+      }
+      if (path === groupsPath(productId, 50, 0)) {
+        return Promise.resolve(
+          json({
+            groups: merged ? [] : [source, target],
+            hasMore: false,
+            limit: 50,
+            offset: 0,
+          }),
+        );
+      }
+      if (path === mergePath(source.groupKey) && init?.method === "POST") {
+        merged = true;
+        return Promise.resolve(
+          json({ reportsMoved: source.reportCount, targetGroupKey: target.groupKey }),
+        );
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderFeedback(data);
+    fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
+    fireEvent.click(await screen.findByRole("button", { name: `Merge signal ${source.groupKey}` }));
+    fireEvent.change(
+      screen.getByRole("combobox", {
+        name: `Signal that survives merge of ${source.groupKey}`,
+      }),
+      { target: { value: target.groupKey } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: `Merge away into ${target.groupKey}` }));
+
+    expect(await screen.findByText("No signals yet")).toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      `Merged away ${source.groupKey} and moved 2 reports into ${target.groupKey}, which survives.`,
+    );
+  });
+
+  it("renders a non-409 merge failure as an error without reconciliation", async () => {
+    const data = dashboardFixture();
+    const productId = data.currentProduct?.id ?? "";
+    const source = reportGroup({ groupKey: mergeSourceGroupKey });
+    const target = reportGroup({ groupKey: mergeTargetGroupKey });
+    const message = "Merge service is temporarily unavailable";
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === `/api/products/${productId}/github-repo`) {
+        return Promise.resolve(json(repositoryMapping(productId)));
+      }
+      if (path === groupsPath(productId, 50, 0)) {
+        return Promise.resolve(
+          json({ groups: [source, target], hasMore: false, limit: 50, offset: 0 }),
+        );
+      }
+      if (path === mergePath(source.groupKey) && init?.method === "POST") {
+        return Promise.resolve(json({ error: message }, 500));
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderFeedback(data);
+    fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
+    fireEvent.click(await screen.findByRole("button", { name: `Merge signal ${source.groupKey}` }));
+    fireEvent.change(
+      screen.getByRole("combobox", {
+        name: `Signal that survives merge of ${source.groupKey}`,
+      }),
+      { target: { value: target.groupKey } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: `Merge away into ${target.groupKey}` }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      `Merge source ${source.groupKey}: ${message}`,
+    );
+    expect(screen.queryByRole("button", { name: "Check again" })).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: `Merge away into ${target.groupKey}` }),
+    ).toBeEnabled();
+  });
+
+  it("excludes self-merge and disables a target when both groups have GitHub issues", async () => {
+    const data = dashboardFixture();
+    const productId = data.currentProduct?.id ?? "";
+    const issue = {
+      repoFullName: "open-software-network/os-epode",
+      issueNumber: 42,
+      url: "https://github.com/open-software-network/os-epode/issues/42",
+      state: "open",
+    };
+    const source = reportGroup({ groupKey: mergeSourceGroupKey, githubIssue: issue });
+    const target = reportGroup({
+      groupKey: mergeTargetGroupKey,
+      githubIssue: { ...issue, issueNumber: 43 },
+    });
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === `/api/products/${productId}/github-repo`) {
+        return Promise.resolve(json(repositoryMapping(productId)));
+      }
+      if (path === groupsPath(productId, 50, 0)) {
+        return Promise.resolve(
+          json({ groups: [source, target], hasMore: false, limit: 50, offset: 0 }),
+        );
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderFeedback(data);
+    fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
+    expect(await screen.findByRole("columnheader", { name: "Signal" })).toHaveClass("w-[44%]");
+    expect(screen.getByRole("columnheader", { name: "Reports" })).toHaveClass("w-[10%]");
+    expect(screen.getByRole("columnheader", { name: "Latest observed" })).toHaveClass("w-[16%]");
+    expect(screen.getByRole("columnheader", { name: "GitHub issue" })).toHaveClass("w-[20%]");
+    expect(screen.getByRole("columnheader", { name: "Actions" })).toHaveClass("w-[10%]");
+    fireEvent.click(await screen.findByRole("button", { name: `Merge signal ${source.groupKey}` }));
+
+    const picker = screen.getByRole("combobox", {
+      name: `Signal that survives merge of ${source.groupKey}`,
+    });
+    expect(picker.closest("td")).toHaveAttribute("colspan", "5");
+    const options = Array.from(picker.querySelectorAll("option"));
+    expect(options.some((option) => option.value === source.groupKey)).toBe(false);
+    const targetOption = options.find((option) => option.value === target.groupKey);
+    expect(targetOption).toBeDisabled();
+    expect(targetOption).toHaveTextContent("unavailable: both signals have GitHub issues");
+    expect(screen.getByRole("button", { name: "Choose a surviving signal" })).toBeDisabled();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/merge"))).toBe(false);
+  });
+
+  it("keeps Cancel and other row triggers usable while one merge is in flight", async () => {
+    const data = dashboardFixture();
+    const productId = data.currentProduct?.id ?? "";
+    const source = reportGroup({ groupKey: mergeSourceGroupKey });
+    const target = reportGroup({ groupKey: mergeTargetGroupKey });
+    const other = reportGroup({ groupKey: mergeOtherGroupKey });
+    let resolveMerge: ((response: Response) => void) | undefined;
+    const pendingMerge = new Promise<Response>((resolve) => {
+      resolveMerge = resolve;
+    });
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === `/api/products/${productId}/github-repo`) {
+        return Promise.resolve(json(repositoryMapping(productId)));
+      }
+      if (path === groupsPath(productId, 50, 0)) {
+        return Promise.resolve(
+          json({ groups: [source, target, other], hasMore: false, limit: 50, offset: 0 }),
+        );
+      }
+      if (path === mergePath(source.groupKey) && init?.method === "POST") return pendingMerge;
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderFeedback(data);
+    fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
+    fireEvent.click(await screen.findByRole("button", { name: `Merge signal ${source.groupKey}` }));
+    fireEvent.change(
+      screen.getByRole("combobox", {
+        name: `Signal that survives merge of ${source.groupKey}`,
+      }),
+      { target: { value: target.groupKey } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: `Merge away into ${target.groupKey}` }));
+
+    const cancel = await screen.findByRole("button", {
+      name: `Cancel merge of signal ${source.groupKey}`,
+    });
+    expect(cancel).toBeEnabled();
+    expect(screen.getByRole("button", { name: `Merge signal ${other.groupKey}` })).toBeEnabled();
+    fireEvent.click(cancel);
+    expect(screen.getByRole("button", { name: `Merge signal ${source.groupKey}` })).toBeDisabled();
+    expect(screen.getByRole("button", { name: `Merge signal ${other.groupKey}` })).toBeEnabled();
+
+    await act(async () => resolveMerge?.(json({ error: "Merge is still in progress" }, 409)));
+  });
+
+  it("attributes a late merge result to its source while another row form is open", async () => {
+    const data = dashboardFixture();
+    const productId = data.currentProduct?.id ?? "";
+    const sourceA = reportGroup({ groupKey: mergeSourceGroupKey, reportCount: 7 });
+    const sourceB = reportGroup({ groupKey: mergeOtherGroupKey, reportCount: 2 });
+    const target = reportGroup({ groupKey: mergeTargetGroupKey, reportCount: 5 });
+    let sourceAMerged = false;
+    let resolveMerge: ((response: Response) => void) | undefined;
+    const pendingMerge = new Promise<Response>((resolve) => {
+      resolveMerge = resolve;
+    });
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === `/api/products/${productId}/github-repo`) {
+        return Promise.resolve(json(repositoryMapping(productId)));
+      }
+      if (path === groupsPath(productId, 50, 0)) {
+        return Promise.resolve(
+          json({
+            groups: sourceAMerged ? [sourceB, target] : [sourceA, sourceB, target],
+            hasMore: false,
+            limit: 50,
+            offset: 0,
+          }),
+        );
+      }
+      if (path === mergePath(sourceA.groupKey) && init?.method === "POST") return pendingMerge;
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderFeedback(data);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
+      await Promise.resolve();
+    });
+    await screen.findByRole("button", { name: `Merge signal ${sourceA.groupKey}` });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: `Merge signal ${sourceA.groupKey}` }));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      fireEvent.change(
+        screen.getByRole("combobox", {
+          name: `Signal that survives merge of ${sourceA.groupKey}`,
+        }),
+        { target: { value: target.groupKey } },
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: `Merge away into ${target.groupKey}` }));
+      await Promise.resolve();
+    });
+    expect(await screen.findByRole("button", { name: "Merging…" })).toBeDisabled();
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: `Cancel merge of signal ${sourceA.groupKey}` }),
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: `Merge signal ${sourceB.groupKey}` }));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      fireEvent.change(
+        screen.getByRole("combobox", {
+          name: `Signal that survives merge of ${sourceB.groupKey}`,
+        }),
+        { target: { value: target.groupKey } },
+      );
+      await Promise.resolve();
+    });
+    expect(
+      screen.getByRole("button", { name: `Merge away into ${target.groupKey}` }),
+    ).toBeDisabled();
+
+    sourceAMerged = true;
+    await act(async () => {
+      resolveMerge?.(json({ reportsMoved: sourceA.reportCount, targetGroupKey: target.groupKey }));
+      await pendingMerge;
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      `Merged away ${sourceA.groupKey} and moved 7 reports into ${target.groupKey}, which survives.`,
+    );
+    expect(
+      screen.getByRole("button", { name: `Cancel merge of signal ${sourceB.groupKey}` }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole("combobox", {
+        name: `Signal that survives merge of ${sourceB.groupKey}`,
+      }),
+    ).toHaveValue(target.groupKey);
+    expect(
+      screen.getByRole("button", { name: `Merge away into ${target.groupKey}` }),
+    ).toBeEnabled();
+    expect(screen.getAllByText(sourceB.groupKey)).toHaveLength(2);
+    expect(
+      screen.queryByRole("button", { name: `Merge signal ${sourceA.groupKey}` }),
+    ).not.toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.filter(
+        ([input, init]) => String(input) === mergePath(sourceA.groupKey) && init?.method === "POST",
+      ),
+    ).toHaveLength(1);
+    expect(
+      fetchMock.mock.calls.some(
+        ([input, init]) => String(input) === mergePath(sourceB.groupKey) && init?.method === "POST",
+      ),
+    ).toBe(false);
   });
 
   it("keeps workflow editing in the rail's compact single-column layout", () => {
@@ -614,6 +1161,10 @@ function groupsPath(productId: string, limit: number, offset: number): string {
 
 function issuePath(groupKey: string): string {
   return `/api/groups/${encodeURIComponent(groupKey)}/github-issue`;
+}
+
+function mergePath(sourceGroupKey: string): string {
+  return `/api/groups/${encodeURIComponent(sourceGroupKey)}/merge`;
 }
 
 function json(body: unknown, status = 200): Response {

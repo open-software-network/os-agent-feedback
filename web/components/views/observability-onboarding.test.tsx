@@ -222,7 +222,7 @@ describe("observability onboarding states", () => {
     expect(await screen.findByRole("heading", { name: "Signal clusters" })).toBeVisible();
     expect(screen.getByText(/one deterministic primary finding/i)).toBeVisible();
     expect(screen.getByText(/Secondary findings remain available/i)).toBeVisible();
-    expect(screen.getByRole("columnheader", { name: "Cluster" })).toBeVisible();
+    expect(screen.getByRole("columnheader", { name: "Signal" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Review full reports" }));
     expect(screen.getByRole("tab", { name: "Reports" })).toHaveAttribute("aria-selected", "true");
   });
