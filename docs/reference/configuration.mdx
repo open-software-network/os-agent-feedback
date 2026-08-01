@@ -33,10 +33,17 @@ old instruction. The envelope's `configuredMode` helps diagnose this drift.
 | `apiKey` / `api_key` | Product key, normally read from the environment |
 | `include` | Route patterns that receive feedback contracts |
 | `feedbackMode` / `feedback_mode` | Explicit mode override |
-| `customerRef` / `customer_ref` | Stable opaque product-auth account or tenant ID; required for durable Ask once |
-| `sessionRef` / `session_ref` | Optional product-proven journey reference; omit it rather than infer continuity |
+| `accountRef` / `account_ref` | Stable opaque account, tenant, or workspace ID from verified product authentication |
+| `userRef` / `user_ref` | Stable opaque user ID from verified product authentication |
+| `anonymousRef` / `anonymous_ref` | Stable product-owned first-party pre-login visitor ID |
+| `customerRef` / `customer_ref` | Durable Ask once compatibility subject; when `accountRef` is present, use the exact same account ID |
+| `sessionRef` / `session_ref` | Optional server/product-proven journey reference; omit it rather than infer continuity |
 | `consentTimeoutMs` / `consent_timeout` / `AGENT_FEEDBACK_CONSENT_TIMEOUT_MS` | Timeout for optional consent-cache warming or protocol-specific lookups (default 750 ms). HTTP product responses never await it. |
 | `endpoint` | Override Epode origin in tests |
+
+Never use names, emails, prompts, raw caller inputs, agent/tool arguments, or unverified token claims. Do not pair
+`customerRef` with `userRef` alone or with a different `accountRef`. Identity and journey accessors add private,
+nonblocking telemetry context; they never add those references to the agent-facing feedback envelope.
 
 ## Route patterns
 

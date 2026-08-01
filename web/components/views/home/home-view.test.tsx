@@ -1,7 +1,12 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { dashboardFixture } from "@/components/dashboard/test-fixture";
+import {
+  customersPageFixture,
+  dashboardFixture,
+  featuresPageFixture,
+} from "@/components/dashboard/test-fixture";
 import type { DashboardData } from "@/lib/api/dashboard";
 import { HomeView } from "./home-view";
 
@@ -11,179 +16,108 @@ describe("HomeView", () => {
     window.history.replaceState({}, "", "/?team=team-1&product=product-1");
   });
 
-  it("orders the page from readout to evidence, patterns, and usage", () => {
-    renderHome(richDashboardFixture());
-
-    expect(
-      screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent),
-    ).toEqual([
-      "3 reports contained blocking findings.",
-      "Evidence pipeline",
-      "Feedback patterns",
-      "Usage and reliability",
-    ]);
-
-    const pipeline = screen.getByRole("region", { name: "Evidence pipeline" });
-    expect(within(pipeline).getByText("32")).toBeVisible();
-    expect(within(pipeline).getByText("26")).toBeVisible();
-    expect(within(pipeline).getByText("18")).toBeVisible();
-    expect(within(pipeline).getByText("81% confirmation")).toBeVisible();
-    expect(screen.getByText("2 blocking")).toBeVisible();
-    expect(
-      screen.getByText(
-        (_, element) =>
-          element?.tagName === "P" &&
-          element.textContent?.includes("8 confirmed uses without feedback") === true,
-      ),
-    ).toBeVisible();
-    expect(screen.queryByText(/feedback gaps?/i)).not.toBeInTheDocument();
-    expect(screen.getByText("620ms")).toBeVisible();
-    expect(screen.getByText("9.8s")).toBeVisible();
-    expect(screen.queryByRole("button", { name: /interactions/i })).not.toBeInTheDocument();
-  });
-
-  it("keeps refresh and direct feedback drilldown behavior", () => {
-    const data = richDashboardFixture();
-    const refresh = vi.fn().mockResolvedValue(undefined);
-    const openFeedback = vi.fn();
-
-    render(<HomeView data={data} refresh={refresh} openFeedback={openFeedback} />);
-
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-    expect(refresh).toHaveBeenCalledOnce();
-
-    fireEvent.click(screen.getByRole("button", { name: data.reports[0].summary }));
-    expect(openFeedback).toHaveBeenCalledWith(data.reports[0].id);
-
-    fireEvent.click(screen.getByRole("button", { name: "Review leading blocker" }));
-    expect(openFeedback).toHaveBeenLastCalledWith(data.reports[0].id);
-  });
-
-  it("routes aggregate exploration only to visible dashboard views", () => {
-    const onPopState = vi.fn();
-    window.addEventListener("popstate", onPopState);
+  it("leads with evidence-backed customer intelligence", async () => {
     renderHome(dashboardFixture());
 
-    fireEvent.click(screen.getByRole("button", { name: "Browse feedback" }));
-    expect(new URL(window.location.href).searchParams.get("view")).toBe("feedback");
-    expect(new URL(window.location.href).searchParams.get("team")).toBe("team-1");
-
-    fireEvent.click(screen.getByRole("button", { name: "Explore sessions" }));
-    expect(new URL(window.location.href).searchParams.get("view")).toBe("sessions");
-    expect(new URL(window.location.href).searchParams.get("product")).toBe("product-1");
-    expect(onPopState).toHaveBeenCalledTimes(2);
-
-    window.removeEventListener("popstate", onPopState);
+    expect(
+      await screen.findByRole("heading", {
+        name: "Fresh results after indexing is the leading customer need.",
+      }),
+    ).toBeVisible();
+    const health = screen.getByRole("region", { name: "Customer health" });
+    expect(within(health).getByText("Customers observed")).toBeVisible();
+    expect(within(health).getByText("Verified customers")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Needs and opportunities" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Customers requiring attention" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Recent outcome evidence" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Interactions" })).not.toBeInTheDocument();
   });
 
-  it("drills aggregate patterns into scoped evidence without stale filters", () => {
-    window.history.replaceState(
-      {},
-      "",
-      "/?team=team-1&product=product-1&status=resolved&group=stale-group",
+  it("opens exact feature, customer, and report evidence", async () => {
+    const openFeature = vi.fn();
+    const openCustomer = vi.fn();
+    const openFeedback = vi.fn();
+    renderHome(dashboardFixture(), { openFeature, openCustomer, openFeedback });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Review evidence" }));
+    expect(openFeature).toHaveBeenCalledWith("freshness-gap");
+
+    fireEvent.click(screen.getByRole("button", { name: "Acme workspace" }));
+    expect(openCustomer).toHaveBeenCalledWith("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Search results omitted the newest document" }),
     );
-    const data = richDashboardFixture();
-    renderHome(data);
-
-    fireEvent.click(screen.getByRole("button", { name: "Knowledge Freshness" }));
-    let url = new URL(window.location.href);
-    expect(url.searchParams.get("view")).toBe("feedback");
-    expect(url.searchParams.get("topic")).toBe("knowledge_freshness");
-    expect(url.searchParams.has("status")).toBe(false);
-    expect(url.searchParams.has("group")).toBe(false);
-
-    fireEvent.click(screen.getByRole("button", { name: "/v1/knowledge/search" }));
-    url = new URL(window.location.href);
-    expect(url.searchParams.get("view")).toBe("sessions");
-    expect(url.searchParams.get("sessionOperation")).toBe("/v1/knowledge/search");
-    expect(url.searchParams.get("sessionRange")).toBe("30d");
+    expect(openFeedback).toHaveBeenCalledWith(dashboardFixture().reports[0].id);
   });
 
-  it("finds a leading blocker outside the bootstrap report window", () => {
-    const data = richDashboardFixture();
-    renderHome({ ...data, reports: [] });
+  it("routes aggregate exploration only to visible dashboard views", async () => {
+    renderHome(dashboardFixture());
+    fireEvent.click(await screen.findByRole("button", { name: "View all features" }));
+    expect(new URL(window.location.href).searchParams.get("view")).toBe("features");
 
-    fireEvent.click(screen.getByRole("button", { name: "Review leading blocker" }));
+    fireEvent.click(screen.getByRole("button", { name: "View all customers" }));
+    expect(new URL(window.location.href).searchParams.get("view")).toBe("customers");
+  });
 
-    const url = new URL(window.location.href);
-    expect(url.searchParams.get("view")).toBe("feedback");
-    expect(url.searchParams.get("topic")).toBe("idempotency");
-    expect(url.searchParams.get("severity")).toBe("blocking");
+  it("refreshes dashboard and both customer-intelligence projections", async () => {
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    const fetchMock = mockIntelligence();
+    renderHome(dashboardFixture(), { refresh }, fetchMock);
+
+    await screen.findByText("Fresh results after indexing");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        String(input).startsWith("/api/dashboard/customers?"),
+      ).length,
+    ).toBeGreaterThan(1);
+    expect(
+      fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/dashboard/features?"))
+        .length,
+    ).toBeGreaterThan(1);
   });
 });
 
-function renderHome(data: DashboardData) {
+function renderHome(
+  data: DashboardData,
+  overrides: Partial<Parameters<typeof HomeView>[0]> = {},
+  fetchMock = mockIntelligence(),
+) {
+  vi.stubGlobal("fetch", fetchMock);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <HomeView data={data} openFeedback={vi.fn()} refresh={vi.fn().mockResolvedValue(undefined)} />,
+    <QueryClientProvider client={client}>
+      <HomeView
+        data={data}
+        openCustomer={vi.fn()}
+        openFeature={vi.fn()}
+        openFeedback={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        {...overrides}
+      />
+    </QueryClientProvider>,
   );
 }
 
-function richDashboardFixture(): DashboardData {
-  const base = dashboardFixture();
-  const occurredAt = new Date().toISOString();
-  return {
-    ...base,
-    reports: [
-      {
-        ...base.reports[0],
-        occurredAt,
-        findings: [
-          {
-            kind: "defect",
-            topic: "idempotency",
-            detail: "The retry contract was ambiguous.",
-            severity: "blocking",
-          },
-        ],
-      },
-    ],
-    listState: {
-      ...base.listState,
-      sessionsTotal: 9,
-    },
-    insights: {
-      ...base.insights,
-      windowDays: 30,
-      comparisonDays: 7,
-      opportunities: 32,
-      confirmedInteractions: 26,
-      reports: 18,
-      confirmationRate: 81,
-      reviewRate: 69,
-      recentOpportunities: 20,
-      previousOpportunities: 12,
-      recentConfirmedInteractions: 17,
-      previousConfirmedInteractions: 9,
-      recentReports: 12,
-      previousReports: 6,
-      reportsWithBlockers: 3,
-      reportsWithWorkarounds: 10,
-      p50DurationMs: 620,
-      p95DurationMs: 9_800,
-      blockingTopics: [
-        { name: "idempotency", count: 2 },
-        { name: "resumability", count: 1 },
-      ],
-      topics: [
-        { name: "knowledge_freshness", count: 3 },
-        { name: "idempotency", count: 2 },
-      ],
-      impacts: [
-        { name: "helped", count: 4 },
-        { name: "blocked", count: 3 },
-      ],
-      findingKinds: [
-        { name: "strength", count: 7 },
-        { name: "gap", count: 6 },
-      ],
-      topOperations: [
-        { name: "/v1/knowledge/search", count: 6 },
-        { name: "refund_create", count: 3 },
-      ],
-      surfaces: [
-        { name: "mcp", count: 20 },
-        { name: "http_json", count: 10 },
-      ],
-    },
-  };
+function mockIntelligence() {
+  return vi.fn().mockImplementation((input: RequestInfo | URL) => {
+    const path = String(input);
+    if (path.startsWith("/api/dashboard/customers?")) {
+      return Promise.resolve(json(customersPageFixture()));
+    }
+    if (path.startsWith("/api/dashboard/features?")) {
+      return Promise.resolve(json(featuresPageFixture()));
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  });
+}
+
+function json(value: unknown) {
+  return new Response(JSON.stringify(value), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
 }

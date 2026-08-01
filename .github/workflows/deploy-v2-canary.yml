@@ -270,7 +270,7 @@ jobs:
           # The API cannot boot without these pre-provisioned or referenced
           # values. Only key presence is tested so sealed secrets stay opaque.
           api_variables="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$API_SERVICE" --json)"
-          for key in DATABASE_URL OS_ACCOUNTS_URL OS_ACCOUNTS_API_URL OS_ACCOUNTS_CLIENT_ID; do
+          for key in DATABASE_URL EPODE_IDENTITY_HMAC_SECRET OS_ACCOUNTS_URL OS_ACCOUNTS_API_URL OS_ACCOUNTS_CLIENT_ID; do
             if ! jq -e --arg key "$key" 'has($key)' <<<"$api_variables" >/dev/null; then
               echo "::error::$API_SERVICE is missing required v2-canary variable $key."
               exit 1

@@ -51,12 +51,14 @@ changed or the product is deleted; changing retention alone does not reset it.
 
 ## Agent and customer identity
 
-Epode does not identify an agent. HTTP runtime headers and MCP client information are unverified hints. Optional
-`customerRef` and session references are opaque values supplied by your own authenticated product
-context. Epode stores `customerRef` with interaction telemetry for optional customer grouping. Session
-references are hashed before storage. Ask-once consent uses an HMAC-derived subject, so neither the raw
-`customerRef` nor the stored telemetry value is exposed to the customer's agent in the feedback envelope.
-Use non-personal internal identifiers only.
+Epode does not identify an agent or invent customer identity. HTTP runtime headers and MCP client information are
+unverified hints. `accountRef` and `userRef` are opaque values supplied by verified product authentication;
+`anonymousRef` is a stable product-owned first-party pre-login ID. `customerRef` exists only for durable Ask once
+compatibility and, when richer identity is present, must exactly equal `accountRef` rather than identifying only a
+user. Session references come only from server/product state that already proves a journey and are hashed before
+storage. Ask-once consent uses an HMAC-derived subject, so neither the raw `customerRef` nor stored telemetry
+references are exposed to the customer's agent in the feedback envelope. Use non-personal internal identifiers
+only; never names, emails, prompts, caller values, agent arguments, or unverified token claims.
 
 ## Origin safety
 

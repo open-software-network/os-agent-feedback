@@ -15,7 +15,11 @@ use sha2::Sha256;
 use std::env;
 
 #[derive(Clone)]
-struct AccountId(String);
+struct ProductIdentity {
+    account_id: String,
+    user_id: String,
+    anonymous_id: String,
+}
 
 async fn authenticate(mut request: Request<Body>, next: Next) -> Response {
     if request.uri().path() == "/health" {
@@ -60,7 +64,11 @@ async fn authenticate(mut request: Request<Body>, next: Next) -> Response {
         )
             .into_response();
     }
-    request.extensions_mut().insert(AccountId(account_id));
+    request.extensions_mut().insert(ProductIdentity {
+        user_id: format!("user.{account_id}"),
+        anonymous_id: format!("anon.{account_id}"),
+        account_id,
+    });
     next.run(request).await
 }
 
@@ -76,12 +84,32 @@ fn valid_account_id(value: &str) -> bool {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut options = Options::new(env::var("AGENT_FEEDBACK_KEY")?)
         .include(["/search", "/docs/*"])
-        .customer_ref(|request| {
+        .account_ref(|request| {
             request
                 .extensions()
-                .get::<AccountId>()
-                .map(|account| account.0.clone())
+                .get::<ProductIdentity>()
+                .map(|identity| identity.account_id.clone())
+        })
+        .user_ref(|request| {
+            request
+                .extensions()
+                .get::<ProductIdentity>()
+                .map(|identity| identity.user_id.clone())
+        })
+        .anonymous_ref(|request| {
+            request
+                .extensions()
+                .get::<ProductIdentity>()
+                .map(|identity| identity.anonymous_id.clone())
         });
+    if env::var("AGENT_FEEDBACK_MODE").as_deref() == Ok("ask_once") {
+        options = options.customer_ref(|request| {
+            request
+                .extensions()
+                .get::<ProductIdentity>()
+                .map(|identity| identity.account_id.clone())
+        });
+    }
     if let Ok(endpoint) = env::var("AGENT_FEEDBACK_URL") {
         options = options.endpoint(endpoint);
     }

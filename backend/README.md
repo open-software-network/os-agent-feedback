@@ -86,5 +86,8 @@ MCP_PRODUCT_URL=http://127.0.0.1:3103/mcp \
 bash tests/customer_agent_e2e.sh
 ```
 
-Required production environment variables remain `DATABASE_URL`, `PUBLIC_BASE_URL`, the OS Accounts URLs/client ID, and `PORT`.
+Required production environment variables are `DATABASE_URL`, `EPODE_IDENTITY_HMAC_SECRET`,
+`PUBLIC_BASE_URL`, the OS Accounts URLs/client ID, and `PORT`. The identity HMAC secret must contain
+at least 32 random bytes and remain stable across product-key rotation; changing it intentionally starts
+a new customer-identity namespace.
 `DATABASE_MAX_CONNECTIONS` is optional and defaults to `10`; lower it for disposable validation environments that share a small PostgreSQL connection budget.

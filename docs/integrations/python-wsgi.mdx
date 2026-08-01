@@ -6,7 +6,7 @@ description: "Instrument finite Flask, Django WSGI, Bottle, or Pyramid responses
 ## Install
 
 ```bash
-python -m pip install https://app.epode.ai/static/agent_feedback-0.2.2-py3-none-any.whl
+python -m pip install https://app.epode.ai/static/agent_feedback-0.3.0-py3-none-any.whl
 ```
 
 ## Configure once
@@ -26,13 +26,18 @@ instrumented_app = AgentFeedbackWSGI(
     app.wsgi_app,
     api_key=os.environ["AGENT_FEEDBACK_KEY"],
     include=("/search", "/docs/*"),
-    customer_ref=lambda environ: environ.get("account_id"),  # required for durable Ask once; optional otherwise
+    account_ref=lambda environ: environ.get("product.account_id"),
+    user_ref=lambda environ: environ.get("product.user_id"),
+    anonymous_ref=lambda environ: environ.get("product.first_party_visitor_id"),
+    customer_ref=lambda environ: environ.get("product.account_id"),  # durable Ask once compatibility
+    session_ref=lambda environ: environ.get("product.journey_id"),  # optional server-issued journey
 )
 app.wsgi_app = ProductTenantAuthMiddleware(instrumented_app)
 ```
 
 The authentication wrapper is intentionally outermost so it establishes the verified account or
-tenant before Epode resolves `customer_ref`.
+user and product-owned visitor/journey context before Epode resolves the extractors. Never populate those
+values from names, emails, prompts, caller fields, or agent arguments.
 
 The WSGI adapter buffers only responses with a declared size of at most 1 MiB. JSON objects receive
 `_agentFeedback`, HTML receives a machine-readable link, and arrays or scalar JSON use the

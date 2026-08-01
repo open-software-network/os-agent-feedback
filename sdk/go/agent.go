@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 )
 
 type FeedbackFinding struct {
@@ -34,6 +35,18 @@ type FeedbackReport struct {
 	Workaround *FeedbackWorkaround `json:"workaround,omitempty"`
 }
 
+type FeedbackInspection struct {
+	Action            string `json:"action"`
+	State             string `json:"state"`
+	ConfiguredMode    string `json:"configuredMode,omitempty"`
+	ConsentPolicy     string `json:"consentPolicy,omitempty"`
+	ProductName       string `json:"productName,omitempty"`
+	CanonicalQuestion string `json:"canonicalQuestion,omitempty"`
+	ExpiresAt         string `json:"expiresAt,omitempty"`
+	SubmitURL         string `json:"submitUrl,omitempty"`
+	Authorization     string `json:"-"`
+}
+
 // FeedbackConsentAction resolves Epode's server-managed response state.
 func FeedbackConsentAction(envelope *Envelope) string {
 	if !validEnvelope(envelope) {
@@ -42,9 +55,8 @@ func FeedbackConsentAction(envelope *Envelope) string {
 	if envelope.State == "feedback_ready" {
 		return "submit"
 	}
-	if envelope.State == "consent_required" {
-		return "ask"
-	}
+	// A response envelope is only a snapshot. Ask once must be resolved with
+	// InspectFeedbackConsent before prompting the user.
 	return "skip"
 }
 
@@ -133,6 +145,120 @@ func validManageConsent(action *ManageConsentContract, current string) bool {
 	return len(action.BodySchema) == 1 && len(decisions) == 2 && decisions[0] == "approved" && decisions[1] == "declined"
 }
 
+func feedbackCapability(envelope *Envelope) (string, *url.URL, error) {
+	if !validEnvelope(envelope) {
+		return "", nil, errors.New("invalid Agent Feedback contract")
+	}
+	actionURL := ""
+	authorization := ""
+	if envelope.State == "feedback_ready" && envelope.Submit != nil {
+		actionURL = envelope.Submit.URL
+		authorization = envelope.Submit.Authorization
+	} else if envelope.RequiredAction != nil {
+		actionURL = envelope.RequiredAction.SubmitDecision.URL
+		authorization = envelope.RequiredAction.SubmitDecision.Authorization
+	}
+	parsed, err := url.Parse(actionURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return "", nil, errors.New("Agent Feedback inspection requires HTTPS")
+	}
+	return authorization, &url.URL{Scheme: parsed.Scheme, Host: parsed.Host}, nil
+}
+
+func trustedOrigin(origin *url.URL, allowedOrigins []string) bool {
+	if len(allowedOrigins) == 0 {
+		allowedOrigins = []string{DefaultEndpoint}
+	}
+	for _, value := range allowedOrigins {
+		allowed, err := url.Parse(value)
+		if err == nil && allowed.Scheme == origin.Scheme && allowed.Host == origin.Host {
+			return true
+		}
+	}
+	return false
+}
+
+func boundedNoRedirectClient(client *http.Client) *http.Client {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	clone := *client
+	clone.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	if clone.Timeout == 0 || clone.Timeout > 5*time.Second {
+		clone.Timeout = 5 * time.Second
+	}
+	return &clone
+}
+
+// InspectFeedbackConsent resolves the current server-authoritative permission
+// before an agent prompts, records a decision, or submits a report.
+func InspectFeedbackConsent(ctx context.Context, envelope *Envelope, allowedOrigins []string, client *http.Client) (*FeedbackInspection, error) {
+	authorization, origin, err := feedbackCapability(envelope)
+	if err != nil {
+		return nil, err
+	}
+	if !trustedOrigin(origin, allowedOrigins) {
+		return nil, fmt.Errorf("refusing to inspect feedback at untrusted origin %s", origin.String())
+	}
+	inspectionURL := origin.ResolveReference(&url.URL{Path: "/api/v2/capabilities/introspect"})
+	inspectionCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(inspectionCtx, http.MethodPost, inspectionURL.String(), strings.NewReader("{}"))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Authorization", authorization)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", "agent-feedback-go-agent/0.3.0")
+	response, err := boundedNoRedirectClient(client).Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusGone {
+		return &FeedbackInspection{Action: "skip", State: "feedback_disabled"}, nil
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("feedback inspection failed with HTTP %d", response.StatusCode)
+	}
+	var body struct {
+		State             string `json:"state"`
+		ConfiguredMode    string `json:"configuredMode"`
+		ConsentPolicy     string `json:"consentPolicy"`
+		ProductName       string `json:"productName"`
+		CanonicalQuestion string `json:"canonicalQuestion"`
+		ExpiresAt         string `json:"expiresAt"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	if body.ConfiguredMode == "" || body.ConsentPolicy == "" || body.ProductName == "" || body.ExpiresAt == "" {
+		return nil, errors.New("Epode returned an incomplete feedback inspection")
+	}
+	inspection := &FeedbackInspection{
+		State: body.State, ConfiguredMode: body.ConfiguredMode, ConsentPolicy: body.ConsentPolicy,
+		ProductName: body.ProductName, CanonicalQuestion: body.CanonicalQuestion, ExpiresAt: body.ExpiresAt,
+	}
+	switch body.State {
+	case "feedback_ready":
+		inspection.Action = "submit"
+		inspection.SubmitURL = origin.ResolveReference(&url.URL{Path: "/api/v2/reports"}).String()
+		inspection.Authorization = authorization
+	case "consent_required":
+		if body.CanonicalQuestion == "" {
+			return nil, errors.New("Epode did not return the canonical permission question")
+		}
+		inspection.Action = "ask"
+	case "declined":
+		inspection.Action = "skip"
+	default:
+		return nil, errors.New("Epode returned an invalid feedback inspection")
+	}
+	return inspection, nil
+}
+
 // SubmitFeedbackConsent records only an explicit approved or declined answer.
 // Epode returns a separate feedback_ready contract after approval.
 func SubmitFeedbackConsent(ctx context.Context, envelope *Envelope, decision string, allowedOrigins []string, client *http.Client) (map[string]any, error) {
@@ -142,34 +268,28 @@ func SubmitFeedbackConsent(ctx context.Context, envelope *Envelope, decision str
 	if decision != "approved" && decision != "declined" {
 		return nil, errors.New("decision must be approved or declined")
 	}
+	inspection, err := InspectFeedbackConsent(ctx, envelope, allowedOrigins, client)
+	if err != nil {
+		return nil, err
+	}
+	if inspection.State == "declined" {
+		return map[string]any{"state": "declined"}, nil
+	}
+	if inspection.State == "feedback_ready" {
+		return map[string]any{"state": "approved"}, nil
+	}
+	if inspection.State != "consent_required" {
+		return nil, errors.New("feedback permission is no longer available")
+	}
 	action := envelope.RequiredAction.SubmitDecision
-	decisionURL, err := url.Parse(action.URL)
-	if err != nil || decisionURL.Scheme != "https" {
-		return nil, errors.New("Agent Feedback decisions require HTTPS")
-	}
-	if len(allowedOrigins) == 0 {
-		allowedOrigins = []string{DefaultEndpoint}
-	}
-	trusted := false
-	for _, value := range allowedOrigins {
-		origin, parseErr := url.Parse(value)
-		if parseErr == nil && origin.Scheme == decisionURL.Scheme && origin.Host == decisionURL.Host {
-			trusted = true
-			break
-		}
-	}
-	if !trusted {
-		return nil, fmt.Errorf("refusing to submit a consent decision to untrusted origin %s://%s", decisionURL.Scheme, decisionURL.Host)
-	}
+	_, origin, _ := feedbackCapability(envelope)
+	decisionURL := origin.ResolveReference(&url.URL{Path: "/api/v2/consent/decisions"})
 	body, _ := json.Marshal(map[string]string{"decision": decision})
-	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, action.URL, bytes.NewReader(body))
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, decisionURL.String(), bytes.NewReader(body))
 	request.Header.Set("Authorization", action.Authorization)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", "agent-feedback-go-agent/0.2.2")
-	if client == nil {
-		client = http.DefaultClient
-	}
-	response, err := client.Do(request)
+	request.Header.Set("User-Agent", "agent-feedback-go-agent/0.3.0")
+	response, err := boundedNoRedirectClient(client).Do(request)
 	if err != nil {
 		return nil, err
 	}
@@ -204,8 +324,15 @@ func feedbackSubmissionBody(envelope *Envelope, report FeedbackReport) []byte {
 }
 
 func SubmitProductFeedback(ctx context.Context, envelope *Envelope, report FeedbackReport, allowedOrigins []string, client *http.Client) (map[string]any, error) {
-	if !validEnvelope(envelope) || envelope.State != "feedback_ready" || envelope.Submit == nil {
+	if !validEnvelope(envelope) {
 		return nil, errors.New("invalid Agent Feedback submission contract")
+	}
+	inspection, err := InspectFeedbackConsent(ctx, envelope, allowedOrigins, client)
+	if err != nil {
+		return nil, err
+	}
+	if inspection.State != "feedback_ready" || inspection.SubmitURL == "" {
+		return nil, errors.New("current Agent Feedback permission does not allow submission")
 	}
 	report.Summary = strings.TrimSpace(report.Summary)
 	if len(report.Summary) < 8 || len(report.Summary) > 700 {
@@ -240,7 +367,7 @@ func SubmitProductFeedback(ctx context.Context, envelope *Envelope, report Feedb
 	if report.Workaround != nil && report.Workaround.Used && strings.TrimSpace(report.Workaround.Detail) == "" {
 		return nil, errors.New("workaround detail is required when a workaround was used")
 	}
-	submitURL, err := url.Parse(envelope.Submit.URL)
+	submitURL, err := url.Parse(inspection.SubmitURL)
 	if err != nil || submitURL.Scheme != "https" {
 		return nil, errors.New("Agent Feedback submissions require HTTPS")
 	}
@@ -259,14 +386,11 @@ func SubmitProductFeedback(ctx context.Context, envelope *Envelope, report Feedb
 		return nil, fmt.Errorf("refusing to submit feedback to untrusted origin %s://%s", submitURL.Scheme, submitURL.Host)
 	}
 	body := feedbackSubmissionBody(envelope, report)
-	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, envelope.Submit.URL, bytes.NewReader(body))
-	request.Header.Set("Authorization", envelope.Submit.Authorization)
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, inspection.SubmitURL, bytes.NewReader(body))
+	request.Header.Set("Authorization", inspection.Authorization)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", "agent-feedback-go-agent/0.2.2")
-	if client == nil {
-		client = http.DefaultClient
-	}
-	response, err := client.Do(request)
+	request.Header.Set("User-Agent", "agent-feedback-go-agent/0.3.0")
+	response, err := boundedNoRedirectClient(client).Do(request)
 	if err != nil {
 		return nil, err
 	}

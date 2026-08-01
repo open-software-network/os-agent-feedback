@@ -23,7 +23,11 @@ function authenticate(request, response, next) {
   if (!/^[A-Za-z0-9_.:-]{1,160}$/.test(accountId)) {
     return response.status(401).json({ error: "unauthorized" });
   }
-  request.auth = { accountId };
+  request.auth = {
+    accountId,
+    userId: `user.${accountId}`,
+    anonymousId: `anon.${accountId}`,
+  };
   next();
 }
 app.use(authenticate);
@@ -31,7 +35,15 @@ const feedback = agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
   endpoint: process.env.AGENT_FEEDBACK_URL,
   include: ["/search", "/docs/*"],
-  customerRef: (request) => request.auth?.accountId,
+  accountRef: (request) => request.auth?.accountId,
+  userRef: (request) => request.auth?.userId,
+  anonymousRef: (request) => request.auth?.anonymousId,
+  // Ask once still uses the legacy stable subject while consent storage moves
+  // to scoped customer grants. It is derived from the same verified auth.
+  customerRef:
+    process.env.AGENT_FEEDBACK_MODE === "ask_once"
+      ? (request) => request.auth?.accountId
+      : undefined,
 });
 app.use(feedback);
 app.get("/search", (_request, response) => response.json({ stack: "node-express", answer: "express-result" }));

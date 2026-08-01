@@ -127,6 +127,9 @@ class AgentFeedbackOptions:
     exclude: tuple[str, ...] = ()
     feedback_mode: str | None = None
     cache_mode: str = "safe"
+    account_ref: Callable[[Any], str | None] | None = None
+    user_ref: Callable[[Any], str | None] | None = None
+    anonymous_ref: Callable[[Any], str | None] | None = None
     customer_ref: Callable[[Any], str | None] | None = None
     session_ref: Callable[[Any], str | None] | None = None
     runtime_hint: Callable[[Any], str | None] | None = None
@@ -212,7 +215,7 @@ class _TelemetryQueue:
                 headers = {
                     "authorization": f"Bearer {self.options.api_key}",
                     "content-type": "application/json",
-                    "user-agent": "agent-feedback-python/0.2.2",
+                    "user-agent": "agent-feedback-python/0.3.0",
                 }
                 body = json.dumps({"events": batch}, separators=(",", ":")).encode()
                 for attempt in range(self.options.max_telemetry_attempts):
@@ -515,7 +518,7 @@ class AgentFeedback:
             request = urllib.request.Request(
                 f"{self.options.endpoint}/api/v2/consent/state",
                 data=json.dumps({"subject": subject}).encode(),
-                headers={"authorization": f"Bearer {self.options.api_key}", "content-type": "application/json", "user-agent": "agent-feedback-python/0.2.2"},
+                headers={"authorization": f"Bearer {self.options.api_key}", "content-type": "application/json", "user-agent": "agent-feedback-python/0.3.0"},
                 method="POST",
             )
             with urllib.request.urlopen(request, timeout=self.options.consent_timeout) as response:
@@ -603,6 +606,9 @@ class AgentFeedback:
     def context(self, request: Any) -> dict[str, str]:
         values: dict[str, str] = {}
         for name, callback in (
+            ("accountRef", self.options.account_ref),
+            ("userRef", self.options.user_ref),
+            ("anonymousRef", self.options.anonymous_ref),
             ("customerRef", self.options.customer_ref),
             ("sessionRef", self.options.session_ref),
             ("runtimeHint", self.options.runtime_hint),
@@ -640,8 +646,9 @@ class AgentFeedback:
             "classification": "unclassified",
             "occurredAt": prepared["occurredAt"],
         }
-        if context.get("customerRef"):
-            event["customerRef"] = context["customerRef"]
+        for name in ("accountRef", "userRef", "anonymousRef", "customerRef"):
+            if context.get(name):
+                event[name] = context[name]
         if context.get("sessionRef"):
             event["sessionRef"] = context["sessionRef"]
             event["sessionSource"] = "customer"

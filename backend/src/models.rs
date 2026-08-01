@@ -410,6 +410,9 @@ pub(crate) struct ProductInteraction {
     pub duration_ms: Option<i64>,
     #[schema(required = true, nullable)]
     pub customer_ref: Option<String>,
+    #[sqlx(default)]
+    #[schema(required = true, nullable)]
+    pub customer_id: Option<Uuid>,
     pub classification: String,
     #[schema(required = true, nullable)]
     pub confirmation_method: Option<String>,
@@ -672,7 +675,7 @@ pub(crate) struct TelemetryBatchResult {
     pub dropped: usize,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct InteractionTelemetryInput {
     pub interaction_id: Uuid,
@@ -682,6 +685,9 @@ pub(crate) struct InteractionTelemetryInput {
     pub status_code: Option<i32>,
     pub duration_ms: Option<i64>,
     pub customer_ref: Option<String>,
+    pub account_ref: Option<String>,
+    pub user_ref: Option<String>,
+    pub anonymous_ref: Option<String>,
     pub classification: Option<String>,
     pub confirmation_method: Option<String>,
     pub runtime_hint: Option<String>,
@@ -689,6 +695,195 @@ pub(crate) struct InteractionTelemetryInput {
     pub session_ref: Option<String>,
     pub session_source: Option<String>,
     pub occurred_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CustomerIdentifier {
+    pub id: Uuid,
+    pub kind: String,
+    pub display_hint: String,
+    pub identity_level: String,
+    pub provenance: String,
+    #[schema(required = true, nullable)]
+    pub verified_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConsentGrant {
+    pub id: Uuid,
+    pub scope: String,
+    pub state: String,
+    pub basis: String,
+    pub decided_at: DateTime<Utc>,
+    #[schema(required = true, nullable)]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[schema(required = true, nullable)]
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConsentEventSummary {
+    pub id: Uuid,
+    pub scope: String,
+    #[schema(required = true, nullable)]
+    pub prior_state: Option<String>,
+    pub state: String,
+    pub basis: String,
+    pub revision: i64,
+    pub source: String,
+    pub decided_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CustomerSignal {
+    pub id: Uuid,
+    #[schema(required = true, nullable)]
+    pub customer_id: Option<Uuid>,
+    #[schema(required = true, nullable)]
+    pub session_id: Option<Uuid>,
+    #[schema(required = true, nullable)]
+    pub interaction_id: Option<Uuid>,
+    #[schema(required = true, nullable)]
+    pub feedback_report_id: Option<Uuid>,
+    #[schema(required = true, nullable)]
+    pub feature_key: Option<String>,
+    #[serde(rename = "type")]
+    pub signal_type: String,
+    pub summary: String,
+    #[schema(required = true, nullable)]
+    pub detail: Option<String>,
+    pub provenance: String,
+    #[schema(required = true, nullable)]
+    pub confidence: Option<f64>,
+    pub collected_at: DateTime<Utc>,
+    #[schema(required = true, nullable)]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[schema(required = true, nullable)]
+    pub consent_scope: Option<String>,
+    #[schema(required = true, nullable)]
+    pub consent_state: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CustomerSummary {
+    pub id: Uuid,
+    pub kind: String,
+    #[schema(required = true, nullable)]
+    pub parent_customer_id: Option<Uuid>,
+    pub member_count: i64,
+    pub display_name: String,
+    pub identity_level: String,
+    #[schema(required = true, nullable)]
+    pub identity_confidence: Option<f64>,
+    #[schema(required = true, nullable)]
+    pub account_ref_hint: Option<String>,
+    #[schema(required = true, nullable)]
+    pub user_ref_hint: Option<String>,
+    pub segments: Vec<String>,
+    pub last_activity_at: DateTime<Utc>,
+    pub outcome_health: String,
+    pub signal_count: i64,
+    pub session_count: i64,
+    pub active_need_count: i64,
+    pub consent_state: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DashboardCustomerFilters {
+    pub query: Option<String>,
+    pub identity_levels: Option<Vec<String>>,
+    pub outcome_health: Option<Vec<String>>,
+    pub signal_types: Option<Vec<String>>,
+    pub consent_states: Option<Vec<String>>,
+    pub segments: Option<Vec<String>>,
+    pub since: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
+    pub limit: Option<i64>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CustomerRollup {
+    pub customers: i64,
+    pub verified: i64,
+    pub pseudonymous: i64,
+    pub ephemeral: i64,
+    pub unclassified: i64,
+    pub active: i64,
+    pub at_risk: i64,
+}
+
+#[derive(Debug, Default, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CustomerFacets {
+    pub identity_level: Vec<InsightCount>,
+    pub outcome_health: Vec<InsightCount>,
+    pub signal_type: Vec<InsightCount>,
+    pub consent_state: Vec<InsightCount>,
+    pub segment: Vec<InsightCount>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardCustomersPage {
+    pub customers: Vec<CustomerSummary>,
+    pub rollup: CustomerRollup,
+    pub facets: CustomerFacets,
+    pub limit: i64,
+    #[schema(required = true, nullable)]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CustomerDetailCounts {
+    pub signals: i64,
+    pub sessions: i64,
+    pub features: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardCustomerDetail {
+    pub customer: CustomerSummary,
+    pub identifiers: Vec<CustomerIdentifier>,
+    pub signals: Vec<CustomerSignal>,
+    pub sessions: Vec<DashboardSessionSummary>,
+    pub consent: Vec<ConsentGrant>,
+    pub consent_history: Vec<ConsentEventSummary>,
+    pub counts: CustomerDetailCounts,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DashboardSignalFilters {
+    pub query: Option<String>,
+    pub customer_id: Option<Uuid>,
+    pub feature_key: Option<String>,
+    pub session_id: Option<Uuid>,
+    pub signal_types: Option<Vec<String>>,
+    pub provenances: Option<Vec<String>>,
+    pub since: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
+    pub limit: Option<i64>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardSignalsPage {
+    pub signals: Vec<CustomerSignal>,
+    pub total: i64,
+    pub limit: i64,
+    #[schema(required = true, nullable)]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]

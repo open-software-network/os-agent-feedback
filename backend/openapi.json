@@ -1,8 +1,8 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Epode Agent Feedback API",
-    "description": "Structured product feedback collection and workspace management API.",
+    "title": "Epode Customer Intelligence API",
+    "description": "Permissioned customer intelligence from agent-mediated product use.",
     "version": "0.1.0"
   },
   "paths": {
@@ -1995,6 +1995,794 @@
           },
           "500": {
             "description": "Feedback page could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/dashboard/customers": {
+      "get": {
+        "tags": [
+          "dashboard"
+        ],
+        "operationId": "dashboard_customers_list_handler",
+        "parameters": [
+          {
+            "name": "productId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "identityLevel",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "outcomeHealth",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "signalType",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "consentState",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "segment",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to access; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Server-filtered customer intelligence page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardCustomersPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, time range, cursor, or page size",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot access the requested team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Product not found in the team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Cursor is outside the retained window",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Customer intelligence could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/dashboard/customers/{customer_id}": {
+      "get": {
+        "tags": [
+          "dashboard"
+        ],
+        "operationId": "dashboard_customer_handler",
+        "parameters": [
+          {
+            "name": "customer_id",
+            "in": "path",
+            "description": "Customer identifier",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "productId",
+            "in": "query",
+            "description": "Product that owns the requested dashboard record.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to access; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Customer identity, evidence, sessions, and scoped consent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardCustomerDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path, query, or team header",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot access the requested team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer not found for the product",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Customer detail could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/dashboard/features": {
+      "get": {
+        "tags": [
+          "dashboard"
+        ],
+        "operationId": "dashboard_features_list_handler",
+        "parameters": [
+          {
+            "name": "productId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "signalType",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "impact",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "segment",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to access; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence-backed customer needs and opportunities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardFeaturesPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, time range, cursor, or page size",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot access the requested team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Product not found in the team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Features could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/dashboard/features/{feature_key}": {
+      "get": {
+        "tags": [
+          "dashboard"
+        ],
+        "operationId": "dashboard_feature_handler",
+        "parameters": [
+          {
+            "name": "feature_key",
+            "in": "path",
+            "description": "Normalized customer need or feature key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "productId",
+            "in": "query",
+            "description": "Product that owns the requested dashboard record.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to access; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Feature with exact customer, signal, and session evidence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardFeatureDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid feature key, query, or team header",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot access the requested team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Feature not found for the product",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Feature detail could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_cookie": []
+          }
+        ]
+      }
+    },
+    "/api/dashboard/signals": {
+      "get": {
+        "tags": [
+          "dashboard"
+        ],
+        "operationId": "dashboard_signals_list_handler",
+        "parameters": [
+          {
+            "name": "productId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "customerId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "featureKey",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sessionId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "provenance",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-workspace-id",
+            "in": "header",
+            "description": "Team to access; defaults to the caller's personal team",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence-backed typed customer signals",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardSignalsPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, time range, cursor, or page size",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Dashboard authentication is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller cannot access the requested team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Product not found in the team",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Cursor is outside the retained window",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Signals could not be loaded",
             "content": {
               "application/json": {
                 "schema": {
@@ -5347,6 +6135,106 @@
           }
         }
       },
+      "ConsentEventSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "scope",
+          "priorState",
+          "state",
+          "basis",
+          "revision",
+          "source",
+          "decidedAt",
+          "createdAt"
+        ],
+        "properties": {
+          "basis": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "decidedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "priorState": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        }
+      },
+      "ConsentGrant": {
+        "type": "object",
+        "required": [
+          "id",
+          "scope",
+          "state",
+          "basis",
+          "decidedAt",
+          "expiresAt",
+          "revokedAt",
+          "revision"
+        ],
+        "properties": {
+          "basis": {
+            "type": "string"
+          },
+          "decidedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "revokedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        }
+      },
       "ConsentStateInput": {
         "type": "object",
         "required": [
@@ -5459,6 +6347,431 @@
           },
           "id": {
             "type": "string"
+          }
+        }
+      },
+      "CustomerDetailCounts": {
+        "type": "object",
+        "required": [
+          "signals",
+          "sessions",
+          "features"
+        ],
+        "properties": {
+          "features": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sessions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "signals": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "CustomerFacets": {
+        "type": "object",
+        "required": [
+          "identityLevel",
+          "outcomeHealth",
+          "signalType",
+          "consentState",
+          "segment"
+        ],
+        "properties": {
+          "consentState": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "identityLevel": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "outcomeHealth": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "segment": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "signalType": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          }
+        }
+      },
+      "CustomerIdentifier": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "displayHint",
+          "identityLevel",
+          "provenance",
+          "verifiedAt"
+        ],
+        "properties": {
+          "displayHint": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "identityLevel": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "string"
+          },
+          "verifiedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "CustomerRollup": {
+        "type": "object",
+        "required": [
+          "customers",
+          "verified",
+          "pseudonymous",
+          "ephemeral",
+          "unclassified",
+          "active",
+          "atRisk"
+        ],
+        "properties": {
+          "active": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "atRisk": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "customers": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "ephemeral": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "pseudonymous": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "unclassified": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "verified": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "CustomerSignal": {
+        "type": "object",
+        "required": [
+          "id",
+          "customerId",
+          "sessionId",
+          "interactionId",
+          "feedbackReportId",
+          "featureKey",
+          "type",
+          "summary",
+          "detail",
+          "provenance",
+          "confidence",
+          "collectedAt",
+          "expiresAt",
+          "consentScope",
+          "consentState"
+        ],
+        "properties": {
+          "collectedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "confidence": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "consentScope": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "consentState": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "customerId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "featureKey": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "feedbackReportId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "interactionId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "provenance": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "CustomerSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "parentCustomerId",
+          "memberCount",
+          "displayName",
+          "identityLevel",
+          "identityConfidence",
+          "accountRefHint",
+          "userRefHint",
+          "segments",
+          "lastActivityAt",
+          "outcomeHealth",
+          "signalCount",
+          "sessionCount",
+          "activeNeedCount",
+          "consentState"
+        ],
+        "properties": {
+          "accountRefHint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "activeNeedCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "consentState": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "identityConfidence": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "identityLevel": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "lastActivityAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "memberCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "outcomeHealth": {
+            "type": "string"
+          },
+          "parentCustomerId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "sessionCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "signalCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "userRefHint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "DashboardCustomerDetail": {
+        "type": "object",
+        "required": [
+          "customer",
+          "identifiers",
+          "signals",
+          "sessions",
+          "consent",
+          "consentHistory",
+          "counts"
+        ],
+        "properties": {
+          "consent": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConsentGrant"
+            }
+          },
+          "consentHistory": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConsentEventSummary"
+            }
+          },
+          "counts": {
+            "$ref": "#/components/schemas/CustomerDetailCounts"
+          },
+          "customer": {
+            "$ref": "#/components/schemas/CustomerSummary"
+          },
+          "identifiers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CustomerIdentifier"
+            }
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DashboardSessionSummary"
+            }
+          },
+          "signals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CustomerSignal"
+            }
+          }
+        }
+      },
+      "DashboardCustomersPage": {
+        "type": "object",
+        "required": [
+          "customers",
+          "rollup",
+          "facets",
+          "limit",
+          "nextCursor"
+        ],
+        "properties": {
+          "customers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CustomerSummary"
+            }
+          },
+          "facets": {
+            "$ref": "#/components/schemas/CustomerFacets"
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rollup": {
+            "$ref": "#/components/schemas/CustomerRollup"
           }
         }
       },
@@ -5582,6 +6895,72 @@
             "items": {
               "$ref": "#/components/schemas/WorkspaceMembership"
             }
+          }
+        }
+      },
+      "DashboardFeatureDetail": {
+        "type": "object",
+        "required": [
+          "feature",
+          "signals",
+          "customers",
+          "sessions"
+        ],
+        "properties": {
+          "customers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CustomerSummary"
+            }
+          },
+          "feature": {
+            "$ref": "#/components/schemas/FeatureSummary"
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DashboardSessionSummary"
+            }
+          },
+          "signals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CustomerSignal"
+            }
+          }
+        }
+      },
+      "DashboardFeaturesPage": {
+        "type": "object",
+        "required": [
+          "features",
+          "rollup",
+          "facets",
+          "limit",
+          "nextCursor"
+        ],
+        "properties": {
+          "facets": {
+            "$ref": "#/components/schemas/FeatureFacets"
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FeatureSummary"
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rollup": {
+            "$ref": "#/components/schemas/FeatureRollup"
           }
         }
       },
@@ -5918,6 +7297,37 @@
           }
         }
       },
+      "DashboardSignalsPage": {
+        "type": "object",
+        "required": [
+          "signals",
+          "total",
+          "limit",
+          "nextCursor"
+        ],
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "signals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CustomerSignal"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "DeleteProductInput": {
         "type": "object",
         "required": [
@@ -5938,6 +7348,143 @@
         "properties": {
           "environment": {
             "$ref": "#/components/schemas/ProductEnvironment"
+          }
+        }
+      },
+      "FeatureFacets": {
+        "type": "object",
+        "required": [
+          "signalType",
+          "impact",
+          "status",
+          "segment"
+        ],
+        "properties": {
+          "impact": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "segment": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "signalType": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "status": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          }
+        }
+      },
+      "FeatureRollup": {
+        "type": "object",
+        "required": [
+          "features",
+          "affectedCustomers",
+          "evidence",
+          "blocking"
+        ],
+        "properties": {
+          "affectedCustomers": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "blocking": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "evidence": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "features": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "FeatureSummary": {
+        "type": "object",
+        "required": [
+          "key",
+          "groupKey",
+          "title",
+          "summary",
+          "signalTypes",
+          "affectedCustomerCount",
+          "evidenceCount",
+          "strongestImpact",
+          "trend",
+          "status",
+          "lastObservedAt",
+          "githubIssue"
+        ],
+        "properties": {
+          "affectedCustomerCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "evidenceCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "githubIssue": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GithubIssueLink"
+              }
+            ]
+          },
+          "groupKey": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "key": {
+            "type": "string"
+          },
+          "lastObservedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "signalTypes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "status": {
+            "type": "string"
+          },
+          "strongestImpact": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "trend": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
           }
         }
       },
@@ -6619,6 +8166,18 @@
           "operation"
         ],
         "properties": {
+          "accountRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "anonymousRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "classification": {
             "type": [
               "string",
@@ -6698,6 +8257,12 @@
           },
           "surface": {
             "type": "string"
+          },
+          "userRef": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "additionalProperties": false
@@ -7398,6 +8963,7 @@
           "statusCode",
           "durationMs",
           "customerRef",
+          "customerId",
           "classification",
           "confirmationMethod",
           "runtimeHint",
@@ -7426,6 +8992,13 @@
           "createdAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "customerId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           },
           "customerRef": {
             "type": [

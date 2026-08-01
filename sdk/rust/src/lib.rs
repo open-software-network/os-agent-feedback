@@ -65,6 +65,9 @@ pub struct Options {
     pub exclude: Vec<String>,
     pub feedback_mode: FeedbackMode,
     pub cache_mode: HttpCacheMode,
+    pub account_ref: Option<Extractor>,
+    pub user_ref: Option<Extractor>,
+    pub anonymous_ref: Option<Extractor>,
     pub customer_ref: Option<Extractor>,
     pub session_ref: Option<Extractor>,
     pub runtime_hint: Option<Extractor>,
@@ -102,6 +105,9 @@ impl Options {
             exclude: Vec::new(),
             feedback_mode,
             cache_mode: HttpCacheMode::Safe,
+            account_ref: None,
+            user_ref: None,
+            anonymous_ref: None,
             customer_ref: None,
             session_ref: None,
             runtime_hint: None,
@@ -143,6 +149,34 @@ impl Options {
         extractor: impl Fn(&Request<Body>) -> Option<String> + Send + Sync + 'static,
     ) -> Self {
         self.customer_ref = Some(Arc::new(extractor));
+        self
+    }
+
+    /// Extract a company-authenticated account or tenant reference. The value
+    /// is sent only through server telemetry and never appears in capabilities.
+    pub fn account_ref(
+        mut self,
+        extractor: impl Fn(&Request<Body>) -> Option<String> + Send + Sync + 'static,
+    ) -> Self {
+        self.account_ref = Some(Arc::new(extractor));
+        self
+    }
+
+    /// Extract a company-authenticated end-user reference.
+    pub fn user_ref(
+        mut self,
+        extractor: impl Fn(&Request<Body>) -> Option<String> + Send + Sync + 'static,
+    ) -> Self {
+        self.user_ref = Some(Arc::new(extractor));
+        self
+    }
+
+    /// Extract a stable first-party pre-authentication reference.
+    pub fn anonymous_ref(
+        mut self,
+        extractor: impl Fn(&Request<Body>) -> Option<String> + Send + Sync + 'static,
+    ) -> Self {
+        self.anonymous_ref = Some(Arc::new(extractor));
         self
     }
 
@@ -290,6 +324,12 @@ struct TelemetryEvent {
     operation: String,
     status_code: u16,
     duration_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anonymous_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     customer_ref: Option<String>,
     classification: &'static str,
@@ -515,7 +555,7 @@ impl Runtime {
         let response = client
             .post(format!("{}/api/v2/consent/state", self.options.endpoint))
             .bearer_auth(&self.options.api_key)
-            .header("user-agent", "agent-feedback-rust/0.2.2")
+            .header("user-agent", "agent-feedback-rust/0.3.0")
             .json(&json!({ "subject": subject }))
             .send()
             .await;
@@ -852,7 +892,7 @@ async fn flush_events(
     let delivered = client
         .post(format!("{}/api/v2/telemetry/batches", options.endpoint))
         .bearer_auth(&options.api_key)
-        .header("user-agent", "agent-feedback-rust/0.2.2")
+        .header("user-agent", "agent-feedback-rust/0.3.0")
         .json(&json!({ "events": &events }))
         .send()
         .await
@@ -1068,6 +1108,9 @@ async fn instrument_response(
         if runtime.options.cache_mode != HttpCacheMode::Request {
             return response;
         }
+        let account_ref = extract(&runtime.options.account_ref, &extractor_request);
+        let user_ref = extract(&runtime.options.user_ref, &extractor_request);
+        let anonymous_ref = extract(&runtime.options.anonymous_ref, &extractor_request);
         let customer_ref = extract(&runtime.options.customer_ref, &extractor_request);
         let session_ref = extract(&runtime.options.session_ref, &extractor_request);
         let runtime_hint = extract(&runtime.options.runtime_hint, &extractor_request);
@@ -1107,6 +1150,9 @@ async fn instrument_response(
             duration_ms: started.elapsed().as_millis() as u64,
             classification: "unclassified",
             occurred_at: prepared.occurred_at,
+            account_ref,
+            user_ref,
+            anonymous_ref,
             customer_ref,
             session_ref: session_ref.clone(),
             session_source: session_ref.map(|_| "customer"),
@@ -1154,6 +1200,9 @@ async fn instrument_response(
             "http_html"
         }
     };
+    let account_ref = extract(&runtime.options.account_ref, &extractor_request);
+    let user_ref = extract(&runtime.options.user_ref, &extractor_request);
+    let anonymous_ref = extract(&runtime.options.anonymous_ref, &extractor_request);
     let customer_ref = extract(&runtime.options.customer_ref, &extractor_request);
     let session_ref = extract(&runtime.options.session_ref, &extractor_request);
     let runtime_hint = extract(&runtime.options.runtime_hint, &extractor_request);
@@ -1214,6 +1263,9 @@ async fn instrument_response(
         operation: normalize_operation(&operation),
         status_code: status.as_u16(),
         duration_ms: started.elapsed().as_millis() as u64,
+        account_ref,
+        user_ref,
+        anonymous_ref,
         customer_ref,
         classification: "unclassified",
         runtime_hint_source: runtime_hint.as_ref().map(|_| "http"),
@@ -1871,7 +1923,7 @@ pub async fn submit_feedback_consent(
     Ok(client
         .post(destination)
         .header("authorization", &action.submit_decision.authorization)
-        .header("user-agent", "agent-feedback-rust-agent/0.2.2")
+        .header("user-agent", "agent-feedback-rust-agent/0.3.0")
         .json(&json!({ "decision": decision }))
         .send()
         .await?
@@ -1970,7 +2022,7 @@ pub async fn submit_product_feedback(
     Ok(client
         .post(submit)
         .header("authorization", &submit_contract.authorization)
-        .header("user-agent", "agent-feedback-rust-agent/0.2.2")
+        .header("user-agent", "agent-feedback-rust-agent/0.3.0")
         .json(&submission)
         .send()
         .await?
@@ -2103,6 +2155,32 @@ mod tests {
     fn legacy_auto_mode_is_rejected() {
         let parsed = serde_json::from_str::<FeedbackMode>("\"auto\"");
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn progressive_identity_context_is_telemetry_only() {
+        let event = TelemetryEvent {
+            interaction_id: Uuid::nil(),
+            sequence: 1,
+            surface: "http_json".into(),
+            operation: "/search".into(),
+            status_code: 200,
+            duration_ms: 1,
+            account_ref: Some("org_verified".into()),
+            user_ref: Some("user_verified".into()),
+            anonymous_ref: Some("anon_verified".into()),
+            customer_ref: Some("legacy_verified".into()),
+            classification: "unclassified",
+            runtime_hint: None,
+            runtime_hint_source: None,
+            session_ref: None,
+            session_source: None,
+            occurred_at: "2026-01-01T00:00:00Z".into(),
+        };
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["accountRef"], "org_verified");
+        assert_eq!(value["userRef"], "user_verified");
+        assert_eq!(value["anonymousRef"], "anon_verified");
     }
 
     #[tokio::test]
@@ -3245,7 +3323,8 @@ mod tests {
             .split('.')
             .nth(1)
             .unwrap();
-        let claims: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
+        let claims: Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
         assert_eq!(claims.get("r").and_then(Value::as_u64), Some(0));
         let per_use = runtime
             .prepare(UNIX_EPOCH + Duration::from_secs(1_715_000_000))
@@ -3493,6 +3572,9 @@ mod tests {
             operation: format!("/test/{index}"),
             status_code: 200,
             duration_ms: 1,
+            account_ref: None,
+            user_ref: None,
+            anonymous_ref: None,
             customer_ref: None,
             classification: "unclassified",
             runtime_hint: None,

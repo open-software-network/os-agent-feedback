@@ -6,14 +6,14 @@ description: "Use standard-library middleware with net/http or a compatible rout
 ## Install
 
 ```bash
-epode_artifact="$(mktemp -d)/agent-feedback-go-0.2.2.tar.gz" &&
-curl -fsSL https://app.epode.ai/static/agent-feedback-go-0.2.2.tar.gz -o "$epode_artifact" &&
-printf '%s  %s\n' '7f28ce6fb875167aac3afab974ca7cfc5896043e69ed136c375a99b9cde6cc15' "$epode_artifact" \
+epode_artifact="$(mktemp -d)/agent-feedback-go-0.3.0.tar.gz" &&
+curl -fsSL https://app.epode.ai/static/agent-feedback-go-0.3.0.tar.gz -o "$epode_artifact" &&
+printf '%s  %s\n' '65ca44b7a44f22eb5f0b9a28c9a2b6076f8e2aada0126fc9d9eabb08dfba811a' "$epode_artifact" \
   | shasum -a 256 -c - &&
-mkdir -p .epode/agent-feedback-go-0.2.2 &&
-tar -xzf "$epode_artifact" -C .epode/agent-feedback-go-0.2.2 &&
-go mod edit -replace=github.com/open-software-network/os-epode/sdk/go=./.epode/agent-feedback-go-0.2.2 &&
-go mod edit -require=github.com/open-software-network/os-epode/sdk/go@v0.2.2
+mkdir -p .epode/agent-feedback-go-0.3.0 &&
+tar -xzf "$epode_artifact" -C .epode/agent-feedback-go-0.3.0 &&
+go mod edit -replace=github.com/open-software-network/os-epode/sdk/go=./.epode/agent-feedback-go-0.3.0 &&
+go mod edit -require=github.com/open-software-network/os-epode/sdk/go@v0.3.0
 ```
 
 This immutable hosted archive is the bootstrap path until the public Go module tag is available. The local
@@ -50,8 +50,20 @@ func run() error {
     feedback, err := agentfeedback.New(agentfeedback.Options{
         APIKey: os.Getenv("AGENT_FEEDBACK_KEY"),
         Include: []string{"/search", "/docs/**"},
+        AccountRef: func(r *http.Request) string {
+            return accountID(r.Context())
+        },
+        UserRef: func(r *http.Request) string {
+            return userID(r.Context())
+        },
+        AnonymousRef: func(r *http.Request) string {
+            return firstPartyVisitorID(r.Context())
+        },
         CustomerRef: func(r *http.Request) string {
-            return accountID(r.Context()) // required for durable Ask once; optional otherwise
+            return accountID(r.Context()) // durable Ask once compatibility
+        },
+        SessionRef: func(r *http.Request) string {
+            return productJourneyID(r.Context()) // optional server-issued journey
         },
     })
     if err != nil { return err }
@@ -87,6 +99,9 @@ func run() error {
 
 Authentication must wrap and execute before Epode. Go middleware cannot observe a context created by
 an inner handler with `r.WithContext`, so never place the feedback middleware outside authentication.
+Account and user references must come from verified auth; the anonymous reference must be a product-owned
+first-party visitor ID. A session reference is safe only when server/product state already proves the journey.
+Never read these values from names, emails, prompts, caller fields, or agent arguments.
 
 ## Server-rendered HTML
 

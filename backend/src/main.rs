@@ -1,4 +1,5 @@
 mod api_types;
+mod customer_features;
 mod error;
 mod github;
 mod grouping;
@@ -54,6 +55,10 @@ use crate::{
         RevokedResponse, TeamInvitationCreatedResponse, TeamMemberResponse, TransferredResponse,
         UpdatedResponse, WorkspaceResponse,
     },
+    customer_features::{
+        DashboardFeatureDetail, DashboardFeatureFilters, DashboardFeaturesPage,
+        dashboard_feature_by_key, dashboard_features_page,
+    },
     error::{ApiError, ApiErrorEnvelope},
     github::{
         GithubAppClient, GithubAppConfig, GithubIssue, GithubIssueCreationOutcome,
@@ -67,9 +72,10 @@ use crate::{
     models::{
         CapabilityInspectionResponse, ClassificationDiscovery, ConsentDecisionInput,
         ConsentStateInput, ConsentStateResponse, CreateApiKeyInput, CreateProductInput,
-        CreateTeamInvitationInput, CurrentUser, DashboardContext, DashboardData,
-        DashboardFeedbackFilters, DashboardFeedbackPage, DashboardSessionDetail,
-        DashboardSessionFilters, DashboardSessionsPage, DeleteProductInput,
+        CreateTeamInvitationInput, CurrentUser, DashboardContext, DashboardCustomerDetail,
+        DashboardCustomerFilters, DashboardCustomersPage, DashboardData, DashboardFeedbackFilters,
+        DashboardFeedbackPage, DashboardSessionDetail, DashboardSessionFilters,
+        DashboardSessionsPage, DashboardSignalFilters, DashboardSignalsPage, DeleteProductInput,
         FeedbackConsentDiscovery, FeedbackDiscoveryResponse, FeedbackFindingShapeDiscovery,
         FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackModesDiscovery,
         FeedbackRequiredFieldsDiscovery, FeedbackSubmissionDiscovery,
@@ -88,13 +94,14 @@ use crate::{
     },
     store::{
         GithubInstallationUpsert, GroupIssueFilingClaim, GroupIssueFilingRequest,
-        GroupIssueSyncContext, accept_team_invitation, agent_product_auth, backfill_report_groups,
-        bump_last_commented_report_count, claim_group_issue_filing,
-        claim_group_issue_reconciliation, claim_group_issue_state_refresh,
-        clear_product_github_repo, complete_group_issue_filing,
+        GroupIssueSyncContext, accept_team_invitation, agent_product_auth,
+        backfill_customer_intelligence, backfill_report_groups, bump_last_commented_report_count,
+        claim_group_issue_filing, claim_group_issue_reconciliation,
+        claim_group_issue_state_refresh, clear_product_github_repo, complete_group_issue_filing,
         complete_group_issue_reconciliation, create_api_key, create_product_with_default_key,
-        create_team_invitation, dashboard_feedback_page, dashboard_interaction_by_id,
-        dashboard_report_by_id, dashboard_session_by_id, dashboard_sessions_page,
+        create_team_invitation, dashboard_customer_by_id, dashboard_customers_page,
+        dashboard_feedback_page, dashboard_interaction_by_id, dashboard_report_by_id,
+        dashboard_session_by_id, dashboard_sessions_page, dashboard_signals_page,
         dashboard_with_limits, delete_product, feedback_consent_state, feedback_list_interactions,
         feedback_list_reports, get_group_github_issue, get_or_create_workspace,
         get_product_github_repo, github_installation_workspace, group_issue_context,
@@ -114,6 +121,7 @@ use crate::{
 #[derive(Clone)]
 struct AppState {
     pool: PgPool,
+    identity_hmac_secret: Vec<u8>,
     public_base_url: String,
     web_app_url: String,
     secure_cookies: bool,
@@ -139,8 +147,8 @@ const GROUP_ISSUE_FILING_CLAIM_STALE_MINUTES: i64 = 5;
 #[derive(OpenApi)]
 #[openapi(
     info(
-        title = "Epode Agent Feedback API",
-        description = "Structured product feedback collection and workspace management API."
+        title = "Epode Customer Intelligence API",
+        description = "Permissioned customer intelligence from agent-mediated product use."
     ),
     modifiers(&SecuritySchemes)
 )]
@@ -223,6 +231,11 @@ fn build_app_router() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(logout_handler))
         .routes(routes!(dashboard_handler))
         .routes(routes!(dashboard_feedback_list_handler))
+        .routes(routes!(dashboard_customers_list_handler))
+        .routes(routes!(dashboard_customer_handler))
+        .routes(routes!(dashboard_features_list_handler))
+        .routes(routes!(dashboard_feature_handler))
+        .routes(routes!(dashboard_signals_list_handler))
         .routes(routes!(dashboard_sessions_list_handler))
         .routes(routes!(
             dashboard_report_handler,
@@ -295,6 +308,22 @@ async fn main() -> anyhow::Result<()> {
 
     let database_url =
         env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL is required"))?;
+    let identity_hmac_secret = match env::var("EPODE_IDENTITY_HMAC_SECRET") {
+        Ok(value) => value.into_bytes(),
+        Err(env::VarError::NotPresent) if !production => {
+            b"epode-development-identity-hmac-secret-change-me".to_vec()
+        }
+        Err(env::VarError::NotPresent) => {
+            anyhow::bail!("EPODE_IDENTITY_HMAC_SECRET is required in production")
+        }
+        Err(env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("EPODE_IDENTITY_HMAC_SECRET must be valid Unicode")
+        }
+    };
+    anyhow::ensure!(
+        identity_hmac_secret.len() >= 32,
+        "EPODE_IDENTITY_HMAC_SECRET must be at least 32 bytes"
+    );
     let database_max_connections = match env::var("DATABASE_MAX_CONNECTIONS") {
         Ok(value) => value
             .parse::<u32>()
@@ -339,6 +368,28 @@ async fn main() -> anyhow::Result<()> {
             skipped_findings = summary.skipped_findings,
             "report group regroup completed"
         );
+        return Ok(());
+    }
+    if command.as_deref() == Some("--backfill-customer-intelligence") {
+        loop {
+            let summary = backfill_customer_intelligence(&pool, &identity_hmac_secret, 500)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            tracing::info!(
+                interactions_scanned = summary.interactions_scanned,
+                interactions_linked = summary.interactions_linked,
+                reports_scanned = summary.reports_scanned,
+                reports_projected = summary.reports_projected,
+                consent_subjects_scanned = summary.consent_subjects_scanned,
+                consent_grants_projected = summary.consent_grants_projected,
+                exhausted = summary.exhausted,
+                "customer intelligence backfill batch completed"
+            );
+            if summary.exhausted {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
         return Ok(());
     }
 
@@ -390,6 +441,58 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Customer intelligence is a projection over retained interaction,
+    // feedback, and consent evidence. Converge historical rows after the
+    // listener is free to start: every batch is bounded, idempotent, protected
+    // by a database advisory lock, and retried without affecting readiness.
+    let customer_backfill_pool = pool.clone();
+    let customer_backfill_secret = identity_hmac_secret.clone();
+    tokio::spawn(async move {
+        let max_backoff = std::time::Duration::from_mins(5);
+        let mut backoff = std::time::Duration::from_secs(1);
+        loop {
+            match backfill_customer_intelligence(
+                &customer_backfill_pool,
+                &customer_backfill_secret,
+                500,
+            )
+            .await
+            {
+                Ok(summary) => {
+                    if summary.interactions_scanned > 0
+                        || summary.reports_scanned > 0
+                        || summary.consent_subjects_scanned > 0
+                    {
+                        tracing::info!(
+                            interactions_scanned = summary.interactions_scanned,
+                            interactions_linked = summary.interactions_linked,
+                            reports_scanned = summary.reports_scanned,
+                            reports_projected = summary.reports_projected,
+                            consent_subjects_scanned = summary.consent_subjects_scanned,
+                            consent_grants_projected = summary.consent_grants_projected,
+                            exhausted = summary.exhausted,
+                            "startup customer intelligence backfill batch completed"
+                        );
+                    }
+                    if summary.exhausted {
+                        break;
+                    }
+                    backoff = std::time::Duration::from_secs(1);
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error.message,
+                        retry_in_secs = backoff.as_secs(),
+                        "startup customer intelligence backfill failed; retrying"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(max_backoff);
+                }
+            }
+        }
+    });
+
     let port = env::var("PORT")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -428,6 +531,7 @@ async fn main() -> anyhow::Result<()> {
         ))
         .collect();
     let state = Arc::new(AppState {
+        identity_hmac_secret,
         secure_cookies: public_base_url.starts_with("https://"),
         public_base_url,
         web_app_url,
@@ -682,21 +786,21 @@ fn feedback_discovery(public_base_url: &str) -> FeedbackDiscoveryResponse {
         },
         integrations: IntegrationsDiscovery {
             node: format!(
-                "{public_base_url}/static/agent-feedback-node-0.2.2.tgz"
+                "{public_base_url}/static/agent-feedback-node-0.3.0.tgz"
             ),
             python: format!(
-                "{public_base_url}/static/agent_feedback-0.2.2-py3-none-any.whl"
+                "{public_base_url}/static/agent_feedback-0.3.0-py3-none-any.whl"
             ),
-            go: format!("{public_base_url}/static/agent-feedback-go-0.2.2.tar.gz"),
+            go: format!("{public_base_url}/static/agent-feedback-go-0.3.0.tar.gz"),
             rust: format!(
-                "{public_base_url}/static/agent-feedback-rust-0.2.2.tar.gz"
+                "{public_base_url}/static/agent-feedback-rust-0.3.0.tar.gz"
             ),
             protocol: format!(
-                "{public_base_url}/static/agent-feedback-protocol-v1-0.2.2.zip"
+                "{public_base_url}/static/agent-feedback-protocol-v1-0.3.0.zip"
             ),
         },
         integrity_manifest: format!(
-            "{public_base_url}/static/agent-feedback-integrations-0.2.2.json"
+            "{public_base_url}/static/agent-feedback-integrations-0.3.0.json"
         ),
         reliability: ReliabilityDiscovery {
             http: "best effort for generic agents; deterministic with a feedback-aware runtime"
@@ -2571,6 +2675,60 @@ struct DashboardSessionsListQuery {
     cursor: Option<String>,
 }
 
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
+struct DashboardCustomersListQuery {
+    product_id: Uuid,
+    q: Option<String>,
+    identity_level: Option<String>,
+    outcome_health: Option<String>,
+    signal_type: Option<String>,
+    consent_state: Option<String>,
+    segment: Option<String>,
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+    #[param(default = 50, minimum = 1, maximum = 100)]
+    limit: Option<i64>,
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
+struct DashboardSignalsListQuery {
+    product_id: Uuid,
+    q: Option<String>,
+    customer_id: Option<Uuid>,
+    feature_key: Option<String>,
+    session_id: Option<Uuid>,
+    #[serde(rename = "type")]
+    signal_type: Option<String>,
+    provenance: Option<String>,
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+    #[param(default = 50, minimum = 1, maximum = 100)]
+    limit: Option<i64>,
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
+struct DashboardFeaturesListQuery {
+    product_id: Uuid,
+    q: Option<String>,
+    signal_type: Option<String>,
+    impact: Option<String>,
+    status: Option<String>,
+    segment: Option<String>,
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+    #[param(default = 50, minimum = 1, maximum = 100)]
+    limit: Option<i64>,
+    cursor: Option<String>,
+}
+
 fn comma_values(value: Option<String>, field: &str) -> Result<Option<Vec<String>>, ApiError> {
     let Some(value) = value else {
         return Ok(None);
@@ -2587,6 +2745,219 @@ fn comma_values(value: Option<String>, field: &str) -> Result<Option<Vec<String>
         return Err(ApiError::bad_request(format!("Invalid {field} filter")));
     }
     Ok(Some(values))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/dashboard/customers",
+    tag = "dashboard",
+    params(
+        DashboardCustomersListQuery,
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Server-filtered customer intelligence page", body = DashboardCustomersPage),
+        (status = 400, description = "Invalid filters, time range, cursor, or page size", body = ApiErrorEnvelope),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot access the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Product not found in the team", body = ApiErrorEnvelope),
+        (status = 410, description = "Cursor is outside the retained window", body = ApiErrorEnvelope),
+        (status = 500, description = "Customer intelligence could not be loaded", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn dashboard_customers_list_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<DashboardCustomersListQuery>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    let page = dashboard_customers_page(
+        &state.pool,
+        context.workspace.id,
+        query.product_id,
+        DashboardCustomerFilters {
+            query: query.q,
+            identity_levels: comma_values(query.identity_level, "identityLevel")?,
+            outcome_health: comma_values(query.outcome_health, "outcomeHealth")?,
+            signal_types: comma_values(query.signal_type, "signalType")?,
+            consent_states: comma_values(query.consent_state, "consentState")?,
+            segments: comma_values(query.segment, "segment")?,
+            since: query.since,
+            until: query.until,
+            limit: query.limit,
+            cursor: query.cursor,
+        },
+    )
+    .await?;
+    dashboard_response(&state, Json(page), tokens)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/dashboard/customers/{customer_id}",
+    tag = "dashboard",
+    params(
+        ("customer_id" = Uuid, Path, description = "Customer identifier"),
+        DashboardDetailQuery,
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Customer identity, evidence, sessions, and scoped consent", body = DashboardCustomerDetail),
+        (status = 400, description = "Invalid path, query, or team header", body = ApiErrorEnvelope),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot access the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Customer not found for the product", body = ApiErrorEnvelope),
+        (status = 500, description = "Customer detail could not be loaded", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn dashboard_customer_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(customer_id): Path<Uuid>,
+    Query(query): Query<DashboardDetailQuery>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    let detail = dashboard_customer_by_id(
+        &state.pool,
+        context.workspace.id,
+        query.product_id,
+        customer_id,
+    )
+    .await?;
+    dashboard_response(&state, Json(detail), tokens)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/dashboard/features",
+    tag = "dashboard",
+    params(
+        DashboardFeaturesListQuery,
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Evidence-backed customer needs and opportunities", body = DashboardFeaturesPage),
+        (status = 400, description = "Invalid filters, time range, cursor, or page size", body = ApiErrorEnvelope),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot access the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Product not found in the team", body = ApiErrorEnvelope),
+        (status = 500, description = "Features could not be loaded", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn dashboard_features_list_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<DashboardFeaturesListQuery>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    let page = dashboard_features_page(
+        &state.pool,
+        context.workspace.id,
+        query.product_id,
+        DashboardFeatureFilters {
+            query: query.q,
+            signal_types: comma_values(query.signal_type, "signalType")?,
+            impacts: comma_values(query.impact, "impact")?,
+            statuses: comma_values(query.status, "status")?,
+            segments: comma_values(query.segment, "segment")?,
+            since: query.since,
+            until: query.until,
+            limit: query.limit,
+            cursor: query.cursor,
+        },
+    )
+    .await?;
+    dashboard_response(&state, Json(page), tokens)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/dashboard/features/{feature_key}",
+    tag = "dashboard",
+    params(
+        ("feature_key" = String, Path, description = "Normalized customer need or feature key"),
+        DashboardDetailQuery,
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Feature with exact customer, signal, and session evidence", body = DashboardFeatureDetail),
+        (status = 400, description = "Invalid feature key, query, or team header", body = ApiErrorEnvelope),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot access the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Feature not found for the product", body = ApiErrorEnvelope),
+        (status = 500, description = "Feature detail could not be loaded", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn dashboard_feature_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(feature_key): Path<String>,
+    Query(query): Query<DashboardDetailQuery>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    let detail = dashboard_feature_by_key(
+        &state.pool,
+        context.workspace.id,
+        query.product_id,
+        &feature_key,
+    )
+    .await?;
+    dashboard_response(&state, Json(detail), tokens)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/dashboard/signals",
+    tag = "dashboard",
+    params(
+        DashboardSignalsListQuery,
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Evidence-backed typed customer signals", body = DashboardSignalsPage),
+        (status = 400, description = "Invalid filters, time range, cursor, or page size", body = ApiErrorEnvelope),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot access the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Product not found in the team", body = ApiErrorEnvelope),
+        (status = 410, description = "Cursor is outside the retained window", body = ApiErrorEnvelope),
+        (status = 500, description = "Signals could not be loaded", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn dashboard_signals_list_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<DashboardSignalsListQuery>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    let page = dashboard_signals_page(
+        &state.pool,
+        context.workspace.id,
+        query.product_id,
+        DashboardSignalFilters {
+            query: query.q,
+            customer_id: query.customer_id,
+            feature_key: query.feature_key,
+            session_id: query.session_id,
+            signal_types: comma_values(query.signal_type, "signalType")?,
+            provenances: comma_values(query.provenance, "provenance")?,
+            since: query.since,
+            until: query.until,
+            limit: query.limit,
+            cursor: query.cursor,
+        },
+    )
+    .await?;
+    dashboard_response(&state, Json(page), tokens)
 }
 
 #[utoipa::path(
@@ -3680,6 +4051,7 @@ async fn telemetry_batch_handler(
     let result = ingest_telemetry_batch(
         &state.pool,
         &auth,
+        &state.identity_hmac_secret,
         safe_input::<TelemetryBatchInput>(value)?,
     )
     .await?;
@@ -4538,13 +4910,13 @@ mod page_tests {
                 "legacyCompatibility": ["2025-11-25"]
             },
             "integrations": {
-                "node": "https://epode.test/static/agent-feedback-node-0.2.2.tgz",
-                "python": "https://epode.test/static/agent_feedback-0.2.2-py3-none-any.whl",
-                "go": "https://epode.test/static/agent-feedback-go-0.2.2.tar.gz",
-                "rust": "https://epode.test/static/agent-feedback-rust-0.2.2.tar.gz",
-                "protocol": "https://epode.test/static/agent-feedback-protocol-v1-0.2.2.zip"
+                "node": "https://epode.test/static/agent-feedback-node-0.3.0.tgz",
+                "python": "https://epode.test/static/agent_feedback-0.3.0-py3-none-any.whl",
+                "go": "https://epode.test/static/agent-feedback-go-0.3.0.tar.gz",
+                "rust": "https://epode.test/static/agent-feedback-rust-0.3.0.tar.gz",
+                "protocol": "https://epode.test/static/agent-feedback-protocol-v1-0.3.0.zip"
             },
-            "integrityManifest": "https://epode.test/static/agent-feedback-integrations-0.2.2.json",
+            "integrityManifest": "https://epode.test/static/agent-feedback-integrations-0.3.0.json",
             "reliability": {
                 "http": "best effort for generic agents; deterministic with a feedback-aware runtime",
                 "mcp": "protocol-backed explicit feedback tool"

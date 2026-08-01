@@ -8,14 +8,14 @@ an agent identity or an Epode-only session.
 
 | Product pattern | Observe | Ask for feedback | Session reference |
 | --- | --- | --- | --- |
-| Search or retrieval API | Selected result responses | Each agent-requested result | Existing agent run ID, if available |
-| Async crawl or export | Terminal result | Completed or failed outcome the agent can evaluate | Existing job or run ID |
-| Browser automation MCP | All browser tools | Close/finalize, or another real journey boundary | Browser session ID |
-| Documentation MCP | Resolve and query tools | Answer-bearing query | Agent run ID |
-| Email, payments, or issue MCP | Selected side-effecting tools | Each completed business operation | Authenticated workflow ID |
+| Search or retrieval API | Selected result responses | Each agent-requested result | Server-issued product journey, if available |
+| Async crawl or export | Terminal result | Completed or failed outcome the agent can evaluate | Authorized product job ID |
+| Browser automation MCP | All browser tools | Close/finalize, or another real journey boundary | Server-owned browser journey ID |
+| Documentation MCP | Resolve and query tools | Answer-bearing query | Server-owned research journey, if any |
+| Email, payments, or issue MCP | Selected side-effecting tools | Each completed business operation | Authorized product workflow ID |
 | Authenticated multi-tenant API | Successful outcome-bearing routes | Each result the customer agent can judge | Existing tenant ID plus optional workflow ID |
 | Streaming or binary API | A later finite JSON summary, if one exists | Never the byte stream itself | Existing request or job ID |
-| Serverless API | The same outcome boundary as a long-lived server | Each finite result | Existing run ID; flush telemetry with `waitUntil` |
+| Serverless API | The same outcome boundary as a long-lived server | Each finite result | Product-owned journey ID; flush telemetry with `waitUntil` |
 | Static site or hosted docs | Finite HTML through a trusted reverse proxy | Agent-requested documentation page | None unless verified edge authentication supplies one |
 
 ## Search APIs with shared caching
@@ -48,14 +48,17 @@ the agent to evaluate a job it has not used yet.
 
 ## Stateful MCP without micro-feedback
 
-Use `includeTools` for the complete trace and `feedbackTools` for the final boundary. A result-aware
-`sessionRef` extractor groups the session-creation result with later calls.
+Use `includeTools` for the complete trace and `feedbackTools` for the final boundary. A `sessionRef` extractor
+may group calls only after trusted server/product state has established the journey. Never use a tool argument,
+model-proposed ID, or transport connection as proof.
 
 [Run the browser example](https://github.com/open-software-network/os-epode/tree/main/examples/icp-browser-mcp)
 
 ## Authenticated, sensitive operations
 
-Derive `customerRef` from verified API or OAuth context, never an email address or a tool argument. Epode
+Derive `accountRef` and `userRef` from verified API or OAuth context and `anonymousRef` from a product-owned
+first-party visitor ID. Keep `customerRef` only for durable Ask once and identical to `accountRef`; never pair it
+with `userRef` alone. Never use an email address, caller value, prompt, or tool argument. Epode
 rejects feedback containing likely personal data, secrets, prompts, transcripts, or raw product content.
 The agent may retry the same handle with a safe abstract summary.
 
@@ -63,8 +66,9 @@ The agent may retry the same handle with a safe abstract summary.
 
 ## Multi-tenant products
 
-Extract `customerRef` from verified server-side auth after the tenant has been selected. Use a stable opaque
-ID such as `acct_42`, not an email, display name, bearer token, or request body value. If a request can operate
+Extract `accountRef` from verified server-side auth after the tenant has been selected. Use a stable opaque
+ID such as `acct_42`, not an email, display name, bearer token, or request body value. If durable Ask once is
+enabled, use that exact same ID for `customerRef`. If a request can operate
 on behalf of another tenant, use the authorization result—not the caller-supplied target—as the source.
 
 ## Streaming, binary, and large responses

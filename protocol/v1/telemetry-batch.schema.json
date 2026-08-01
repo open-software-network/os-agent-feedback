@@ -27,6 +27,24 @@
             "maxLength": 160,
             "pattern": "^[A-Za-z0-9_.:-]+$"
           },
+          "accountRef": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": "^[A-Za-z0-9_.:-]+$"
+          },
+          "userRef": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": "^[A-Za-z0-9_.:-]+$"
+          },
+          "anonymousRef": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": "^[A-Za-z0-9_.:-]+$"
+          },
           "classification": { "enum": ["unclassified", "confirmed"] },
           "confirmationMethod": { "enum": ["mcp"] },
           "runtimeHint": { "type": "string", "minLength": 1, "maxLength": 200 },

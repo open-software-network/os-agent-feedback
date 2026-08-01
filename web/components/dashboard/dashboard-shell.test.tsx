@@ -5,6 +5,25 @@ import { dashboardFixture } from "@/components/dashboard/test-fixture";
 import { DashboardShell } from "./dashboard-shell";
 
 describe("DashboardShell", () => {
+  it("uses the customer-intelligence navigation without a standalone feedback tab", () => {
+    render(
+      <DashboardShell
+        data={dashboardFixture()}
+        view="home"
+        onNavigate={vi.fn()}
+        onWorkspaceChange={vi.fn()}
+        onProductChange={vi.fn()}
+        onLogout={vi.fn()}
+      >
+        <div>Dashboard content</div>
+      </DashboardShell>,
+    );
+
+    const labels = ["Home", "Customers", "Features", "Sessions", "Configuration"];
+    for (const label of labels) expect(screen.getByRole("button", { name: label })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Feedback" })).not.toBeInTheDocument();
+  });
+
   it("offers product creation from the context switcher even with one product", async () => {
     const data = dashboardFixture();
     const onNavigate = vi.fn();

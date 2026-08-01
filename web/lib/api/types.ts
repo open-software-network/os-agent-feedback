@@ -278,6 +278,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/dashboard/customers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["dashboard_customers_list_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/dashboard/customers/{customer_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["dashboard_customer_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/dashboard/features": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["dashboard_features_list_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/dashboard/features/{feature_key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["dashboard_feature_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/dashboard/signals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["dashboard_signals_list_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/dashboard/sessions": {
         parameters: {
             query?: never;
@@ -690,6 +770,36 @@ export interface components {
             feedback: unknown;
             state: string;
         };
+        ConsentEventSummary: {
+            basis: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            decidedAt: string;
+            /** Format: uuid */
+            id: string;
+            priorState: string | null;
+            /** Format: int64 */
+            revision: number;
+            scope: string;
+            source: string;
+            state: string;
+        };
+        ConsentGrant: {
+            basis: string;
+            /** Format: date-time */
+            decidedAt: string;
+            /** Format: date-time */
+            expiresAt: string | null;
+            /** Format: uuid */
+            id: string;
+            /** Format: int64 */
+            revision: number;
+            /** Format: date-time */
+            revokedAt: string | null;
+            scope: string;
+            state: string;
+        };
         ConsentStateInput: {
             subject: string;
         };
@@ -719,6 +829,115 @@ export interface components {
             handle: string;
             id: string;
         };
+        CustomerDetailCounts: {
+            /** Format: int64 */
+            features: number;
+            /** Format: int64 */
+            sessions: number;
+            /** Format: int64 */
+            signals: number;
+        };
+        CustomerFacets: {
+            consentState: components["schemas"]["InsightCount"][];
+            identityLevel: components["schemas"]["InsightCount"][];
+            outcomeHealth: components["schemas"]["InsightCount"][];
+            segment: components["schemas"]["InsightCount"][];
+            signalType: components["schemas"]["InsightCount"][];
+        };
+        CustomerIdentifier: {
+            displayHint: string;
+            /** Format: uuid */
+            id: string;
+            identityLevel: string;
+            kind: string;
+            provenance: string;
+            /** Format: date-time */
+            verifiedAt: string | null;
+        };
+        CustomerRollup: {
+            /** Format: int64 */
+            active: number;
+            /** Format: int64 */
+            atRisk: number;
+            /** Format: int64 */
+            customers: number;
+            /** Format: int64 */
+            ephemeral: number;
+            /** Format: int64 */
+            pseudonymous: number;
+            /** Format: int64 */
+            unclassified: number;
+            /** Format: int64 */
+            verified: number;
+        };
+        CustomerSignal: {
+            /** Format: date-time */
+            collectedAt: string;
+            /** Format: double */
+            confidence: number | null;
+            consentScope: string | null;
+            consentState: string | null;
+            /** Format: uuid */
+            customerId: string | null;
+            detail: string | null;
+            /** Format: date-time */
+            expiresAt: string | null;
+            featureKey: string | null;
+            /** Format: uuid */
+            feedbackReportId: string | null;
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            interactionId: string | null;
+            provenance: string;
+            /** Format: uuid */
+            sessionId: string | null;
+            summary: string;
+            type: string;
+        };
+        CustomerSummary: {
+            accountRefHint: string | null;
+            /** Format: int64 */
+            activeNeedCount: number;
+            consentState: string;
+            displayName: string;
+            /** Format: uuid */
+            id: string;
+            /** Format: double */
+            identityConfidence: number | null;
+            identityLevel: string;
+            kind: string;
+            /** Format: date-time */
+            lastActivityAt: string;
+            /** Format: int64 */
+            memberCount: number;
+            outcomeHealth: string;
+            /** Format: uuid */
+            parentCustomerId: string | null;
+            segments: string[];
+            /** Format: int64 */
+            sessionCount: number;
+            /** Format: int64 */
+            signalCount: number;
+            userRefHint: string | null;
+        };
+        DashboardCustomerDetail: {
+            consent: components["schemas"]["ConsentGrant"][];
+            consentHistory: components["schemas"]["ConsentEventSummary"][];
+            counts: components["schemas"]["CustomerDetailCounts"];
+            customer: components["schemas"]["CustomerSummary"];
+            identifiers: components["schemas"]["CustomerIdentifier"][];
+            sessions: components["schemas"]["DashboardSessionSummary"][];
+            signals: components["schemas"]["CustomerSignal"][];
+        };
+        DashboardCustomersPage: {
+            customers: components["schemas"]["CustomerSummary"][];
+            facets: components["schemas"]["CustomerFacets"];
+            /** Format: int64 */
+            limit: number;
+            nextCursor: string | null;
+            rollup: components["schemas"]["CustomerRollup"];
+        };
         DashboardData: {
             activationMilestones: null | components["schemas"]["ProductActivationMilestones"];
             apiKeys: components["schemas"]["ApiKeyPublic"][];
@@ -737,6 +956,20 @@ export interface components {
             user: components["schemas"]["CurrentUser"];
             workspace: components["schemas"]["Workspace"];
             workspaceMemberships: components["schemas"]["WorkspaceMembership"][];
+        };
+        DashboardFeatureDetail: {
+            customers: components["schemas"]["CustomerSummary"][];
+            feature: components["schemas"]["FeatureSummary"];
+            sessions: components["schemas"]["DashboardSessionSummary"][];
+            signals: components["schemas"]["CustomerSignal"][];
+        };
+        DashboardFeaturesPage: {
+            facets: components["schemas"]["FeatureFacets"];
+            features: components["schemas"]["FeatureSummary"][];
+            /** Format: int64 */
+            limit: number;
+            nextCursor: string | null;
+            rollup: components["schemas"]["FeatureRollup"];
         };
         /**
          * @description Facet counts across the complete retained search/time window.
@@ -847,11 +1080,53 @@ export interface components {
             rollup: components["schemas"]["DashboardSessionRollup"];
             sessions: components["schemas"]["DashboardSessionSummary"][];
         };
+        DashboardSignalsPage: {
+            /** Format: int64 */
+            limit: number;
+            nextCursor: string | null;
+            signals: components["schemas"]["CustomerSignal"][];
+            /** Format: int64 */
+            total: number;
+        };
         DeleteProductInput: {
             confirmation: string;
         };
         EnvironmentResponse: {
             environment: components["schemas"]["ProductEnvironment"];
+        };
+        FeatureFacets: {
+            impact: components["schemas"]["InsightCount"][];
+            segment: components["schemas"]["InsightCount"][];
+            signalType: components["schemas"]["InsightCount"][];
+            status: components["schemas"]["InsightCount"][];
+        };
+        FeatureRollup: {
+            /** Format: int64 */
+            affectedCustomers: number;
+            /** Format: int64 */
+            blocking: number;
+            /** Format: int64 */
+            evidence: number;
+            /** Format: int64 */
+            features: number;
+        };
+        FeatureSummary: {
+            /** Format: int64 */
+            affectedCustomerCount: number;
+            /** Format: int64 */
+            evidenceCount: number;
+            githubIssue: null | components["schemas"]["GithubIssueLink"];
+            groupKey: string | null;
+            key: string;
+            /** Format: date-time */
+            lastObservedAt: string;
+            signalTypes: string[];
+            status: string;
+            strongestImpact: string;
+            summary: string;
+            title: string;
+            /** Format: int64 */
+            trend: number | null;
         };
         FeedbackConsentDiscovery: {
             askAlwaysPrompt: string;
@@ -1055,6 +1330,8 @@ export interface components {
             rust: string;
         };
         InteractionTelemetryInput: {
+            accountRef?: string | null;
+            anonymousRef?: string | null;
             classification?: string | null;
             confirmationMethod?: string | null;
             customerRef?: string | null;
@@ -1074,6 +1351,7 @@ export interface components {
             /** Format: int32 */
             statusCode?: number | null;
             surface: string;
+            userRef?: string | null;
         };
         McpDiscovery: {
             discoveryMethod: string;
@@ -1263,6 +1541,8 @@ export interface components {
             confirmationMethod: string | null;
             /** Format: date-time */
             createdAt: string;
+            /** Format: uuid */
+            customerId: string | null;
             customerRef: string | null;
             /** Format: int64 */
             durationMs: number | null;
@@ -2740,6 +3020,411 @@ export interface operations {
                 };
             };
             /** @description Feedback page could not be loaded */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    dashboard_customers_list_handler: {
+        parameters: {
+            query: {
+                productId: string;
+                q?: string;
+                identityLevel?: string;
+                outcomeHealth?: string;
+                signalType?: string;
+                consentState?: string;
+                segment?: string;
+                since?: string;
+                until?: string;
+                limit?: number;
+                cursor?: string;
+            };
+            header?: {
+                /** @description Team to access; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Server-filtered customer intelligence page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DashboardCustomersPage"];
+                };
+            };
+            /** @description Invalid filters, time range, cursor, or page size */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot access the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Product not found in the team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Cursor is outside the retained window */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Customer intelligence could not be loaded */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    dashboard_customer_handler: {
+        parameters: {
+            query: {
+                /** @description Product that owns the requested dashboard record. */
+                productId: string;
+            };
+            header?: {
+                /** @description Team to access; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path: {
+                /** @description Customer identifier */
+                customer_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Customer identity, evidence, sessions, and scoped consent */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DashboardCustomerDetail"];
+                };
+            };
+            /** @description Invalid path, query, or team header */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot access the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Customer not found for the product */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Customer detail could not be loaded */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    dashboard_features_list_handler: {
+        parameters: {
+            query: {
+                productId: string;
+                q?: string;
+                signalType?: string;
+                impact?: string;
+                status?: string;
+                segment?: string;
+                since?: string;
+                until?: string;
+                limit?: number;
+                cursor?: string;
+            };
+            header?: {
+                /** @description Team to access; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Evidence-backed customer needs and opportunities */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DashboardFeaturesPage"];
+                };
+            };
+            /** @description Invalid filters, time range, cursor, or page size */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot access the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Product not found in the team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Features could not be loaded */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    dashboard_feature_handler: {
+        parameters: {
+            query: {
+                /** @description Product that owns the requested dashboard record. */
+                productId: string;
+            };
+            header?: {
+                /** @description Team to access; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path: {
+                /** @description Normalized customer need or feature key */
+                feature_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Feature with exact customer, signal, and session evidence */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DashboardFeatureDetail"];
+                };
+            };
+            /** @description Invalid feature key, query, or team header */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot access the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Feature not found for the product */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Feature detail could not be loaded */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    dashboard_signals_list_handler: {
+        parameters: {
+            query: {
+                productId: string;
+                q?: string;
+                customerId?: string;
+                featureKey?: string;
+                sessionId?: string;
+                type?: string;
+                provenance?: string;
+                since?: string;
+                until?: string;
+                limit?: number;
+                cursor?: string;
+            };
+            header?: {
+                /** @description Team to access; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Evidence-backed typed customer signals */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DashboardSignalsPage"];
+                };
+            };
+            /** @description Invalid filters, time range, cursor, or page size */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot access the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Product not found in the team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Cursor is outside the retained window */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Signals could not be loaded */
             500: {
                 headers: {
                     [name: string]: unknown;

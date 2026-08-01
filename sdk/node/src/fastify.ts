@@ -20,7 +20,14 @@ type RequestState = {
   instrumentationSkipped?: boolean;
   surface?: ProductSurface;
   operation?: string;
-  context: { customerRef?: string; sessionRef?: string; runtimeHint?: string };
+  context: {
+    accountRef?: string;
+    userRef?: string;
+    anonymousRef?: string;
+    customerRef?: string;
+    sessionRef?: string;
+    runtimeHint?: string;
+  };
   consentState: Awaited<ReturnType<AgentFeedbackRuntime<FastifyRequest>["resolveConsent"]>>;
 };
 
@@ -288,6 +295,9 @@ export function agentFeedback(
         operation: state.operation,
         statusCode: reply.statusCode,
         durationMs: Math.max(0, Math.round(performance.now() - state.started)),
+        accountRef: state.context.accountRef,
+        userRef: state.context.userRef,
+        anonymousRef: state.context.anonymousRef,
         customerRef: state.context.customerRef,
         classification: "unclassified",
         runtimeHint: state.context.runtimeHint,

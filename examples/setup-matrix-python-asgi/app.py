@@ -55,7 +55,10 @@ class ProductAuthMiddleware:
             ]})
             await send({"type": "http.response.body", "body": body})
             return
-        scope.setdefault("state", {})["account_id"] = account_id
+        identity = scope.setdefault("state", {})
+        identity["account_id"] = account_id
+        identity["user_id"] = f"user.{account_id}"
+        identity["anonymous_id"] = f"anon.{account_id}"
         await self.app(scope, receive, send)
 
 @product.get("/search")
@@ -75,6 +78,13 @@ instrumented = AgentFeedbackASGI(
     api_key=os.environ["AGENT_FEEDBACK_KEY"],
     endpoint=os.environ.get("AGENT_FEEDBACK_URL", "https://app.epode.ai"),
     include=("/search", "/docs/*"),
-    customer_ref=lambda scope: scope.get("state", {}).get("account_id"),
+    account_ref=lambda scope: scope.get("state", {}).get("account_id"),
+    user_ref=lambda scope: scope.get("state", {}).get("user_id"),
+    anonymous_ref=lambda scope: scope.get("state", {}).get("anonymous_id"),
+    customer_ref=(
+        (lambda scope: scope.get("state", {}).get("account_id"))
+        if os.getenv("AGENT_FEEDBACK_MODE") == "ask_once"
+        else None
+    ),
 )
 app = ProductAuthMiddleware(instrumented)

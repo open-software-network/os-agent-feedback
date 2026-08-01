@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const publicRoot = new URL("../backend/public/", import.meta.url);
-const release = "0.2.2";
+const release = "0.3.0";
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
 const artifactBodies = new Map();

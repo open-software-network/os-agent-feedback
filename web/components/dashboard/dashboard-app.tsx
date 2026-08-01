@@ -14,6 +14,8 @@ import {
   ProductConfigurationView,
 } from "@/components/views/configuration/configuration-view";
 import { ConnectorsView } from "@/components/views/connectors/connectors-view";
+import { CustomersView } from "@/components/views/customers/customers-view";
+import { FeaturesView } from "@/components/views/features/features-view";
 import { FeedbackView } from "@/components/views/feedback/feedback-view";
 import { HomeView } from "@/components/views/home/home-view";
 import { InteractionDetail } from "@/components/views/interactions/interaction-detail";
@@ -48,6 +50,8 @@ export function DashboardApp() {
   const [workspaceId, setWorkspaceId] = useState("");
   const [productId, setProductId] = useState("");
   const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
+  const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
+  const [selectedFeatureKey, setSelectedFeatureKey] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedInteractionId, setSelectedInteractionId] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -107,6 +111,8 @@ export function DashboardApp() {
     setWorkspaceId(requestedWorkspaceId || localStorageValue("epode:last-team"));
     setProductId(url.searchParams.get("product") ?? "");
     setSelectedReportId(url.searchParams.get("report"));
+    setSelectedCustomerId(url.searchParams.get("customer"));
+    setSelectedFeatureKey(url.searchParams.get("feature"));
     setSelectedSessionId(url.searchParams.get("session"));
     setSelectedInteractionId(url.searchParams.get("interaction"));
   }, [showNotice]);
@@ -160,6 +166,8 @@ export function DashboardApp() {
     setWorkspaceId("");
     setProductId("");
     setSelectedReportId(null);
+    setSelectedCustomerId(null);
+    setSelectedFeatureKey(null);
     setSelectedSessionId(null);
     setSelectedInteractionId(null);
   }, [dashboardQuery.error, workspaceId]);
@@ -192,6 +200,8 @@ export function DashboardApp() {
     setOrDelete(url, "team", workspaceId);
     setOrDelete(url, "product", productId);
     setOrDelete(url, "report", selectedReportId);
+    setOrDelete(url, "customer", selectedCustomerId);
+    setOrDelete(url, "feature", selectedFeatureKey);
     setOrDelete(url, "session", selectedSessionId);
     setOrDelete(url, "interaction", selectedInteractionId);
     if (historyMode.current === "push") window.history.pushState({}, "", url);
@@ -201,6 +211,8 @@ export function DashboardApp() {
     productId,
     ready,
     selectedInteractionId,
+    selectedCustomerId,
+    selectedFeatureKey,
     selectedReportId,
     selectedSessionId,
     view,
@@ -242,6 +254,8 @@ export function DashboardApp() {
 
   function clearSelection() {
     setSelectedReportId(null);
+    setSelectedCustomerId(null);
+    setSelectedFeatureKey(null);
     setSelectedSessionId(null);
     setSelectedInteractionId(null);
   }
@@ -251,6 +265,8 @@ export function DashboardApp() {
     historyMode.current = "push";
     setView(nextView);
     if (nextView !== "feedback") setSelectedReportId(null);
+    if (nextView !== "customers") setSelectedCustomerId(null);
+    if (nextView !== "features") setSelectedFeatureKey(null);
     if (nextView !== "sessions") setSelectedSessionId(null);
     if (nextView !== "interactions") setSelectedInteractionId(null);
   }
@@ -260,8 +276,32 @@ export function DashboardApp() {
     historyMode.current = "push";
     setSelectedSessionId(null);
     setSelectedInteractionId(null);
+    setSelectedCustomerId(null);
+    setSelectedFeatureKey(null);
     setSelectedReportId(reportId);
     setView("feedback");
+  }
+
+  function openCustomer(customerId: string) {
+    setNotice(null);
+    historyMode.current = "push";
+    setSelectedReportId(null);
+    setSelectedFeatureKey(null);
+    setSelectedSessionId(null);
+    setSelectedInteractionId(null);
+    setSelectedCustomerId(customerId);
+    setView("customers");
+  }
+
+  function openFeature(featureKey: string) {
+    setNotice(null);
+    historyMode.current = "push";
+    setSelectedReportId(null);
+    setSelectedCustomerId(null);
+    setSelectedSessionId(null);
+    setSelectedInteractionId(null);
+    setSelectedFeatureKey(featureKey);
+    setView("features");
   }
 
   function openSession(sessionId: string) {
@@ -269,6 +309,8 @@ export function DashboardApp() {
     historyMode.current = "push";
     setSelectedReportId(null);
     setSelectedInteractionId(null);
+    setSelectedCustomerId(null);
+    setSelectedFeatureKey(null);
     setSelectedSessionId(sessionId);
     setView("sessions");
   }
@@ -278,6 +320,8 @@ export function DashboardApp() {
     historyMode.current = "push";
     setSelectedReportId(null);
     setSelectedSessionId(null);
+    setSelectedCustomerId(null);
+    setSelectedFeatureKey(null);
     setSelectedInteractionId(interactionId);
     setView("interactions");
   }
@@ -320,7 +364,12 @@ export function DashboardApp() {
   const page = data.products.length ? renderView(data) : renderEmptyProductState(data);
   const configurationActive =
     isConfigurationSection(view) || (data.products.length === 0 && data.currentRole !== "member");
-  const fullBleed = configurationActive || view === "feedback" || view === "sessions";
+  const fullBleed =
+    configurationActive ||
+    view === "feedback" ||
+    view === "customers" ||
+    view === "features" ||
+    view === "sessions";
 
   return (
     <DashboardShell
@@ -413,6 +462,41 @@ export function DashboardApp() {
             setNotice={showNotice}
           />
         );
+      case "customers":
+        return (
+          <CustomersView
+            data={currentData}
+            selectedCustomerId={selectedCustomerId}
+            selectCustomer={(customerId) => {
+              setNotice(null);
+              historyMode.current = "push";
+              setSelectedCustomerId(customerId);
+            }}
+            openFeature={openFeature}
+            openFeedback={openFeedback}
+            openInteraction={openInteraction}
+            openSession={openSession}
+            refresh={refresh}
+          />
+        );
+      case "features":
+        return (
+          <FeaturesView
+            data={currentData}
+            selectedFeatureKey={selectedFeatureKey}
+            selectFeature={(featureKey) => {
+              setNotice(null);
+              historyMode.current = "push";
+              setSelectedFeatureKey(featureKey);
+            }}
+            openCustomer={openCustomer}
+            openFeedback={openFeedback}
+            openInteraction={openInteraction}
+            openSession={openSession}
+            refresh={refresh}
+            setNotice={showNotice}
+          />
+        );
       case "sessions":
         return (
           <SessionsView
@@ -424,6 +508,8 @@ export function DashboardApp() {
               setSelectedSessionId(sessionId);
             }}
             openFeedback={openFeedback}
+            openCustomer={openCustomer}
+            openFeature={openFeature}
             openInteraction={openInteraction}
             refresh={refresh}
           />
@@ -455,7 +541,13 @@ export function DashboardApp() {
             <ConnectorsView data={currentData} embedded />,
           )
         ) : (
-          <HomeView data={currentData} openFeedback={openFeedback} refresh={refresh} />
+          <HomeView
+            data={currentData}
+            openCustomer={openCustomer}
+            openFeature={openFeature}
+            openFeedback={openFeedback}
+            refresh={refresh}
+          />
         );
       case "team":
         return configurationPage(
@@ -485,7 +577,15 @@ export function DashboardApp() {
           />
         );
       default:
-        return <HomeView data={currentData} openFeedback={openFeedback} refresh={refresh} />;
+        return (
+          <HomeView
+            data={currentData}
+            openCustomer={openCustomer}
+            openFeature={openFeature}
+            openFeedback={openFeedback}
+            refresh={refresh}
+          />
+        );
     }
   }
 }

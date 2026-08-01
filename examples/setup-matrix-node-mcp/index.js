@@ -9,7 +9,13 @@ const app = createMcpExpressApp({ host: "127.0.0.1", allowedOrigins: [] });
 const feedback = createMcpInstrumentation({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
   endpoint: process.env.AGENT_FEEDBACK_URL,
-  customerRef: (_arguments, context) => context.http?.authInfo?.extra?.accountId,
+  accountRef: (_arguments, context) => context.http?.authInfo?.extra?.accountId,
+  userRef: (_arguments, context) => context.http?.authInfo?.extra?.userId,
+  anonymousRef: (_arguments, context) => context.http?.authInfo?.extra?.anonymousId,
+  customerRef:
+    process.env.AGENT_FEEDBACK_MODE === "ask_once"
+      ? (_arguments, context) => context.http?.authInfo?.extra?.accountId
+      : undefined,
 });
 
 function productServer() {
@@ -57,7 +63,11 @@ app.use("/mcp", (request, response, next) => {
     token: "verified-setup-matrix-auth",
     clientId: "setup-matrix-client",
     scopes: [],
-    extra: { accountId },
+    extra: {
+      accountId,
+      userId: `user.${accountId}`,
+      anonymousId: `anon.${accountId}`,
+    },
   };
   next();
 });

@@ -54,13 +54,13 @@ const httpIntegrations = [
   {
     id: "rust",
     page: "docs/integrations/rust-axum.mdx",
-    required: ["agent-feedback-rust-0.2.2.tar.gz", "AgentFeedbackLayer::new", ".include", "Tokio"],
+    required: ["agent-feedback-rust-0.3.0.tar.gz", "AgentFeedbackLayer::new", ".include", "Tokio"],
   },
   {
     id: "manual-http",
     page: "docs/integrations/manual-http.mdx",
     required: [
-      "agent-feedback-protocol-v1-0.2.2.zip",
+      "agent-feedback-protocol-v1-0.3.0.zip",
       "HMAC-SHA256",
       "_agentFeedback",
       "Cache-Control",
@@ -253,11 +253,15 @@ test("Node MCP setup authenticates before dispatch and keeps hosted installs rep
     "requireBearerAuth",
     "productTokenVerifier",
     "requiredScopes",
-    "authenticatedAccountId",
-    "typeof accountId",
+    "verifiedField",
+    'accountRef: (_args, context) => verifiedField(context, "accountId")',
+    'userRef: (_args, context) => verifiedField(context, "userId")',
+    'anonymousRef: (_args, context) => verifiedField(context, "visitorId")',
+    'customerRef: (_args, context) => verifiedField(context, "accountId")',
+    'sessionRef: (_args, context) => verifiedField(context, "journeyId")',
     "standalone JSON text block",
     "outputSchema",
-    ".epode/artifacts/agent-feedback-node-0.2.2.tgz",
+    ".epode/artifacts/agent-feedback-node-0.3.0.tgz",
     "shasum -a 256 -c -",
   ]) {
     assert.ok(content.includes(expected), `Node MCP docs omit ${expected}`);
@@ -281,10 +285,10 @@ test("Node MCP setup authenticates before dispatch and keeps hosted installs rep
   assert.match(dashboard, /report_product_feedback/);
   assert.match(dashboard, /standalone JSON content block/);
   assert.match(dashboard, /feedbackMode: env\.AGENT_FEEDBACK_MODE/);
-  assert.match(dashboard, /epode_artifact="\.epode\/artifacts\/agent-feedback-node-0\.2\.2\.tgz"/);
+  assert.match(dashboard, /epode_artifact="\.epode\/artifacts\/agent-feedback-node-[0-9.]+\.tgz"/);
   assert.doesNotMatch(
     dashboard,
-    /nodeDownload = verifiedDownload\("agent-feedback-node-0\.2\.2\.tgz"/,
+    /nodeDownload = verifiedDownload\("agent-feedback-node-[0-9.]+\.tgz"/,
   );
 });
 
@@ -295,9 +299,41 @@ test("Fastify guidance authenticates before reading identity and uses product-pr
       content.indexOf("await app.register(agentFeedback"),
   );
   assert.match(content, /authorize the selected tenant/i);
-  assert.match(content, /sessionRef: request => request\.params\.id/);
-  assert.doesNotMatch(content, /sessionRef: request => request\.headers/);
+  assert.match(content, /sessionRef: request => request\.authorizedCrawl\?\.id/);
+  assert.doesNotMatch(content, /sessionRef: request => request\.(?:headers|params|query|body)/);
   assert.match(content, /never accept an arbitrary grouping handle/i);
+});
+
+test("customer-intelligence setup uses only verified or product-owned correlation context", async () => {
+  const pages = await Promise.all(
+    [
+      "docs/quickstart.mdx",
+      "docs/integrations/node-express.mdx",
+      "docs/integrations/node-fastify.mdx",
+      "docs/integrations/node-mcp.mdx",
+      "docs/integrations/python-asgi.mdx",
+      "docs/integrations/python-wsgi.mdx",
+      "docs/integrations/go-http.mdx",
+      "docs/integrations/rust-axum.mdx",
+      "docs/integrations/manual-http.mdx",
+      "docs/integrations/manual-mcp.mdx",
+      "docs/integrations/static-edge.mdx",
+    ].map(read),
+  );
+  const joined = pages.join("\n");
+  for (const field of ["accountRef", "userRef", "anonymousRef", "customerRef", "sessionRef"]) {
+    assert.match(joined, new RegExp(field));
+  }
+  assert.match(joined, /customerRef[\s\S]{0,180}(?:exact|identical)[\s\S]{0,80}accountRef/i);
+  assert.match(joined, /server\/product state[\s\S]{0,100}proves? (?:a |the )?journey/i);
+  assert.match(
+    joined,
+    /never (?:use|derive)[\s\S]{0,140}(?:names|name)[\s\S]{0,80}(?:emails|email)/i,
+  );
+  assert.doesNotMatch(
+    joined,
+    /sessionRef:[\s\S]{0,100}(?:get\("x-|\.headers|\.query|\.body|\bargs\.)/,
+  );
 });
 
 test("verification and reference docs preserve the two-stage consent workflow", async () => {
@@ -321,8 +357,8 @@ test("docs explain the product/customer-agent boundary and evidence model", asyn
   const overview = await read("docs/index.mdx");
   const reliability = await read("docs/concepts/reliability.mdx");
   const privacy = await read("docs/reference/privacy-security.mdx");
-  assert.match(overview, /independent agents used by your customers/i);
-  assert.match(overview, /customers do not install an Epode SDK/i);
+  assert.match(overview, /independent agents used by\s+their customers/i);
+  assert.match(overview, /customers do not install (?:an Epode |an )?SDK/i);
   assert.match(
     reliability,
     /does not label ordinary HTTP traffic as agent traffic without evidence/i,
@@ -365,10 +401,10 @@ test("docs and dashboard publish the same install artifacts and feedback modes",
   ]);
   const joined = pages.join("\n");
   for (const artifact of [
-    "agent-feedback-node-0.2.2.tgz",
-    "agent_feedback-0.2.2-py3-none-any.whl",
-    "agent-feedback-rust-0.2.2.tar.gz",
-    "agent-feedback-protocol-v1-0.2.2.zip",
+    "agent-feedback-node-0.3.0.tgz",
+    "agent_feedback-0.3.0-py3-none-any.whl",
+    "agent-feedback-rust-0.3.0.tar.gz",
+    "agent-feedback-protocol-v1-0.3.0.zip",
   ]) {
     assert.ok(joined.includes(artifact), `docs omit ${artifact}`);
     assert.ok(dashboard.includes(artifact), `dashboard omits ${artifact}`);
@@ -468,7 +504,7 @@ test("every public docs page has a title and actionable description", async () =
 });
 
 test("the downloadable protocol bundle preserves the immutable v1 schema contract", async () => {
-  const bundle = new URL("../backend/public/agent-feedback-protocol-v1-0.2.2.zip", import.meta.url)
+  const bundle = new URL("../backend/public/agent-feedback-protocol-v1-0.3.0.zip", import.meta.url)
     .pathname;
   const schemaFiles = [
     "consent-decision.schema.json",
