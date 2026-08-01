@@ -102,6 +102,32 @@ test("production promotion verifies the active canary pair and can compensate ei
   assert.match(canaryVerification, /service="\$CANARY_API_SERVICE"/);
   assert.match(canaryVerification, /service="\$CANARY_WEB_SERVICE"/);
   assert.doesNotMatch(canaryVerification, /--service "\$API_SERVICE"/);
+  const routing = source.slice(
+    source.indexOf("Validate production routing configuration"),
+    source.indexOf("Verify the exact promotion pair passed canary"),
+  );
+  assert.match(routing, /WEB_API_URL/);
+  assert.match(routing, /private production API origin/);
+  const recoverableState = source.slice(
+    source.indexOf("Capture recoverable production state"),
+    source.indexOf("- name: Promote API"),
+  );
+  assert.match(recoverableState, /org\.opencontainers\.image\.revision/);
+  assert.match(
+    recoverableState,
+    /git ls-tree -r --name-only "\$previous_api_revision" -- backend\/migrations/,
+  );
+  assert.match(
+    recoverableState,
+    /git ls-tree -r --name-only "\$TARGET_API_REVISION" -- backend\/migrations/,
+  );
+  assert.match(recoverableState, /diff --unified=0 "\$previous_migrations" "\$target_migrations"/);
+  assert.match(recoverableState, /separately attested migration rollout/);
+  assert.match(
+    recoverableState,
+    /"\$previous_ref" == "\$target_ref" && "\$previous_digest" == "\$target_digest"/,
+    "an interrupted exact-pair promotion may resume even before its production tags move",
+  );
   assert.match(source, /Verify both production tags by digest/);
   assert.match(source, /id: tag_readback/);
   assert.match(source, /steps\.tag_readback\.outcome != 'success'/);
