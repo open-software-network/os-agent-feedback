@@ -12,6 +12,7 @@ export type ProductInteraction = components["schemas"]["ProductInteraction"];
 export type ProductSession = components["schemas"]["ProductSession"];
 export type DashboardSessionSummary = components["schemas"]["DashboardSessionSummary"];
 export type DashboardFeedbackPage = components["schemas"]["DashboardFeedbackPage"];
+export type DashboardFeedbackFacets = components["schemas"]["DashboardFeedbackFacets"];
 export type DashboardSessionsPage = components["schemas"]["DashboardSessionsPage"];
 export type DashboardInteractionResponse = components["schemas"]["DashboardInteractionResponse"];
 export type DashboardSessionDetail = components["schemas"]["DashboardSessionDetail"];

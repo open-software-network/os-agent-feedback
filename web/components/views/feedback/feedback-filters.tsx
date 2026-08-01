@@ -75,6 +75,7 @@ export type FeedbackFacet =
 export type FilterOption = {
   value: string;
   label: string;
+  count?: number;
 };
 
 export type FeedbackFiltersState = Record<FeedbackFacet, string[]>;
@@ -249,6 +250,11 @@ export function FeedbackFilters({
                             >
                               <span className="truncate">{option.label}</span>
                             </Label>
+                            {option.count !== undefined ? (
+                              <span className="tabular-nums text-muted-foreground">
+                                {option.count.toLocaleString()}
+                              </span>
+                            ) : null}
                           </div>
                         );
                       })}

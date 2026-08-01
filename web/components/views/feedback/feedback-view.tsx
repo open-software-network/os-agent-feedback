@@ -33,10 +33,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsList, TabsPanel, TabsTab } from "@/components/ui/tabs";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { ApiError, apiRequest } from "@/lib/api/client";
 import { fetchProductGithubRepo } from "@/lib/api/connectors";
 import type {
   DashboardData,
+  DashboardFeedbackFacets,
   DashboardReportResponse,
   ProductFeedbackReport,
 } from "@/lib/api/dashboard";
@@ -145,19 +147,22 @@ export function FeedbackView({
   const [mode, setMode] = useState<FeedbackMode>("reports");
   const [groupLimit, setGroupLimit] = useState(groupsPageSize);
   const productId = data.currentProduct?.id;
+  const debouncedQuery = useDebouncedValue(query, 250);
   const since = useMemo(() => rangeStart(range), [range]);
+  const searchSettling = query.trim() !== debouncedQuery.trim();
   const hasFacetFilters = facetOrder.some((facet) => filters[facet].length > 0);
   const canSeedReportList =
     !query.trim() &&
     !hasFacetFilters &&
     data.listState.reportsLoaded === data.listState.reportsTotal &&
-    data.reports.every((report) => !since || new Date(report.occurredAt) >= new Date(since));
+    data.reports.every((report) => !since || new Date(report.createdAt) >= new Date(since));
+  const seedFacets = useMemo(() => feedbackFacetsFromReports(data.reports), [data.reports]);
   const reportPages = useInfiniteQuery({
-    queryKey: ["feedback-list", data.workspace.id, productId, query, filters, since],
+    queryKey: ["feedback-list", data.workspace.id, productId, debouncedQuery, filters, since],
     queryFn: ({ pageParam }) =>
       fetchDashboardFeedbackPage(data.workspace.id, {
         productId: productId ?? "",
-        q: query.trim() || undefined,
+        q: debouncedQuery.trim() || undefined,
         status: filters.status,
         impact: filters.impact,
         surface: filters.surface,
@@ -179,6 +184,7 @@ export function FeedbackView({
             {
               reports: data.reports,
               total: data.listState.reportsTotal,
+              facets: seedFacets,
               limit: Math.min(100, Math.max(1, data.reports.length || 50)),
               nextCursor: null,
             },
@@ -189,10 +195,14 @@ export function FeedbackView({
     initialDataUpdatedAt: 0,
     enabled: Boolean(productId),
   });
-  const reports =
-    reportPages.data?.pages.flatMap((page) => (Array.isArray(page.reports) ? page.reports : [])) ??
-    [];
+  const reports = searchSettling
+    ? []
+    : (reportPages.data?.pages.flatMap((page) =>
+        Array.isArray(page.reports) ? page.reports : [],
+      ) ?? []);
   const reportTotal = reportPages.data?.pages[0]?.total ?? data.listState.reportsTotal;
+  const facetData = reportPages.data?.pages[0]?.facets ?? feedbackFacetsFromReports(reports);
+  const feedbackPending = reportPages.isPending || searchSettling;
   const loadedReport = reports.find((report) => report.id === selectedReportId);
   const detail = useQuery({
     queryKey: ["feedback", data.workspace.id, productId, selectedReportId],
@@ -236,50 +246,77 @@ export function FeedbackView({
   }, []);
 
   const filterOptions = useMemo<Record<FeedbackFacet, FilterOption[]>>(() => {
-    const findings = reports.flatMap(reportFindings);
     const memberNames = new Map(
       data.teamMembers.map((member) => [member.osUserId, member.displayName]),
     );
-    const assignedIds = unique(reports.map((report) => report.assigneeOsUserId));
+    const counts = Object.fromEntries(
+      Object.entries(facetData).map(([facet, values]) => [
+        facet,
+        new Map(values.map((item) => [item.name, item.count])),
+      ]),
+    ) as Record<keyof DashboardFeedbackFacets, Map<string, number>>;
+    const options = (
+      facet: FeedbackFacet,
+      source: keyof DashboardFeedbackFacets,
+      label: (value: string) => string,
+    ) =>
+      unique([...facetData[source].map((item) => item.name), ...filters[facet]]).map((value) => ({
+        value,
+        label: label(value),
+        count: counts[source].get(value) ?? 0,
+      }));
+    const assignedIds = facetData.assignee
+      .map((item) => item.name)
+      .filter((value) => value !== "unassigned");
     const assigneeIds = unique([
       ...data.teamMembers.map((member) => member.osUserId),
       ...assignedIds,
+      ...filters.assignee.filter((value) => value !== "unassigned"),
     ]);
 
     return {
-      status: workflowStatuses.map((value) => ({ value, label: workflowLabels[value] })),
-      impact: impactValues.map((value) => ({ value, label: impactLabels[value] })),
-      surface: unique(reports.map((report) => report.surface)).map((value) => ({
+      status: workflowStatuses.map((value) => ({
         value,
-        label: interfaceLabel(value),
+        label: workflowLabels[value],
+        count: counts.status.get(value) ?? 0,
       })),
-      topic: unique(findings.map((finding) => finding.topic)).map((value) => ({
+      impact: impactValues.map((value) => ({
         value,
-        label: titleCase(value),
+        label: impactLabels[value],
+        count: counts.impact.get(value) ?? 0,
       })),
-      kind: unique(findings.map((finding) => finding.kind)).map((value) => ({
-        value,
-        label: titleCase(value),
-      })),
-      severity: unique(findings.map((finding) => finding.severity)).map((value) => ({
-        value,
-        label: titleCase(value),
-      })),
-      tag: unique(reports.flatMap((report) => report.tags)).map((value) => ({
-        value,
-        label: value,
-      })),
+      surface: options("surface", "surface", interfaceLabel),
+      topic: options("topic", "topic", titleCase),
+      kind: options("kind", "findingKind", titleCase),
+      severity: options("severity", "severity", titleCase),
+      tag: options("tag", "tag", (value) => value),
       assignee: [
-        { value: "unassigned", label: "Unassigned" },
-        ...assigneeIds.map((value) => ({ value, label: memberNames.get(value) ?? value })),
+        {
+          value: "unassigned",
+          label: "Unassigned",
+          count: counts.assignee.get("unassigned") ?? 0,
+        },
+        ...assigneeIds.map((value) => ({
+          value,
+          label: memberNames.get(value) ?? value,
+          count: counts.assignee.get(value) ?? 0,
+        })),
       ],
       workaround: [
-        { value: "used", label: "Observed" },
-        { value: "suggested", label: "Not used" },
-        { value: "none", label: "None recorded" },
+        { value: "used", label: "Observed", count: counts.workaround.get("used") ?? 0 },
+        {
+          value: "suggested",
+          label: "Not used",
+          count: counts.workaround.get("suggested") ?? 0,
+        },
+        {
+          value: "none",
+          label: "None recorded",
+          count: counts.workaround.get("none") ?? 0,
+        },
       ],
     };
-  }, [data.teamMembers, reports]);
+  }, [data.teamMembers, facetData, filters]);
 
   function commitFilters(nextFilters: FeedbackFiltersState) {
     setFilters(nextFilters);
@@ -374,13 +411,13 @@ export function FeedbackView({
             </div>
           ) : null}
 
-          {reportPages.isPending ? (
+          {feedbackPending ? (
             <p className="border-b px-4 py-3 text-xs text-muted-foreground" role="status">
               Loading feedback…
             </p>
           ) : null}
 
-          {!reportPages.isPending && reportTotal > 0 ? (
+          {!feedbackPending && reportTotal > 0 ? (
             <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/25 px-4 py-2 text-xs text-muted-foreground">
               <p aria-live="polite">
                 Showing {reports.length.toLocaleString()} of {reportTotal.toLocaleString()} matching
@@ -410,7 +447,7 @@ export function FeedbackView({
                 onSelect={selectReport}
               />
             </section>
-          ) : reportPages.isPending ? (
+          ) : feedbackPending ? (
             <div className="min-h-0 flex-1 bg-canvas" />
           ) : (
             <div className="min-h-0 flex-1 bg-canvas p-4">
@@ -1162,6 +1199,34 @@ function unique(values: Array<string | null | undefined>) {
   return [...new Set(values.filter((value): value is string => Boolean(value)))].sort(
     (left, right) => left.localeCompare(right),
   );
+}
+
+function feedbackFacetsFromReports(reports: ProductFeedbackReport[]): DashboardFeedbackFacets {
+  const facet = (values: (report: ProductFeedbackReport) => Array<string | null | undefined>) => {
+    const counts = new Map<string, number>();
+    for (const report of reports) {
+      for (const value of new Set(values(report).filter((item): item is string => Boolean(item)))) {
+        counts.set(value, (counts.get(value) ?? 0) + 1);
+      }
+    }
+    return [...counts]
+      .map(([name, count]) => ({ name, count }))
+      .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name));
+  };
+
+  return {
+    status: facet((report) => [report.workflowStatus ?? "new"]),
+    impact: facet((report) => [report.impact ?? "unknown"]),
+    surface: facet((report) => [report.surface]),
+    topic: facet((report) => reportFindings(report).map((finding) => finding.topic)),
+    findingKind: facet((report) => reportFindings(report).map((finding) => finding.kind)),
+    severity: facet((report) => reportFindings(report).map((finding) => finding.severity)),
+    tag: facet((report) => report.tags),
+    assignee: facet((report) => [report.assigneeOsUserId ?? "unassigned"]),
+    workaround: facet((report) => [
+      report.workaround ? (report.workaround.used ? "used" : "suggested") : "none",
+    ]),
+  };
 }
 
 function rangeStart(range: string): string | undefined {

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -133,6 +133,91 @@ describe("FeedbackView", () => {
       expect.stringContaining(`/api/dashboard/reports/${report.id}?productId=`),
       expect.any(Object),
     );
+  });
+
+  it("offers counted facets from outside the loaded page and retains them when selected", async () => {
+    const complete = dashboardFixture();
+    const data = dashboardFixture({
+      reports: [],
+      listState: { ...complete.listState, reportsLoaded: 0, reportsTotal: 7 },
+    });
+    const facets = {
+      status: [{ name: "new", count: 7 }],
+      impact: [{ name: "blocked", count: 7 }],
+      surface: [{ name: "mcp", count: 7 }],
+      topic: [{ name: "outside_page", count: 7 }],
+      findingKind: [{ name: "defect", count: 7 }],
+      severity: [{ name: "blocking", count: 7 }],
+      tag: [],
+      assignee: [{ name: "unassigned", count: 7 }],
+      workaround: [{ name: "none", count: 7 }],
+    };
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/dashboard/feedback?")) {
+        return Promise.resolve(
+          json({
+            reports: [],
+            total: path.includes("topic=outside_page") ? 0 : 7,
+            facets,
+            limit: 50,
+            nextCursor: null,
+          }),
+        );
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderFeedback(data);
+
+    expect(await screen.findByText(/Filters cover all retained feedback/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Topic" }));
+    const option = await screen.findByRole("checkbox", { name: "Outside Page" });
+    expect(within(option.closest("div") as HTMLElement).getByText("7")).toBeVisible();
+
+    fireEvent.click(option);
+
+    await waitFor(() => {
+      expect(window.location.search).toContain("topic=outside_page");
+      expect(
+        fetchMock.mock.calls.some(([input]) => String(input).includes("topic=outside_page")),
+      ).toBe(true);
+    });
+    expect(screen.getByRole("checkbox", { name: "Outside Page" })).toBeChecked();
+  });
+
+  it("debounces feedback search before issuing a server request", async () => {
+    const data = dashboardFixture();
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/dashboard/feedback?")) {
+        return Promise.resolve(
+          json({
+            reports: data.reports,
+            total: data.reports.length,
+            limit: 50,
+            nextCursor: null,
+          }),
+        );
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderFeedback(data);
+    const search = screen.getByRole("textbox", { name: "Search feedback" });
+    fireEvent.change(search, { target: { value: "t" } });
+    fireEvent.change(search, { target: { value: "ti" } });
+    fireEvent.change(search, { target: { value: "timeout" } });
+
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("q=timeout"))).toBe(false);
+    await waitFor(() => {
+      const searched = fetchMock.mock.calls.filter(([input]) => String(input).includes("q="));
+      expect(searched).toHaveLength(1);
+      expect(String(searched[0][0])).toContain("q=timeout");
+    });
   });
 
   it("defaults to reports and loads read-only grouped signals on demand", async () => {

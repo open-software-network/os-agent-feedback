@@ -5550,16 +5550,91 @@
           }
         }
       },
+      "DashboardFeedbackFacets": {
+        "type": "object",
+        "description": "Facet counts across the complete retained search/time window.\n\nCounts deliberately ignore categorical facet selections so choosing one\nvalue never makes the other retained values undiscoverable. Pagination is\nnever applied to these aggregates.",
+        "required": [
+          "status",
+          "impact",
+          "surface",
+          "topic",
+          "findingKind",
+          "severity",
+          "tag",
+          "assignee",
+          "workaround"
+        ],
+        "properties": {
+          "assignee": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "findingKind": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "impact": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "severity": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "status": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "surface": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "tag": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "topic": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "workaround": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          }
+        }
+      },
       "DashboardFeedbackPage": {
         "type": "object",
         "description": "A bounded, server-filtered page of feedback reports.\n\n`total` is computed from the complete retained product dataset with the\nactive filters, not from the returned page.",
         "required": [
           "reports",
           "total",
+          "facets",
           "limit",
           "nextCursor"
         ],
         "properties": {
+          "facets": {
+            "$ref": "#/components/schemas/DashboardFeedbackFacets"
+          },
           "limit": {
             "type": "integer",
             "format": "int64"

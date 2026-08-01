@@ -174,6 +174,99 @@ describe("SessionsView", () => {
       expect(window.location.search).toContain("sessionKind=feedback");
     });
   });
+
+  it("restores useful server constraints from the URL and applies them together", async () => {
+    const data = dashboardFixture();
+    window.history.replaceState(
+      {},
+      "",
+      "/?view=sessions&sessionOperation=checkout&sessionCustomer=tenant-a&sessionImpact=blocked&sessionRange=7d",
+    );
+    const fetchMock = sessionFetch(data);
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWithQuery(
+      <SessionsView
+        data={data}
+        selectedSessionId={null}
+        selectSession={vi.fn()}
+        openFeedback={vi.fn()}
+        openInteraction={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(screen.getByText("Operation: checkout")).toBeVisible();
+    expect(screen.getByText("Customer: tenant-a")).toBeVisible();
+    expect(screen.getByText("Impact: Blocked")).toBeVisible();
+    expect(screen.getByText("Last 7 days")).toBeVisible();
+    await waitFor(() => {
+      const path = fetchMock.mock.calls
+        .map(([input]) => String(input))
+        .find((input) => input.startsWith("/api/dashboard/sessions?"));
+      expect(path).toContain("operation=checkout");
+      expect(path).toContain("customerRef=tenant-a");
+      expect(path).toContain("impact=blocked");
+      expect(path).toContain("since=");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Constraints/ }));
+    fireEvent.change(screen.getByLabelText("Operation"), { target: { value: "refund" } });
+    fireEvent.change(screen.getByLabelText("Customer reference"), {
+      target: { value: "tenant-b" },
+    });
+    fireEvent.change(screen.getByLabelText("Contains impact"), {
+      target: { value: "hindered" },
+    });
+    fireEvent.change(screen.getByLabelText("Last seen"), { target: { value: "30d" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    await waitFor(() => {
+      expect(window.location.search).toContain("sessionOperation=refund");
+      expect(window.location.search).toContain("sessionCustomer=tenant-b");
+      expect(window.location.search).toContain("sessionImpact=hindered");
+      expect(window.location.search).toContain("sessionRange=30d");
+      expect(
+        fetchMock.mock.calls.some(([input]) => {
+          const path = String(input);
+          return (
+            path.includes("operation=refund") &&
+            path.includes("customerRef=tenant-b") &&
+            path.includes("impact=hindered") &&
+            path.includes("since=")
+          );
+        }),
+      ).toBe(true);
+    });
+  });
+
+  it("debounces session search before issuing a server request", async () => {
+    const data = dashboardFixture();
+    const fetchMock = sessionFetch(data);
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWithQuery(
+      <SessionsView
+        data={data}
+        selectedSessionId={null}
+        selectSession={vi.fn()}
+        openFeedback={vi.fn()}
+        openInteraction={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+    const search = screen.getByRole("textbox", { name: "Search sessions" });
+    fireEvent.change(search, { target: { value: "r" } });
+    fireEvent.change(search, { target: { value: "re" } });
+    fireEvent.change(search, { target: { value: "refund" } });
+
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("q=refund"))).toBe(false);
+    await waitFor(() => {
+      const searched = fetchMock.mock.calls.filter(([input]) => String(input).includes("q="));
+      expect(searched).toHaveLength(1);
+      expect(String(searched[0][0])).toContain("q=refund");
+    });
+  });
 });
 
 function renderWithQuery(element: ReactElement) {

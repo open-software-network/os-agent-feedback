@@ -803,9 +803,29 @@ pub(crate) struct DashboardListState {
 pub(crate) struct DashboardFeedbackPage {
     pub reports: Vec<ProductFeedbackReportWithInteraction>,
     pub total: i64,
+    pub facets: DashboardFeedbackFacets,
     pub limit: i64,
     #[schema(required = true, nullable)]
     pub next_cursor: Option<String>,
+}
+
+/// Facet counts across the complete retained search/time window.
+///
+/// Counts deliberately ignore categorical facet selections so choosing one
+/// value never makes the other retained values undiscoverable. Pagination is
+/// never applied to these aggregates.
+#[derive(Debug, Default, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardFeedbackFacets {
+    pub status: Vec<InsightCount>,
+    pub impact: Vec<InsightCount>,
+    pub surface: Vec<InsightCount>,
+    pub topic: Vec<InsightCount>,
+    pub finding_kind: Vec<InsightCount>,
+    pub severity: Vec<InsightCount>,
+    pub tag: Vec<InsightCount>,
+    pub assignee: Vec<InsightCount>,
+    pub workaround: Vec<InsightCount>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

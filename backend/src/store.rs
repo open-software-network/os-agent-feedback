@@ -22,19 +22,19 @@ use crate::{
     models::{
         ApiKeyPublic, CapabilityInspectionResponse, ConsentDecisionInput, ConsentStateInput,
         ConsentStateResponse, CreateProductInput, CreateTeamInvitationInput, DashboardContext,
-        DashboardData, DashboardFeedbackFilters, DashboardFeedbackPage, DashboardListState,
-        DashboardSessionDetail, DashboardSessionFilters, DashboardSessionRollup,
-        DashboardSessionSummary, DashboardSessionsPage, DeleteProductInput, FeedbackFindingInput,
-        FeedbackInteractionItem, FeedbackInteractionsPage, FeedbackListInteractionsInput,
-        FeedbackListReportsInput, FeedbackOperationSummary, FeedbackReportItem,
-        FeedbackReportsPage, FeedbackReportsResponse, FeedbackSummary, FeedbackSurfaceSummary,
-        FeedbackWindow, GithubIssueLink, InsightCount, Insights, InteractionTelemetryInput,
-        MergeReportGroupsResponse, PolicyInput, Product, ProductAuth, ProductEnvironment,
-        ProductFeedbackReport, ProductFeedbackReportInput, ProductFeedbackReportWithInteraction,
-        ProductGithubRepo, ProductGithubRepoInput, ProductInteraction, ProductReportGroup,
-        ProductSession, TeamInvitation, TeamMember, TelemetryBatchInput, TelemetryBatchResult,
-        UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput, Workspace,
-        WorkspaceMembership,
+        DashboardData, DashboardFeedbackFacets, DashboardFeedbackFilters, DashboardFeedbackPage,
+        DashboardListState, DashboardSessionDetail, DashboardSessionFilters,
+        DashboardSessionRollup, DashboardSessionSummary, DashboardSessionsPage, DeleteProductInput,
+        FeedbackFindingInput, FeedbackInteractionItem, FeedbackInteractionsPage,
+        FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackOperationSummary,
+        FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse, FeedbackSummary,
+        FeedbackSurfaceSummary, FeedbackWindow, GithubIssueLink, InsightCount, Insights,
+        InteractionTelemetryInput, MergeReportGroupsResponse, PolicyInput, Product, ProductAuth,
+        ProductEnvironment, ProductFeedbackReport, ProductFeedbackReportInput,
+        ProductFeedbackReportWithInteraction, ProductGithubRepo, ProductGithubRepoInput,
+        ProductInteraction, ProductReportGroup, ProductSession, TeamInvitation, TeamMember,
+        TelemetryBatchInput, TelemetryBatchResult, UpdateFeedbackWorkflowInput, UpdateNameInput,
+        UpdateTeamMemberInput, Workspace, WorkspaceMembership,
     },
     os_accounts::OsUser,
     security::{
@@ -2594,6 +2594,17 @@ pub(crate) async fn dashboard_feedback_page(
     .fetch_one(pool)
     .await?;
 
+    let facets = dashboard_feedback_facets(
+        pool,
+        environment.id,
+        since,
+        filters.until,
+        search.as_deref(),
+        filters.operation.as_deref(),
+        filters.customer_ref.as_deref(),
+    )
+    .await?;
+
     let mut reports = sqlx::query_as::<_, ProductFeedbackReportWithInteraction>(
         r"SELECT r.id, r.interaction_id, r.summary, r.impact, r.confidence,
         r.findings, r.workaround, r.source, r.created_at,
@@ -2667,9 +2678,88 @@ pub(crate) async fn dashboard_feedback_page(
     Ok(DashboardFeedbackPage {
         reports,
         total,
+        facets,
         limit,
         next_cursor,
     })
+}
+
+async fn dashboard_feedback_facets(
+    pool: &PgPool,
+    environment_id: Uuid,
+    since: DateTime<Utc>,
+    until: Option<DateTime<Utc>>,
+    search: Option<&str>,
+    operation: Option<&str>,
+    customer_ref: Option<&str>,
+) -> Result<DashboardFeedbackFacets, ApiError> {
+    let rows = sqlx::query_as::<_, (String, String, i64)>(
+        r"WITH base AS MATERIALIZED (
+          SELECT r.id, COALESCE(w.status, 'new') AS workflow_status,
+            COALESCE(r.impact, 'unknown') AS impact, i.surface,
+            CASE WHEN jsonb_typeof(r.findings) = 'array' THEN r.findings ELSE '[]'::JSONB END AS findings,
+            COALESCE(w.tags, '{}'::TEXT[]) AS tags,
+            COALESCE(w.assignee_os_user_id::TEXT, 'unassigned') AS assignee,
+            CASE WHEN r.workaround IS NULL THEN 'none'
+              WHEN r.workaround ->> 'used' = 'true' THEN 'used'
+              ELSE 'suggested' END AS workaround
+          FROM feedback_reports r
+          JOIN interactions_v2 i ON i.id = r.interaction_id
+          LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
+          WHERE i.environment_id = $1 AND r.created_at >= $2
+            AND ($3::TIMESTAMPTZ IS NULL OR r.created_at <= $3)
+            AND ($4::TEXT IS NULL OR r.summary ILIKE $4 ESCAPE '\'
+              OR i.operation ILIKE $4 ESCAPE '\'
+              OR COALESCE(i.customer_ref, '') ILIKE $4 ESCAPE '\'
+              OR r.findings::TEXT ILIKE $4 ESCAPE '\')
+            AND ($5::TEXT IS NULL OR i.operation = $5)
+            AND ($6::TEXT IS NULL OR i.customer_ref = $6)
+        ), facet_values AS (
+          SELECT id AS report_id, 'status'::TEXT AS facet, workflow_status AS value FROM base
+          UNION ALL SELECT id, 'impact', impact FROM base
+          UNION ALL SELECT id, 'surface', surface FROM base
+          UNION ALL SELECT id, 'assignee', assignee FROM base
+          UNION ALL SELECT id, 'workaround', workaround FROM base
+          UNION ALL SELECT id, 'tag', tag FROM base CROSS JOIN LATERAL UNNEST(tags) tag
+          UNION ALL SELECT id, 'topic', finding ->> 'topic'
+            FROM base CROSS JOIN LATERAL jsonb_array_elements(findings) finding
+          UNION ALL SELECT id, 'finding_kind', finding ->> 'kind'
+            FROM base CROSS JOIN LATERAL jsonb_array_elements(findings) finding
+          UNION ALL SELECT id, 'severity', finding ->> 'severity'
+            FROM base CROSS JOIN LATERAL jsonb_array_elements(findings) finding
+        )
+        SELECT facet, value, COUNT(DISTINCT report_id)::BIGINT
+        FROM facet_values
+        WHERE value IS NOT NULL AND value <> ''
+        GROUP BY facet, value
+        ORDER BY facet, COUNT(DISTINCT report_id) DESC, value",
+    )
+    .bind(environment_id)
+    .bind(since)
+    .bind(until)
+    .bind(search)
+    .bind(operation)
+    .bind(customer_ref)
+    .fetch_all(pool)
+    .await?;
+
+    let mut facets = DashboardFeedbackFacets::default();
+    for (facet, name, count) in rows {
+        let item = InsightCount { name, count };
+        match facet.as_str() {
+            "status" => facets.status.push(item),
+            "impact" => facets.impact.push(item),
+            "surface" => facets.surface.push(item),
+            "topic" => facets.topic.push(item),
+            "finding_kind" => facets.finding_kind.push(item),
+            "severity" => facets.severity.push(item),
+            "tag" => facets.tag.push(item),
+            "assignee" => facets.assignee.push(item),
+            "workaround" => facets.workaround.push(item),
+            _ => {}
+        }
+    }
+    Ok(facets)
 }
 
 #[allow(
@@ -7695,6 +7785,24 @@ mod product_tests {
             .await
             .map_err(test_error)?;
             anyhow::ensure!(first.total == 2 && first.reports.len() == 1);
+            anyhow::ensure!(
+                first
+                    .facets
+                    .status
+                    .iter()
+                    .map(|item| (item.name.as_str(), item.count))
+                    .collect::<BTreeMap<_, _>>()
+                    == BTreeMap::from([("investigating", 1), ("resolved", 1)])
+            );
+            anyhow::ensure!(
+                first
+                    .facets
+                    .topic
+                    .iter()
+                    .map(|item| (item.name.as_str(), item.count))
+                    .collect::<BTreeMap<_, _>>()
+                    == BTreeMap::from([("freshness", 1), ("timeout", 1)])
+            );
             let second = dashboard_feedback_page(
                 &pool,
                 workspace.id,
@@ -7709,6 +7817,28 @@ mod product_tests {
             .map_err(test_error)?;
             anyhow::ensure!(second.total == 2 && second.reports.len() == 1);
             anyhow::ensure!(first.reports[0].id != second.reports[0].id);
+
+            let status_filtered = dashboard_feedback_page(
+                &pool,
+                workspace.id,
+                product.id,
+                DashboardFeedbackFilters {
+                    statuses: Some(vec!["investigating".into()]),
+                    ..DashboardFeedbackFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(status_filtered.total == 1);
+            anyhow::ensure!(
+                status_filtered
+                    .facets
+                    .status
+                    .iter()
+                    .map(|item| (item.name.as_str(), item.count))
+                    .collect::<BTreeMap<_, _>>()
+                    == BTreeMap::from([("investigating", 1), ("resolved", 1)])
+            );
 
             let filtered = dashboard_feedback_page(
                 &pool,
@@ -7728,6 +7858,13 @@ mod product_tests {
             .await
             .map_err(test_error)?;
             anyhow::ensure!(filtered.total == 1 && filtered.reports[0].id == checkout_report);
+            anyhow::ensure!(
+                filtered
+                    .facets
+                    .status
+                    .iter()
+                    .any(|item| item.name == "investigating" && item.count == 1)
+            );
 
             let sessions = dashboard_sessions_page(
                 &pool,

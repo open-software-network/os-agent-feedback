@@ -736,12 +736,31 @@ export interface components {
             workspaceMemberships: components["schemas"]["WorkspaceMembership"][];
         };
         /**
+         * @description Facet counts across the complete retained search/time window.
+         *
+         *     Counts deliberately ignore categorical facet selections so choosing one
+         *     value never makes the other retained values undiscoverable. Pagination is
+         *     never applied to these aggregates.
+         */
+        DashboardFeedbackFacets: {
+            assignee: components["schemas"]["InsightCount"][];
+            findingKind: components["schemas"]["InsightCount"][];
+            impact: components["schemas"]["InsightCount"][];
+            severity: components["schemas"]["InsightCount"][];
+            status: components["schemas"]["InsightCount"][];
+            surface: components["schemas"]["InsightCount"][];
+            tag: components["schemas"]["InsightCount"][];
+            topic: components["schemas"]["InsightCount"][];
+            workaround: components["schemas"]["InsightCount"][];
+        };
+        /**
          * @description A bounded, server-filtered page of feedback reports.
          *
          *     `total` is computed from the complete retained product dataset with the
          *     active filters, not from the returned page.
          */
         DashboardFeedbackPage: {
+            facets: components["schemas"]["DashboardFeedbackFacets"];
             /** Format: int64 */
             limit: number;
             nextCursor: string | null;
