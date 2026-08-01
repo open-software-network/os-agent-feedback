@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
 
-const companionVersion = "0.2.1";
+const companionVersion = "0.2.2";
 const productionEndpoint = "https://app.epode.ai";
 const configuredEndpoint = (process.env.EPODE_COMPANION_ENDPOINT || productionEndpoint).replace(
   /\/$/,

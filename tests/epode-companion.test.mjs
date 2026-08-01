@@ -119,7 +119,7 @@ test("Epode Companion exposes fixed consent and bounded report tools", async () 
       protocolVersion: "2025-11-25",
     });
     assert.equal(initialized.result.serverInfo.name, "epode-companion");
-    assert.equal(initialized.result.serverInfo.version, "0.2.1");
+    assert.equal(initialized.result.serverInfo.version, "0.2.2");
     assert.equal(initialized.result.protocolVersion, "2025-11-25");
 
     const negotiated = await companion.request("initialize", {
