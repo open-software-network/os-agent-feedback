@@ -7,6 +7,10 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 artifact_dir="${SDK_ARTIFACT_DIR:-$repo_root/.artifacts/sdk-release}"
+case "$artifact_dir" in
+  /*) ;;
+  *) artifact_dir="$repo_root/$artifact_dir" ;;
+esac
 source_date_epoch="${SOURCE_DATE_EPOCH:-$(git -C "$repo_root" log -1 --format=%ct)}"
 if [[ -n "${PYTHON_BIN:-}" ]]; then
   python_bin="$PYTHON_BIN"
