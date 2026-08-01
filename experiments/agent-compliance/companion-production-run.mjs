@@ -166,6 +166,10 @@ async function runAgent(runtime, prompt, cwd, outputFile) {
       180_000,
       {},
     );
+    await Promise.all([
+      writeFile(`${outputFile}.jsonl`, response.stdout),
+      writeFile(`${outputFile}.stderr`, response.stderr),
+    ]);
     return { ...response, ...parseCodex(response.stdout), calls: companionCalls(response.stdout) };
   }
   const nativePlugin = values["native-claude-plugin"];
@@ -186,6 +190,10 @@ async function runAgent(runtime, prompt, cwd, outputFile) {
     180_000,
     {},
   );
+  await Promise.all([
+    writeFile(`${outputFile}.jsonl`, response.stdout),
+    writeFile(`${outputFile}.stderr`, response.stderr),
+  ]);
   return { ...response, ...parseClaude(response.stdout), calls: companionCalls(response.stdout) };
 }
 
@@ -212,6 +220,10 @@ async function resumeAgent(runtime, threadId, prompt, cwd, outputFile) {
       180_000,
       {},
     );
+    await Promise.all([
+      writeFile(`${outputFile}.jsonl`, response.stdout),
+      writeFile(`${outputFile}.stderr`, response.stderr),
+    ]);
     return { ...response, ...parseCodex(response.stdout), calls: companionCalls(response.stdout) };
   }
   const nativePlugin = values["native-claude-plugin"];
@@ -234,6 +246,10 @@ async function resumeAgent(runtime, threadId, prompt, cwd, outputFile) {
     180_000,
     {},
   );
+  await Promise.all([
+    writeFile(`${outputFile}.jsonl`, response.stdout),
+    writeFile(`${outputFile}.stderr`, response.stderr),
+  ]);
   return { ...response, ...parseClaude(response.stdout), calls: companionCalls(response.stdout) };
 }
 

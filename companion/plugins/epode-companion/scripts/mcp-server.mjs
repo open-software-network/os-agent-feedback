@@ -293,7 +293,10 @@ async function inspectFeedback(arguments_) {
     typeof value?.productName !== "string" ||
     value.productName.length === 0 ||
     (value.state === "consent_required" &&
-      (typeof value.canonicalQuestion !== "string" || !value.canonicalQuestion.endsWith("?")))
+      (typeof value.canonicalQuestion !== "string" ||
+        value.canonicalQuestion.length === 0 ||
+        value.canonicalQuestion.length > 1_000 ||
+        !value.canonicalQuestion.includes("?")))
   ) {
     return result(
       "Epode returned an invalid capability inspection. Do not ask the user or submit feedback.",
@@ -314,8 +317,14 @@ async function inspectFeedback(arguments_) {
   };
   if (value.state === "consent_required") {
     return result(
-      `Verified feedback request for ${value.productName}. Show canonicalQuestion exactly and wait for the user's explicit answer.`,
-      verified,
+      `Verified feedback request for ${value.productName}. After the useful product answer, ask exactly this question and then wait for the user's explicit answer: ${value.canonicalQuestion}`,
+      {
+        ...verified,
+        nextAction: {
+          type: "ask_user",
+          question: value.canonicalQuestion,
+        },
+      },
     );
   }
   if (value.state === "feedback_ready") {

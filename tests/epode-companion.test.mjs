@@ -95,7 +95,8 @@ test("Epode Companion exposes fixed consent and bounded report tools", async () 
           configuredMode: "ask_once",
           consentPolicy: "once",
           productName: "Checkout API",
-          canonicalQuestion: "May I send Checkout API's provider one short report?",
+          canonicalQuestion:
+            "May I send Checkout API's provider one short report? Your prompts and task content are never included; nothing is installed.",
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         }),
       );
@@ -139,6 +140,15 @@ test("Epode Companion exposes fixed consent and bounded report tools", async () 
     });
     assert.equal(inspection.result.structuredContent.verified, true);
     assert.equal(inspection.result.structuredContent.productName, "Checkout API");
+    assert.deepEqual(inspection.result.structuredContent.nextAction, {
+      type: "ask_user",
+      question:
+        "May I send Checkout API's provider one short report? Your prompts and task content are never included; nothing is installed.",
+    });
+    assert.match(
+      inspection.result.content[0].text,
+      /ask exactly this question.*May I send Checkout API's provider one short report\?.*nothing is installed\./,
+    );
 
     const consent = await companion.request("tools/call", {
       name: "record_product_feedback_consent",
@@ -299,9 +309,101 @@ test("Epode Companion rejects every free-form or unknown field without network a
       },
     });
     assert.equal(freeform.error.message, "report contains an unknown field");
+
+    const ambiguousConsent = await companion.request("tools/call", {
+      name: "record_product_feedback_consent",
+      arguments: {
+        feedbackHandle: handle,
+        decision: "maybe",
+      },
+    });
+    assert.equal(ambiguousConsent.error.message, "decision must be approved or declined");
     assert.equal(requests, 0);
   } finally {
     companion.child.kill();
+    await api.close();
+  }
+});
+
+test("Epode Companion keeps invalid, expired, and unavailable capabilities fail-closed", async (testContext) => {
+  for (const scenario of [
+    { name: "forged capability", status: 401, retryable: false, expectedRequests: 1 },
+    { name: "expired capability", status: 410, retryable: false, expectedRequests: 1 },
+    { name: "unavailable backend", status: 503, retryable: true, expectedRequests: 2 },
+  ]) {
+    await testContext.test(scenario.name, async () => {
+      let requests = 0;
+      const api = await listen(async (request, response) => {
+        for await (const _chunk of request) {
+          // Drain request bodies so retry behavior is deterministic.
+        }
+        requests += 1;
+        response.writeHead(scenario.status, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: scenario.name }));
+      });
+      const companion = startCompanion(api.endpoint);
+      try {
+        const handle = `afr2_${"7".repeat(80)}`;
+        const inspection = await companion.request("tools/call", {
+          name: "inspect_product_feedback",
+          arguments: { feedbackHandle: handle },
+        });
+        assert.equal(inspection.result.isError, true);
+        assert.equal(inspection.result.structuredContent.verified, false);
+        assert.equal(inspection.result.structuredContent.retryable, scenario.retryable);
+        assert.match(inspection.result.content[0].text, /Do not ask the user or submit feedback/);
+        assert.equal(requests, scenario.expectedRequests);
+      } finally {
+        companion.child.kill();
+        await api.close();
+      }
+    });
+  }
+});
+
+test("Epode Companion treats Ask-always as fresh consent after every restart", async () => {
+  const handle = `afr2_${"8".repeat(80)}`;
+  let inspections = 0;
+  const api = await listen(async (request, response) => {
+    for await (const _chunk of request) {
+      // Drain the request body.
+    }
+    if (request.url === "/api/v2/capabilities/introspect") inspections += 1;
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify({
+        state: "consent_required",
+        configuredMode: "ask_always",
+        consentPolicy: "always",
+        productName: "Per-use API",
+        canonicalQuestion: "May I send Per-use API's provider one short report for this use?",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    );
+  });
+  try {
+    for (let restart = 0; restart < 2; restart += 1) {
+      const companion = startCompanion(api.endpoint);
+      try {
+        const inspection = await companion.request("tools/call", {
+          name: "inspect_product_feedback",
+          arguments: { feedbackHandle: handle },
+        });
+        assert.equal(inspection.result.structuredContent.consentPolicy, "always");
+        assert.deepEqual(inspection.result.structuredContent.nextAction, {
+          type: "ask_user",
+          question: "May I send Per-use API's provider one short report for this use?",
+        });
+        assert.match(
+          inspection.result.content[0].text,
+          /May I send Per-use API's provider one short report for this use\?/,
+        );
+      } finally {
+        companion.child.kill();
+      }
+    }
+    assert.equal(inspections, 2);
+  } finally {
     await api.close();
   }
 });
