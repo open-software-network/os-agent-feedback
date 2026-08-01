@@ -5,6 +5,9 @@ import type { NextRequest } from "next/server";
 
 const API_URL_DEFAULT = "http://localhost:8080";
 const UPSTREAM_TIMEOUT_MS = 30_000;
+const MAX_REQUEST_BODY_BYTES = 64 * 1024;
+
+class PayloadTooLargeError extends Error {}
 
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -185,6 +188,43 @@ function upstreamUrl(path: string, search: string): URL {
   return base;
 }
 
+async function boundedRequestBody(request: NextRequest): Promise<Buffer | undefined> {
+  const declaredLength = request.headers.get("content-length");
+  if (declaredLength !== null) {
+    const parsedLength = Number(declaredLength);
+    if (!Number.isSafeInteger(parsedLength) || parsedLength < 0) {
+      throw new PayloadTooLargeError("invalid content length");
+    }
+    if (parsedLength > MAX_REQUEST_BODY_BYTES) {
+      throw new PayloadTooLargeError("request body is too large");
+    }
+  }
+  if (!request.body) return undefined;
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > MAX_REQUEST_BODY_BYTES) {
+        await reader.cancel("request body is too large");
+        throw new PayloadTooLargeError("request body is too large");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (length === 0) return undefined;
+  return Buffer.concat(
+    chunks.map((chunk) => Buffer.from(chunk)),
+    length,
+  );
+}
+
 export function pathFromSegments(prefix: string, segments: string[]): string {
   return `${prefix}/${segments.map((segment) => encodeURIComponent(segment)).join("/")}`;
 }
@@ -193,7 +233,7 @@ export async function proxyToApi(request: NextRequest, upstreamPath: string): Pr
   try {
     const upstream = upstreamUrl(upstreamPath, request.nextUrl.search);
     const hasBody = request.method !== "GET" && request.method !== "HEAD";
-    const bodyBuffer = hasBody ? Buffer.from(await request.arrayBuffer()) : undefined;
+    const bodyBuffer = hasBody ? await boundedRequestBody(request) : undefined;
     const upstreamResponse = await requestUpstream(upstream, {
       method: request.method,
       headers: toNodeHeaders(requestHeaders(request, upstreamPath)),
@@ -209,7 +249,10 @@ export async function proxyToApi(request: NextRequest, upstreamPath: string): Pr
       status: upstreamResponse.status,
       headers: responseHeaders(upstreamResponse.headers),
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof PayloadTooLargeError) {
+      return Response.json({ error: "request body is too large" }, { status: 413 });
+    }
     return Response.json({ error: "upstream unreachable" }, { status: 502 });
   }
 }

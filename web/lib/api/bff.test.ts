@@ -233,6 +233,30 @@ describe("BFF request header policy", () => {
     );
     expect(lastRequest().headers.authorization).toBe("Bearer af_read_read-secret");
   });
+
+  it("rejects declared and streamed oversized bodies before buffering or proxying", async () => {
+    const before = seenRequests.length;
+    const declared = await proxyApiPost(
+      new NextRequest("https://app.epode.ai/api/v2/reports", {
+        method: "POST",
+        headers: { "content-length": String(64 * 1024 + 1) },
+        body: "{}",
+      }),
+      { params: Promise.resolve({ path: ["v2", "reports"] }) },
+    );
+    expect(declared.status).toBe(413);
+    expect(seenRequests).toHaveLength(before);
+
+    const streamed = await proxyApiPost(
+      new NextRequest("https://app.epode.ai/api/v2/reports", {
+        method: "POST",
+        body: new Uint8Array(80 * 1024),
+      }),
+      { params: Promise.resolve({ path: ["v2", "reports"] }) },
+    );
+    expect(streamed.status).toBe(413);
+    expect(seenRequests).toHaveLength(before);
+  });
 });
 
 describe("BFF response and route behavior", () => {
