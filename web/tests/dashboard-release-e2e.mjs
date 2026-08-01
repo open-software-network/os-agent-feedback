@@ -652,7 +652,12 @@ function requestPath(pathname) {
 }
 
 async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
-  await page.goto(`${baseUrl}/`, { waitUntil: "networkidle0" });
+  const initialResponse = await page.goto(`${baseUrl}/`, { waitUntil: "networkidle0" });
+  assert.match(
+    initialResponse?.headers()["content-security-policy"] ?? "",
+    /frame-ancestors 'none'/,
+  );
+  assert.equal(initialResponse?.headers()["x-frame-options"], "DENY");
   assert.match(page.url(), /\/auth\/signin/);
   await textVisible(page, "Sign in to Epode");
 

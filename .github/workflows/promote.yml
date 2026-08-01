@@ -152,6 +152,8 @@ jobs:
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
       API_SERVICE: ${{ vars.RAILWAY_API_SERVICE || 'epode-api' }}
       WEB_SERVICE: ${{ vars.RAILWAY_WEB_SERVICE || 'epode-web' }}
+      API_ORIGIN: ${{ vars.PRODUCTION_API_ORIGIN || 'https://api.epode.ai' }}
+      WEB_ORIGIN: ${{ vars.PRODUCTION_WEB_ORIGIN || 'https://app.epode.ai' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -171,6 +173,34 @@ jobs:
 
       - name: Install Railway CLI
         run: npm install --global "@railway/cli@${RAILWAY_CLI_VERSION}"
+
+      - name: Validate production routing configuration
+        id: routing
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$API_ORIGIN" =~ ^https://[^/]+$ || ! "$WEB_ORIGIN" =~ ^https://[^/]+$ ]]; then
+            echo "::error::Production origins must be origin-only HTTPS URLs without a trailing slash."
+            exit 1
+          fi
+          api_variables="$(railway variables --project "$RAILWAY_PROJECT_ID" --environment production --service "$API_SERVICE" --json)"
+          web_variables="$(railway variables --project "$RAILWAY_PROJECT_ID" --environment production --service "$WEB_SERVICE" --json)"
+          jq -e --arg web "$WEB_ORIGIN" \
+            '.PUBLIC_BASE_URL == $web and .WEB_APP_URL == $web' <<<"$api_variables" >/dev/null || {
+            echo "::error::$API_SERVICE must use the public web origin for PUBLIC_BASE_URL and WEB_APP_URL."
+            exit 1
+          }
+          jq -e --arg api "$API_ORIGIN" '.API_URL == $api' <<<"$web_variables" >/dev/null || {
+            echo "::error::$WEB_SERVICE API_URL does not match the reviewed production API origin."
+            exit 1
+          }
+          accounts_url="$(jq -r '.OS_ACCOUNTS_URL // empty' <<<"$api_variables")"
+          if [[ ! "$accounts_url" =~ ^https://[^/]+/?$ ]]; then
+            echo "::error::$API_SERVICE has no valid OS_ACCOUNTS_URL."
+            exit 1
+          fi
+          echo "accounts_url=${accounts_url%/}" >>"$GITHUB_OUTPUT"
 
       - name: Capture recoverable production state
         id: previous
@@ -298,7 +328,64 @@ jobs:
           echo "::error::The web change failed. The workflow restored the previous API image; production tags were not moved."
           exit 1
 
+      - name: Verify production HTTP and authentication start
+        id: production_smoke
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --max-time 20 "$API_ORIGIN/api/health" >/dev/null
+          curl --fail --silent --show-error --max-time 20 "$WEB_ORIGIN/api/health" >/dev/null
+
+          headers="$(mktemp)"
+          trap 'rm -f "$headers"' EXIT
+          status="$(
+            curl --silent --show-error --max-time 20 \
+              --dump-header "$headers" \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              "$WEB_ORIGIN/auth/start"
+          )"
+          if [[ "$status" != "303" ]]; then
+            echo "::error::$WEB_ORIGIN/auth/start returned HTTP $status instead of 303."
+            exit 1
+          fi
+          location="$(awk 'BEGIN { IGNORECASE=1 } /^location:/ { sub(/^[^:]+:[[:space:]]*/, ""); sub(/\r$/, ""); print; exit }' "$headers")"
+          if [[ "$location" != "${{ steps.routing.outputs.accounts_url }}"/* ]]; then
+            echo "::error::Authentication start did not redirect to the configured accounts origin."
+            exit 1
+          fi
+          for cookie in af_oa_pkce af_oa_state; do
+            grep -Eiq "^set-cookie: ${cookie}=[^;]+;.*HttpOnly;.*SameSite=Lax;.*Secure" "$headers" || {
+              echo "::error::Authentication start did not set a secure ${cookie} cookie."
+              exit 1
+            }
+          done
+
+      - name: Restore the previous pair after a failed production smoke
+        if: steps.production_smoke.outcome == 'failure'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          set -euo pipefail
+          bash scripts/railway-deploy-image.sh \
+            production \
+            "$API_SERVICE" \
+            "${{ steps.previous.outputs.api_ref }}" \
+            "${{ steps.previous.outputs.api_digest }}"
+          bash scripts/railway-deploy-image.sh \
+            production \
+            "$WEB_SERVICE" \
+            "${{ steps.previous.outputs.web_ref }}" \
+            "${{ steps.previous.outputs.web_digest }}"
+
+      - name: Fail a production smoke that required restoration
+        if: steps.production_smoke.outcome == 'failure'
+        run: |
+          echo "::error::Production health or authentication-start validation failed. The workflow restored the previous API and web pair; production tags were not moved."
+          exit 1
+
       - name: Move production tags after both services succeed
+        if: steps.production_smoke.outcome == 'success'
         run: |
           set -euo pipefail
           docker buildx imagetools create \

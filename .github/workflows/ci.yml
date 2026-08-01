@@ -64,10 +64,11 @@ jobs:
               - ".github/workflows/ci.yml"
               - ".github/workflows/sdk-release.yml"
             examples:
-              - "backend/public/agent-feedback-node-0.1.0.tgz"
+              - "backend/public/agent-feedback-node-0.2.0.tgz"
               - "sdk/node/**"
               - "examples/node-express/**"
               - "examples/node-mcp/**"
+              - "examples/static-docs-edge/**"
               - ".dockerignore"
               - ".github/workflows/build-node-examples.yml"
               - ".github/workflows/ci.yml"
@@ -196,7 +197,7 @@ jobs:
           if-no-files-found: error
 
   examples:
-    name: Node examples
+    name: Product examples
     needs: changes
     if: needs.changes.outputs.examples == 'true'
     runs-on: ubuntu-latest
@@ -209,14 +210,24 @@ jobs:
           cache-dependency-path: |
             examples/node-express/package-lock.json
             examples/node-mcp/package-lock.json
+            examples/static-docs-edge/package-lock.json
       - name: Install locked production dependencies
         run: |
           npm ci --prefix examples/node-express --omit=dev --ignore-scripts
           npm ci --prefix examples/node-mcp --omit=dev --ignore-scripts
+          npm install \
+            --prefix examples/static-docs-edge \
+            --ignore-scripts \
+            --no-save \
+            --package-lock=false \
+            wrangler@4.118.0 \
+            "$GITHUB_WORKSPACE/backend/public/agent-feedback-node-0.2.0.tgz"
       - name: Check entry points
         run: |
           node --check examples/node-express/src/index.js
           node --check examples/node-mcp/src/index.js
+      - name: Validate static edge worker bundle
+        run: npm run --prefix examples/static-docs-edge check
       - name: Smoke-test health endpoints
         env:
           AGENT_FEEDBACK_KEY: af_live_11111111111111111111111111111111_22222222222222222222222222222222_abcdefghijklmnopqrstuvwxyz

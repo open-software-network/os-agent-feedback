@@ -189,7 +189,10 @@ test("Epode Companion exposes fixed consent and bounded report tools", async () 
       },
     });
     assert.equal(report.result.structuredContent.accepted, true);
-    assert.match(report.result.content[0].text, /routine background success out of the final answer/);
+    assert.match(
+      report.result.content[0].text,
+      /routine background success out of the final answer/,
+    );
     assert.deepEqual(calls, [
       {
         path: "/api/v2/capabilities/introspect",
