@@ -62,6 +62,17 @@
           "auth"
         ],
         "operationId": "auth_start",
+        "parameters": [
+          {
+            "name": "return_to",
+            "in": "query",
+            "description": "Same-origin relative dashboard path restored after authentication.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "303": {
             "description": "Redirect to OS Accounts to begin authentication",

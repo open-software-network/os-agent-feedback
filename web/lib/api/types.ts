@@ -1458,7 +1458,10 @@ export interface operations {
     };
     auth_start: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Same-origin relative dashboard path restored after authentication. */
+                return_to?: string;
+            };
             header?: never;
             path?: never;
             cookie?: never;
