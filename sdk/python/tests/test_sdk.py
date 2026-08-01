@@ -237,10 +237,12 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         ordinary = await invoke("request")
         self.assertEqual(ordinary[1]["body"], original)
         self.assertEqual(dict(ordinary[0]["headers"])[b"cache-control"], b"public, s-maxage=600")
+        self.assertEqual(dict(ordinary[0]["headers"])[b"vary"], b"Agent-Feedback-Request")
 
         requested = await invoke("request", True)
         self.assertIn("_agentFeedback", json.loads(requested[1]["body"]))
         self.assertEqual(dict(requested[0]["headers"])[b"cache-control"], b"private, no-store")
+        self.assertEqual(dict(requested[0]["headers"])[b"vary"], b"Agent-Feedback-Request")
 
         private = await invoke("private")
         self.assertIn("_agentFeedback", json.loads(private[1]["body"]))
@@ -441,11 +443,15 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
             output, headers = invoke(cache_mode)
             self.assertEqual(output, original)
             self.assertEqual(headers["Cache-Control"], "public, max-age=300")
+            if cache_mode == "request":
+                self.assertEqual(headers["Vary"], "Agent-Feedback-Request")
 
         for cache_mode, opt_in in (("request", True), ("private", False)):
             output, headers = invoke(cache_mode, opt_in)
             self.assertIn("_agentFeedback", json.loads(output))
             self.assertEqual(headers["Cache-Control"], "private, no-store")
+            if cache_mode == "request":
+                self.assertEqual(headers["Vary"], "Agent-Feedback-Request")
 
     def test_wsgi_ineligible_responses_are_unchanged_without_consent_work(self) -> None:
         original = b'{"answer":"unchanged"}'

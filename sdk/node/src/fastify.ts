@@ -23,8 +23,25 @@ type RequestState = {
 };
 
 export type AgentFeedbackFastifyPlugin = FastifyPluginAsync & {
+  /** Flush queued telemetry, for serverless waitUntil/lifecycle hooks. */
+  flush(): Promise<void>;
   shutdown(): Promise<void>;
 };
+
+function ensureRequestVary(reply: {
+  header(name: string, value: string): unknown;
+  getHeader(name: string): unknown;
+}): void {
+  const current = String(reply.getHeader("vary") || "");
+  const tokens = current
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (!tokens.some((value) => value.toLowerCase() === "agent-feedback-request")) {
+    tokens.push("Agent-Feedback-Request");
+  }
+  reply.header("vary", tokens.join(", "));
+}
 
 export function agentFeedback(
   options: AgentFeedbackOptions<FastifyRequest>,
@@ -119,6 +136,9 @@ export function agentFeedback(
     });
 
     app.addHook("onSend", async (request, reply, payload) => {
+      if (runtime.cacheMode === "request" && runtime.matches(request.url)) {
+        ensureRequestVary(reply);
+      }
       const contentType = String(reply.getHeader("content-type") || "");
       if (typeof payload === "string" && contentType.includes("text/html")) {
         const prepared = attach(request, reply, "http_html", payload)?.prepared;
@@ -168,6 +188,7 @@ export function agentFeedback(
     name: "agent-feedback",
     fastify: ">=4 <6",
   }) as unknown as AgentFeedbackFastifyPlugin;
+  plugin.flush = () => runtime.flush();
   plugin.shutdown = () => runtime.shutdown();
   return plugin;
 }

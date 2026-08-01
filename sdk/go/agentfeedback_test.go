@@ -184,6 +184,11 @@ func TestMiddlewareCacheModesPreservePublicResponsesUnlessExplicit(t *testing.T)
 			if got := response.Header().Get("Cache-Control"); got != wantCache {
 				t.Fatalf("Cache-Control = %q, want %q", got, wantCache)
 			}
+			if test.mode == CacheRequest {
+				if got := response.Header().Values("Vary"); !strings.Contains(strings.Join(got, ","), "Agent-Feedback-Request") {
+					t.Fatalf("Vary = %q, want Agent-Feedback-Request", got)
+				}
+			}
 			if err := runtime.Shutdown(context.Background()); err != nil {
 				t.Fatal(err)
 			}

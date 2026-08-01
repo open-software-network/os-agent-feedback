@@ -9,6 +9,15 @@ from .core import AgentFeedback, AgentFeedbackOptions, encoded_envelope, inject_
 MAX_BODY_BYTES = 1024 * 1024
 
 
+def _with_request_vary(headers: list[tuple[bytes, bytes]]) -> list[tuple[bytes, bytes]]:
+    for name, value in headers:
+        if name.lower() != b"vary":
+            continue
+        if any(token.strip().lower() == b"agent-feedback-request" for token in value.split(b",")):
+            return headers
+    return [*headers, (b"vary", b"Agent-Feedback-Request")]
+
+
 class AgentFeedbackASGI:
     """Dependency-free ASGI middleware for FastAPI, Starlette, Quart, and Django ASGI."""
 
@@ -24,6 +33,18 @@ class AgentFeedbackASGI:
             name.lower() == b"agent-feedback-request" and value.strip() == b"1"
             for name, value in scope.get("headers", [])
         )
+        if self.runtime.options.cache_mode == "request":
+            original_send = send
+
+            async def send_with_request_vary(message: dict[str, Any]) -> None:
+                if message.get("type") == "http.response.start":
+                    message = {
+                        **message,
+                        "headers": _with_request_vary(list(message.get("headers", []))),
+                    }
+                await original_send(message)
+
+            send = send_with_request_vary
         if self.runtime.options.cache_mode == "request" and not request_opt_in:
             await self.app(scope, receive, send)
             return

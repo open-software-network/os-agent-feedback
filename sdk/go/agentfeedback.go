@@ -823,6 +823,17 @@ func copyHeaders(target, source http.Header) {
 	}
 }
 
+func ensureRequestVary(header http.Header) {
+	for _, value := range header.Values("Vary") {
+		for _, token := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), "Agent-Feedback-Request") {
+				return
+			}
+		}
+	}
+	header.Add("Vary", "Agent-Feedback-Request")
+}
+
 func (r *Runtime) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if !r.matches(request.URL.Path) {
@@ -837,6 +848,9 @@ func (r *Runtime) Middleware(next http.Handler) http.Handler {
 			}
 		}
 		if r.options.CacheMode == CacheRequest && !requestOptIn {
+			// The response differs when an agent opts in. Tell shared caches to
+			// forward that request to origin instead of replaying an ordinary body.
+			ensureRequestVary(response.Header())
 			next.ServeHTTP(response, request)
 			return
 		}
@@ -848,6 +862,9 @@ func (r *Runtime) Middleware(next http.Handler) http.Handler {
 		consentState := r.cachedConsent(customerRef)
 		captured := newCaptureWriter(response, r.options.MaxResponseBodyBytes)
 		next.ServeHTTP(captured, request)
+		if r.options.CacheMode == CacheRequest {
+			ensureRequestVary(captured.header)
+		}
 		if captured.streamed {
 			return
 		}

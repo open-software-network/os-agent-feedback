@@ -60,7 +60,8 @@ In `Include`/`Exclude` patterns, `*` matches exactly one path segment and `**` m
 `CacheMode` controls how instrumentation interacts with HTTP caching. The default `CacheSafe` skips
 responses that declare a shared cache policy (`public`, `max-age`, `s-maxage`, `immutable`). Use
 `CachePrivate` only when replacing shared caching with `private, no-store` is intentional, or
-`CacheRequest` to instrument only requests that opt in with the `Agent-Feedback-Request: 1` header.
+`CacheRequest` to instrument only requests that opt in with the `Agent-Feedback-Request: 1` header. Request
+mode adds `Vary: Agent-Feedback-Request` to both variants so shared caches keep them separate.
 
 ## Verify
 

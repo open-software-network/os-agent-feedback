@@ -33,6 +33,10 @@ app.wsgi_app = AgentFeedbackWSGI(
 The conservative WSGI adapter uses the `Agent-Feedback` response header for finite responses. It does
 not buffer or mutate the application body.
 
+With `cache_mode="request"`, only callers sending `Agent-Feedback-Request: 1` receive a contract. The
+middleware adds `Vary: Agent-Feedback-Request` to ordinary and opted-in responses so a shared cache cannot
+hide the opted-in request.
+
 ## Server-rendered HTML
 
 Included HTML pages use that same response-header handoff. The page body remains byte-for-byte unchanged,

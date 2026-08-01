@@ -18,7 +18,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
 use http::{
     HeaderMap, HeaderValue, Method, Request,
-    header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, LINK},
+    header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, LINK, VARY},
 };
 use http_body::Body as HttpBody;
 use serde::{Deserialize, Serialize};
@@ -816,7 +816,9 @@ where
                 .and_then(|value| value.to_str().ok())
                 .is_some_and(|value| value.trim() == "1");
             if runtime.options.cache_mode == HttpCacheMode::Request && !request_opt_in {
-                return inner.call(request).await;
+                let mut response = inner.call(request).await?;
+                ensure_request_vary(response.headers_mut());
+                return Ok(response);
             }
             let method = request.method().clone();
             let customer_ref = extract(&runtime.options.customer_ref, &request);
@@ -824,7 +826,7 @@ where
             let runtime_hint = extract(&runtime.options.runtime_hint, &request);
             let started = Instant::now();
             let response = inner.call(request).await?;
-            Ok(instrument_response(
+            let mut response = instrument_response(
                 &runtime,
                 response,
                 method,
@@ -834,8 +836,25 @@ where
                 session_ref,
                 runtime_hint,
             )
-            .await)
+            .await;
+            if runtime.options.cache_mode == HttpCacheMode::Request {
+                ensure_request_vary(response.headers_mut());
+            }
+            Ok(response)
         })
+    }
+}
+
+fn ensure_request_vary(headers: &mut HeaderMap) {
+    let present = headers.get_all(VARY).iter().any(|value| {
+        value.to_str().is_ok_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("agent-feedback-request"))
+        })
+    });
+    if !present {
+        headers.append(VARY, HeaderValue::from_static("Agent-Feedback-Request"));
     }
 }
 
@@ -1722,11 +1741,21 @@ mod tests {
                 .to_str()
                 .unwrap()
                 .to_string();
+            let vary = response
+                .headers()
+                .get_all(VARY)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .collect::<Vec<_>>()
+                .join(",");
             let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
                 .await
                 .unwrap();
             let value: Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(value.get("_agentFeedback").is_some(), instrumented);
+            if mode == HttpCacheMode::Request {
+                assert!(vary.contains("Agent-Feedback-Request"));
+            }
             assert_eq!(
                 cache_control,
                 if instrumented {

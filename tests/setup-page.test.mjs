@@ -78,7 +78,7 @@ test("dashboard action notices are ephemeral fixed toasts", () => {
 
 test("products exist before integration setup without an environment picker", () => {
   assert.match(dashboardHtml, /id="product-scope"/);
-  assert.match(dashboardHtml, /app\.js\?v=20260731-companion/);
+  assert.match(dashboardHtml, /app\.js\?v=20260731-coverage/);
   assert.match(dashboardScript, /Create your first product/);
   assert.match(dashboardScript, /id="product-select"/);
   assert.match(dashboardScript, /\+ New product/);
@@ -134,8 +134,13 @@ test("setup offers one guided install with a manual fallback", () => {
 test("setup explains the real customer-agent coverage path", () => {
   assert.match(dashboardScript, /Customer-agent coverage: native MCP/);
   assert.match(dashboardScript, /No separate Epode install is required/);
-  assert.match(dashboardScript, /Customer-agent coverage: HTTP/);
-  assert.match(dashboardScript, /Epode Companion makes this reliable in Codex and Claude Code/);
+  assert.match(dashboardScript, /CUSTOMER COVERAGE/);
+  assert.match(
+    dashboardScript,
+    /Your company-side integration is complete without another install/,
+  );
+  assert.match(dashboardScript, /optionally share Epode Companion once/);
+  assert.match(dashboardScript, /reliable Codex and Claude Code handling/);
   assert.match(dashboardScript, /codex plugin marketplace add open-software-network\/os-epode/);
   assert.match(
     dashboardScript,
@@ -166,7 +171,7 @@ test("setup warns about legacy keys and keeps rotation visible", () => {
   assert.match(dashboardScript, /\/\^af_\(live\|read\)_\[0-9a-f\]\{8\}\$\//);
   assert.match(dashboardScript, /class="secret-callout warning"/);
   assert.match(dashboardStyles, /\.secret-callout\.warning/);
-  assert.match(dashboardHtml, /styles\.css\?v=20260731-companion/);
+  assert.match(dashboardHtml, /styles\.css\?v=20260731-coverage/);
   assert.match(dashboardScript, /legacy key and cannot produce valid afr2 capabilities/i);
   assert.match(dashboardScript, /V2 integrations will fail boot validation/);
   assert.match(dashboardScript, /current key will keep working for one hour/);
@@ -298,8 +303,8 @@ test("setup verifies the connection with data from its own product key", () => {
 test("setup communicates the HTTP and MCP evidence models separately", () => {
   assert.match(dashboardScript, /confirmed agent interaction/);
   assert.match(dashboardScript, /becomes confirmed when its receipt returns/);
-  assert.match(dashboardScript, /Telemetry is asynchronous/);
-  assert.match(dashboardScript, /Ask once state lookup is bounded/);
+  assert.match(dashboardScript, /Telemetry and Ask once state refreshes run in the background/);
+  assert.match(dashboardScript, /never delay the product response/);
   assert.match(dashboardScript, /MCP 2026-07-28 is stateless/);
   assert.match(dashboardScript, /createMcpInstrumentation/);
   assert.match(dashboardScript, /context\.http\?\.authInfo\?\.extra\?\.accountId/);

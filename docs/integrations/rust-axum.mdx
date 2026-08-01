@@ -49,6 +49,13 @@ Finite bodies with an exact bounded size can be instrumented. Streams and unknow
 If an advertised safe body fails while being read, the middleware returns an explicit non-empty 500 instead
 of disguising the body failure as a success.
 
+## Shared caching
+
+The default `HttpCacheMode::Safe` leaves explicitly shared-cacheable responses unchanged. Request mode
+instruments only callers sending `Agent-Feedback-Request: 1` and adds `Vary: Agent-Feedback-Request` to both
+ordinary and opted-in responses. Use private mode only when disabling shared caching for every included
+response is intentional.
+
 ## Verify
 
 Send one request to each included surface, then verify the response contract and Setup telemetry. Call

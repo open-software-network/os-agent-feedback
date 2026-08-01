@@ -21,9 +21,15 @@ type Instrumentation = {
 };
 
 export type AgentFeedbackExpress = RequestHandler & {
+  /** Flush queued telemetry, for serverless waitUntil/lifecycle hooks. */
+  flush(): Promise<void>;
   shutdown(): Promise<void>;
   wrap(operation: string, handler: RequestHandler): RequestHandler;
 };
+
+function ensureRequestVary(response: Response): void {
+  response.vary("Agent-Feedback-Request");
+}
 
 export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeedbackExpress {
   const runtime = new AgentFeedbackRuntime(options);
@@ -32,6 +38,7 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
     const started = performance.now();
     const requestContext = runtime.context(request);
     const matched = runtime.matches(request.originalUrl || request.url);
+    if (matched && runtime.cacheMode === "request") ensureRequestVary(response);
     const consentState = matched
       ? runtime.cachedConsent(requestContext.customerRef)
       : "unavailable";
@@ -91,6 +98,7 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
     };
 
     response.json = ((body: unknown) => {
+      if (matched && runtime.cacheMode === "request") ensureRequestVary(response);
       if (isPlainObject(body)) {
         if (Object.hasOwn(body, "_agentFeedback")) {
           instrumentationSkipped = true;
@@ -112,6 +120,7 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
     }) as Response["json"];
 
     response.send = ((body?: unknown) => {
+      if (matched && runtime.cacheMode === "request") ensureRequestVary(response);
       const contentType = String(response.getHeader("content-type") || "");
       if (typeof body === "string" && contentType.includes("text/html")) {
         const current = attach("http_html", body);
@@ -154,6 +163,7 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
     next();
   }) as AgentFeedbackExpress;
 
+  middleware.flush = () => runtime.flush();
   middleware.shutdown = () => runtime.shutdown();
   middleware.wrap =
     (operation: string, handler: RequestHandler): RequestHandler =>

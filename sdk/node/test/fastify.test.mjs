@@ -86,6 +86,40 @@ test("Fastify Ask-once never awaits Epode and keeps consent_required through an 
   await app.close();
 });
 
+test("Fastify request cache mode varies ordinary and agent responses", async () => {
+  const app = Fastify();
+  const plugin = agentFeedback({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    include: ["/api/search"],
+    cacheMode: "request",
+    flushIntervalMs: 60_000,
+    fetch: async () => new Response("{}", { status: 202 }),
+  });
+  await app.register(plugin);
+  app.get("/api/search", async (_request, reply) => {
+    reply.header("cache-control", "public, max-age=300");
+    reply.header("vary", "Accept-Encoding");
+    return { answer: "cached" };
+  });
+  await app.ready();
+
+  const ordinary = await app.inject({ method: "GET", url: "/api/search" });
+  assert.equal(ordinary.json()._agentFeedback, undefined);
+  assert.match(ordinary.headers.vary, /Accept-Encoding/);
+  assert.match(ordinary.headers.vary, /Agent-Feedback-Request/);
+  const agent = await app.inject({
+    method: "GET",
+    url: "/api/search",
+    headers: { "agent-feedback-request": "1" },
+  });
+  assert.equal(agent.json()._agentFeedback.v, 1);
+  assert.equal(agent.headers["cache-control"], "private, no-store");
+  assert.match(agent.headers.vary, /Agent-Feedback-Request/);
+  await plugin.flush();
+  await app.close();
+});
+
 test("Fastify Ask-once does no consent work for ineligible responses", async () => {
   let consentLookups = 0;
   const app = Fastify();

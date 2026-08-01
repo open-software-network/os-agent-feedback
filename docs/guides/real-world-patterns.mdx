@@ -13,11 +13,16 @@ an agent identity or an Epode-only session.
 | Browser automation MCP | All browser tools | Close/finalize, or another real journey boundary | Browser session ID |
 | Documentation MCP | Resolve and query tools | Answer-bearing query | Agent run ID |
 | Email, payments, or issue MCP | Selected side-effecting tools | Each completed business operation | Authenticated workflow ID |
+| Authenticated multi-tenant API | Successful outcome-bearing routes | Each result the customer agent can judge | Existing tenant ID plus optional workflow ID |
+| Streaming or binary API | A later finite JSON summary, if one exists | Never the byte stream itself | Existing request or job ID |
+| Serverless API | The same outcome boundary as a long-lived server | Each finite result | Existing run ID; flush telemetry with `waitUntil` |
 
 ## Search APIs with shared caching
 
 If ordinary traffic shares a CDN response, use `cacheMode: "request"`. A feedback-aware caller sends
-`Agent-Feedback-Request: 1`; public callers keep the public cache policy.
+`Agent-Feedback-Request: 1`; public callers keep the public cache policy. The SDK adds
+`Vary: Agent-Feedback-Request` to both variants. If a CDN strips `Vary`, configure the same cache-key rule at
+the edge or do not use request mode.
 
 [Run the search example](https://github.com/open-software-network/os-epode/tree/main/examples/icp-search-express)
 
@@ -42,3 +47,23 @@ rejects feedback containing likely personal data, secrets, prompts, transcripts,
 The agent may retry the same handle with a safe abstract summary.
 
 [Run the authenticated operations example](https://github.com/open-software-network/os-epode/tree/main/examples/icp-operations-mcp)
+
+## Multi-tenant products
+
+Extract `customerRef` from verified server-side auth after the tenant has been selected. Use a stable opaque
+ID such as `acct_42`, not an email, display name, bearer token, or request body value. If a request can operate
+on behalf of another tenant, use the authorization result—not the caller-supplied target—as the source.
+
+## Streaming, binary, and large responses
+
+Epode deliberately leaves SSE, chunked streams, file downloads, images, archives, and other binary bodies
+untouched. Instrument a finite JSON completion or manifest endpoint only when it represents an outcome the
+agent has actually experienced. If no such endpoint exists, that surface has no safe HTTP outcome boundary;
+use native MCP or keep it uninstrumented.
+
+## Serverless lifecycle
+
+Create the SDK runtime outside the handler so warm invocations share its bounded queue. On Node platforms
+with a post-response lifecycle, pass `feedback.flush()` to `waitUntil`. Do not turn telemetry into a blocking
+dependency. A platform that freezes immediately after returning may drop opportunity telemetry; the product
+response and signed feedback submission remain independent.

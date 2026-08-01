@@ -4,10 +4,16 @@ import test from "node:test";
 
 import express from "express";
 
-import { AgentFeedbackRuntime, consentSubject } from "../dist/core.js";
+import { AgentFeedbackRuntime, consentSubject, matchPattern } from "../dist/core.js";
 import { agentFeedback } from "../dist/express.js";
 
 const key = `af_live_0123456789abcdef0123456789abcdef_${"x".repeat(32)}`;
+
+test("route globs distinguish one segment from nested documentation paths", () => {
+  assert.equal(matchPattern("/docs/guide", "/docs/*"), true);
+  assert.equal(matchPattern("/docs/platform/authentication", "/docs/*"), false);
+  assert.equal(matchPattern("/docs/platform/authentication", "/docs/**"), true);
+});
 
 test("Ask-once consent survives product-key rotation", () => {
   const scope = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -489,11 +495,38 @@ test("Express request cache mode instruments only explicit agent requests", asyn
   const ordinary = await fetch(`${server.url}/search`);
   assert.equal((await ordinary.json())._agentFeedback, undefined);
   assert.equal(ordinary.headers.get("cache-control"), "public, max-age=300");
+  assert.match(ordinary.headers.get("vary") || "", /Agent-Feedback-Request/i);
   const agent = await fetch(`${server.url}/search`, {
     headers: { "agent-feedback-request": "1" },
   });
   assert.equal((await agent.json())._agentFeedback.v, 1);
   assert.equal(agent.headers.get("cache-control"), "private, no-store");
+  assert.match(agent.headers.get("vary") || "", /Agent-Feedback-Request/i);
+  await middleware.shutdown();
+  await server.close();
+});
+
+test("Express exposes an explicit serverless telemetry flush hook", async () => {
+  const requests = [];
+  const middleware = agentFeedback({
+    apiKey: key,
+    include: ["/search"],
+    flushIntervalMs: 60_000,
+    fetch: async (url, init) => {
+      requests.push({ url: String(url), body: JSON.parse(init.body) });
+      return new Response("{}", { status: 202 });
+    },
+  });
+  const app = express();
+  app.use(middleware);
+  app.get("/search", (_request, response) => response.json({ answer: "found" }));
+  const server = await serve(app);
+
+  await fetch(`${server.url}/search`);
+  assert.equal(requests.length, 0);
+  await middleware.flush();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].body.events[0].operation, "/search");
   await middleware.shutdown();
   await server.close();
 });

@@ -15,6 +15,15 @@ from .core import (
 MAX_BODY_BYTES = 1024 * 1024
 
 
+def _with_request_vary(headers: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    for key, value in headers:
+        if key.lower() != "vary":
+            continue
+        if any(token.strip().lower() == "agent-feedback-request" for token in value.split(",")):
+            return headers
+    return [*headers, ("Vary", "Agent-Feedback-Request")]
+
+
 class AgentFeedbackWSGI:
     """Header-safe WSGI middleware for Flask, Django WSGI, Bottle, and Pyramid."""
 
@@ -28,7 +37,14 @@ class AgentFeedbackWSGI:
             return self.app(environ, start_response)
         request_opt_in = str(environ.get("HTTP_AGENT_FEEDBACK_REQUEST", "")).strip() == "1"
         if self.runtime.options.cache_mode == "request" and not request_opt_in:
-            return self.app(environ, start_response)
+            def start_response_with_request_vary(
+                status: str,
+                headers: list[tuple[str, str]],
+                exc_info: Any = None,
+            ) -> Any:
+                return start_response(status, _with_request_vary(headers), exc_info)
+
+            return self.app(environ, start_response_with_request_vary)
         started = time.perf_counter()
         context = self.runtime.context(environ)
         captured: dict[str, Any] = {}
@@ -120,6 +136,8 @@ class AgentFeedbackWSGI:
                         ),
                     ]
                 )
+        if self.runtime.options.cache_mode == "request":
+            headers = _with_request_vary(headers)
         writer = start_response(status, headers, captured.get("exc_info"))
         for chunk in writes:
             writer(chunk)

@@ -35,20 +35,23 @@ authentication. Never use a name, email address, prompt, or agent-supplied value
     Include only configured product routes. Exclude errors, redirects, assets, health/metrics, streams,
     binaries, and Epode's own endpoints.
   </Step>
-  <Step title="Resolve Ask once state">
+  <Step title="Create a stable Ask once subject">
     For `ask_once` with a stable customer reference, derive
     `afsub1_ + base64url(HMAC-SHA256(SHA256("epode-consent-scope:" + consent_scope), "customer-ref:" + trimmed_customer_ref))`,
     where `consent_scope` is the key's scope segment as defined in the protocol README. This keeps subjects
     stable across product-key rotation. The bundled `protocol/v1/README.md` and `conformance.json` are canonical;
     verify your derivation against the conformance vector before shipping.
-    POST that subject to `/api/v2/consent/state` with the product key and a bounded timeout (750 ms by
-    default). Cache known decisions briefly. If the lookup is unavailable, omit feedback instructions and
-    return the normal product response.
+    Do not put a consent lookup on the product response path. A cold response can safely emit a
+    subject-bound `consent_required` capability. Epode Companion inspects that capability and treats Epode's
+    remembered decision as authoritative before asking or reporting. You may refresh `/api/v2/consent/state`
+    in a bounded background task and cache approved or declined decisions briefly; an outage must never delay
+    or fail the product response.
   </Step>
   <Step title="Sign a capability locally">
     Follow the compact claim order and signing vector in `protocol/v1/conformance.json`. The capability
     must expire within two hours. Append the derived subject as the optional `s` claim only for durable
-    Ask once; never include the raw customer reference or product data.
+    Ask once; never include the raw customer reference or product data. Without a cached decision, emit the
+    cold `consent_required` stage rather than waiting on Epode.
   </Step>
   <Step title="Add the stage-appropriate handoff">
     Append `_agentFeedback` to JSON objects without wrapping them. Use the `Agent-Feedback` header for arrays,
@@ -57,11 +60,11 @@ authentication. Never use a name, email address, prompt, or agent-supplied value
     `state: "consent_required"` with only `requiredAction.submitDecision`; do not expose `submit` or a report
     schema before approval. A declined Ask once decision emits a non-requesting `state: "feedback_disabled"`
     envelope with only a `manageConsent` block so an explicit user request can later change the decision.
-    An unavailable Ask once lookup emits no handoff at all.
+    A failed background Ask once refresh leaves the cold subject-bound handoff intact.
   </Step>
   <Step title="Queue telemetry">
-    Send opportunity telemetry in bounded background batches. Telemetry delivery never delays the response;
-    the bounded Ask once state lookup is the only synchronous Epode request.
+    Send opportunity telemetry in bounded background batches. Neither telemetry delivery nor Ask once state
+    refresh may delay the response.
   </Step>
 </Steps>
 
