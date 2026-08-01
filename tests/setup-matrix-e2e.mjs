@@ -220,6 +220,26 @@ function assertConsentEnvelope(envelope, mode) {
   assert.doesNotMatch(envelope.instruction, /reportSchema|summary:string/);
 }
 
+function assertDisabledEnvelope(envelope) {
+  assert.equal(
+    validateEnvelopeSchema(envelope),
+    true,
+    `invalid disabled envelope: ${JSON.stringify(validateEnvelopeSchema.errors)}`,
+  );
+  assert.equal(envelope.v, 1);
+  assert.equal(envelope.requested, false);
+  assert.equal(envelope.state, "feedback_disabled");
+  assert.equal(envelope.mode, "ask_once");
+  assert.equal(envelope.configuredMode, "ask_once");
+  assert.equal(envelope.consentRequired, false);
+  assert.equal(envelope.consentPolicy, "once");
+  assert.equal(envelope.consentManagedBy, "epode");
+  assert.equal(envelope.requiredAction, undefined);
+  assert.equal(envelope.submit, undefined);
+  assert.equal(envelope.manageConsent.current, "declined");
+  assert.match(envelope.instruction, /Do not ask or submit feedback/);
+}
+
 async function decide(envelope, decision) {
   const action = envelope.requiredAction.submitDecision;
   const response = await fetch(action.url, {
@@ -239,7 +259,26 @@ async function decide(envelope, decision) {
   return body;
 }
 
-async function submit(envelope, summary) {
+async function inspectConsentEnvelope(envelope) {
+  const authorization = envelope?.requiredAction?.submitDecision?.authorization;
+  assert.match(authorization || "", /^Bearer afr2_/);
+  return inspectFeedbackHandle(authorization.replace(/^Bearer\s+/i, ""));
+}
+
+async function inspectFeedbackHandle(feedbackHandle) {
+  assert.match(feedbackHandle || "", /^afr2_/);
+  const authorization = `Bearer ${feedbackHandle}`;
+  const response = await fetch(`${backendUrl}/api/v2/capabilities/introspect`, {
+    method: "POST",
+    headers: { authorization, "content-type": "application/json" },
+    body: "{}",
+  });
+  const body = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(body));
+  return { authorization, body };
+}
+
+async function submitAction(action, summary) {
   const report = {
     summary,
     impact: "helped_with_friction",
@@ -259,9 +298,9 @@ async function submit(envelope, summary) {
     ],
     workaround: { used: true, detail: "The agent verified the result through the setup harness." },
   };
-  const response = await fetch(envelope.submit.url, {
+  const response = await fetch(action.url, {
     method: "POST",
-    headers: { authorization: envelope.submit.authorization, "content-type": "application/json" },
+    headers: { authorization: action.authorization, "content-type": "application/json" },
     body: JSON.stringify(report),
   });
   const body = await response.json();
@@ -270,9 +309,9 @@ async function submit(envelope, summary) {
   assert.equal(body.report.summary, summary);
   assert.equal(body.report.impact, "helped_with_friction");
   assert.equal(body.report.findings.length, 2);
-  const duplicate = await fetch(envelope.submit.url, {
+  const duplicate = await fetch(action.url, {
     method: "POST",
-    headers: { authorization: envelope.submit.authorization, "content-type": "application/json" },
+    headers: { authorization: action.authorization, "content-type": "application/json" },
     body: JSON.stringify({ summary: "This duplicate report must not replace the first report." }),
   });
   const duplicateBody = await duplicate.json();
@@ -280,6 +319,10 @@ async function submit(envelope, summary) {
   assert.equal(duplicateBody.report.id, body.report.id);
   assert.equal(duplicateBody.report.summary, summary);
   return body;
+}
+
+async function submit(envelope, summary) {
+  return submitAction(envelope.submit, summary);
 }
 
 async function testHttp(base, stack) {
@@ -342,9 +385,24 @@ async function testHttpConsent(base, stack, mode) {
 
     result = await readHttpSurface(base, path, approvedRef);
     if (mode === "ask_once") {
-      assertFeedbackEnvelope(result.envelope, "ask_once");
       const rememberedSummary = `Epode ${stack} ${surfaceName} remembered Ask once approval without asking again.`;
-      report = await submit(result.envelope, rememberedSummary);
+      if (result.envelope?.state === "feedback_ready") {
+        assertFeedbackEnvelope(result.envelope, "ask_once");
+        report = await submit(result.envelope, rememberedSummary);
+      } else {
+        assertConsentEnvelope(result.envelope, "ask_once");
+        const inspection = await inspectConsentEnvelope(result.envelope);
+        assert.equal(inspection.body.state, "feedback_ready");
+        assert.equal(inspection.body.configuredMode, "ask_once");
+        assert.equal(inspection.body.consentPolicy, "none");
+        report = await submitAction(
+          {
+            url: `${backendUrl}/api/v2/reports`,
+            authorization: inspection.authorization,
+          },
+          rememberedSummary,
+        );
+      }
       expected.set(rememberedSummary, {
         surface,
         operation: path,
@@ -361,11 +419,18 @@ async function testHttpConsent(base, stack, mode) {
     await decide(declined.envelope, "declined");
     const afterDecline = await readHttpSurface(base, path, declinedRef);
     if (mode === "ask_once") {
-      assert.equal(
-        afterDecline.envelope,
-        undefined,
-        `${stack}/${surfaceName} asked again after a durable refusal`,
-      );
+      if (afterDecline.envelope?.state === "feedback_disabled") {
+        assertDisabledEnvelope(afterDecline.envelope);
+      } else if (afterDecline.envelope !== undefined) {
+        assertConsentEnvelope(afterDecline.envelope, "ask_once");
+        const inspection = await inspectConsentEnvelope(afterDecline.envelope);
+        assert.equal(
+          inspection.body.state,
+          "declined",
+          `${stack}/${surfaceName} did not preserve the durable refusal`,
+        );
+        assert.equal(inspection.body.consentPolicy, "once");
+      }
     } else {
       assertConsentEnvelope(afterDecline.envelope, "ask_always");
     }
@@ -630,6 +695,20 @@ function assertMcpFeedbackReady(feedback, configuredMode) {
   assert.match(feedback.instruction, /do not ask again/i);
 }
 
+function assertMcpFeedbackDisabled(feedback) {
+  assert.equal(feedback.mode, "ask_once");
+  assert.equal(feedback.configuredMode, "ask_once");
+  assert.equal(feedback.state, "feedback_disabled");
+  assert.equal(feedback.required, false);
+  assert.equal(feedback.consentRequired, false);
+  assert.equal(feedback.consentPolicy, "once");
+  assert.equal(feedback.consentManagedBy, "epode");
+  assert.equal(feedback.reportTool, undefined);
+  assert.equal(feedback.consentTool, undefined);
+  assert.equal(feedback.question, undefined);
+  assert.match(feedback.instruction, /Do not ask or submit feedback/);
+}
+
 async function callMcpSearch(url, id, customerRef) {
   const payload = await mcpPost(
     url,
@@ -676,8 +755,15 @@ async function testMcpConsent(url, stack, mode) {
 
   feedback = await callMcpSearch(url, 205, headers["x-customer-ref"]);
   if (mode === "ask_once") {
-    assertMcpFeedbackReady(feedback, "ask_once");
     const rememberedSummary = `Epode ${stack} MCP remembered Ask once approval without asking again.`;
+    if (feedback?.state === "feedback_ready") {
+      assertMcpFeedbackReady(feedback, "ask_once");
+    } else {
+      assertMcpConsent(feedback, "ask_once");
+      const inspection = await inspectFeedbackHandle(feedback.feedbackHandle);
+      assert.equal(inspection.body.state, "feedback_ready");
+      assert.equal(inspection.body.configuredMode, "ask_once");
+    }
     report = await submitMcpReport(url, feedback.feedbackHandle, rememberedSummary, 206, headers);
     expected.set(rememberedSummary, {
       surface: "mcp",
@@ -704,7 +790,17 @@ async function testMcpConsent(url, stack, mode) {
   assert.equal(payload.result.structuredContent.reportTool, undefined);
   feedback = await callMcpSearch(url, 210, declinedHeaders["x-customer-ref"]);
   if (mode === "ask_once") {
-    assert.equal(feedback, undefined, `${stack}/mcp asked again after durable refusal`);
+    if (feedback?.state === "feedback_disabled") {
+      assertMcpFeedbackDisabled(feedback);
+    } else if (feedback !== undefined) {
+      assertMcpConsent(feedback, "ask_once");
+      const inspection = await inspectFeedbackHandle(feedback.feedbackHandle);
+      assert.equal(
+        inspection.body.state,
+        "declined",
+        `${stack}/mcp did not preserve the durable refusal`,
+      );
+    }
   } else {
     assertMcpConsent(feedback, "ask_always");
   }
@@ -1011,7 +1107,11 @@ try {
     `PASS persistence: all ${expected.size} Setup and consent permutations stored the exact structured report on the correct confirmed interaction`,
   );
   console.log(
-    "PASS setup matrix E2E: 7 API + 7 website + 2 MCP integrations across Never ask, Ask once, and Ask always",
+    `PASS setup matrix E2E: ${
+      selectedIntegrations.size === 0
+        ? "7 API + 7 website + 2 MCP integrations"
+        : [...selectedIntegrations].sort().join(", ")
+    } across Never ask, Ask once, and Ask always`,
   );
 } finally {
   for (const child of children) await stop(child);
