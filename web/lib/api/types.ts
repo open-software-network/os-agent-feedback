@@ -636,11 +636,15 @@ export interface components {
             expiresAt: string | null;
             /** Format: uuid */
             id: string;
+            /** Format: int64 */
+            interactionCount: number;
             kind: string;
             label: string;
             /** Format: date-time */
             lastUsedAt: string | null;
             prefix: string;
+            /** Format: int64 */
+            reportCount: number;
             /** Format: date-time */
             revokedAt: string | null;
         };

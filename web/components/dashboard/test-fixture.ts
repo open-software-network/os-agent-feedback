@@ -90,6 +90,8 @@ export function dashboardFixture(overrides: Partial<DashboardData> = {}): Dashbo
         expiresAt: null,
         lastUsedAt: now,
         revokedAt: null,
+        interactionCount: 1,
+        reportCount: 1,
       },
     ],
     interactions: [

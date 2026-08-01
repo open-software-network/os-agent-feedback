@@ -252,6 +252,8 @@ mod tests {
             last_used_at: None,
             revoked_at: None,
             expires_at: None,
+            interaction_count: 0,
+            report_count: 0,
         }
     }
 
@@ -496,6 +498,8 @@ mod tests {
                 "lastUsedAt",
                 "revokedAt",
                 "expiresAt",
+                "interactionCount",
+                "reportCount",
             ],
         );
         let product_response = assert_keys(ProductResponse { product: product() }, &["product"]);
@@ -572,6 +576,8 @@ mod tests {
                 "lastUsedAt",
                 "revokedAt",
                 "expiresAt",
+                "interactionCount",
+                "reportCount",
             ],
         );
         let api_key_rotated = assert_keys(
@@ -596,6 +602,8 @@ mod tests {
                 "lastUsedAt",
                 "revokedAt",
                 "expiresAt",
+                "interactionCount",
+                "reportCount",
             ],
         );
         let environment_response = assert_keys(

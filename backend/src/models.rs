@@ -219,6 +219,8 @@ pub(crate) struct ApiKeyPublic {
     pub revoked_at: Option<DateTime<Utc>>,
     #[schema(required = true, nullable)]
     pub expires_at: Option<DateTime<Utc>>,
+    pub interaction_count: i64,
+    pub report_count: i64,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

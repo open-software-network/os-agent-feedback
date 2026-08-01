@@ -72,11 +72,8 @@ export function SetupView({
   const integration = setupInstructions(stack, surface, origin);
   const agentPrompt = setupAgentPrompt(surface, stack, integration, origin);
   const activeReadClient = READ_CLIENTS[readClient];
-  const keyInteractions = writeKey
-    ? data.interactions.filter((interaction) => interaction.apiKeyId === writeKey.id)
-    : [];
-  const interactionIds = new Set(keyInteractions.map((interaction) => interaction.id));
-  const keyReports = data.reports.filter((report) => interactionIds.has(report.interactionId));
+  const keyInteractionCount = writeKeys.reduce((total, key) => total + key.interactionCount, 0);
+  const keyReportCount = writeKeys.reduce((total, key) => total + key.reportCount, 0);
   const editor = isEditor(data.currentRole);
   const readForm = useForm<z.infer<typeof readKeySchema>>({
     resolver: zodResolver(readKeySchema),
@@ -141,21 +138,15 @@ export function SetupView({
 
   const connectionRows = useMemo(
     () =>
-      data.apiKeys.map((key) => {
-        const interactionIdsForKey = new Set(
-          data.interactions.filter((item) => item.apiKeyId === key.id).map((item) => item.id),
-        );
-        const reports = data.reports.filter((item) => interactionIdsForKey.has(item.interactionId));
-        return {
-          key,
-          state: reports.length
-            ? "Feedback received"
-            : interactionIdsForKey.size
-              ? "Connected"
-              : "Never seen",
-        };
-      }),
-    [data.apiKeys, data.interactions, data.reports],
+      data.apiKeys.map((key) => ({
+        key,
+        state: key.reportCount
+          ? "Feedback received"
+          : key.interactionCount
+            ? "Connected"
+            : "Never seen",
+      })),
+    [data.apiKeys],
   );
 
   if (!environment || !data.currentProduct)
@@ -219,7 +210,7 @@ export function SetupView({
         <PageHeader
           eyebrow="Setup"
           title={`Connect ${data.currentProduct.name}`}
-          description={keyInteractions.length ? "Receiving data" : "Not connected"}
+          description={keyInteractionCount ? "Receiving data" : "Not connected"}
         />
       )}
       <Metrics
@@ -228,8 +219,8 @@ export function SetupView({
             label: "Product key",
             value: writeKey ? "Ready" : creatingWriteKey ? "Preparing" : "Missing",
           },
-          { label: "Telemetry", value: keyInteractions.length ? "Connected" : "Waiting" },
-          { label: "Agent feedback", value: keyReports.length ? "Received" : "Waiting" },
+          { label: "Telemetry", value: keyInteractionCount ? "Connected" : "Waiting" },
+          { label: "Agent feedback", value: keyReportCount ? "Received" : "Waiting" },
         ]}
       />
       {error ? <StatusMessage tone="error">{error}</StatusMessage> : null}
@@ -312,13 +303,13 @@ export function SetupView({
 
       <Panel title="3. Verify">
         <p>
-          {keyInteractions.length
-            ? `${keyInteractions.length} interaction(s) received.`
+          {keyInteractionCount
+            ? `${keyInteractionCount} interaction(s) received.`
             : "Waiting for the first interaction."}
         </p>
         <p>
-          {keyReports.length
-            ? `${keyReports.length} feedback report(s) received.`
+          {keyReportCount
+            ? `${keyReportCount} feedback report(s) received.`
             : "Waiting for agent feedback."}
         </p>
         <Button variant="outline" onClick={() => void refresh()}>

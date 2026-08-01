@@ -2077,7 +2077,8 @@ pub(crate) async fn create_product_with_default_key(
         r"INSERT INTO api_keys
         (id, workspace_id, environment_id, label, prefix, kind, key_hash)
         VALUES ($1, $2, $3, 'Default product key', $4, 'write', $5)
-        RETURNING id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at, expires_at",
+        RETURNING id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at,
+          expires_at, 0::BIGINT AS interaction_count, 0::BIGINT AS report_count",
     )
     .bind(key_id)
     .bind(workspace_id)
@@ -2247,7 +2248,8 @@ pub(crate) async fn create_api_key(
         r"INSERT INTO api_keys
         (id, workspace_id, environment_id, label, prefix, kind, key_hash, expires_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        RETURNING id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at, expires_at",
+        RETURNING id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at,
+          expires_at, 0::BIGINT AS interaction_count, 0::BIGINT AS report_count",
     )
     .bind(key_id)
     .bind(workspace_id)
@@ -2319,7 +2321,8 @@ pub(crate) async fn rotate_api_key(
         r"INSERT INTO api_keys
         (id, workspace_id, environment_id, label, prefix, kind, key_hash, expires_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        RETURNING id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at, expires_at",
+        RETURNING id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at,
+          expires_at, 0::BIGINT AS interaction_count, 0::BIGINT AS report_count",
     )
     .bind(successor_id)
     .bind(workspace_id)
@@ -3465,12 +3468,23 @@ pub(crate) async fn dashboard_with_limits(
         .as_ref()
         .map(|environment| environment.id);
     let api_keys = sqlx::query_as::<_, ApiKeyPublic>(
-        r"SELECT id, environment_id, label, prefix, kind, created_at, last_used_at, revoked_at, expires_at
-        FROM api_keys
-        WHERE environment_id = $1
-          AND revoked_at IS NULL
-          AND (expires_at IS NULL OR expires_at > NOW())
-        ORDER BY created_at DESC",
+        r"SELECT k.id, k.environment_id, k.label, k.prefix, k.kind, k.created_at,
+          k.last_used_at, k.revoked_at, k.expires_at,
+          COALESCE(activity.interaction_count, 0) AS interaction_count,
+          COALESCE(activity.report_count, 0) AS report_count
+        FROM api_keys k
+        LEFT JOIN (
+          SELECT i.api_key_id, COUNT(DISTINCT i.id)::BIGINT AS interaction_count,
+            COUNT(r.id)::BIGINT AS report_count
+          FROM interactions_v2 i
+          LEFT JOIN feedback_reports r ON r.interaction_id = i.id
+          WHERE i.environment_id = $1
+          GROUP BY i.api_key_id
+        ) activity ON activity.api_key_id = k.id
+        WHERE k.environment_id = $1
+          AND k.revoked_at IS NULL
+          AND (k.expires_at IS NULL OR k.expires_at > NOW())
+        ORDER BY k.created_at DESC",
     )
     .bind(environment_id)
     .fetch_all(pool)
@@ -9463,6 +9477,8 @@ mod product_tests {
             anyhow::ensure!(current_product.name == "Search v2");
             anyhow::ensure!(search_dashboard.interactions.len() == 1);
             anyhow::ensure!(search_dashboard.api_keys.len() == 1);
+            anyhow::ensure!(search_dashboard.api_keys[0].interaction_count == 1);
+            anyhow::ensure!(search_dashboard.api_keys[0].report_count == 0);
 
             let docs_dashboard = dashboard(&pool, context(), Some(docs.id), None)
                 .await

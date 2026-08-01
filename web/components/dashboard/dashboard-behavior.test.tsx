@@ -819,6 +819,62 @@ describe("dashboard view behavior", () => {
     expect(screen.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
   });
 
+  it("keeps setup status authoritative when key activity is outside the dashboard slice", () => {
+    const data = dashboardFixture({ interactions: [], reports: [] });
+    renderWithQuery(
+      <SetupView
+        data={data}
+        secrets={null}
+        rememberSecret={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        setNotice={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Receiving data")).toBeVisible();
+    expect(screen.getByText("1 interaction(s) received.")).toBeVisible();
+    expect(screen.getByText("1 feedback report(s) received.")).toBeVisible();
+    expect(screen.getByText(/Feedback received/)).toBeVisible();
+    expect(screen.queryByText("Never seen")).not.toBeInTheDocument();
+  });
+
+  it("keeps product setup connected while a rotated key overlaps its unused successor", () => {
+    const base = dashboardFixture();
+    const predecessor = base.apiKeys[0];
+    const successor = {
+      ...predecessor,
+      id: "88888888-8888-4888-8888-888888888888",
+      prefix: "af_live_5678efab",
+      createdAt: "2026-07-30T12:30:00Z",
+      lastUsedAt: null,
+      interactionCount: 0,
+      reportCount: 0,
+    };
+    const data = dashboardFixture({
+      apiKeys: [successor, predecessor],
+      interactions: [],
+      reports: [],
+    });
+
+    renderWithQuery(
+      <SetupView
+        data={data}
+        secrets={null}
+        rememberSecret={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        setNotice={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Receiving data")).toBeVisible();
+    expect(screen.getByText("1 interaction(s) received.")).toBeVisible();
+    expect(screen.getByText("1 feedback report(s) received.")).toBeVisible();
+    expect(screen.getAllByText(/af_live_5678efab/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/af_live_1234abcd/)).toBeVisible();
+    expect(screen.getByText(/Never seen/)).toBeVisible();
+    expect(screen.getByText(/Feedback received/)).toBeVisible();
+  });
+
   it("does not auto-recreate a removed write key and offers manual recovery", async () => {
     const data = dashboardFixture();
     const fetchMock = vi.fn();
