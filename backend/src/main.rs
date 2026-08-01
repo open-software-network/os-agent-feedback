@@ -64,15 +64,17 @@ use crate::{
         CapabilityInspectionResponse, ClassificationDiscovery, ConsentDecisionInput,
         ConsentStateInput, ConsentStateResponse, CreateApiKeyInput, CreateProductInput,
         CreateTeamInvitationInput, CurrentUser, DashboardContext, DashboardData,
-        DashboardSessionDetail, DeleteProductInput, FeedbackConsentDiscovery,
-        FeedbackDiscoveryResponse, FeedbackFindingShapeDiscovery, FeedbackListInteractionsInput,
-        FeedbackListReportsInput, FeedbackModesDiscovery, FeedbackRequiredFieldsDiscovery,
-        FeedbackSubmissionDiscovery, FeedbackWorkaroundShapeDiscovery, GithubIssueLink,
-        HealthResponse, IntegrationsDiscovery, McpDiscovery, MergeReportGroupsInput,
-        MergeReportGroupsResponse, PolicyInput, ProductAuth, ProductFeedbackAcceptedResponse,
-        ProductFeedbackReportInput, ProductGithubRepo, ProductGithubRepoInput,
-        ProductGroupsResponse, ReliabilityDiscovery, TelemetryBatchInput, TelemetryBatchResult,
-        TelemetryDiscovery, UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput,
+        DashboardFeedbackFilters, DashboardFeedbackPage, DashboardSessionDetail,
+        DashboardSessionFilters, DashboardSessionsPage, DeleteProductInput,
+        FeedbackConsentDiscovery, FeedbackDiscoveryResponse, FeedbackFindingShapeDiscovery,
+        FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackModesDiscovery,
+        FeedbackRequiredFieldsDiscovery, FeedbackSubmissionDiscovery,
+        FeedbackWorkaroundShapeDiscovery, GithubIssueLink, HealthResponse, IntegrationsDiscovery,
+        McpDiscovery, MergeReportGroupsInput, MergeReportGroupsResponse, PolicyInput, ProductAuth,
+        ProductFeedbackAcceptedResponse, ProductFeedbackReportInput, ProductGithubRepo,
+        ProductGithubRepoInput, ProductGroupsResponse, ReliabilityDiscovery, TelemetryBatchInput,
+        TelemetryBatchResult, TelemetryDiscovery, UpdateFeedbackWorkflowInput, UpdateNameInput,
+        UpdateTeamMemberInput,
     },
     os_accounts::{
         ACCESS_COOKIE, OsAccountsClient, PKCE_COOKIE, REFRESH_COOKIE, STATE_COOKIE, TokenPair,
@@ -87,15 +89,15 @@ use crate::{
         claim_group_issue_reconciliation, claim_group_issue_state_refresh,
         clear_product_github_repo, complete_group_issue_filing,
         complete_group_issue_reconciliation, create_api_key, create_product_with_default_key,
-        create_team_invitation, dashboard_interaction_by_id, dashboard_report_by_id,
-        dashboard_session_by_id, dashboard_with_limits, delete_product, feedback_consent_state,
-        feedback_list_interactions, feedback_list_reports, get_group_github_issue,
-        get_or_create_workspace, get_product_github_repo, github_installation_workspace,
-        group_issue_context, group_issue_sync_context, ingest_telemetry_batch,
-        inspect_feedback_capability, list_github_installations, list_product_groups,
-        mark_group_issue_filing_for_reconciliation, merge_report_groups,
-        purge_expired_product_data, read_product_auth, record_feedback_consent_decision,
-        regroup_report_groups, release_group_issue_filing_claim,
+        create_team_invitation, dashboard_feedback_page, dashboard_interaction_by_id,
+        dashboard_report_by_id, dashboard_session_by_id, dashboard_sessions_page,
+        dashboard_with_limits, delete_product, feedback_consent_state, feedback_list_interactions,
+        feedback_list_reports, get_group_github_issue, get_or_create_workspace,
+        get_product_github_repo, github_installation_workspace, group_issue_context,
+        group_issue_sync_context, ingest_telemetry_batch, inspect_feedback_capability,
+        list_github_installations, list_product_groups, mark_group_issue_filing_for_reconciliation,
+        merge_report_groups, purge_expired_product_data, read_product_auth,
+        record_feedback_consent_decision, regroup_report_groups, release_group_issue_filing_claim,
         release_group_issue_reconciliation_claim, remove_team_member, rename_product,
         rename_workspace, resolve_workspace_access, revert_last_commented_report_count,
         revoke_api_key, revoke_github_installation, revoke_team_invitation, rotate_api_key,
@@ -215,6 +217,8 @@ fn build_app_router() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(join_team_handler))
         .routes(routes!(logout_handler))
         .routes(routes!(dashboard_handler))
+        .routes(routes!(dashboard_feedback_list_handler))
+        .routes(routes!(dashboard_sessions_list_handler))
         .routes(routes!(
             dashboard_report_handler,
             update_feedback_workflow_handler
@@ -2464,6 +2468,175 @@ async fn dashboard_handler(
     dashboard_response(&state, Json(data), tokens)
 }
 
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
+struct DashboardFeedbackListQuery {
+    product_id: Uuid,
+    q: Option<String>,
+    status: Option<String>,
+    impact: Option<String>,
+    surface: Option<String>,
+    topic: Option<String>,
+    finding_kind: Option<String>,
+    severity: Option<String>,
+    tag: Option<String>,
+    assignee: Option<String>,
+    workaround: Option<String>,
+    operation: Option<String>,
+    customer_ref: Option<String>,
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+    #[param(default = 50, minimum = 1, maximum = 100)]
+    limit: Option<i64>,
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
+struct DashboardSessionsListQuery {
+    product_id: Uuid,
+    q: Option<String>,
+    kind: Option<String>,
+    impact: Option<String>,
+    operation: Option<String>,
+    customer_ref: Option<String>,
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+    #[param(default = 50, minimum = 1, maximum = 100)]
+    limit: Option<i64>,
+    cursor: Option<String>,
+}
+
+fn comma_values(value: Option<String>, field: &str) -> Result<Option<Vec<String>>, ApiError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.len() > 1_000 {
+        return Err(ApiError::bad_request(format!("{field} filter is too long")));
+    }
+    let values = value
+        .split(',')
+        .map(str::trim)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if values.is_empty() || values.len() > 20 || values.iter().any(String::is_empty) {
+        return Err(ApiError::bad_request(format!("Invalid {field} filter")));
+    }
+    Ok(Some(values))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/dashboard/feedback",
+    tag = "dashboard",
+    params(
+        DashboardFeedbackListQuery,
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Server-filtered feedback page", body = DashboardFeedbackPage),
+        (status = 400, description = "Invalid filters, time range, cursor, or page size", body = ApiErrorEnvelope),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot access the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Product not found in the team", body = ApiErrorEnvelope),
+        (status = 410, description = "Cursor is outside the retained window", body = ApiErrorEnvelope),
+        (status = 500, description = "Feedback page could not be loaded", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn dashboard_feedback_list_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<DashboardFeedbackListQuery>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    let assignees = comma_values(query.assignee, "assignee")?;
+    let include_unassigned = assignees
+        .as_deref()
+        .is_some_and(|values| values.iter().any(|value| value == "unassigned"));
+    let assignees = assignees.map(|values| {
+        values
+            .into_iter()
+            .filter(|value| value != "unassigned")
+            .collect::<Vec<_>>()
+    });
+    let page = dashboard_feedback_page(
+        &state.pool,
+        context.workspace.id,
+        query.product_id,
+        DashboardFeedbackFilters {
+            query: query.q,
+            statuses: comma_values(query.status, "status")?,
+            impacts: comma_values(query.impact, "impact")?,
+            surfaces: comma_values(query.surface, "surface")?,
+            topics: comma_values(query.topic, "topic")?,
+            finding_kinds: comma_values(query.finding_kind, "findingKind")?,
+            severities: comma_values(query.severity, "severity")?,
+            tags: comma_values(query.tag, "tag")?,
+            assignees,
+            include_unassigned,
+            workarounds: comma_values(query.workaround, "workaround")?,
+            operation: query.operation,
+            customer_ref: query.customer_ref,
+            since: query.since,
+            until: query.until,
+            limit: query.limit,
+            cursor: query.cursor,
+        },
+    )
+    .await?;
+    dashboard_response(&state, Json(page), tokens)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/dashboard/sessions",
+    tag = "dashboard",
+    params(
+        DashboardSessionsListQuery,
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Server-filtered sessions page with complete rollups", body = DashboardSessionsPage),
+        (status = 400, description = "Invalid filters, time range, cursor, or page size", body = ApiErrorEnvelope),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot access the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Product not found in the team", body = ApiErrorEnvelope),
+        (status = 410, description = "Cursor is outside the retained window", body = ApiErrorEnvelope),
+        (status = 500, description = "Sessions page could not be loaded", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn dashboard_sessions_list_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<DashboardSessionsListQuery>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    let page = dashboard_sessions_page(
+        &state.pool,
+        context.workspace.id,
+        query.product_id,
+        DashboardSessionFilters {
+            query: query.q,
+            kind: query.kind,
+            impacts: comma_values(query.impact, "impact")?,
+            operation: query.operation,
+            customer_ref: query.customer_ref,
+            since: query.since,
+            until: query.until,
+            limit: query.limit,
+            cursor: query.cursor,
+        },
+    )
+    .await?;
+    dashboard_response(&state, Json(page), tokens)
+}
+
 #[utoipa::path(
     get,
     path = "/api/dashboard/reports/{report_id}",
@@ -3982,7 +4155,7 @@ mod page_tests {
 
     use super::{
         ApiError, GithubIssue, GroupIssueReconciliationDecision, GroupIssueReconciliationEvidence,
-        GroupIssueReconciliationInconclusive, build_app_router, feedback_discovery,
+        GroupIssueReconciliationInconclusive, build_app_router, comma_values, feedback_discovery,
         github_callback_redirect_target, group_issue_reconciliation_resolution,
         group_issue_state_refresh_due, group_issue_sync_needed, group_marker_comment,
         mcp_auth_error, mcp_tool_allowed, mcp_tools, resolve_web_app_url, reveal_auth_error,
@@ -3993,6 +4166,30 @@ mod page_tests {
 
     const NON_API_ROUTES: &[&str] = &["GET /"];
     const COVERAGE_GUARD_GUIDANCE: &str = "route registration form not understood by the coverage guard — teach `served_operations` about it or register API handlers with `.routes(routes!(handler))`";
+
+    #[test]
+    fn dashboard_comma_filters_are_bounded_and_unambiguous() {
+        assert_eq!(
+            comma_values(Some("new, investigating".into()), "status")
+                .expect("valid comma list should parse"),
+            Some(vec!["new".into(), "investigating".into()])
+        );
+        for invalid in ["new,", ",new", "", &"x".repeat(1_001)] {
+            assert!(comma_values(Some(invalid.to_owned()), "status").is_err());
+        }
+        assert!(
+            comma_values(
+                Some(
+                    (0..21)
+                        .map(|index| format!("v{index}"))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                "status"
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn failed_authentication_message_is_revealed() {

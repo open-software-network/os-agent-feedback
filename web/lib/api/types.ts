@@ -262,6 +262,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/dashboard/feedback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["dashboard_feedback_list_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/dashboard/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["dashboard_sessions_list_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/dashboard/reports/{report_id}": {
         parameters: {
             query?: never;
@@ -639,6 +671,18 @@ export interface components {
             decision: string;
         };
         ConsentDecisionResponse: {
+            /**
+             * @description True when this call recorded the standing decision; false when a prior
+             *     decision already stood and was returned unchanged.
+             */
+            changed: boolean;
+            /**
+             * Format: date-time
+             * @description When the standing decision was made. Matches the request time when this
+             *     call recorded the decision, and the original decision time when a prior
+             *     decision stands.
+             */
+            decidedAt: string;
             feedback: unknown;
             state: string;
         };
@@ -687,6 +731,20 @@ export interface components {
             workspace: components["schemas"]["Workspace"];
             workspaceMemberships: components["schemas"]["WorkspaceMembership"][];
         };
+        /**
+         * @description A bounded, server-filtered page of feedback reports.
+         *
+         *     `total` is computed from the complete retained product dataset with the
+         *     active filters, not from the returned page.
+         */
+        DashboardFeedbackPage: {
+            /** Format: int64 */
+            limit: number;
+            nextCursor: string | null;
+            reports: components["schemas"]["ProductFeedbackReportWithInteraction"][];
+            /** Format: int64 */
+            total: number;
+        };
         DashboardInteractionResponse: {
             interaction: components["schemas"]["ProductInteraction"];
         };
@@ -708,6 +766,16 @@ export interface components {
             interactions: components["schemas"]["ProductInteraction"][];
             reports: components["schemas"]["ProductFeedbackReportWithInteraction"][];
             session: components["schemas"]["ProductSession"];
+        };
+        DashboardSessionRollup: {
+            /** Format: double */
+            averageInteractions: number;
+            /** Format: int64 */
+            interactions: number;
+            /** Format: int64 */
+            multiStepSessions: number;
+            /** Format: int64 */
+            sessions: number;
         };
         /**
          * @description A session row enriched with complete server-side rollups for the dashboard.
@@ -739,6 +807,19 @@ export interface components {
             strongestImpact: string | null;
             /** Format: uuid */
             workspaceId: string;
+        };
+        /**
+         * @description A bounded, server-filtered page of proven sessions.
+         *
+         *     The rollup is computed across every retained session matching the active
+         *     filters, independently of the current page.
+         */
+        DashboardSessionsPage: {
+            /** Format: int64 */
+            limit: number;
+            nextCursor: string | null;
+            rollup: components["schemas"]["DashboardSessionRollup"];
+            sessions: components["schemas"]["DashboardSessionSummary"][];
         };
         DeleteProductInput: {
             confirmation: string;
@@ -2521,6 +2602,189 @@ export interface operations {
                 };
             };
             /** @description Dashboard state could not be loaded */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    dashboard_feedback_list_handler: {
+        parameters: {
+            query: {
+                productId: string;
+                q?: string;
+                status?: string;
+                impact?: string;
+                surface?: string;
+                topic?: string;
+                findingKind?: string;
+                severity?: string;
+                tag?: string;
+                assignee?: string;
+                workaround?: string;
+                operation?: string;
+                customerRef?: string;
+                since?: string;
+                until?: string;
+                limit?: number;
+                cursor?: string;
+            };
+            header?: {
+                /** @description Team to access; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Server-filtered feedback page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DashboardFeedbackPage"];
+                };
+            };
+            /** @description Invalid filters, time range, cursor, or page size */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot access the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Product not found in the team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Cursor is outside the retained window */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Feedback page could not be loaded */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    dashboard_sessions_list_handler: {
+        parameters: {
+            query: {
+                productId: string;
+                q?: string;
+                kind?: string;
+                impact?: string;
+                operation?: string;
+                customerRef?: string;
+                since?: string;
+                until?: string;
+                limit?: number;
+                cursor?: string;
+            };
+            header?: {
+                /** @description Team to access; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Server-filtered sessions page with complete rollups */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DashboardSessionsPage"];
+                };
+            };
+            /** @description Invalid filters, time range, cursor, or page size */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot access the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Product not found in the team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Cursor is outside the retained window */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Sessions page could not be loaded */
             500: {
                 headers: {
                     [name: string]: unknown;

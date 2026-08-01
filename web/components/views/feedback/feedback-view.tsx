@@ -1,6 +1,6 @@
 "use client";
 
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
 import { IconArrowUpRight } from "central-icons/IconArrowUpRight";
 import { IconCalendarCheck } from "central-icons/IconCalendarCheck";
 import { IconCheckCircle2 } from "central-icons/IconCheckCircle2";
@@ -40,6 +40,7 @@ import type {
   DashboardReportResponse,
   ProductFeedbackReport,
 } from "@/lib/api/dashboard";
+import { fetchDashboardFeedbackPage } from "@/lib/api/dashboard";
 import {
   fetchProductGroupsWindow,
   fileGroupGithubIssue,
@@ -124,7 +125,6 @@ export function FeedbackView({
   selectReport,
   openInteraction,
   openSession,
-  loadMore,
   refresh,
   setNotice,
 }: {
@@ -133,7 +133,8 @@ export function FeedbackView({
   selectReport: (reportId: string | null) => void;
   openInteraction: (interactionId: string) => void;
   openSession: (sessionId: string) => void;
-  loadMore: () => void;
+  /** @deprecated Pagination is now owned by the server-backed list query. */
+  loadMore?: () => void;
   refresh: () => Promise<unknown>;
   setNotice: (message: string) => void;
 }) {
@@ -144,7 +145,47 @@ export function FeedbackView({
   const [mode, setMode] = useState<FeedbackMode>("reports");
   const [groupLimit, setGroupLimit] = useState(groupsPageSize);
   const productId = data.currentProduct?.id;
-  const loadedReport = data.reports.find((report) => report.id === selectedReportId);
+  const since = useMemo(() => rangeStart(range), [range]);
+  const reportPages = useInfiniteQuery({
+    queryKey: ["feedback-list", data.workspace.id, productId, query, filters, since],
+    queryFn: ({ pageParam }) =>
+      fetchDashboardFeedbackPage(data.workspace.id, {
+        productId: productId ?? "",
+        q: query.trim() || undefined,
+        status: filters.status,
+        impact: filters.impact,
+        surface: filters.surface,
+        topic: filters.topic,
+        findingKind: filters.kind,
+        severity: filters.severity,
+        tag: filters.tag,
+        assignee: filters.assignee,
+        workaround: filters.workaround,
+        since,
+        limit: 50,
+        cursor: pageParam,
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page) => page.nextCursor ?? undefined,
+    initialData: {
+      pages: [
+        {
+          reports: data.reports,
+          total: data.listState.reportsTotal,
+          limit: Math.min(100, Math.max(1, data.reports.length || 50)),
+          nextCursor: null,
+        },
+      ],
+      pageParams: [undefined],
+    },
+    initialDataUpdatedAt: 0,
+    enabled: Boolean(productId),
+  });
+  const reports =
+    reportPages.data?.pages.flatMap((page) => (Array.isArray(page.reports) ? page.reports : [])) ??
+    [];
+  const reportTotal = reportPages.data?.pages[0]?.total ?? data.listState.reportsTotal;
+  const loadedReport = reports.find((report) => report.id === selectedReportId);
   const detail = useQuery({
     queryKey: ["feedback", data.workspace.id, productId, selectedReportId],
     queryFn: () =>
@@ -187,11 +228,11 @@ export function FeedbackView({
   }, []);
 
   const filterOptions = useMemo<Record<FeedbackFacet, FilterOption[]>>(() => {
-    const findings = data.reports.flatMap(reportFindings);
+    const findings = reports.flatMap(reportFindings);
     const memberNames = new Map(
       data.teamMembers.map((member) => [member.osUserId, member.displayName]),
     );
-    const assignedIds = unique(data.reports.map((report) => report.assigneeOsUserId));
+    const assignedIds = unique(reports.map((report) => report.assigneeOsUserId));
     const assigneeIds = unique([
       ...data.teamMembers.map((member) => member.osUserId),
       ...assignedIds,
@@ -200,7 +241,7 @@ export function FeedbackView({
     return {
       status: workflowStatuses.map((value) => ({ value, label: workflowLabels[value] })),
       impact: impactValues.map((value) => ({ value, label: impactLabels[value] })),
-      surface: unique(data.reports.map((report) => report.surface)).map((value) => ({
+      surface: unique(reports.map((report) => report.surface)).map((value) => ({
         value,
         label: interfaceLabel(value),
       })),
@@ -216,7 +257,7 @@ export function FeedbackView({
         value,
         label: titleCase(value),
       })),
-      tag: unique(data.reports.flatMap((report) => report.tags)).map((value) => ({
+      tag: unique(reports.flatMap((report) => report.tags)).map((value) => ({
         value,
         label: value,
       })),
@@ -230,12 +271,7 @@ export function FeedbackView({
         { value: "none", label: "None recorded" },
       ],
     };
-  }, [data.reports, data.teamMembers]);
-
-  const filteredReports = useMemo(
-    () => filterFeedbackReports(data.reports, { filters, query, range }),
-    [data.reports, filters, query, range],
-  );
+  }, [data.teamMembers, reports]);
 
   function commitFilters(nextFilters: FeedbackFiltersState) {
     setFilters(nextFilters);
@@ -250,12 +286,12 @@ export function FeedbackView({
   }
 
   async function refreshSelectedReport() {
-    await refresh();
+    await Promise.all([refresh(), reportPages.refetch()]);
     if (!loadedReport) await detail.refetch();
   }
 
   async function refreshView() {
-    await refresh();
+    await Promise.all([refresh(), reportPages.refetch()]);
     if (mode === "signals" && productId && isEditor(data.currentRole)) {
       await groups.refetch();
     }
@@ -266,7 +302,7 @@ export function FeedbackView({
     if (nextMode === "signals") selectReport(null);
   }
 
-  const incomplete = data.listState.reportsLoaded < data.listState.reportsTotal;
+  const incomplete = Boolean(reportPages.hasNextPage);
 
   return (
     <DetailWorkspace
@@ -321,26 +357,47 @@ export function FeedbackView({
             }}
           />
 
-          {incomplete ? (
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/25 px-4 py-2 text-xs text-muted-foreground">
-              <p>
-                Showing the newest {data.listState.reportsLoaded.toLocaleString()} of{" "}
-                {data.listState.reportsTotal.toLocaleString()} reports. Filters apply to loaded
-                reports.
-              </p>
-              <Button variant="outline" size="sm" onClick={loadMore}>
-                Load 250 more
-              </Button>
+          {reportPages.isError ? (
+            <div
+              className="border-b bg-destructive/5 px-4 py-2 text-xs text-destructive"
+              role="alert"
+            >
+              Feedback could not be loaded. Use Refresh to try again.
             </div>
           ) : null}
 
-          {filteredReports.length ? (
+          {reportPages.isPending ? (
+            <p className="border-b px-4 py-3 text-xs text-muted-foreground" role="status">
+              Loading feedback…
+            </p>
+          ) : null}
+
+          {!reportPages.isPending && reportTotal > 0 ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/25 px-4 py-2 text-xs text-muted-foreground">
+              <p aria-live="polite">
+                Showing {reports.length.toLocaleString()} of {reportTotal.toLocaleString()} matching
+                reports. Filters cover all retained feedback.
+              </p>
+              {incomplete ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={reportPages.isFetchingNextPage}
+                  onClick={() => void reportPages.fetchNextPage()}
+                >
+                  {reportPages.isFetchingNextPage ? "Loading…" : "Load 50 more"}
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+
+          {reports.length ? (
             <section
               className="min-h-0 flex-1 overflow-auto bg-background"
               aria-label="Feedback reports"
             >
               <FeedbackTable
-                reports={filteredReports}
+                reports={reports}
                 selectedId={selectedReportId}
                 onSelect={selectReport}
               />
@@ -671,8 +728,16 @@ function FeedbackTable({
             key={report.id}
             data-state={selectedId === report.id ? "selected" : undefined}
             aria-selected={selectedId === report.id}
+            aria-label={`Open feedback: ${report.summary}`}
+            tabIndex={0}
             className="cursor-pointer bg-background hover:bg-muted/40 data-[state=selected]:bg-selected data-[state=selected]:shadow-[inset_2px_0_0_var(--attention)]"
             onClick={() => onSelect(report.id)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onSelect(report.id);
+              }
+            }}
           >
             <TableCell className="h-[66px] overflow-hidden pl-4">
               <div className="min-w-0">
@@ -1041,6 +1106,12 @@ function unique(values: Array<string | null | undefined>) {
   return [...new Set(values.filter((value): value is string => Boolean(value)))].sort(
     (left, right) => left.localeCompare(right),
   );
+}
+
+function rangeStart(range: string): string | undefined {
+  const days = range === "7d" ? 7 : range === "30d" ? 30 : null;
+  if (days === null) return undefined;
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1_000).toISOString();
 }
 
 function connectorsPath(workspaceId: string, productId: string): string {

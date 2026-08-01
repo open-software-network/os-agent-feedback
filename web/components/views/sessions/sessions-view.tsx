@@ -1,9 +1,9 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { DetailRail, DetailWorkspace } from "@/components/dashboard/detail-rail";
 import { MetricStrip } from "@/components/dashboard/metric-strip";
@@ -27,6 +27,7 @@ import type {
   DashboardSessionDetail,
   DashboardSessionSummary,
 } from "@/lib/api/dashboard";
+import { fetchDashboardSessionsPage } from "@/lib/api/dashboard";
 import {
   formatDate,
   formatDuration,
@@ -37,6 +38,30 @@ import {
 import { cn } from "@/lib/utils";
 
 type SessionFilter = "all" | "multi" | "feedback" | "no_feedback";
+
+function isSessionFilter(value: string | null): value is SessionFilter {
+  return value !== null && ["all", "multi", "feedback", "no_feedback"].includes(value);
+}
+
+function readSessionLocation(): { query: string; filter: SessionFilter } {
+  if (typeof window === "undefined") return { query: "", filter: "all" };
+  const params = new URL(window.location.href).searchParams;
+  const filter = params.get("sessionKind");
+  return {
+    query: params.get("sessionQ") ?? "",
+    filter: isSessionFilter(filter) ? filter : "all",
+  };
+}
+
+function writeSessionLocation(query: string, filter: SessionFilter) {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (query.trim()) url.searchParams.set("sessionQ", query.trim());
+  else url.searchParams.delete("sessionQ");
+  if (filter === "all") url.searchParams.delete("sessionKind");
+  else url.searchParams.set("sessionKind", filter);
+  window.history.replaceState(window.history.state, "", url);
+}
 
 const impactLabels: Record<string, string> = {
   blocked: "Blocked",
@@ -80,7 +105,6 @@ export function SessionsView({
   selectSession,
   openFeedback,
   openInteraction,
-  loadMore,
   refresh,
 }: {
   data: DashboardData;
@@ -88,12 +112,62 @@ export function SessionsView({
   selectSession: (sessionId: string | null) => void;
   openFeedback: (reportId: string) => void;
   openInteraction: (interactionId: string) => void;
-  loadMore: () => void;
+  /** @deprecated Pagination is now owned by the server-backed list query. */
+  loadMore?: () => void;
   refresh: () => Promise<unknown>;
 }) {
-  const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<SessionFilter>("all");
+  const initialLocation = useMemo(readSessionLocation, []);
+  const [query, setQuery] = useState(initialLocation.query);
+  const [filter, setFilter] = useState<SessionFilter>(initialLocation.filter);
   const productId = data.currentProduct?.id;
+  const sessionPages = useInfiniteQuery({
+    queryKey: ["session-list", data.workspace.id, productId, query, filter],
+    queryFn: ({ pageParam }) =>
+      fetchDashboardSessionsPage(data.workspace.id, {
+        productId: productId ?? "",
+        q: query.trim() || undefined,
+        kind: filter,
+        limit: 50,
+        cursor: pageParam,
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page) => page.nextCursor ?? undefined,
+    initialData: {
+      pages: [
+        {
+          sessions: data.sessions,
+          rollup: {
+            sessions: data.listState.sessionsTotal,
+            interactions: data.sessions.reduce(
+              (total, session) => total + session.interactionCount,
+              0,
+            ),
+            multiStepSessions: data.sessions.filter((session) => session.interactionCount > 1)
+              .length,
+            averageInteractions: data.sessions.length
+              ? data.sessions.reduce((total, session) => total + session.interactionCount, 0) /
+                data.sessions.length
+              : 0,
+          },
+          limit: Math.min(100, Math.max(1, data.sessions.length || 50)),
+          nextCursor: null,
+        },
+      ],
+      pageParams: [undefined],
+    },
+    initialDataUpdatedAt: 0,
+    enabled: Boolean(productId),
+  });
+  const sessionRows =
+    sessionPages.data?.pages.flatMap((page) =>
+      Array.isArray(page.sessions) ? page.sessions : [],
+    ) ?? [];
+  const rollup = sessionPages.data?.pages[0]?.rollup ?? {
+    sessions: 0,
+    interactions: 0,
+    multiStepSessions: 0,
+    averageInteractions: 0,
+  };
   const detail = useQuery({
     queryKey: ["session", data.workspace.id, productId, selectedSessionId],
     queryFn: () =>
@@ -104,38 +178,17 @@ export function SessionsView({
     enabled: Boolean(selectedSessionId && productId),
   });
 
-  const sessionRows = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    return data.sessions.filter((session) => {
-      const haystack = [
-        session.refHint,
-        session.source,
-        session.firstOperation,
-        session.lastOperation,
-        session.customerRef,
-        session.strongestImpact,
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      return (
-        (!needle || haystack.includes(needle)) &&
-        (filter === "all" ||
-          (filter === "multi" && session.interactionCount > 1) ||
-          (filter === "feedback" && session.reportCount > 0) ||
-          (filter === "no_feedback" && session.reportCount === 0))
-      );
-    });
-  }, [data.sessions, filter, query]);
+  useEffect(() => writeSessionLocation(query, filter), [filter, query]);
 
-  const loadedInteractions = data.sessions.reduce(
-    (total, session) => total + session.interactionCount,
-    0,
-  );
-  const multiStep = data.sessions.filter((session) => session.interactionCount > 1).length;
-  const average = data.sessions.length
-    ? (loadedInteractions / data.sessions.length).toFixed(1)
-    : "0";
+  useEffect(() => {
+    const restore = () => {
+      const location = readSessionLocation();
+      setQuery(location.query);
+      setFilter(location.filter);
+    };
+    window.addEventListener("popstate", restore);
+    return () => window.removeEventListener("popstate", restore);
+  }, []);
 
   return (
     <DetailWorkspace
@@ -157,10 +210,10 @@ export function SessionsView({
     >
       <MetricStrip
         items={[
-          { label: "Proven sessions", value: data.listState.sessionsTotal.toLocaleString() },
-          { label: "Interactions in view", value: loadedInteractions },
-          { label: "Multi-step in view", value: multiStep },
-          { label: "Average in view", value: average },
+          { label: "Proven sessions", value: rollup.sessions.toLocaleString() },
+          { label: "Interactions", value: rollup.interactions.toLocaleString() },
+          { label: "Multi-step", value: rollup.multiStepSessions.toLocaleString() },
+          { label: "Average", value: rollup.averageInteractions.toFixed(1) },
         ]}
       />
       <p className="border-b bg-muted/25 px-4 py-2 text-xs text-muted-foreground">
@@ -193,13 +246,25 @@ export function SessionsView({
             <ToggleGroupItem value="feedback">Has feedback</ToggleGroupItem>
             <ToggleGroupItem value="no_feedback">No feedback</ToggleGroupItem>
           </ToggleGroup>
-          <Button variant="ghost" size="sm" onClick={() => void refresh()}>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => void Promise.all([refresh(), sessionPages.refetch()])}
+          >
             Refresh
           </Button>
         </div>
       </div>
       <section className="min-h-0 flex-1 overflow-auto bg-background" aria-label="Sessions">
-        {sessionRows.length ? (
+        {sessionPages.isError ? (
+          <div className="p-4 text-sm text-destructive" role="alert">
+            Sessions could not be loaded. Use Refresh to try again.
+          </div>
+        ) : sessionPages.isPending ? (
+          <p className="p-4 text-sm text-muted-foreground" role="status">
+            Loading sessions…
+          </p>
+        ) : sessionRows.length ? (
           <Table className="min-w-[760px] table-fixed">
             <TableHeader className="sticky top-0 z-[1] bg-background">
               <TableRow className="hover:bg-background">
@@ -242,10 +307,23 @@ export function SessionsView({
           </div>
         )}
       </section>
-      {data.listState.sessionsLoaded < data.listState.sessionsTotal ? (
-        <div className="shrink-0 border-t bg-background px-4 py-2">
-          <Button variant="outline" size="sm" onClick={loadMore}>
-            Load 100 more
+      {sessionRows.length ? (
+        <div className="flex shrink-0 items-center justify-between gap-3 border-t bg-background px-4 py-2 text-xs text-muted-foreground">
+          <p aria-live="polite">
+            Showing {sessionRows.length.toLocaleString()} of {rollup.sessions.toLocaleString()}{" "}
+            matching sessions. Filters cover all retained sessions.
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!sessionPages.hasNextPage || sessionPages.isFetchingNextPage}
+            onClick={() => void sessionPages.fetchNextPage()}
+          >
+            {sessionPages.isFetchingNextPage
+              ? "Loading…"
+              : sessionPages.hasNextPage
+                ? "Load 50 more"
+                : "All loaded"}
           </Button>
         </div>
       ) : null}
@@ -266,8 +344,16 @@ function SessionRow({
     <TableRow
       data-state={selected ? "selected" : undefined}
       aria-selected={selected}
+      aria-label={`Open session ${session.refHint}`}
+      tabIndex={0}
       className="cursor-pointer bg-background hover:bg-muted/40 data-[state=selected]:bg-selected data-[state=selected]:shadow-[inset_2px_0_0_var(--attention)]"
       onClick={onOpen}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpen();
+        }
+      }}
     >
       <TableCell className="h-[66px] overflow-hidden pl-5">
         <Button
@@ -327,7 +413,7 @@ function SessionInspector({
     <DetailRail open onClose={close} label="Session detail">
       <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-4">
         <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
-          {detail?.session.refHint ?? requestedId}
+          {detail?.session?.refHint ?? requestedId}
         </span>
         <Button variant="ghost" size="icon-sm" aria-label="Close session detail" onClick={close}>
           <IconCrossSmall />
@@ -337,7 +423,7 @@ function SessionInspector({
         <div className="p-5">
           {error ? (
             <ErrorState error={error} onRetry={() => void retry()} />
-          ) : detail ? (
+          ) : detail?.session ? (
             <SessionJourney
               detail={detail}
               openFeedback={openFeedback}

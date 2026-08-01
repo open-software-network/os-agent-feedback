@@ -640,7 +640,13 @@ describe("dashboard view behavior", () => {
         }),
       ),
     );
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual(
+    const workflowRequest = fetchMock.mock.calls.find(
+      ([input, init]) =>
+        String(input) === `/api/dashboard/reports/${data.reports[0].id}` &&
+        init?.method === "PATCH",
+    );
+    expect(workflowRequest).toBeDefined();
+    expect(JSON.parse(workflowRequest?.[1]?.body as string)).toEqual(
       expect.objectContaining({
         productId: data.currentProduct?.id,
         internalNote: "Reproduce against the fresh index",
@@ -656,7 +662,26 @@ describe("dashboard view behavior", () => {
       interactions: data.interactions,
       reports: data.reports,
     };
-    const fetchMock = vi.fn().mockResolvedValue(json(detail));
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/dashboard/sessions?")) {
+        return Promise.resolve(
+          json({
+            sessions: data.sessions,
+            rollup: {
+              sessions: 1,
+              interactions: 1,
+              multiStepSessions: 0,
+              averageInteractions: 1,
+            },
+            limit: 50,
+            nextCursor: null,
+          }),
+        );
+      }
+      if (path.startsWith("/api/dashboard/sessions/")) return Promise.resolve(json(detail));
+      throw new Error(`Unexpected request: ${path}`);
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     const list = renderWithQuery(
@@ -960,7 +985,7 @@ describe("dashboard view behavior", () => {
       screen.getByRole("row", { name: /Search results omitted the newest document/ }),
     ).toBeVisible();
     expect(screen.getByLabelText("Search feedback")).toBeVisible();
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("keeps the Feedback list usable when one report has malformed findings", async () => {
@@ -971,11 +996,12 @@ describe("dashboard view behavior", () => {
       summary: "Legacy report with malformed findings",
       findings: null as never,
     };
-    vi.stubGlobal("fetch", feedbackGroupFetch(data));
+    const malformedData = { ...data, reports: [malformedReport, data.reports[0]] };
+    vi.stubGlobal("fetch", feedbackGroupFetch(malformedData));
 
     renderWithQuery(
       <FeedbackView
-        data={{ ...data, reports: [malformedReport, data.reports[0]] }}
+        data={malformedData}
         selectedReportId={null}
         selectReport={vi.fn()}
         openInteraction={vi.fn()}
@@ -987,7 +1013,7 @@ describe("dashboard view behavior", () => {
     );
 
     expect(
-      screen.getByRole("row", { name: /Legacy report with malformed findings/ }),
+      await screen.findByRole("row", { name: /Legacy report with malformed findings/ }),
     ).toBeVisible();
     expect(
       screen.getByRole("row", { name: /Search results omitted the newest document/ }),
@@ -996,7 +1022,7 @@ describe("dashboard view behavior", () => {
     expect(await screen.findByText("No signals yet")).toBeVisible();
     fireEvent.click(screen.getByRole("tab", { name: "Reports" }));
     expect(
-      screen.getByRole("row", { name: /Legacy report with malformed findings/ }),
+      await screen.findByRole("row", { name: /Legacy report with malformed findings/ }),
     ).toBeVisible();
   });
 
@@ -1124,6 +1150,11 @@ function feedbackGroupFetch(
   const productId = data.currentProduct?.id ?? "";
   return vi.fn().mockImplementation((input: RequestInfo | URL) => {
     const path = String(input);
+    if (path.startsWith("/api/dashboard/feedback?")) {
+      return Promise.resolve(
+        json({ reports: data.reports, total: data.reports.length, limit: 50, nextCursor: null }),
+      );
+    }
     if (path === `/api/products/${productId}/github-repo`) {
       return Promise.resolve(json(null));
     }

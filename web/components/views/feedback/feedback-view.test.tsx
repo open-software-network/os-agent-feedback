@@ -68,15 +68,30 @@ describe("FeedbackView", () => {
     await waitFor(() => expect(window.location.search).not.toContain("status="));
   });
 
-  it("keeps the loaded-page disclosure and fetches a selected report outside that page", async () => {
+  it("paginates the complete server-filtered result and fetches a selected report outside it", async () => {
     const complete = dashboardFixture();
     const report = complete.reports[0];
     const data = dashboardFixture({
       reports: [],
       listState: { ...complete.listState, reportsLoaded: 0, reportsTotal: 501 },
     });
-    const loadMore = vi.fn();
-    const fetchMock = vi.fn().mockResolvedValue(json({ report }));
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/dashboard/feedback?") && path.includes("cursor=next-page")) {
+        return Promise.resolve(
+          json({ reports: [report], total: 501, limit: 50, nextCursor: null }),
+        );
+      }
+      if (path.startsWith("/api/dashboard/feedback?")) {
+        return Promise.resolve(
+          json({ reports: [], total: 501, limit: 50, nextCursor: "next-page" }),
+        );
+      }
+      if (path.includes(`/api/dashboard/reports/${report.id}?`)) {
+        return Promise.resolve(json({ report }));
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     const list = renderWithQuery(
@@ -86,15 +101,19 @@ describe("FeedbackView", () => {
         selectReport={vi.fn()}
         openInteraction={vi.fn()}
         openSession={vi.fn()}
-        loadMore={loadMore}
         refresh={vi.fn().mockResolvedValue(undefined)}
         setNotice={vi.fn()}
       />,
     );
 
-    expect(screen.getByText(/Filters apply to loaded reports/)).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Load 250 more" }));
-    expect(loadMore).toHaveBeenCalledOnce();
+    expect(await screen.findByText(/Filters cover all retained feedback/)).toBeVisible();
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([input]) =>
+          String(input).startsWith("/api/dashboard/feedback?"),
+        ),
+      ).toBe(true),
+    );
     list.unmount();
 
     renderWithQuery(
@@ -104,7 +123,6 @@ describe("FeedbackView", () => {
         selectReport={vi.fn()}
         openInteraction={vi.fn()}
         openSession={vi.fn()}
-        loadMore={loadMore}
         refresh={vi.fn().mockResolvedValue(undefined)}
         setNotice={vi.fn()}
       />,
@@ -120,35 +138,44 @@ describe("FeedbackView", () => {
   it("defaults to reports and loads read-only grouped signals on demand", async () => {
     const data = dashboardFixture();
     const selectReport = vi.fn();
-    const fetchMock = vi.fn().mockResolvedValue(
-      json({
-        groups: [
-          {
-            explanation: "Agents repeatedly hit authorization failures during setup.",
-            githubIssue: {
-              issueNumber: 42,
-              repoFullName: "open-software/epode",
-              state: "open",
-              url: "https://github.com/open-software/epode/issues/42",
-            },
-            groupKey: "authorization-setup",
-            latestOccurredAt: "2026-07-30T12:00:00Z",
-            reportCount: 7,
+    const groups = {
+      groups: [
+        {
+          explanation: "Agents repeatedly hit authorization failures during setup.",
+          githubIssue: {
+            issueNumber: 42,
+            repoFullName: "open-software/epode",
+            state: "open",
+            url: "https://github.com/open-software/epode/issues/42",
           },
-          {
-            explanation:
-              "product 22222222-2222-4222-8222-222222222222 · operation refund_create · surface mcp · defect/idempotency · 5xx",
-            githubIssue: null,
-            groupKey: "c86875b212d12aa37bb9a3fff09787d6",
-            latestOccurredAt: "2026-07-30T12:00:00Z",
-            reportCount: 2,
-          },
-        ],
-        hasMore: false,
-        limit: 100,
-        offset: 0,
-      }),
-    );
+          groupKey: "authorization-setup",
+          latestOccurredAt: "2026-07-30T12:00:00Z",
+          reportCount: 7,
+        },
+        {
+          explanation:
+            "product 22222222-2222-4222-8222-222222222222 · operation refund_create · surface mcp · defect/idempotency · 5xx",
+          githubIssue: null,
+          groupKey: "c86875b212d12aa37bb9a3fff09787d6",
+          latestOccurredAt: "2026-07-30T12:00:00Z",
+          reportCount: 2,
+        },
+      ],
+      hasMore: false,
+      limit: 100,
+      offset: 0,
+    };
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/dashboard/feedback?")) {
+        return Promise.resolve(
+          json({ reports: data.reports, total: data.reports.length, limit: 50, nextCursor: null }),
+        );
+      }
+      if (path.includes("/groups?")) return Promise.resolve(json(groups));
+      if (path.endsWith("/github-repo")) return Promise.resolve(json(null));
+      throw new Error(`Unexpected request: ${path}`);
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     renderWithQuery(

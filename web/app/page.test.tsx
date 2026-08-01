@@ -228,7 +228,7 @@ describe("dashboard data flow", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
-        const supplemental = feedbackApiResponse(String(input));
+        const supplemental = feedbackApiResponse(String(input), data);
         if (supplemental) return Promise.resolve(supplemental);
         if (init?.method === "PATCH")
           return Promise.resolve(json({ product: data.currentProduct }));
@@ -258,10 +258,38 @@ describe("dashboard data flow", () => {
 
 function dashboardFetch(data: ReturnType<typeof dashboardFixture>) {
   return (input: RequestInfo | URL) =>
-    Promise.resolve(feedbackApiResponse(String(input)) ?? json(data));
+    Promise.resolve(feedbackApiResponse(String(input), data) ?? json(data));
 }
 
-function feedbackApiResponse(path: string): Response | null {
+function feedbackApiResponse(
+  path: string,
+  data: ReturnType<typeof dashboardFixture>,
+): Response | null {
+  if (path.startsWith("/api/dashboard/feedback?")) {
+    return json({
+      reports: data.reports,
+      total: data.listState.reportsTotal,
+      limit: 50,
+      nextCursor: null,
+    });
+  }
+  if (path.startsWith("/api/dashboard/sessions?")) {
+    const interactions = data.sessions.reduce(
+      (total, session) => total + session.interactionCount,
+      0,
+    );
+    return json({
+      sessions: data.sessions,
+      rollup: {
+        sessions: data.listState.sessionsTotal,
+        interactions,
+        multiStepSessions: data.sessions.filter((session) => session.interactionCount > 1).length,
+        averageInteractions: data.sessions.length ? interactions / data.sessions.length : 0,
+      },
+      limit: 50,
+      nextCursor: null,
+    });
+  }
   if (path.includes("/groups?")) {
     return json({ groups: [], hasMore: false, limit: 50, offset: 0 });
   }

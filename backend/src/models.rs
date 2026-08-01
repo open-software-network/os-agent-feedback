@@ -792,6 +792,78 @@ pub(crate) struct DashboardListState {
     pub sessions_loaded: usize,
 }
 
+/// A bounded, server-filtered page of feedback reports.
+///
+/// `total` is computed from the complete retained product dataset with the
+/// active filters, not from the returned page.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardFeedbackPage {
+    pub reports: Vec<ProductFeedbackReportWithInteraction>,
+    pub total: i64,
+    pub limit: i64,
+    #[schema(required = true, nullable)]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardSessionRollup {
+    pub sessions: i64,
+    pub interactions: i64,
+    pub multi_step_sessions: i64,
+    #[schema(value_type = f64)]
+    pub average_interactions: f64,
+}
+
+/// A bounded, server-filtered page of proven sessions.
+///
+/// The rollup is computed across every retained session matching the active
+/// filters, independently of the current page.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardSessionsPage {
+    pub sessions: Vec<DashboardSessionSummary>,
+    pub rollup: DashboardSessionRollup,
+    pub limit: i64,
+    #[schema(required = true, nullable)]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DashboardFeedbackFilters {
+    pub query: Option<String>,
+    pub statuses: Option<Vec<String>>,
+    pub impacts: Option<Vec<String>>,
+    pub surfaces: Option<Vec<String>>,
+    pub topics: Option<Vec<String>>,
+    pub finding_kinds: Option<Vec<String>>,
+    pub severities: Option<Vec<String>>,
+    pub tags: Option<Vec<String>>,
+    pub assignees: Option<Vec<String>>,
+    pub include_unassigned: bool,
+    pub workarounds: Option<Vec<String>>,
+    pub operation: Option<String>,
+    pub customer_ref: Option<String>,
+    pub since: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
+    pub limit: Option<i64>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DashboardSessionFilters {
+    pub query: Option<String>,
+    pub kind: Option<String>,
+    pub impacts: Option<Vec<String>>,
+    pub operation: Option<String>,
+    pub customer_ref: Option<String>,
+    pub since: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
+    pub limit: Option<i64>,
+    pub cursor: Option<String>,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DashboardSessionDetail {

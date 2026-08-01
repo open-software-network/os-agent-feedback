@@ -1,12 +1,17 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { dashboardFixture } from "@/components/dashboard/test-fixture";
 import { SessionsView } from "./sessions-view";
 
 describe("SessionsView", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    window.history.replaceState({}, "", "/?view=sessions");
+  });
+
   it("renders an observed metadata journey without implying replay", async () => {
     const base = dashboardFixture();
     const session = {
@@ -31,13 +36,11 @@ describe("SessionsView", () => {
     });
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(
-        json({
-          session,
-          interactions: [errorInteraction, firstInteraction],
-          reports: base.reports,
-        }),
-      ),
+      sessionFetch(data, {
+        session,
+        interactions: [errorInteraction, firstInteraction],
+        reports: base.reports,
+      }),
     );
     const selectSession = vi.fn();
     const openFeedback = vi.fn();
@@ -87,11 +90,13 @@ describe("SessionsView", () => {
     );
 
     const row = screen.getByRole("row", { name: new RegExp(data.sessions[0].refHint) });
+    fireEvent.keyDown(row, { key: "Enter" });
     fireEvent.click(row);
     fireEvent.click(screen.getByRole("button", { name: data.sessions[0].refHint }));
 
     expect(selectSession).toHaveBeenNthCalledWith(1, data.sessions[0].id);
     expect(selectSession).toHaveBeenNthCalledWith(2, data.sessions[0].id);
+    expect(selectSession).toHaveBeenNthCalledWith(3, data.sessions[0].id);
   });
 
   it("uses complete server rollups when interaction and report windows do not overlap", () => {
@@ -129,10 +134,42 @@ describe("SessionsView", () => {
     expect(within(row).getByText("12")).toBeVisible();
     expect(within(row).getByText("3 · Blocked")).toBeVisible();
     expect(within(row).getByText("account-high-volume")).toBeVisible();
-    expect(screen.getByText("Interactions in view").parentElement).toHaveTextContent("12");
+    expect(screen.getAllByText("Interactions")[0].parentElement).toHaveTextContent("12");
 
     fireEvent.click(screen.getByRole("button", { name: "Has feedback" }));
     expect(screen.getByRole("row", { name: new RegExp(base.sessions[0].refHint) })).toBeVisible();
+  });
+
+  it("restores and updates shareable server filter state", async () => {
+    const data = dashboardFixture();
+    window.history.replaceState({}, "", "/?view=sessions&sessionQ=checkout&sessionKind=multi");
+    vi.stubGlobal("fetch", sessionFetch(data));
+
+    renderWithQuery(
+      <SessionsView
+        data={data}
+        selectedSessionId={null}
+        selectSession={vi.fn()}
+        openFeedback={vi.fn()}
+        openInteraction={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(screen.getByRole("textbox", { name: "Search sessions" })).toHaveValue("checkout");
+    expect(screen.getByRole("button", { name: "Multi-step" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "Search sessions" }), {
+      target: { value: "refund" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Has feedback" }));
+
+    await waitFor(() => {
+      expect(window.location.search).toContain("sessionQ=refund");
+      expect(window.location.search).toContain("sessionKind=feedback");
+    });
   });
 });
 
@@ -145,5 +182,35 @@ function json(body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
     headers: { "content-type": "application/json" },
+  });
+}
+
+function sessionFetch(data: ReturnType<typeof dashboardFixture>, detail?: unknown) {
+  return vi.fn().mockImplementation((input: RequestInfo | URL) => {
+    const path = String(input);
+    if (path.startsWith("/api/dashboard/sessions?")) {
+      const interactions = data.sessions.reduce(
+        (total, session) => total + session.interactionCount,
+        0,
+      );
+      return Promise.resolve(
+        json({
+          sessions: data.sessions,
+          rollup: {
+            sessions: data.listState.sessionsTotal,
+            interactions,
+            multiStepSessions: data.sessions.filter((session) => session.interactionCount > 1)
+              .length,
+            averageInteractions: data.sessions.length ? interactions / data.sessions.length : 0,
+          },
+          limit: 50,
+          nextCursor: null,
+        }),
+      );
+    }
+    if (path.startsWith("/api/dashboard/sessions/") && detail) {
+      return Promise.resolve(json(detail));
+    }
+    throw new Error(`Unexpected request: ${path}`);
   });
 }

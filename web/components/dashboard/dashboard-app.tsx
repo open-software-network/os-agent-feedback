@@ -380,12 +380,6 @@ export function DashboardApp() {
             }}
             openInteraction={openInteraction}
             openSession={openSession}
-            loadMore={() =>
-              setLimits((current) => ({
-                ...current,
-                reportLimit: Math.min(current.reportLimit + 250, 10_000),
-              }))
-            }
             refresh={refresh}
             setNotice={showNotice}
           />
@@ -403,12 +397,6 @@ export function DashboardApp() {
             openFeedback={openFeedback}
             openInteraction={openInteraction}
             refresh={refresh}
-            loadMore={() =>
-              setLimits((current) => ({
-                ...current,
-                sessionLimit: Math.min(current.sessionLimit + 100, 10_000),
-              }))
-            }
           />
         );
       case "setup":
