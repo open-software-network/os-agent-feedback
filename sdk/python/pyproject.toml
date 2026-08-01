@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-feedback"
-version = "0.2.0"
+version = "0.2.1"
 description = "Protocol-first Agent Feedback middleware for Python web products."
 readme = "README.md"
 requires-python = ">=3.10"

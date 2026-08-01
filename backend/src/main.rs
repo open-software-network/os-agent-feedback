@@ -681,14 +681,14 @@ fn feedback_discovery(public_base_url: &str) -> FeedbackDiscoveryResponse {
         },
         integrations: IntegrationsDiscovery {
             node: format!(
-                "{public_base_url}/static/agent-feedback-node-0.2.0.tgz"
+                "{public_base_url}/static/agent-feedback-node-0.2.1.tgz"
             ),
             python: format!(
-                "{public_base_url}/static/agent_feedback-0.2.0-py3-none-any.whl"
+                "{public_base_url}/static/agent_feedback-0.2.1-py3-none-any.whl"
             ),
-            go: format!("{public_base_url}/static/agent-feedback-go-0.2.0.tar.gz"),
+            go: format!("{public_base_url}/static/agent-feedback-go-0.2.1.tar.gz"),
             rust: format!(
-                "{public_base_url}/static/agent-feedback-rust-0.2.0.tar.gz"
+                "{public_base_url}/static/agent-feedback-rust-0.2.1.tar.gz"
             ),
             protocol: format!(
                 "{public_base_url}/static/agent-feedback-protocol-v1.zip"
@@ -4534,10 +4534,10 @@ mod page_tests {
                 "legacyCompatibility": ["2025-11-25"]
             },
             "integrations": {
-                "node": "https://epode.test/static/agent-feedback-node-0.2.0.tgz",
-                "python": "https://epode.test/static/agent_feedback-0.2.0-py3-none-any.whl",
-                "go": "https://epode.test/static/agent-feedback-go-0.2.0.tar.gz",
-                "rust": "https://epode.test/static/agent-feedback-rust-0.2.0.tar.gz",
+                "node": "https://epode.test/static/agent-feedback-node-0.2.1.tgz",
+                "python": "https://epode.test/static/agent_feedback-0.2.1-py3-none-any.whl",
+                "go": "https://epode.test/static/agent-feedback-go-0.2.1.tar.gz",
+                "rust": "https://epode.test/static/agent-feedback-rust-0.2.1.tar.gz",
                 "protocol": "https://epode.test/static/agent-feedback-protocol-v1.zip"
             },
             "reliability": {

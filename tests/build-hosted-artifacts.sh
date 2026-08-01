@@ -32,12 +32,13 @@ if [[ "$actual_protocol_sha256" != "$expected_protocol_sha256" ]]; then
   echo "the immutable protocol v1 artifact changed; publish a new versioned filename" >&2
   exit 1
 fi
-if unzip -Z1 "$protocol_artifact" | grep -q 'outcome\.schema\.json$'; then
+protocol_listing="$(unzip -Z1 "$protocol_artifact")"
+if grep -Eq 'outcome\.schema\.json$' <<<"$protocol_listing"; then
   echo "stale outcome.schema.json remained in the protocol artifact" >&2
   exit 1
 fi
 for required in README.md conformance.json consent-decision.schema.json envelope.schema.json feedback-report.schema.json telemetry-batch.schema.json; do
-  unzip -Z1 "$protocol_artifact" | grep -q "protocol/v1/$required$" || {
+  grep -Fxq "protocol/v1/$required" <<<"$protocol_listing" || {
     echo "protocol artifact is missing $required" >&2
     exit 1
   }

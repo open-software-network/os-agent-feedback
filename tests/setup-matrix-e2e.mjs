@@ -855,7 +855,7 @@ async function prepareNode(fixtureName) {
   const manifestPath = join(target, "package.json");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   manifest.dependencies["@agent-feedback/node"] =
-    `${backendUrl}/static/agent-feedback-node-0.2.0.tgz`;
+    `${backendUrl}/static/agent-feedback-node-0.2.1.tgz`;
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   run("npm", ["install", "--ignore-scripts"], { cwd: target });
   return target;
@@ -893,7 +893,7 @@ async function prepareGo() {
     ],
     { cwd: target },
   );
-  run("go", ["mod", "edit", "-require=github.com/open-software-network/os-epode/sdk/go@v0.2.0"], {
+  run("go", ["mod", "edit", "-require=github.com/open-software-network/os-epode/sdk/go@v0.2.1"], {
     cwd: target,
   });
   run("go", ["mod", "tidy"], { cwd: target });

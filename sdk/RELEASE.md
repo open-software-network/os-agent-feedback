@@ -13,7 +13,7 @@ available until all registry releases are established and consumers have moved
 to registry installation.
 
 Hosted bootstrap artifacts are immutable releases too. A changed package must
-use a new SemVer filename (for example, `agent-feedback-node-0.2.0.tgz`); never
+use a new SemVer filename (for example, `agent-feedback-node-0.2.1.tgz`); never
 replace bytes at an existing URL because package-manager lockfiles pin their
 integrity. Keep every previously published hosted filename available.
 Record each new hosted filename's SHA-256 in

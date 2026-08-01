@@ -9,7 +9,7 @@ describe("static edge setup instructions", () => {
     const instructions = setupInstructions("static-edge", "static", origin);
     const prompt = setupAgentPrompt("static", "static-edge", instructions, origin);
 
-    expect(instructions.install).toContain("agent-feedback-node-0.2.0.tgz");
+    expect(instructions.install).toContain("agent-feedback-node-0.2.1.tgz");
     expect(instructions.code).toContain("@agent-feedback/node/edge");
     expect(instructions.code).toContain("createStaticDocsProxy");
     expect(instructions.code).toContain('upstreamOrigin: "https://your-docs-origin.example"');
@@ -65,16 +65,16 @@ describe("company setup instructions", () => {
     expect(prompt).toMatch(/unknown, approved, and declined states/i);
   });
 
-  it("pins every downloadable SDK instruction to the advertised 0.2.0 release", () => {
+  it("pins every downloadable SDK instruction to the advertised 0.2.1 release", () => {
     expect(setupInstructions("node-express", "api", origin).install).toContain(
-      "agent-feedback-node-0.2.0.tgz",
+      "agent-feedback-node-0.2.1.tgz",
     );
     expect(setupInstructions("python-asgi", "api", origin).install).toContain(
-      "agent_feedback-0.2.0-py3-none-any.whl",
+      "agent_feedback-0.2.1-py3-none-any.whl",
     );
-    expect(setupInstructions("go", "api", origin).install).toContain("sdk/go@v0.2.0");
+    expect(setupInstructions("go", "api", origin).install).toContain("sdk/go@v0.2.1");
     expect(setupInstructions("rust", "api", origin).install).toContain(
-      "agent-feedback-rust-0.2.0.tar.gz",
+      "agent-feedback-rust-0.2.1.tar.gz",
     );
   });
 });

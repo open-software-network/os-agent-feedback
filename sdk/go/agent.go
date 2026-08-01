@@ -165,7 +165,7 @@ func SubmitFeedbackConsent(ctx context.Context, envelope *Envelope, decision str
 	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, action.URL, bytes.NewReader(body))
 	request.Header.Set("Authorization", action.Authorization)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", "agent-feedback-go-agent/0.2.0")
+	request.Header.Set("User-Agent", "agent-feedback-go-agent/0.2.1")
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -262,7 +262,7 @@ func SubmitProductFeedback(ctx context.Context, envelope *Envelope, report Feedb
 	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, envelope.Submit.URL, bytes.NewReader(body))
 	request.Header.Set("Authorization", envelope.Submit.Authorization)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", "agent-feedback-go-agent/0.2.0")
+	request.Header.Set("User-Agent", "agent-feedback-go-agent/0.2.1")
 	if client == nil {
 		client = http.DefaultClient
 	}

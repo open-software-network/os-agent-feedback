@@ -459,7 +459,7 @@ impl Runtime {
         let response = client
             .post(format!("{}/api/v2/consent/state", self.options.endpoint))
             .bearer_auth(&self.options.api_key)
-            .header("user-agent", "agent-feedback-rust/0.2.0")
+            .header("user-agent", "agent-feedback-rust/0.2.1")
             .json(&json!({ "subject": subject }))
             .send()
             .await;
@@ -745,7 +745,7 @@ async fn flush_events(
     let delivered = client
         .post(format!("{}/api/v2/telemetry/batches", options.endpoint))
         .bearer_auth(&options.api_key)
-        .header("user-agent", "agent-feedback-rust/0.2.0")
+        .header("user-agent", "agent-feedback-rust/0.2.1")
         .json(&json!({ "events": &events }))
         .send()
         .await
@@ -1534,7 +1534,7 @@ pub async fn submit_feedback_consent(
     Ok(client
         .post(destination)
         .header("authorization", &action.submit_decision.authorization)
-        .header("user-agent", "agent-feedback-rust-agent/0.2.0")
+            .header("user-agent", "agent-feedback-rust-agent/0.2.1")
         .json(&json!({ "decision": decision }))
         .send()
         .await?
@@ -1633,7 +1633,7 @@ pub async fn submit_product_feedback(
     Ok(client
         .post(submit)
         .header("authorization", &submit_contract.authorization)
-        .header("user-agent", "agent-feedback-rust-agent/0.2.0")
+        .header("user-agent", "agent-feedback-rust-agent/0.2.1")
         .json(&submission)
         .send()
         .await?

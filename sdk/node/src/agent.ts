@@ -204,7 +204,7 @@ export async function submitFeedbackConsent(
     headers: {
       authorization: action.authorization,
       "content-type": action.contentType,
-      "user-agent": "@agent-feedback/node-agent/0.2.0",
+      "user-agent": "@agent-feedback/node-agent/0.2.1",
     },
     body: JSON.stringify({ decision }),
     signal: AbortSignal.timeout(options.timeoutMs ?? 5_000),
@@ -343,7 +343,7 @@ export async function submitProductFeedback(
           authorization: parsed.submit.authorization,
           "content-type": "application/json",
           "idempotency-key": idempotencyKey,
-          "user-agent": "@agent-feedback/node-agent/0.2.0",
+          "user-agent": "@agent-feedback/node-agent/0.2.1",
         },
         body: requestBody,
         signal: AbortSignal.timeout(options.timeoutMs ?? 5_000),

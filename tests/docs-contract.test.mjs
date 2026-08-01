@@ -54,7 +54,7 @@ const httpIntegrations = [
   {
     id: "rust",
     page: "docs/integrations/rust-axum.mdx",
-    required: ["agent-feedback-rust-0.2.0.tar.gz", "AgentFeedbackLayer::new", ".include", "Tokio"],
+    required: ["agent-feedback-rust-0.2.1.tar.gz", "AgentFeedbackLayer::new", ".include", "Tokio"],
   },
   {
     id: "manual-http",
@@ -312,9 +312,9 @@ test("docs and dashboard publish the same install artifacts and feedback modes",
   ]);
   const joined = pages.join("\n");
   for (const artifact of [
-    "agent-feedback-node-0.2.0.tgz",
-    "agent_feedback-0.2.0-py3-none-any.whl",
-    "agent-feedback-rust-0.2.0.tar.gz",
+    "agent-feedback-node-0.2.1.tgz",
+    "agent_feedback-0.2.1-py3-none-any.whl",
+    "agent-feedback-rust-0.2.1.tar.gz",
     "agent-feedback-protocol-v1.zip",
   ]) {
     assert.ok(joined.includes(artifact), `docs omit ${artifact}`);
