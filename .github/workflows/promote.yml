@@ -195,6 +195,7 @@ jobs:
       CANARY_WEB_SERVICE: ${{ vars.RAILWAY_CANARY_WEB_SERVICE || 'epode-web' }}
       API_ORIGIN: ${{ vars.PRODUCTION_API_ORIGIN || 'https://api.epode.ai' }}
       WEB_ORIGIN: ${{ vars.PRODUCTION_WEB_ORIGIN || 'https://app.epode.ai' }}
+      WEB_API_URL: ${{ vars.PRODUCTION_WEB_API_URL || 'http://epode-api.railway.internal:8080' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -232,8 +233,8 @@ jobs:
             echo "::error::$API_SERVICE must use the public web origin for PUBLIC_BASE_URL and WEB_APP_URL."
             exit 1
           }
-          jq -e --arg api "$API_ORIGIN" '.API_URL == $api' <<<"$web_variables" >/dev/null || {
-            echo "::error::$WEB_SERVICE API_URL does not match the reviewed production API origin."
+          jq -e --arg api "$WEB_API_URL" '.API_URL == $api' <<<"$web_variables" >/dev/null || {
+            echo "::error::$WEB_SERVICE API_URL must use the reviewed private production API origin."
             exit 1
           }
           accounts_url="$(jq -r '.OS_ACCOUNTS_URL // empty' <<<"$api_variables")"
@@ -311,6 +312,11 @@ jobs:
         id: previous
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          TARGET_API_REF: ${{ needs.plan.outputs.api_ref }}
+          TARGET_API_DIGEST: ${{ needs.plan.outputs.api_digest }}
+          TARGET_API_REVISION: ${{ needs.plan.outputs.api_revision }}
+          TARGET_WEB_REF: ${{ needs.plan.outputs.web_ref }}
+          TARGET_WEB_DIGEST: ${{ needs.plan.outputs.web_digest }}
         run: |
           set -euo pipefail
           if [[ -z "$RAILWAY_TOKEN" || -z "$RAILWAY_PROJECT_ID" ]]; then
@@ -319,11 +325,16 @@ jobs:
           fi
 
           services="$(railway service list --project "$RAILWAY_PROJECT_ID" --environment production --json)"
+          previous_api_revision=""
           for artifact in api web; do
             if [[ "$artifact" == "api" ]]; then
               service="$API_SERVICE"
+              target_ref="$TARGET_API_REF"
+              target_digest="$TARGET_API_DIGEST"
             else
               service="$WEB_SERVICE"
+              target_ref="$TARGET_WEB_REF"
+              target_digest="$TARGET_WEB_DIGEST"
             fi
             count="$(jq --arg service "$service" '[.[] | select(.name == $service)] | length' <<<"$services")"
             if [[ "$count" -ne 1 ]]; then
@@ -356,12 +367,24 @@ jobs:
               echo "::error::Cannot safely restore $service: $previous_ref now resolves to ${registry_digest:-no digest}, not active digest $previous_digest."
               exit 1
             fi
+            if [[ "$artifact" == "api" ]]; then
+              previous_api_revision="$(
+                docker buildx imagetools inspect "$previous_ref" \
+                  --format '{{ json .Image }}' \
+                  | jq -r 'first(.. | objects | select(.config?.Labels?["org.opencontainers.image.revision"] != null) | .config.Labels["org.opencontainers.image.revision"]) // empty'
+              )"
+              if [[ ! "$previous_api_revision" =~ ^[0-9a-f]{40}$ || "${previous_api_revision:0:7}" != "$previous_tag" ]]; then
+                echo "::error::Cannot prove the source revision for active API image $previous_ref."
+                exit 1
+              fi
+            fi
             production_ref="${expected_image}:production"
             production_digest="$(
               docker buildx imagetools inspect "$production_ref" \
                 --format '{{ json .Manifest }}' | jq -r '.digest // empty'
             )"
-            if [[ "$production_digest" != "$previous_digest" ]]; then
+            if [[ "$production_digest" != "$previous_digest" \
+              && ! ("$previous_ref" == "$target_ref" && "$previous_digest" == "$target_digest") ]]; then
               echo "::error::$production_ref must identify the active, recoverable $service digest before a paired change."
               exit 1
             fi
@@ -370,6 +393,27 @@ jobs:
               echo "${artifact}_digest=$previous_digest"
             } >>"$GITHUB_OUTPUT"
           done
+
+          # sqlx refuses to run an image whose embedded migration ledger omits
+          # any migration already recorded in the database. Conversely, once
+          # a target applies a new migration, the old image is no longer an
+          # automatic recovery candidate. Until migrations have a separately
+          # attested expand/contract rollout, require identical ledgers before
+          # promising service-level compensation.
+          git fetch --no-tags origin "$previous_api_revision" "$TARGET_API_REVISION"
+          previous_migrations="$(mktemp)"
+          target_migrations="$(mktemp)"
+          trap 'rm -f "$previous_migrations" "$target_migrations"' EXIT
+          git ls-tree -r --name-only "$previous_api_revision" -- backend/migrations \
+            | sed -nE 's#^backend/migrations/([0-9]+)_.*\.sql$#\1#p' \
+            | sort -nu >"$previous_migrations"
+          git ls-tree -r --name-only "$TARGET_API_REVISION" -- backend/migrations \
+            | sed -nE 's#^backend/migrations/([0-9]+)_.*\.sql$#\1#p' \
+            | sort -nu >"$target_migrations"
+          if ! diff --unified=0 "$previous_migrations" "$target_migrations"; then
+            echo "::error::The target API changes the SQL migration ledger, so the active API cannot be proven recoverable after startup. Use a separately attested migration rollout; no production mutation was started."
+            exit 1
+          fi
 
       - name: Promote API
         id: promote_api
