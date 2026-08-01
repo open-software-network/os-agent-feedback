@@ -64,6 +64,89 @@ export interface McpInstrumentationOptions
 
 type McpServer = { registerTool: (...arguments_: unknown[]) => unknown };
 
+type FailureGuidance = { retryable: boolean; text: string };
+
+function isTransientHttpStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function consentFailureGuidance(status: number): FailureGuidance {
+  if (isTransientHttpStatus(status)) {
+    return {
+      retryable: true,
+      text: "Retry this permission action exactly once with the same arguments; never assume approval.",
+    };
+  }
+  if (status === 401) {
+    return {
+      retryable: false,
+      text: "The consent handle is invalid or expired; do not retry with the same handle. Do not assume approval.",
+    };
+  }
+  if (status === 409) {
+    return {
+      retryable: false,
+      text: "Consent is not applicable to the product's current mode. Do not retry; never assume approval.",
+    };
+  }
+  if (status === 410) {
+    return {
+      retryable: false,
+      text: "Feedback collection is disabled. Do not retry; never assume approval.",
+    };
+  }
+  if (status === 404) {
+    return {
+      retryable: false,
+      text: "The consent endpoint is unavailable for this integration. Do not retry; never assume approval.",
+    };
+  }
+  return { retryable: false, text: "Do not retry. Do not assume approval." };
+}
+
+function reportFailureGuidance(status: number): FailureGuidance {
+  if (status === 400 || status === 422) {
+    return {
+      retryable: true,
+      text: "Retry this tool exactly once with only feedbackHandle and a concise summary; omit every optional field.",
+    };
+  }
+  if (isTransientHttpStatus(status)) {
+    return {
+      retryable: true,
+      text: "Retry this tool exactly once with the same arguments.",
+    };
+  }
+  if (status === 401) {
+    return {
+      retryable: false,
+      text: "The feedback handle is invalid or expired; do not retry with the same handle.",
+    };
+  }
+  if (status === 403) {
+    return {
+      retryable: false,
+      text: "Consent is required or was declined; do not retry. Never call this tool unless a feedback_ready action returned it.",
+    };
+  }
+  if (status === 409) {
+    return {
+      retryable: false,
+      text: "The feedback handle belongs to a different product environment. Do not retry.",
+    };
+  }
+  if (status === 410) {
+    return { retryable: false, text: "Feedback collection is disabled. Do not retry." };
+  }
+  if (status === 404) {
+    return {
+      retryable: false,
+      text: "The feedback endpoint is unavailable for this integration. Do not retry.",
+    };
+  }
+  return { retryable: false, text: "Do not retry with the same handle." };
+}
+
 export interface McpInstrumentation {
   instrument(server: McpServer): void;
   flush(): Promise<void>;
@@ -283,21 +366,16 @@ function instrumentServer(
         );
         const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
         if (!response.ok) {
-          const guidance =
-            response.status >= 500
-              ? "Retry once."
-              : response.status === 401
-                ? "The consent handle is invalid or expired; do not retry with the same handle. Do not assume approval."
-                : "Do not retry. Do not assume approval.";
+          const guidance = consentFailureGuidance(response.status);
           return {
             isError: true,
             content: [
               {
                 type: "text",
-                text: `Permission could not be recorded (HTTP ${response.status}). ${guidance}`,
+                text: `Permission could not be recorded (HTTP ${response.status}). ${guidance.text}`,
               },
             ],
-            structuredContent: { accepted: false, retryable: response.status >= 500 },
+            structuredContent: { accepted: false, retryable: guidance.retryable },
           };
         }
         const returnedFeedback = isPlainObject(body.feedback) ? body.feedback : undefined;
@@ -332,7 +410,7 @@ function instrumentServer(
           content: [
             {
               type: "text",
-              text: "Epode is temporarily unavailable. Retry this permission action once; never assume approval.",
+              text: "Epode is temporarily unavailable. Retry this permission action exactly once with the same arguments; never assume approval.",
             },
           ],
           structuredContent: { accepted: false, retryable: true },
@@ -426,23 +504,16 @@ function instrumentServer(
         );
         const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
         if (!response.ok) {
-          const guidance =
-            response.status >= 500
-              ? "Retry this tool once."
-              : response.status === 403
-                ? "Consent is required or was declined; do not retry. Never call this tool unless a feedback_ready action returned it."
-                : response.status === 401
-                  ? "The feedback handle is invalid or expired; do not retry with the same handle."
-                  : "Retry this tool once with only feedbackHandle and a concise summary; omit every optional field.";
+          const guidance = reportFailureGuidance(response.status);
           return {
             isError: true,
             content: [
               {
                 type: "text",
-                text: `Feedback submission failed with HTTP ${response.status}. ${guidance}`,
+                text: `Feedback submission failed with HTTP ${response.status}. ${guidance.text}`,
               },
             ],
-            structuredContent: { accepted: false, retryable: response.status >= 500 },
+            structuredContent: { accepted: false, retryable: guidance.retryable },
           };
         }
         return {
@@ -460,7 +531,7 @@ function instrumentServer(
           content: [
             {
               type: "text",
-              text: "Agent Feedback is temporarily unavailable. Retry this tool once.",
+              text: "Agent Feedback is temporarily unavailable. Retry this tool exactly once with the same arguments.",
             },
           ],
           structuredContent: { accepted: false, retryable: true },

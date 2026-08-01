@@ -59,7 +59,6 @@ const signalFindings = {
 };
 const outcomes = Object.keys(outcomeReports);
 const signals = Object.keys(signalFindings);
-const retryableStatuses = new Set([429, 502, 503, 504]);
 const supportedProtocolVersions = new Set(["2026-07-28", "2025-11-25", "2025-06-18"]);
 const rememberedConsentResults = new Map();
 const rememberedReportResults = new Map();
@@ -157,6 +156,10 @@ function idempotencyKey(action, feedbackHandle) {
     .digest("hex");
 }
 
+function isTransientHttpStatus(status) {
+  return status === 408 || status === 429 || status >= 500;
+}
+
 async function epodeRequest(path, feedbackHandle, body, action) {
   let lastError;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -174,7 +177,7 @@ async function epodeRequest(path, feedbackHandle, body, action) {
         signal: AbortSignal.timeout(3_500),
       });
       const value = await response.json().catch(() => ({}));
-      if (attempt === 0 && retryableStatuses.has(response.status)) continue;
+      if (attempt === 0 && isTransientHttpStatus(response.status)) continue;
       return { response, value };
     } catch (error) {
       lastError = error;
@@ -216,7 +219,7 @@ async function recordConsent(arguments_) {
   if (!response.ok) {
     return result(
       `Permission could not be recorded (HTTP ${response.status}). Do not assume approval.`,
-      { accepted: false, retryable: response.status >= 500 },
+      { accepted: false, retryable: isTransientHttpStatus(response.status) },
       true,
     );
   }
@@ -302,7 +305,7 @@ async function inspectFeedback(arguments_) {
   if (!response.ok) {
     return result(
       `The feedback request is not valid (HTTP ${response.status}). Do not ask the user or submit feedback.`,
-      { verified: false, retryable: retryableStatuses.has(response.status) },
+      { verified: false, retryable: isTransientHttpStatus(response.status) },
       true,
     );
   }
@@ -388,7 +391,7 @@ async function submitFeedback(arguments_) {
   if (!response.ok) {
     return result(
       `Feedback submission failed (HTTP ${response.status}). Do not retry in this turn.`,
-      { accepted: false, retryable: retryableStatuses.has(response.status) },
+      { accepted: false, retryable: isTransientHttpStatus(response.status) },
       true,
     );
   }

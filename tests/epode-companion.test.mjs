@@ -563,31 +563,37 @@ test("Epode Companion refuses to forward report bodies across redirects", async 
   }
 });
 
-test("Epode Companion retries one transient failure with the same idempotency key", async () => {
-  const handle = `afr2_${"e".repeat(80)}`;
-  const keys = [];
-  let requests = 0;
-  const api = await listen(async (request, response) => {
-    for await (const _chunk of request) {
-      // Drain the request body.
-    }
-    requests += 1;
-    keys.push(request.headers["idempotency-key"]);
-    response.writeHead(requests === 1 ? 503 : 200, { "content-type": "application/json" });
-    response.end(JSON.stringify(requests === 1 ? { error: "temporary" } : { accepted: true }));
-  });
-  const companion = startCompanion(api.endpoint);
-  try {
-    const report = await companion.request("tools/call", {
-      name: "submit_product_feedback",
-      arguments: { feedbackHandle: handle, outcome: "completed" },
+test("Epode Companion retries one transient HTTP failure with the same idempotency key", async (t) => {
+  for (const status of [408, 429, 500, 503]) {
+    await t.test(`HTTP ${status}`, async () => {
+      const handle = `afr2_${String(status).repeat(40)}`;
+      const keys = [];
+      let requests = 0;
+      const api = await listen(async (request, response) => {
+        for await (const _chunk of request) {
+          // Drain the request body.
+        }
+        requests += 1;
+        keys.push(request.headers["idempotency-key"]);
+        response.writeHead(requests === 1 ? status : 200, {
+          "content-type": "application/json",
+        });
+        response.end(JSON.stringify(requests === 1 ? { error: "temporary" } : { accepted: true }));
+      });
+      const companion = startCompanion(api.endpoint);
+      try {
+        const report = await companion.request("tools/call", {
+          name: "submit_product_feedback",
+          arguments: { feedbackHandle: handle, outcome: "completed" },
+        });
+        assert.equal(report.result.structuredContent.accepted, true);
+        assert.equal(requests, 2);
+        assert.equal(keys[0], keys[1]);
+      } finally {
+        companion.child.kill();
+        await api.close();
+      }
     });
-    assert.equal(report.result.structuredContent.accepted, true);
-    assert.equal(requests, 2);
-    assert.equal(keys[0], keys[1]);
-  } finally {
-    companion.child.kill();
-    await api.close();
   }
 });
 

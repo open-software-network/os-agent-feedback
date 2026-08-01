@@ -5,6 +5,24 @@ import { createMcpInstrumentation, instrumentMcp } from "../dist/mcp.js";
 
 const key = `af_live_2123456789abcdef0123456789abcdef_${"z".repeat(32)}`;
 
+function createFailureHarness(fetch) {
+  const tools = new Map();
+  const server = {
+    registerTool(name, configuration, handler) {
+      tools.set(name, { configuration, handler });
+      return { remove() {} };
+    },
+  };
+  const feedback = createMcpInstrumentation({
+    apiKey: key,
+    endpoint: "https://feedback.test",
+    flushIntervalMs: 60_000,
+    fetch,
+  });
+  feedback.instrument(server);
+  return { feedback, tools };
+}
+
 test("MCP instrumentation decorates business tools and registers structured feedback reporting", async () => {
   const tools = new Map();
   const telemetry = [];
@@ -460,41 +478,117 @@ test("MCP Ask-once lets Epode own approval and never exposes report fields early
   await feedback.shutdown();
 });
 
-test("MCP gives agents a safe minimal retry after backend report validation fails", async () => {
-  const tools = new Map();
-  const server = {
-    registerTool(name, configuration, handler) {
-      tools.set(name, { configuration, handler });
-      return { remove() {} };
+test("MCP report failures expose one bounded, status-specific retry decision", async (t) => {
+  const scenarios = [
+    {
+      name: "400 validation gets one minimal retry",
+      status: 400,
+      retryable: true,
+      guidance: /exactly once with only feedbackHandle and a concise summary/,
     },
-  };
-  const feedback = createMcpInstrumentation({
-    apiKey: key,
-    endpoint: "https://feedback.test",
-    flushIntervalMs: 60_000,
-    fetch: async (url) => {
-      if (String(url).endsWith("/api/v2/reports")) {
+    {
+      name: "404 endpoint mismatch is terminal",
+      status: 404,
+      retryable: false,
+      guidance: /endpoint is unavailable.*Do not retry/,
+    },
+    {
+      name: "409 environment mismatch is terminal",
+      status: 409,
+      retryable: false,
+      guidance: /different product environment.*Do not retry/,
+    },
+    {
+      name: "410 disabled feedback is terminal",
+      status: 410,
+      retryable: false,
+      guidance: /collection is disabled.*Do not retry/,
+    },
+    {
+      name: "429 throttling gets one same-arguments retry",
+      status: 429,
+      retryable: true,
+      guidance: /exactly once with the same arguments/,
+    },
+    {
+      name: "5xx failure gets one same-arguments retry",
+      status: 500,
+      retryable: true,
+      guidance: /exactly once with the same arguments/,
+    },
+    {
+      name: "transport failure gets one same-arguments retry",
+      transportError: true,
+      retryable: true,
+      guidance: /exactly once with the same arguments/,
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const { feedback, tools } = createFailureHarness(async () => {
+        if (scenario.transportError) throw new Error("untrusted transport detail");
         return new Response('{"error":"untrusted backend detail"}', {
-          status: 400,
+          status: scenario.status,
           headers: { "content-type": "application/json" },
         });
+      });
+      try {
+        const result = await tools.get("report_product_feedback").handler({
+          feedbackHandle: `afr2_${"a".repeat(96)}`,
+          summary: "The product returned a useful result.",
+          impact: "helped",
+        });
+
+        assert.equal(result.isError, true);
+        assert.equal(result.structuredContent.retryable, scenario.retryable);
+        assert.match(result.content[0].text, scenario.guidance);
+        assert.doesNotMatch(result.content[0].text, /untrusted (?:backend|transport) detail/);
+      } finally {
+        await feedback.shutdown();
       }
-      return new Response("{}", { status: 202 });
-    },
-  });
-  feedback.instrument(server);
+    });
+  }
+});
 
-  const result = await tools.get("report_product_feedback").handler({
-    feedbackHandle: `afr2_${"a".repeat(96)}`,
-    summary: "The product returned a useful result.",
-    impact: "helped",
-  });
+test("MCP consent failures expose one bounded, status-specific retry decision", async (t) => {
+  const scenarios = [
+    { name: "400 invalid request is terminal", status: 400, retryable: false },
+    { name: "404 endpoint mismatch is terminal", status: 404, retryable: false },
+    { name: "409 inapplicable consent is terminal", status: 409, retryable: false },
+    { name: "410 disabled feedback is terminal", status: 410, retryable: false },
+    { name: "429 throttling gets one retry", status: 429, retryable: true },
+    { name: "5xx failure gets one retry", status: 503, retryable: true },
+    { name: "transport failure gets one retry", transportError: true, retryable: true },
+  ];
 
-  assert.equal(result.isError, true);
-  assert.match(
-    result.content[0].text,
-    /Retry this tool once with only feedbackHandle and a concise summary/,
-  );
-  assert.doesNotMatch(result.content[0].text, /untrusted backend detail/);
-  await feedback.shutdown();
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const { feedback, tools } = createFailureHarness(async () => {
+        if (scenario.transportError) throw new Error("untrusted transport detail");
+        return new Response('{"error":"untrusted backend detail"}', {
+          status: scenario.status,
+          headers: { "content-type": "application/json" },
+        });
+      });
+      try {
+        const result = await tools.get("record_product_feedback_consent").handler({
+          feedbackHandle: `afr2_${"b".repeat(96)}`,
+          decision: "approved",
+        });
+
+        assert.equal(result.isError, true);
+        assert.equal(result.structuredContent.retryable, scenario.retryable);
+        if (scenario.retryable) {
+          assert.match(result.content[0].text, /exactly once with the same arguments/);
+        } else {
+          assert.match(result.content[0].text, /[Dd]o not retry/);
+        }
+        assert.match(result.content[0].text, /never assume approval|Do not assume approval/);
+        assert.doesNotMatch(result.content[0].text, /untrusted (?:backend|transport) detail/);
+      } finally {
+        await feedback.shutdown();
+      }
+    });
+  }
 });
