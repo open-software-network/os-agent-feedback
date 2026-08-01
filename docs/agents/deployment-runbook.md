@@ -49,8 +49,9 @@ its health before deploying the web service.
 
 `PUBLIC_BASE_URL` and `WEB_APP_URL` intentionally use the web domain. That
 keeps browser authentication cookies, the OAuth callback, same-origin feedback
-relay routes, and generated public links on one origin. `API_URL` on the web
-service points to the API domain only for server-to-server BFF forwarding.
+and API proxy routes, and generated public links on one origin. `API_URL` on
+the web service points to the API domain only for server-to-server BFF
+forwarding.
 
 ## Canary deployment
 
