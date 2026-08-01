@@ -144,6 +144,7 @@ export function FeedbackView({
   const [query, setQuery] = useState(initialLocation.query);
   const [filters, setFilters] = useState<FeedbackFiltersState>(initialLocation.filters);
   const [range, setRange] = useState(initialLocation.range);
+  const [groupKey, setGroupKey] = useState(initialLocation.groupKey);
   const [mode, setMode] = useState<FeedbackMode>("reports");
   const [groupLimit, setGroupLimit] = useState(groupsPageSize);
   const productId = data.currentProduct?.id;
@@ -152,16 +153,26 @@ export function FeedbackView({
   const searchSettling = query.trim() !== debouncedQuery.trim();
   const hasFacetFilters = facetOrder.some((facet) => filters[facet].length > 0);
   const canSeedReportList =
+    !groupKey &&
     !query.trim() &&
     !hasFacetFilters &&
     data.listState.reportsLoaded === data.listState.reportsTotal &&
     data.reports.every((report) => !since || new Date(report.createdAt) >= new Date(since));
   const seedFacets = useMemo(() => feedbackFacetsFromReports(data.reports), [data.reports]);
   const reportPages = useInfiniteQuery({
-    queryKey: ["feedback-list", data.workspace.id, productId, debouncedQuery, filters, since],
+    queryKey: [
+      "feedback-list",
+      data.workspace.id,
+      productId,
+      groupKey,
+      debouncedQuery,
+      filters,
+      since,
+    ],
     queryFn: ({ pageParam }) =>
       fetchDashboardFeedbackPage(data.workspace.id, {
         productId: productId ?? "",
+        groupKey: groupKey ?? undefined,
         q: debouncedQuery.trim() || undefined,
         status: filters.status,
         impact: filters.impact,
@@ -231,8 +242,8 @@ export function FeedbackView({
   });
 
   useEffect(() => {
-    writeFilterLocation(query, filters, range);
-  }, [filters, query, range]);
+    writeFilterLocation(query, filters, range, groupKey);
+  }, [filters, groupKey, query, range]);
 
   useEffect(() => {
     const restoreFilters = () => {
@@ -240,6 +251,7 @@ export function FeedbackView({
       setQuery(location.query);
       setFilters(location.filters);
       setRange(location.range);
+      setGroupKey(location.groupKey);
     };
     window.addEventListener("popstate", restoreFilters);
     return () => window.removeEventListener("popstate", restoreFilters);
@@ -347,6 +359,19 @@ export function FeedbackView({
     if (nextMode === "signals") selectReport(null);
   }
 
+  function reviewSignalReports(nextGroupKey: string) {
+    setQuery("");
+    setFilters(createEmptyFilters());
+    setRange("all");
+    setGroupKey(nextGroupKey);
+    selectMode("reports");
+  }
+
+  function reviewAllReports() {
+    setGroupKey(null);
+    selectMode("reports");
+  }
+
   const incomplete = Boolean(reportPages.hasNextPage);
 
   return (
@@ -398,9 +423,25 @@ export function FeedbackView({
             onClearAll={() => {
               setQuery("");
               setRange(defaultRange);
+              setGroupKey(null);
               commitFilters(createEmptyFilters());
             }}
           />
+
+          {groupKey ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-attention/5 px-4 py-2 text-xs">
+              <p aria-live="polite">
+                {feedbackPending
+                  ? "Loading exact signal evidence…"
+                  : `Signal cluster evidence · ${reportTotal.toLocaleString()} matching ${
+                      reportTotal === 1 ? "report" : "reports"
+                    }`}
+              </p>
+              <Button type="button" variant="ghost" size="xs" onClick={() => setGroupKey(null)}>
+                Show all feedback
+              </Button>
+            </div>
+          ) : null}
 
           {reportPages.isError ? (
             <div
@@ -474,6 +515,7 @@ export function FeedbackView({
                       onClick={() => {
                         setQuery("");
                         setRange("all");
+                        setGroupKey(null);
                         commitFilters(createEmptyFilters());
                       }}
                     >
@@ -498,7 +540,8 @@ export function FeedbackView({
             mutationGroupKey={filing.variables}
             filingPending={filing.isPending}
             filingError={filing.error}
-            onReviewReports={() => selectMode("reports")}
+            onReviewReports={reviewAllReports}
+            onReviewGroup={reviewSignalReports}
             onFileIssue={(groupKey) => filing.mutate(groupKey)}
             onCheckAgain={async () => {
               await groups.refetch();
@@ -538,6 +581,7 @@ function SignalsView({
   filingPending,
   filingError,
   onReviewReports,
+  onReviewGroup,
   onFileIssue,
   onCheckAgain,
   onLoadMore,
@@ -554,6 +598,7 @@ function SignalsView({
   filingPending: boolean;
   filingError: Error | null;
   onReviewReports: () => void;
+  onReviewGroup: (groupKey: string) => void;
   onFileIssue: (groupKey: string) => void;
   onCheckAgain: () => Promise<void>;
   onLoadMore: () => void;
@@ -646,6 +691,7 @@ function SignalsView({
           mappingAvailable={mappingAvailable}
           mutationGroupKey={mutationGroupKey}
           filingPending={filingPending}
+          onReviewGroup={onReviewGroup}
           onFileIssue={onFileIssue}
         />
       </Panel>
@@ -663,20 +709,22 @@ function SignalsTable({
   mappingAvailable,
   mutationGroupKey,
   filingPending,
+  onReviewGroup,
   onFileIssue,
 }: {
   groups: ProductReportGroup[];
   mappingAvailable: boolean;
   mutationGroupKey: string | undefined;
   filingPending: boolean;
+  onReviewGroup: (groupKey: string) => void;
   onFileIssue: (groupKey: string) => void;
 }) {
   return (
     <Table className="min-w-[680px] table-fixed">
       <TableHeader className="bg-background">
         <TableRow className="hover:bg-background">
-          <TableHead className="w-[52%] pl-4 text-xs text-muted-foreground">Cluster</TableHead>
-          <TableHead className="w-[12%] text-xs text-muted-foreground">Reports</TableHead>
+          <TableHead className="w-[48%] pl-4 text-xs text-muted-foreground">Cluster</TableHead>
+          <TableHead className="w-[16%] text-xs text-muted-foreground">Evidence</TableHead>
           <TableHead className="w-[18%] text-xs text-muted-foreground">Latest observed</TableHead>
           <TableHead className="w-[18%] pr-4 text-xs text-muted-foreground">GitHub issue</TableHead>
         </TableRow>
@@ -706,8 +754,17 @@ function SignalsTable({
                   {signal.detail ? <span className="truncate">{signal.detail}</span> : null}
                 </p>
               </TableCell>
-              <TableCell className="text-xs text-muted-foreground">
-                {group.reportCount.toLocaleString()}
+              <TableCell className="text-xs">
+                <Button
+                  type="button"
+                  variant="link"
+                  className="h-auto p-0 text-xs"
+                  aria-label={`Review ${group.reportCount.toLocaleString()} ${group.reportCount === 1 ? "report" : "reports"} in this signal cluster`}
+                  onClick={() => onReviewGroup(group.groupKey)}
+                >
+                  {group.reportCount.toLocaleString()}{" "}
+                  {group.reportCount === 1 ? "report" : "reports"}
+                </Button>
               </TableCell>
               <TableCell
                 className="text-xs text-muted-foreground"
@@ -1244,21 +1301,29 @@ function readFilterLocation(): {
   query: string;
   filters: FeedbackFiltersState;
   range: string;
+  groupKey: string | null;
 } {
   if (typeof window === "undefined") {
-    return { query: "", filters: createEmptyFilters(), range: defaultRange };
+    return { query: "", filters: createEmptyFilters(), range: defaultRange, groupKey: null };
   }
   const params = new URL(window.location.href).searchParams;
   const filters = createEmptyFilters();
+  const groupKey = params.get("group");
   for (const facet of facetOrder) filters[facet] = params.getAll(facet).filter(Boolean);
   return {
     query: params.get("q") ?? "",
     filters,
-    range: params.get("range") ?? defaultRange,
+    range: params.get("range") ?? (groupKey ? "all" : defaultRange),
+    groupKey,
   };
 }
 
-function writeFilterLocation(query: string, filters: FeedbackFiltersState, range: string) {
+function writeFilterLocation(
+  query: string,
+  filters: FeedbackFiltersState,
+  range: string,
+  groupKey: string | null,
+) {
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
   if (query.trim()) url.searchParams.set("q", query.trim());
@@ -1269,5 +1334,7 @@ function writeFilterLocation(query: string, filters: FeedbackFiltersState, range
   }
   if (range === defaultRange) url.searchParams.delete("range");
   else url.searchParams.set("range", range);
+  if (groupKey) url.searchParams.set("group", groupKey);
+  else url.searchParams.delete("group");
   window.history.replaceState(window.history.state, "", url);
 }

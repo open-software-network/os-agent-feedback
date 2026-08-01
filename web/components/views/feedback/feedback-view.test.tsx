@@ -68,6 +68,47 @@ describe("FeedbackView", () => {
     await waitFor(() => expect(window.location.search).not.toContain("status="));
   });
 
+  it("resolves a GitHub signal backlink to the exact retained reports", async () => {
+    const data = dashboardFixture();
+    const groupKey = "6910e1b05a001949e02f04db6d67d013";
+    window.history.replaceState({}, "", `/?view=feedback&group=${groupKey}`);
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/dashboard/feedback?")) {
+        return Promise.resolve(
+          json({
+            reports: data.reports,
+            total: 1,
+            facets: feedbackFacets(),
+            limit: 50,
+            nextCursor: null,
+          }),
+        );
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderFeedback(data);
+
+    expect(await screen.findByText("Signal cluster evidence · 1 matching report")).toBeVisible();
+    await waitFor(() => {
+      const request = fetchMock.mock.calls.find(([input]) =>
+        String(input).startsWith("/api/dashboard/feedback?"),
+      );
+      expect(request).toBeDefined();
+      const url = new URL(String(request?.[0]), "https://app.epode.ai");
+      expect(url.searchParams.get("groupKey")).toBe(groupKey);
+      expect(url.searchParams.has("since")).toBe(false);
+      expect(new URL(window.location.href).searchParams.get("range")).toBe("all");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Show all feedback" }));
+    await waitFor(() =>
+      expect(new URL(window.location.href).searchParams.has("group")).toBe(false),
+    );
+  });
+
   it("paginates the complete server-filtered result and fetches a selected report outside it", async () => {
     const complete = dashboardFixture();
     const report = complete.reports[0];
@@ -295,6 +336,22 @@ describe("FeedbackView", () => {
       "https://github.com/open-software/epode/issues/42",
     );
     expect(screen.queryByRole("dialog", { name: "Feedback detail" })).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Review 2 reports in this signal cluster" }),
+    );
+
+    expect(await screen.findByText(/Signal cluster evidence/)).toBeVisible();
+    await waitFor(() => {
+      expect(new URL(window.location.href).searchParams.get("group")).toBe(
+        "c86875b212d12aa37bb9a3fff09787d6",
+      );
+      expect(
+        fetchMock.mock.calls.some(([input]) =>
+          String(input).includes("groupKey=c86875b212d12aa37bb9a3fff09787d6"),
+        ),
+      ).toBe(true);
+    });
   });
 
   it("loads additional signal pages and points unmapped products to Connectors", async () => {
@@ -534,6 +591,20 @@ function repositoryMapping(productId: string) {
     pathPrefix: null,
     createdAt: "2026-07-30T12:00:00Z",
     updatedAt: "2026-07-30T12:00:00Z",
+  };
+}
+
+function feedbackFacets() {
+  return {
+    status: [{ name: "new", count: 1 }],
+    impact: [{ name: "blocked", count: 1 }],
+    surface: [{ name: "mcp", count: 1 }],
+    topic: [{ name: "freshness", count: 1 }],
+    findingKind: [{ name: "defect", count: 1 }],
+    severity: [{ name: "blocking", count: 1 }],
+    tag: [],
+    assignee: [{ name: "unassigned", count: 1 }],
+    workaround: [{ name: "none", count: 1 }],
   };
 }
 

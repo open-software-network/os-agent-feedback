@@ -2573,7 +2573,12 @@ pub(crate) async fn dashboard_feedback_page(
             WHEN r.workaround ->> 'used' = 'true' THEN 'used'
             ELSE 'suggested' END = ANY($15))
           AND ($16::TEXT IS NULL OR i.operation = $16)
-          AND ($17::TEXT IS NULL OR i.customer_ref = $17)",
+          AND ($17::TEXT IS NULL OR i.customer_ref = $17)
+          AND ($18::TEXT IS NULL OR EXISTS (
+            SELECT 1 FROM report_groups report_group
+            WHERE report_group.id = r.group_id
+              AND report_group.workspace_id = r.workspace_id
+              AND report_group.group_key = $18))",
     )
     .bind(environment.id)
     .bind(retained_since)
@@ -2592,6 +2597,7 @@ pub(crate) async fn dashboard_feedback_page(
     .bind(&filters.workarounds)
     .bind(&filters.operation)
     .bind(&filters.customer_ref)
+    .bind(&filters.group_key)
     .fetch_one(pool)
     .await?;
 
@@ -2645,8 +2651,13 @@ pub(crate) async fn dashboard_feedback_page(
             ELSE 'suggested' END = ANY($15))
           AND ($16::TEXT IS NULL OR i.operation = $16)
           AND ($17::TEXT IS NULL OR i.customer_ref = $17)
-          AND ($18::TIMESTAMPTZ IS NULL OR (r.created_at, r.id) < ($18, $19))
-        ORDER BY r.created_at DESC, r.id DESC LIMIT $20",
+          AND ($18::TEXT IS NULL OR EXISTS (
+            SELECT 1 FROM report_groups report_group
+            WHERE report_group.id = r.group_id
+              AND report_group.workspace_id = r.workspace_id
+              AND report_group.group_key = $18))
+          AND ($19::TIMESTAMPTZ IS NULL OR (r.created_at, r.id) < ($19, $20))
+        ORDER BY r.created_at DESC, r.id DESC LIMIT $21",
     )
     .bind(environment.id)
     .bind(retained_since)
@@ -2665,6 +2676,7 @@ pub(crate) async fn dashboard_feedback_page(
     .bind(filters.workarounds)
     .bind(filters.operation)
     .bind(filters.customer_ref)
+    .bind(filters.group_key)
     .bind(cursor_created_at)
     .bind(cursor_id)
     .bind(limit + 1)
@@ -2708,25 +2720,25 @@ async fn dashboard_feedback_facets(
             CASE WHEN r.workaround IS NULL THEN 'none'
               WHEN r.workaround ->> 'used' = 'true' THEN 'used'
               ELSE 'suggested' END AS workaround,
-            ($8::TEXT[] IS NULL OR COALESCE(w.status, 'new') = ANY($8)) AS matches_status,
-            ($9::TEXT[] IS NULL OR COALESCE(r.impact, 'unknown') = ANY($9)) AS matches_impact,
-            ($10::TEXT[] IS NULL OR i.surface = ANY($10)) AS matches_surface,
-            ($11::TEXT[] IS NULL OR EXISTS (
-              SELECT 1 FROM jsonb_array_elements(r.findings) finding
-              WHERE finding ->> 'topic' = ANY($11))) AS matches_topic,
+            ($9::TEXT[] IS NULL OR COALESCE(w.status, 'new') = ANY($9)) AS matches_status,
+            ($10::TEXT[] IS NULL OR COALESCE(r.impact, 'unknown') = ANY($10)) AS matches_impact,
+            ($11::TEXT[] IS NULL OR i.surface = ANY($11)) AS matches_surface,
             ($12::TEXT[] IS NULL OR EXISTS (
               SELECT 1 FROM jsonb_array_elements(r.findings) finding
-              WHERE finding ->> 'kind' = ANY($12))) AS matches_finding_kind,
+              WHERE finding ->> 'topic' = ANY($12))) AS matches_topic,
             ($13::TEXT[] IS NULL OR EXISTS (
               SELECT 1 FROM jsonb_array_elements(r.findings) finding
-              WHERE finding ->> 'severity' = ANY($13))) AS matches_severity,
-            ($14::TEXT[] IS NULL OR COALESCE(w.tags, '{}'::TEXT[]) && $14) AS matches_tag,
-            ($15::TEXT[] IS NULL OR w.assignee_os_user_id = ANY($15)
-              OR ($16 AND w.assignee_os_user_id IS NULL)) AS matches_assignee,
-            ($17::TEXT[] IS NULL OR CASE
+              WHERE finding ->> 'kind' = ANY($13))) AS matches_finding_kind,
+            ($14::TEXT[] IS NULL OR EXISTS (
+              SELECT 1 FROM jsonb_array_elements(r.findings) finding
+              WHERE finding ->> 'severity' = ANY($14))) AS matches_severity,
+            ($15::TEXT[] IS NULL OR COALESCE(w.tags, '{}'::TEXT[]) && $15) AS matches_tag,
+            ($16::TEXT[] IS NULL OR w.assignee_os_user_id = ANY($16)
+              OR ($17 AND w.assignee_os_user_id IS NULL)) AS matches_assignee,
+            ($18::TEXT[] IS NULL OR CASE
               WHEN r.workaround IS NULL THEN 'none'
               WHEN r.workaround ->> 'used' = 'true' THEN 'used'
-              ELSE 'suggested' END = ANY($17)) AS matches_workaround
+              ELSE 'suggested' END = ANY($18)) AS matches_workaround
           FROM feedback_reports r
           JOIN interactions_v2 i ON i.id = r.interaction_id
           LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
@@ -2738,6 +2750,11 @@ async fn dashboard_feedback_facets(
               OR r.findings::TEXT ILIKE $5 ESCAPE '\')
             AND ($6::TEXT IS NULL OR i.operation = $6)
             AND ($7::TEXT IS NULL OR i.customer_ref = $7)
+            AND ($8::TEXT IS NULL OR EXISTS (
+              SELECT 1 FROM report_groups report_group
+              WHERE report_group.id = r.group_id
+                AND report_group.workspace_id = r.workspace_id
+                AND report_group.group_key = $8))
         ), facet_values AS (
           SELECT id AS report_id, 'status'::TEXT AS facet, workflow_status AS value FROM base
             WHERE matches_impact AND matches_surface AND matches_topic
@@ -2792,6 +2809,7 @@ async fn dashboard_feedback_facets(
     .bind(search)
     .bind(&filters.operation)
     .bind(&filters.customer_ref)
+    .bind(&filters.group_key)
     .bind(&filters.statuses)
     .bind(&filters.impacts)
     .bind(&filters.surfaces)
@@ -7725,6 +7743,65 @@ mod product_tests {
         .expect_err("invalid session kind must fail before a database call");
         anyhow::ensure!(invalid_session_kind.status == StatusCode::BAD_REQUEST);
         Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn dashboard_feedback_group_filter_returns_exact_evidence() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let fixture = github_issue_group_fixture(&pool, "Dashboard group evidence", 2).await?;
+
+        let result = async {
+            let page = dashboard_feedback_page(
+                &pool,
+                fixture.workspace_id,
+                fixture.product_id,
+                DashboardFeedbackFilters {
+                    group_key: Some(fixture.group_key.clone()),
+                    ..DashboardFeedbackFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(page.total == 2 && page.reports.len() == 2);
+            anyhow::ensure!(
+                page.reports
+                    .iter()
+                    .all(|report| report.operation == "search_reports")
+            );
+            anyhow::ensure!(
+                page.facets
+                    .topic
+                    .iter()
+                    .any(|topic| topic.name == "search_failure" && topic.count == 2)
+            );
+
+            let missing = dashboard_feedback_page(
+                &pool,
+                fixture.workspace_id,
+                fixture.product_id,
+                DashboardFeedbackFilters {
+                    group_key: Some(Uuid::new_v4().simple().to_string()),
+                    ..DashboardFeedbackFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(missing.total == 0 && missing.reports.is_empty());
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(fixture.workspace_id)
+            .execute(&pool)
+            .await?;
+        result
     }
 
     #[tokio::test]

@@ -24,6 +24,7 @@ import { cn } from "@/lib/utils";
 
 type InsightCount = { name: string; count: number };
 type VisibleDashboardView = "feedback" | "sessions" | "setup";
+type DashboardScope = Record<string, string>;
 
 const impactTone: Record<string, string> = {
   blocked: "bg-impact-negative",
@@ -79,10 +80,19 @@ export function HomeView({
       previous: insights.previousReports,
     },
   ];
+  const feedbackRange = insightRange(insights.windowDays);
 
   function openLeadingFeedback() {
     if (leadingBlockerReport) {
       openFeedback(leadingBlockerReport.id);
+      return;
+    }
+    if (topBlockingTopic) {
+      navigateToDashboardView("feedback", {
+        topic: topBlockingTopic.name,
+        severity: "blocking",
+        range: feedbackRange,
+      });
       return;
     }
     navigateToDashboardView("feedback");
@@ -126,7 +136,7 @@ export function HomeView({
                 <Button onClick={() => navigateToDashboardView("setup")}>Finish setup</Button>
               ) : null}
               <Button variant="outline" onClick={openLeadingFeedback}>
-                {leadingBlockerReport ? "Review leading blocker" : "Browse feedback"}
+                {topBlockingTopic ? "Review leading blocker" : "Browse feedback"}
                 <IconArrowUpRight data-icon="inline-end" />
               </Button>
             </div>
@@ -202,16 +212,41 @@ export function HomeView({
                 const blockingCount = blockingByTopic.get(item.name);
                 return blockingCount ? `${blockingCount} blocking` : null;
               }}
+              onSelect={(item) =>
+                navigateToDashboardView("feedback", {
+                  topic: item.name,
+                  range: feedbackRange,
+                })
+              }
             />
           </div>
           <div className="divide-y">
             <div className="p-4">
               <h3 className="text-sm font-medium">Impact</h3>
-              <CountList items={insights.impacts} empty="No impact data yet." showTone />
+              <CountList
+                items={insights.impacts}
+                empty="No impact data yet."
+                showTone
+                onSelect={(item) =>
+                  navigateToDashboardView("feedback", {
+                    impact: item.name,
+                    range: feedbackRange,
+                  })
+                }
+              />
             </div>
             <div className="p-4">
               <h3 className="text-sm font-medium">Finding types</h3>
-              <CountList items={insights.findingKinds} empty="No findings reported yet." />
+              <CountList
+                items={insights.findingKinds}
+                empty="No findings reported yet."
+                onSelect={(item) =>
+                  navigateToDashboardView("feedback", {
+                    kind: item.name,
+                    range: feedbackRange,
+                  })
+                }
+              />
             </div>
           </div>
         </div>
@@ -278,6 +313,12 @@ export function HomeView({
               items={insights.topOperations}
               empty="No operations recorded yet."
               technical
+              onSelect={(item) =>
+                navigateToDashboardView("sessions", {
+                  sessionOperation: item.name,
+                  sessionRange: feedbackRange,
+                })
+              }
             />
           </div>
           <div className="p-4">
@@ -355,6 +396,7 @@ function CountList({
   empty,
   metadata,
   label,
+  onSelect,
   showTone = false,
   technical = false,
 }: {
@@ -362,6 +404,7 @@ function CountList({
   empty: string;
   metadata?: (item: InsightCount) => string | null;
   label?: (value: string) => string;
+  onSelect?: (item: InsightCount) => void;
   showTone?: boolean;
   technical?: boolean;
 }) {
@@ -388,9 +431,22 @@ function CountList({
                   )}
                 />
               ) : null}
-              <span className={cn("truncate", technical && "font-mono text-xs")}>
-                {technical ? item.name : (label?.(item.name) ?? titleCase(item.name))}
-              </span>
+              {onSelect ? (
+                <button
+                  type="button"
+                  className={cn(
+                    "min-w-0 truncate text-left underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    technical && "font-mono text-xs",
+                  )}
+                  onClick={() => onSelect(item)}
+                >
+                  {technical ? item.name : (label?.(item.name) ?? titleCase(item.name))}
+                </button>
+              ) : (
+                <span className={cn("truncate", technical && "font-mono text-xs")}>
+                  {technical ? item.name : (label?.(item.name) ?? titleCase(item.name))}
+                </span>
+              )}
               {secondary ? (
                 <span className="shrink-0 text-xs text-impact-negative">{secondary}</span>
               ) : null}
@@ -436,12 +492,50 @@ function formatDelta(current: number, previous: number): string {
   return `${change > 0 ? "+" : ""}${change}`;
 }
 
-function navigateToDashboardView(view: VisibleDashboardView) {
+function insightRange(windowDays: number): string {
+  if (windowDays === 7) return "7d";
+  if (windowDays === 30) return "30d";
+  return "all";
+}
+
+function navigateToDashboardView(view: VisibleDashboardView, scope: DashboardScope = {}) {
   const url = new URL(window.location.href);
   url.searchParams.set("view", view);
   url.searchParams.delete("report");
   url.searchParams.delete("session");
   url.searchParams.delete("interaction");
+  const scopedParameters =
+    view === "feedback"
+      ? [
+          "q",
+          "status",
+          "impact",
+          "surface",
+          "topic",
+          "kind",
+          "severity",
+          "tag",
+          "assignee",
+          "workaround",
+          "range",
+          "group",
+        ]
+      : view === "sessions"
+        ? [
+            "sessionQ",
+            "sessionKind",
+            "sessionOperation",
+            "sessionCustomer",
+            "sessionImpact",
+            "sessionRange",
+          ]
+        : [];
+  for (const parameter of scopedParameters) url.searchParams.delete(parameter);
+  for (const [parameter, value] of Object.entries(scope)) {
+    if (value && !(parameter === "range" && value === "30d")) {
+      url.searchParams.set(parameter, value);
+    }
+  }
   window.history.pushState({}, "", url);
   window.dispatchEvent(new PopStateEvent("popstate"));
 }

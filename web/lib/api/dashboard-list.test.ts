@@ -6,6 +6,7 @@ describe("dashboard list request paths", () => {
   it("serializes bounded feedback filters and its opaque cursor", () => {
     const path = feedbackListPath({
       productId: "product-1",
+      groupKey: "6910e1b05a001949e02f04db6d67d013",
       q: "checkout timeout",
       status: ["new", "investigating"],
       impact: ["blocked"],
@@ -21,6 +22,7 @@ describe("dashboard list request paths", () => {
     expect(url.pathname).toBe("/api/dashboard/feedback");
     expect(Object.fromEntries(url.searchParams)).toEqual({
       productId: "product-1",
+      groupKey: "6910e1b05a001949e02f04db6d67d013",
       q: "checkout timeout",
       status: "new,investigating",
       impact: "blocked",

@@ -75,6 +75,41 @@ describe("HomeView", () => {
 
     window.removeEventListener("popstate", onPopState);
   });
+
+  it("drills aggregate patterns into scoped evidence without stale filters", () => {
+    window.history.replaceState(
+      {},
+      "",
+      "/?team=team-1&product=product-1&status=resolved&group=stale-group",
+    );
+    const data = richDashboardFixture();
+    renderHome(data);
+
+    fireEvent.click(screen.getByRole("button", { name: "Knowledge Freshness" }));
+    let url = new URL(window.location.href);
+    expect(url.searchParams.get("view")).toBe("feedback");
+    expect(url.searchParams.get("topic")).toBe("knowledge_freshness");
+    expect(url.searchParams.has("status")).toBe(false);
+    expect(url.searchParams.has("group")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "/v1/knowledge/search" }));
+    url = new URL(window.location.href);
+    expect(url.searchParams.get("view")).toBe("sessions");
+    expect(url.searchParams.get("sessionOperation")).toBe("/v1/knowledge/search");
+    expect(url.searchParams.get("sessionRange")).toBe("30d");
+  });
+
+  it("finds a leading blocker outside the bootstrap report window", () => {
+    const data = richDashboardFixture();
+    renderHome({ ...data, reports: [] });
+
+    fireEvent.click(screen.getByRole("button", { name: "Review leading blocker" }));
+
+    const url = new URL(window.location.href);
+    expect(url.searchParams.get("view")).toBe("feedback");
+    expect(url.searchParams.get("topic")).toBe("idempotency");
+    expect(url.searchParams.get("severity")).toBe("blocking");
+  });
 });
 
 function renderHome(data: DashboardData) {

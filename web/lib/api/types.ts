@@ -2642,6 +2642,7 @@ export interface operations {
         parameters: {
             query: {
                 productId: string;
+                groupKey?: string;
                 q?: string;
                 status?: string;
                 impact?: string;

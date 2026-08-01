@@ -73,6 +73,7 @@ export function fetchDashboard(query: DashboardQuery): Promise<DashboardData> {
 
 export type DashboardFeedbackListQuery = {
   productId: string;
+  groupKey?: string;
   q?: string;
   status?: string[];
   impact?: string[];
@@ -110,6 +111,7 @@ function appendListQuery(params: URLSearchParams, key: string, values?: string[]
 
 export function feedbackListPath(query: DashboardFeedbackListQuery): string {
   const params = new URLSearchParams({ productId: query.productId });
+  if (query.groupKey) params.set("groupKey", query.groupKey);
   if (query.q) params.set("q", query.q);
   appendListQuery(params, "status", query.status);
   appendListQuery(params, "impact", query.impact);

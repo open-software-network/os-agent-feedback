@@ -855,6 +855,7 @@ pub(crate) struct DashboardSessionsPage {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DashboardFeedbackFilters {
     pub query: Option<String>,
+    pub group_key: Option<String>,
     pub statuses: Option<Vec<String>>,
     pub impacts: Option<Vec<String>>,
     pub surfaces: Option<Vec<String>>,

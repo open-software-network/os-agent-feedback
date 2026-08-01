@@ -2530,6 +2530,7 @@ async fn dashboard_handler(
 #[into_params(parameter_in = Query)]
 struct DashboardFeedbackListQuery {
     product_id: Uuid,
+    group_key: Option<String>,
     q: Option<String>,
     status: Option<String>,
     impact: Option<String>,
@@ -2610,6 +2611,13 @@ async fn dashboard_feedback_list_handler(
 ) -> Result<Response, ApiError> {
     let (context, tokens) =
         dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    if query
+        .group_key
+        .as_deref()
+        .is_some_and(|group_key| !valid_report_group_key(group_key))
+    {
+        return Err(ApiError::bad_request("Invalid feedback group key"));
+    }
     let assignees = comma_values(query.assignee, "assignee")?;
     let include_unassigned = assignees
         .as_deref()
@@ -2626,6 +2634,7 @@ async fn dashboard_feedback_list_handler(
         query.product_id,
         DashboardFeedbackFilters {
             query: query.q,
+            group_key: query.group_key,
             statuses: comma_values(query.status, "status")?,
             impacts: comma_values(query.impact, "impact")?,
             surfaces: comma_values(query.surface, "surface")?,
