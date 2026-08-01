@@ -232,6 +232,8 @@ test("both MCP setup permutations document the stateless 2026 feedback-tool cont
     for (const expected of integration.required)
       assert.ok(content.includes(expected), `${integration.id} docs omit ${expected}`);
     assert.match(content, /stateless/i);
+    assert.match(content, /Never ask is the most reliable mode/i);
+    assert.match(content, /verify the exact client versions/i);
     assert.match(content, /runnable .*example/i);
     assert.ok(
       dashboard.includes(`"${integration.id}"`),
@@ -273,6 +275,27 @@ test("docs explain the product/customer-agent boundary and evidence model", asyn
   assert.match(reliability, /native report tool/i);
   assert.match(privacy, /does not identify an agent/i);
   assert.match(privacy, /prompts or transcripts/i);
+});
+
+test("every shipped agent handoff keeps routine feedback success out of the user answer", async () => {
+  const handoffs = await Promise.all([
+    read("protocol/v1/README.md"),
+    read("backend/src/main.rs"),
+    read("sdk/node/src/core.ts"),
+    read("sdk/node/src/mcp.ts"),
+    read("sdk/python/src/agent_feedback/core.py"),
+    read("sdk/rust/src/lib.rs"),
+    read("sdk/go/agentfeedback.go"),
+    read("examples/setup-matrix-manual-http/server.py"),
+    read("examples/setup-matrix-manual-mcp/server.py"),
+    read("companion/plugins/epode-companion/scripts/mcp-server.mjs"),
+    read("companion/plugins/epode-companion/skills/epode-product-feedback/SKILL.md"),
+  ]);
+  for (const content of handoffs) {
+    assert.match(content, /routine/i);
+    assert.match(content, /do not mention|keep .* out of the final (?:answer|response)/i);
+    assert.match(content, /unless the user explicitly ask/i);
+  }
 });
 
 test("docs and dashboard publish the same install artifacts and feedback modes", async () => {

@@ -57,12 +57,23 @@ Ask the exact question and pass only the explicit answer to `record_product_feed
 a new `feedback_ready` action for the same interaction. Refusal returns no report action, and silence creates no
 decision. Never call `report_product_feedback` from a `consent_required` result.
 
+Successful background reporting is silent bookkeeping: it should not add a receipt or disclosure
+aside to the user's final answer unless the user explicitly asked about feedback. Permission
+questions remain visible, and failures may be disclosed when the user needs to know a requested
+action did not complete.
+
 The product-tool call is confirmed immediately with confirmation method `mcp`. The later report enriches that
 same interaction.
 
 Put the stage-aware outcome action near the start of the MCP server's `instructions`. Keep the two-value decision
 shape in the native consent tool and the full report shape in the native report tool. The result-local
 `_agentFeedback` block supplies the scoped handle and timing; it is not a substitute for registering both tools.
+
+Current Codex and Claude MCP clients reliably follow Never ask when the action appears in both server
+instructions and the product result. Ask once and Ask every time additionally depend on the client
+surfacing a question and resuming the tool chain after the user's reply; support is inconsistent.
+Prefer Never ask for MCP unless you have verified the exact target clients and versions. Do not fall
+back to inferred approval when a client cannot resume consent.
 
 ## 2025 compatibility
 

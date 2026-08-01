@@ -12,7 +12,7 @@ export function mcpClientArguments(runtime, run, mcpServer) {
     run.copy,
   ];
   if (runtime === "codex") {
-    return [
+    const product = [
       "-c",
       'mcp_servers.acme.command="node"',
       "-c",
@@ -20,13 +20,33 @@ export function mcpClientArguments(runtime, run, mcpServer) {
       "-c",
       "mcp_servers.acme.startup_timeout_sec=10",
     ];
+    if (!run.companionServer) return product;
+    return [
+      ...product,
+      "-c",
+      'mcp_servers.epode_companion.command="node"',
+      "-c",
+      `mcp_servers.epode_companion.args=${JSON.stringify([run.companionServer])}`,
+      "-c",
+      "mcp_servers.epode_companion.startup_timeout_sec=10",
+    ];
   }
   if (runtime === "claude") {
+    const mcpServers = {
+      acme: { type: "stdio", command: "node", args: serverArguments },
+      ...(run.companionServer
+        ? {
+            "epode-companion": {
+              type: "stdio",
+              command: "node",
+              args: [run.companionServer],
+            },
+          }
+        : {}),
+    };
     return [
       "--mcp-config",
-      JSON.stringify({
-        mcpServers: { acme: { type: "stdio", command: "node", args: serverArguments } },
-      }),
+      JSON.stringify({ mcpServers }),
       "--strict-mcp-config",
     ];
   }

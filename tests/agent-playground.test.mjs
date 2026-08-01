@@ -33,4 +33,6 @@ test("hosted HTTP and MCP examples support both consent modes", () => {
   assert.match(mcpSource, /EPODE_EXAMPLE_ENABLE_EXPERIMENT_REFS/);
   assert.match(mcpSource, /sessionRef: experimentRefsEnabled/);
   assert.match(mcpSource, /verified MCP authentication/);
+  assert.match(mcpSource, /scope: "regional"/);
+  assert.match(mcpSource, /checkedAt: new Date\(\)\.toISOString\(\)/);
 });

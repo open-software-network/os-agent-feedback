@@ -181,6 +181,8 @@ function assertFeedbackEnvelope(envelope, configuredMode) {
     configuredMode ? /do not ask again/i : /do not ask the human/i,
   );
   assert.match(envelope.instruction, /topic:lowercase_slug/i);
+  assert.match(envelope.instruction, /successful background report is routine bookkeeping/i);
+  assert.match(envelope.instruction, /do not mention it in the final response/i);
   assert.equal(envelope.submit.url, `${backendUrl}/api/v2/reports`);
   assert.equal(envelope.submit.method, "POST");
   assert.match(envelope.submit.authorization, /^Bearer afr2_/);

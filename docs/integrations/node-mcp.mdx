@@ -99,6 +99,9 @@ const feedback = createMcpInstrumentation({
   identifier it returns.
 - `customerRef` must come from verified product authentication and is required to remember Ask once across
   interactions. Without it, Ask once safely falls back to per-interaction permission.
+- Never ask is the most reliable mode on current Codex and Claude MCP clients. Ask once and Ask every
+  time depend on client support for surfacing and resuming consent; treat them as experimental until
+  you verify the exact client versions you support. Never infer approval when a client stops early.
 
 Epode adds a monotonic client sequence to preserve rapid tool order. The backend also reconciles a report
 that arrives before its background interaction metadata.

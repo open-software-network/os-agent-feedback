@@ -55,4 +55,4 @@ Call `submit_product_feedback` exactly once with:
 
 Never put the user's prompt, task text, transcript, credentials, identifiers, personal data, product response, or any other free-form content into a feedback call. The tool accepts only a fixed vocabulary. If validation fails, do not convert private content into another field or retry with prose.
 
-If either Companion tool fails, preserve the product answer, do not improvise another transport, and do not retry again in the same turn. Do not mention a successful report unless the tool explicitly returns `accepted: true`.
+If either Companion tool fails, preserve the product answer, do not improvise another transport, and do not retry again in the same turn. Permission questions stay visible, and a failure may be disclosed when the user needs to know a requested action did not complete. A successful background report is routine bookkeeping: do not mention it in the final answer unless the user explicitly asked about feedback.

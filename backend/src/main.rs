@@ -3436,7 +3436,7 @@ fn approved_feedback_contract(
         "consentManagedBy": "epode",
         "reliability": reliability,
         "when": "after_experience_known_before_final_response",
-        "instruction": format!("The user has approved feedback for this interaction.{flip_caution} Before your final response submit exactly one feedback report. If the trusted submit_product_feedback tool is available, pass it only the afr2_ handle from submit.authorization and its fixed outcome categories; otherwise POST JSON to submit.url with submit.authorization using this schema. Proceed autonomously; do not ask again. {report_shape} Never include user or task content."),
+        "instruction": format!("The user has approved feedback for this interaction.{flip_caution} Before your final response submit exactly one feedback report. If the trusted submit_product_feedback tool is available, pass it only the afr2_ handle from submit.authorization and its fixed outcome categories; otherwise POST JSON to submit.url with submit.authorization using this schema. Proceed autonomously; do not ask again. {report_shape} Never include user or task content. A successful background report is routine bookkeeping: do not mention it in the final response unless the user explicitly asked about feedback."),
         "submit": {
             "url": format!("{public_base_url}/api/v2/reports"),
             "method": "POST",

@@ -93,6 +93,10 @@ function consentKey(run) {
   return `${run.productRef}:${run.customerRef}`;
 }
 
+function companionHandle(runId) {
+  return `afr2_${runId.replaceAll("-", "")}${"a".repeat(16)}`;
+}
+
 function effectiveModeFor(run, consents) {
   if (run.mode !== "ask_once" || run.consentOwner !== "epode") return run.mode;
   const decision = consents.get(consentKey(run)) || "unknown";
@@ -382,6 +386,93 @@ export async function startLabServer() {
   let baseUrl;
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || "/", baseUrl || "http://127.0.0.1");
+    const bearer = request.headers.authorization?.replace(/^Bearer\s+/, "");
+    const companionRun = bearer
+      ? [...runs.values()].find((candidate) => companionHandle(candidate.id) === bearer)
+      : undefined;
+    if (request.method === "POST" && url.pathname === "/api/v2/capabilities/introspect") {
+      request.resume();
+      if (!companionRun) return json(response, 401, { error: "invalid_capability" });
+      const decision = consents.get(consentKey(companionRun)) || "unknown";
+      const state = decision === "approved"
+        ? "feedback_ready"
+        : decision === "declined"
+          ? "declined"
+          : "consent_required";
+      companionRun.effectiveMode = decision === "approved"
+        ? "never_ask"
+        : decision === "declined"
+          ? "off"
+          : "ask_once";
+      companionRun.events.push({ kind: "companion_inspected", state, at: new Date().toISOString() });
+      return json(response, 200, {
+        state,
+        configuredMode: "ask_once",
+        consentPolicy: state === "feedback_ready" ? "none" : "once",
+        productName: "Acme Queue",
+        canonicalQuestion: state === "consent_required"
+          ? "May I send Acme Queue's provider one short, privacy-safe outcome report after this use and future uses without asking again? Epode will remember your choice for this product. Your prompts and task content are never included; nothing is installed."
+          : null,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
+      });
+    }
+    if (request.method === "POST" && url.pathname === "/api/v2/consent/decisions") {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      let body;
+      try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch {}
+      if (!companionRun || !["approved", "declined"].includes(body?.decision)) {
+        return json(response, 422, { error: "invalid_decision" });
+      }
+      consents.set(consentKey(companionRun), body.decision);
+      companionRun.consentState = body.decision;
+      companionRun.effectiveMode = body.decision === "approved" ? "never_ask" : "off";
+      companionRun.events.push({
+        kind: `consent_${body.decision}`,
+        via: "companion",
+        at: new Date().toISOString(),
+      });
+      return json(response, 200, {
+        state: body.decision,
+        ...(body.decision === "approved"
+          ? {
+              feedback: {
+                submit: { authorization: `Bearer ${companionHandle(companionRun.id)}` },
+              },
+            }
+          : {}),
+      });
+    }
+    if (request.method === "POST" && url.pathname === "/api/v2/reports") {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      let body;
+      try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch {}
+      if (!companionRun) return json(response, 401, { error: "invalid_capability" });
+      if (consents.get(consentKey(companionRun)) !== "approved") {
+        return json(response, 403, { error: "consent_required" });
+      }
+      if (!companionRun.report) {
+        companionRun.report = { id: randomUUID(), ...body };
+        companionRun.events.push({
+          kind: "submission_accepted",
+          via: "companion",
+          body,
+          at: new Date().toISOString(),
+        });
+      } else {
+        companionRun.events.push({
+          kind: "submission_duplicate",
+          via: "companion",
+          body,
+          at: new Date().toISOString(),
+        });
+      }
+      return json(response, 200, {
+        accepted: true,
+        report: companionRun.report,
+      });
+    }
     const [, resource, id] = url.pathname.split("/");
     const run = id ? runs.get(id) : undefined;
 

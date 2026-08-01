@@ -21,6 +21,10 @@ unzip agent-feedback-protocol-v1.zip
 
 ## Required behavior
 
+Never ask is the most reliable mode on current Codex and Claude MCP clients. Ask once and Ask every
+time depend on client support for surfacing and resuming consent; treat them as experimental until
+you verify the exact client versions you support. Never infer approval when a client stops early.
+
 1. Implement stateless MCP `2026-07-28` and `server/discover`.
 2. Validate every present HTTP `Origin` against an explicit allowlist.
 3. Require matching `MCP-Protocol-Version`, `Mcp-Method`, and, for named calls, `Mcp-Name`.

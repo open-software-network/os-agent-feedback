@@ -99,7 +99,9 @@ export function PolicyView({
             sessions without showing the customer reference to the agent. Epode stores the opaque
             customer reference separately with interaction telemetry for dashboard grouping. Without
             a customer reference, permission is safely requested for each use. Ask every time always
-            requires fresh permission.
+            requires fresh permission. For MCP, Never ask is currently the most reliable choice;
+            consent modes depend on the client surfacing and resuming permission, so verify the
+            exact client versions before enabling them.
           </p>
         </Panel>
         <Panel title="Outside the feedback protocol">

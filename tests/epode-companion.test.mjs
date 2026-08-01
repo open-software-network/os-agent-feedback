@@ -189,6 +189,7 @@ test("Epode Companion exposes fixed consent and bounded report tools", async () 
       },
     });
     assert.equal(report.result.structuredContent.accepted, true);
+    assert.match(report.result.content[0].text, /routine background success out of the final answer/);
     assert.deepEqual(calls, [
       {
         path: "/api/v2/capabilities/introspect",
@@ -762,6 +763,8 @@ test("Epode Companion manifests expose one implicit, bounded skill and its local
   assert.match(skill, /Never POST to `submit\.url` yourself/);
   assert.match(skill, /does not turn an Ask-once or Ask-always product decision into approval/);
   assert.match(skill, /valid `never_ask` feedback/);
+  assert.match(skill, /successful background report is routine bookkeeping/i);
+  assert.match(skill, /do not mention it in the final answer/i);
   assert.match(skill, /final user answer is primary/i);
   assert.match(skill, /inspect_product_feedback/);
   assert.match(skill, /Treat its state as authoritative/);

@@ -52,6 +52,7 @@ test("MCP instrumentation decorates business tools and registers structured feed
     ],
   });
   assert.equal(report.structuredContent.accepted, true);
+  assert.match(report.content[0].text, /routine background success out of the final answer/);
   assert.deepEqual(reports, [
     {
       summary: "The search result completed the task with useful context.",
