@@ -26,6 +26,12 @@ if [[ ! -f "$protocol_artifact" ]]; then
   echo "the immutable protocol v1 artifact is missing" >&2
   exit 1
 fi
+expected_protocol_sha256="84c74beccabdbf771070cad001223df9335aa19894f9305b30afd224266188a6"
+actual_protocol_sha256="$(shasum -a 256 "$protocol_artifact" | awk '{print $1}')"
+if [[ "$actual_protocol_sha256" != "$expected_protocol_sha256" ]]; then
+  echo "the immutable protocol v1 artifact changed; publish a new versioned filename" >&2
+  exit 1
+fi
 if unzip -Z1 "$protocol_artifact" | grep -q 'outcome\.schema\.json$'; then
   echo "stale outcome.schema.json remained in the protocol artifact" >&2
   exit 1
@@ -35,10 +41,12 @@ for required in README.md conformance.json consent-decision.schema.json envelope
     echo "protocol artifact is missing $required" >&2
     exit 1
   }
-  cmp --silent <(unzip -p "$protocol_artifact" "protocol/v1/$required") "$repo_root/protocol/v1/$required" || {
-    echo "protocol/v1/$required changed; publish a new protocol version instead of overwriting v1" >&2
+done
+for schema in conformance.json consent-decision.schema.json envelope.schema.json feedback-report.schema.json telemetry-batch.schema.json; do
+  cmp --silent <(unzip -p "$protocol_artifact" "protocol/v1/$schema") "$repo_root/protocol/v1/$schema" || {
+    echo "protocol/v1/$schema changed; publish a new protocol version instead of overwriting v1" >&2
     exit 1
   }
 done
 
-echo "PASS hosted SDK artifacts rebuilt from current source"
+echo "PASS hosted SDK artifacts rebuilt and immutable protocol v1 verified"

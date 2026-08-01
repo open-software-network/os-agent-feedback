@@ -16,6 +16,9 @@ Hosted bootstrap artifacts are immutable releases too. A changed package must
 use a new SemVer filename (for example, `agent-feedback-node-0.2.0.tgz`); never
 replace bytes at an existing URL because package-manager lockfiles pin their
 integrity. Keep every previously published hosted filename available.
+Record each new hosted filename's SHA-256 in
+`tests/hosted-artifact-integrity.test.mjs` before release. Adding a new entry is
+expected; changing the checksum for an existing filename is not.
 
 For a release, update the Node, Python, and Rust package versions together,
 run the readiness command, and create one protected tag per registry target at

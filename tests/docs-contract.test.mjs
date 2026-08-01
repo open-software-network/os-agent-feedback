@@ -9,7 +9,6 @@ const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 const docsConfig = JSON.parse(await read("docs/docs.json"));
 const dashboard = await read("backend/public/app.js");
 const mintIgnore = await read("docs/.mintignore");
-const protocolReadme = await read("protocol/v1/README.md");
 
 const httpIntegrations = [
   {
@@ -355,11 +354,10 @@ test("every public docs page has a title and actionable description", async () =
   }
 });
 
-test("the downloadable protocol bundle contains only the current report contract", async () => {
+test("the downloadable protocol bundle preserves the immutable v1 schema contract", async () => {
   const bundle = new URL("../backend/public/agent-feedback-protocol-v1.zip", import.meta.url)
     .pathname;
-  const protocolFiles = [
-    "README.md",
+  const schemaFiles = [
     "consent-decision.schema.json",
     "conformance.json",
     "envelope.schema.json",
@@ -372,9 +370,13 @@ test("the downloadable protocol bundle contains only the current report contract
     .sort();
   assert.deepEqual(
     listing,
-    ["protocol/v1/", ...protocolFiles.map((file) => `protocol/v1/${file}`)].sort(),
+    [
+      "protocol/v1/",
+      "protocol/v1/README.md",
+      ...schemaFiles.map((file) => `protocol/v1/${file}`),
+    ].sort(),
   );
-  for (const file of protocolFiles) {
+  for (const file of schemaFiles) {
     assert.equal(
       execFileSync("unzip", ["-p", bundle, `protocol/v1/${file}`], { encoding: "utf8" }),
       await read(`protocol/v1/${file}`),
@@ -384,9 +386,8 @@ test("the downloadable protocol bundle contains only the current report contract
   const bundledReadme = execFileSync("unzip", ["-p", bundle, "protocol/v1/README.md"], {
     encoding: "utf8",
   });
-  assert.equal(bundledReadme, protocolReadme, "hosted protocol README is stale");
-  assert.match(protocolReadme, /"state": "feedback_ready"/);
-  assert.doesNotMatch(protocolReadme, /"optional": \[[^\]]*"consent"/);
+  assert.match(bundledReadme, /"state": "feedback_ready"/);
+  assert.doesNotMatch(bundledReadme, /"optional": \[[^\]]*"consent"/);
 });
 
 test("the telemetry schema accepts only bounded opaque correlation evidence", async () => {

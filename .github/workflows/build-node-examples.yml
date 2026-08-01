@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "backend/public/agent-feedback-node-0.1.0.tgz"
+      - "backend/public/agent-feedback-node-*.tgz"
       - "sdk/node/**"
       - "examples/node-express/**"
       - "examples/node-mcp/**"

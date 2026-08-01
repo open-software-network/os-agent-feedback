@@ -64,7 +64,7 @@ jobs:
               - ".github/workflows/ci.yml"
               - ".github/workflows/sdk-release.yml"
             examples:
-              - "backend/public/agent-feedback-node-0.2.0.tgz"
+              - "backend/public/agent-feedback-node-*.tgz"
               - "sdk/node/**"
               - "examples/node-express/**"
               - "examples/node-mcp/**"
