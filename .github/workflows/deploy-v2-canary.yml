@@ -220,7 +220,7 @@ jobs:
         run: |
           curl --fail --silent --show-error \
             --retry 12 --retry-all-errors --retry-delay 5 \
-            "https://${API_DOMAIN}/health" >/dev/null
+            "https://${API_DOMAIN}/api/health" >/dev/null
 
       - name: Deploy and verify web image
         env:
