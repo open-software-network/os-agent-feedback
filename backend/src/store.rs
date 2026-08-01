@@ -9,7 +9,7 @@ use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{Acquire, Executor, PgPool, Postgres, Transaction};
+use sqlx::{Executor, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
@@ -4187,10 +4187,8 @@ pub(crate) async fn ingest_telemetry_batch(
     events.sort_by_key(|event| event.interaction_id);
     let mut tx = pool.begin().await?;
     for event in events {
-        let mut event_tx = tx.begin().await?;
-        match ingest_telemetry_event(&mut event_tx, auth, event).await {
+        match ingest_telemetry_event(&mut tx, auth, event).await {
             Ok(result) => {
-                event_tx.commit().await?;
                 if result.grouping_facts_changed {
                     changed_interaction_ids.push(result.interaction_id);
                 }
@@ -4203,7 +4201,13 @@ pub(crate) async fn ingest_telemetry_batch(
                 accepted += 1;
             }
             Err(error) if error.status.is_client_error() => {
-                event_tx.rollback().await?;
+                // Every client-error path in `ingest_telemetry_event` either
+                // validates before the upsert or is the conflict result of an
+                // upsert that changed no row. Continuing therefore cannot
+                // preserve a partial event write and does not need a nested
+                // transaction. Avoiding per-event savepoints also keeps a
+                // cancelled request from desynchronizing SQLx's local
+                // transaction depth from PostgreSQL while releasing one.
                 dropped += 1;
             }
             Err(error) => return Err(error),
@@ -8849,23 +8853,40 @@ mod product_tests {
             .await?;
             anyhow::ensure!(coalesced_ref_hash == sha256("workflow:first_valid_proof"));
 
+            let isolated_valid_id = Uuid::new_v4();
             let cross_environment = ingest_telemetry_batch(
                 &pool,
                 &isolated_auth,
                 TelemetryBatchInput {
-                    events: vec![mcp_telemetry_event(
-                        interaction_id,
-                        Some(1),
-                        "cross_environment_retry",
-                        Some("workflow:cross_environment"),
-                        Some("mcp"),
-                        first_at,
-                    )],
+                    events: vec![
+                        mcp_telemetry_event(
+                            interaction_id,
+                            Some(1),
+                            "cross_environment_retry",
+                            Some("workflow:cross_environment"),
+                            Some("mcp"),
+                            first_at,
+                        ),
+                        mcp_telemetry_event(
+                            isolated_valid_id,
+                            Some(2),
+                            "valid_after_dropped_conflict",
+                            None,
+                            None,
+                            first_at,
+                        ),
+                    ],
                 },
             )
             .await
             .map_err(test_error)?;
-            anyhow::ensure!(cross_environment.accepted == 0 && cross_environment.dropped == 1);
+            anyhow::ensure!(cross_environment.accepted == 1 && cross_environment.dropped == 1);
+            let isolated_valid_environment: Uuid =
+                sqlx::query_scalar("SELECT environment_id FROM interactions_v2 WHERE id = $1")
+                    .bind(isolated_valid_id)
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(isolated_valid_environment == isolated_auth.environment.id);
             let isolated_sessions: i64 =
                 sqlx::query_scalar("SELECT COUNT(*) FROM sessions_v2 WHERE environment_id = $1")
                     .bind(isolated_auth.environment.id)

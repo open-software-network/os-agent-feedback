@@ -9,6 +9,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
+import { submitMcpReportWithOneRetry } from "./setup-matrix-mcp-retry.mjs";
 import { assertPortAvailable } from "./setup-matrix-process.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -612,18 +613,18 @@ async function testMcp(url, stack) {
     ],
     workaround: { used: true, detail: "The agent verified the result through the setup harness." },
   };
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    payload = await mcpPost(
-      url,
-      modernMcpRequest(5 + attempt, "tools/call", {
-        name: "report_product_feedback",
-        arguments: reportArguments,
-      }),
-    );
-    if (payload.result.structuredContent.accepted || !payload.result.structuredContent.retryable)
-      break;
-    if (attempt === 0) await new Promise((resolveWait) => setTimeout(resolveWait, 250));
-  }
+  ({ payload } = await submitMcpReportWithOneRetry({
+    id: 5,
+    reportArguments,
+    call: ({ requestId, reportArguments: retryArguments }) =>
+      mcpPost(
+        url,
+        modernMcpRequest(requestId, "tools/call", {
+          name: "report_product_feedback",
+          arguments: retryArguments,
+        }),
+      ),
+  }));
   assert.equal(payload.result.resultType, "complete");
   assert.equal(payload.result.structuredContent.accepted, true, JSON.stringify(payload.result));
   assert.equal(payload.result.structuredContent.report.summary, summary);
@@ -678,22 +679,27 @@ async function submitMcpReport(url, feedbackHandle, summary, id, headerOverrides
     ],
     workaround: { used: true, detail: "The agent verified the result through the setup harness." },
   };
-  let payload;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    payload = await mcpPost(
-      url,
-      modernMcpRequest(id + attempt, "tools/call", {
-        name: "report_product_feedback",
-        arguments: reportArguments,
-      }),
-      { headerOverrides },
-    );
-    if (payload.result.structuredContent.accepted || !payload.result.structuredContent.retryable)
-      break;
-    if (attempt === 0) await new Promise((resolveWait) => setTimeout(resolveWait, 250));
-  }
+  const { payload, attempts } = await submitMcpReportWithOneRetry({
+    id,
+    reportArguments,
+    call: ({ requestId, reportArguments: retryArguments }) =>
+      mcpPost(
+        url,
+        modernMcpRequest(requestId, "tools/call", {
+          name: "report_product_feedback",
+          arguments: retryArguments,
+        }),
+        { headerOverrides },
+      ),
+  });
   assert.equal(payload.result.resultType, "complete");
-  assert.equal(payload.result.structuredContent.accepted, true, JSON.stringify(payload.result));
+  assert.equal(
+    payload.result.structuredContent.accepted,
+    true,
+    `MCP report was not accepted after ${attempts.length} attempt(s): ${JSON.stringify(
+      attempts.map((attempt) => attempt.result),
+    )}`,
+  );
   assert.equal(payload.result.structuredContent.report.summary, summary);
   return payload.result.structuredContent;
 }
