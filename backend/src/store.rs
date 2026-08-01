@@ -2547,35 +2547,36 @@ pub(crate) async fn dashboard_feedback_page(
         r"SELECT COUNT(*) FROM feedback_reports r
         JOIN interactions_v2 i ON i.id = r.interaction_id
         LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
-        WHERE i.environment_id = $1 AND r.created_at >= $2
-          AND ($3::TIMESTAMPTZ IS NULL OR r.created_at <= $3)
-          AND ($4::TEXT IS NULL OR r.summary ILIKE $4 ESCAPE '\'
-            OR i.operation ILIKE $4 ESCAPE '\'
-            OR COALESCE(i.customer_ref, '') ILIKE $4 ESCAPE '\'
-            OR r.findings::TEXT ILIKE $4 ESCAPE '\')
-          AND ($5::TEXT[] IS NULL OR COALESCE(w.status, 'new') = ANY($5))
-          AND ($6::TEXT[] IS NULL OR COALESCE(r.impact, 'unknown') = ANY($6))
-          AND ($7::TEXT[] IS NULL OR i.surface = ANY($7))
-          AND ($8::TEXT[] IS NULL OR EXISTS (
-            SELECT 1 FROM jsonb_array_elements(r.findings) finding
-            WHERE finding ->> 'topic' = ANY($8)))
+        WHERE i.environment_id = $1 AND i.occurred_at >= $2 AND r.created_at >= $3
+          AND ($4::TIMESTAMPTZ IS NULL OR r.created_at <= $4)
+          AND ($5::TEXT IS NULL OR r.summary ILIKE $5 ESCAPE '\'
+            OR i.operation ILIKE $5 ESCAPE '\'
+            OR COALESCE(i.customer_ref, '') ILIKE $5 ESCAPE '\'
+            OR r.findings::TEXT ILIKE $5 ESCAPE '\')
+          AND ($6::TEXT[] IS NULL OR COALESCE(w.status, 'new') = ANY($6))
+          AND ($7::TEXT[] IS NULL OR COALESCE(r.impact, 'unknown') = ANY($7))
+          AND ($8::TEXT[] IS NULL OR i.surface = ANY($8))
           AND ($9::TEXT[] IS NULL OR EXISTS (
             SELECT 1 FROM jsonb_array_elements(r.findings) finding
-            WHERE finding ->> 'kind' = ANY($9)))
+            WHERE finding ->> 'topic' = ANY($9)))
           AND ($10::TEXT[] IS NULL OR EXISTS (
             SELECT 1 FROM jsonb_array_elements(r.findings) finding
-            WHERE finding ->> 'severity' = ANY($10)))
-          AND ($11::TEXT[] IS NULL OR COALESCE(w.tags, '{}'::TEXT[]) && $11)
-          AND ($12::TEXT[] IS NULL OR w.assignee_os_user_id = ANY($12)
-            OR ($13 AND w.assignee_os_user_id IS NULL))
-          AND ($14::TEXT[] IS NULL OR CASE
+            WHERE finding ->> 'kind' = ANY($10)))
+          AND ($11::TEXT[] IS NULL OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(r.findings) finding
+            WHERE finding ->> 'severity' = ANY($11)))
+          AND ($12::TEXT[] IS NULL OR COALESCE(w.tags, '{}'::TEXT[]) && $12)
+          AND ($13::TEXT[] IS NULL OR w.assignee_os_user_id = ANY($13)
+            OR ($14 AND w.assignee_os_user_id IS NULL))
+          AND ($15::TEXT[] IS NULL OR CASE
             WHEN r.workaround IS NULL THEN 'none'
             WHEN r.workaround ->> 'used' = 'true' THEN 'used'
-            ELSE 'suggested' END = ANY($14))
-          AND ($15::TEXT IS NULL OR i.operation = $15)
-          AND ($16::TEXT IS NULL OR i.customer_ref = $16)",
+            ELSE 'suggested' END = ANY($15))
+          AND ($16::TEXT IS NULL OR i.operation = $16)
+          AND ($17::TEXT IS NULL OR i.customer_ref = $17)",
     )
     .bind(environment.id)
+    .bind(retained_since)
     .bind(since)
     .bind(filters.until)
     .bind(&search)
@@ -2597,11 +2598,11 @@ pub(crate) async fn dashboard_feedback_page(
     let facets = dashboard_feedback_facets(
         pool,
         environment.id,
+        retained_since,
         since,
         filters.until,
         search.as_deref(),
-        filters.operation.as_deref(),
-        filters.customer_ref.as_deref(),
+        &filters,
     )
     .await?;
 
@@ -2617,37 +2618,38 @@ pub(crate) async fn dashboard_feedback_page(
         FROM feedback_reports r
         JOIN interactions_v2 i ON i.id = r.interaction_id
         LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
-        WHERE i.environment_id = $1 AND r.created_at >= $2
-          AND ($3::TIMESTAMPTZ IS NULL OR r.created_at <= $3)
-          AND ($4::TEXT IS NULL OR r.summary ILIKE $4 ESCAPE '\'
-            OR i.operation ILIKE $4 ESCAPE '\'
-            OR COALESCE(i.customer_ref, '') ILIKE $4 ESCAPE '\'
-            OR r.findings::TEXT ILIKE $4 ESCAPE '\')
-          AND ($5::TEXT[] IS NULL OR COALESCE(w.status, 'new') = ANY($5))
-          AND ($6::TEXT[] IS NULL OR COALESCE(r.impact, 'unknown') = ANY($6))
-          AND ($7::TEXT[] IS NULL OR i.surface = ANY($7))
-          AND ($8::TEXT[] IS NULL OR EXISTS (
-            SELECT 1 FROM jsonb_array_elements(r.findings) finding
-            WHERE finding ->> 'topic' = ANY($8)))
+        WHERE i.environment_id = $1 AND i.occurred_at >= $2 AND r.created_at >= $3
+          AND ($4::TIMESTAMPTZ IS NULL OR r.created_at <= $4)
+          AND ($5::TEXT IS NULL OR r.summary ILIKE $5 ESCAPE '\'
+            OR i.operation ILIKE $5 ESCAPE '\'
+            OR COALESCE(i.customer_ref, '') ILIKE $5 ESCAPE '\'
+            OR r.findings::TEXT ILIKE $5 ESCAPE '\')
+          AND ($6::TEXT[] IS NULL OR COALESCE(w.status, 'new') = ANY($6))
+          AND ($7::TEXT[] IS NULL OR COALESCE(r.impact, 'unknown') = ANY($7))
+          AND ($8::TEXT[] IS NULL OR i.surface = ANY($8))
           AND ($9::TEXT[] IS NULL OR EXISTS (
             SELECT 1 FROM jsonb_array_elements(r.findings) finding
-            WHERE finding ->> 'kind' = ANY($9)))
+            WHERE finding ->> 'topic' = ANY($9)))
           AND ($10::TEXT[] IS NULL OR EXISTS (
             SELECT 1 FROM jsonb_array_elements(r.findings) finding
-            WHERE finding ->> 'severity' = ANY($10)))
-          AND ($11::TEXT[] IS NULL OR COALESCE(w.tags, '{}'::TEXT[]) && $11)
-          AND ($12::TEXT[] IS NULL OR w.assignee_os_user_id = ANY($12)
-            OR ($13 AND w.assignee_os_user_id IS NULL))
-          AND ($14::TEXT[] IS NULL OR CASE
+            WHERE finding ->> 'kind' = ANY($10)))
+          AND ($11::TEXT[] IS NULL OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(r.findings) finding
+            WHERE finding ->> 'severity' = ANY($11)))
+          AND ($12::TEXT[] IS NULL OR COALESCE(w.tags, '{}'::TEXT[]) && $12)
+          AND ($13::TEXT[] IS NULL OR w.assignee_os_user_id = ANY($13)
+            OR ($14 AND w.assignee_os_user_id IS NULL))
+          AND ($15::TEXT[] IS NULL OR CASE
             WHEN r.workaround IS NULL THEN 'none'
             WHEN r.workaround ->> 'used' = 'true' THEN 'used'
-            ELSE 'suggested' END = ANY($14))
-          AND ($15::TEXT IS NULL OR i.operation = $15)
-          AND ($16::TEXT IS NULL OR i.customer_ref = $16)
-          AND ($17::TIMESTAMPTZ IS NULL OR (r.created_at, r.id) < ($17, $18))
-        ORDER BY r.created_at DESC, r.id DESC LIMIT $19",
+            ELSE 'suggested' END = ANY($15))
+          AND ($16::TEXT IS NULL OR i.operation = $16)
+          AND ($17::TEXT IS NULL OR i.customer_ref = $17)
+          AND ($18::TIMESTAMPTZ IS NULL OR (r.created_at, r.id) < ($18, $19))
+        ORDER BY r.created_at DESC, r.id DESC LIMIT $20",
     )
     .bind(environment.id)
+    .bind(retained_since)
     .bind(since)
     .bind(filters.until)
     .bind(search)
@@ -2684,14 +2686,17 @@ pub(crate) async fn dashboard_feedback_page(
     })
 }
 
+/// Compute disjunctive facet counts: each facet applies every active filter
+/// except its own selection, so counts stay useful without claiming that an
+/// incompatible value belongs to the current result set.
 async fn dashboard_feedback_facets(
     pool: &PgPool,
     environment_id: Uuid,
+    retained_since: DateTime<Utc>,
     since: DateTime<Utc>,
     until: Option<DateTime<Utc>>,
     search: Option<&str>,
-    operation: Option<&str>,
-    customer_ref: Option<&str>,
+    filters: &DashboardFeedbackFilters,
 ) -> Result<DashboardFeedbackFacets, ApiError> {
     let rows = sqlx::query_as::<_, (String, String, i64)>(
         r"WITH base AS MATERIALIZED (
@@ -2702,31 +2707,77 @@ async fn dashboard_feedback_facets(
             COALESCE(w.assignee_os_user_id::TEXT, 'unassigned') AS assignee,
             CASE WHEN r.workaround IS NULL THEN 'none'
               WHEN r.workaround ->> 'used' = 'true' THEN 'used'
-              ELSE 'suggested' END AS workaround
+              ELSE 'suggested' END AS workaround,
+            ($8::TEXT[] IS NULL OR COALESCE(w.status, 'new') = ANY($8)) AS matches_status,
+            ($9::TEXT[] IS NULL OR COALESCE(r.impact, 'unknown') = ANY($9)) AS matches_impact,
+            ($10::TEXT[] IS NULL OR i.surface = ANY($10)) AS matches_surface,
+            ($11::TEXT[] IS NULL OR EXISTS (
+              SELECT 1 FROM jsonb_array_elements(r.findings) finding
+              WHERE finding ->> 'topic' = ANY($11))) AS matches_topic,
+            ($12::TEXT[] IS NULL OR EXISTS (
+              SELECT 1 FROM jsonb_array_elements(r.findings) finding
+              WHERE finding ->> 'kind' = ANY($12))) AS matches_finding_kind,
+            ($13::TEXT[] IS NULL OR EXISTS (
+              SELECT 1 FROM jsonb_array_elements(r.findings) finding
+              WHERE finding ->> 'severity' = ANY($13))) AS matches_severity,
+            ($14::TEXT[] IS NULL OR COALESCE(w.tags, '{}'::TEXT[]) && $14) AS matches_tag,
+            ($15::TEXT[] IS NULL OR w.assignee_os_user_id = ANY($15)
+              OR ($16 AND w.assignee_os_user_id IS NULL)) AS matches_assignee,
+            ($17::TEXT[] IS NULL OR CASE
+              WHEN r.workaround IS NULL THEN 'none'
+              WHEN r.workaround ->> 'used' = 'true' THEN 'used'
+              ELSE 'suggested' END = ANY($17)) AS matches_workaround
           FROM feedback_reports r
           JOIN interactions_v2 i ON i.id = r.interaction_id
           LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
-          WHERE i.environment_id = $1 AND r.created_at >= $2
-            AND ($3::TIMESTAMPTZ IS NULL OR r.created_at <= $3)
-            AND ($4::TEXT IS NULL OR r.summary ILIKE $4 ESCAPE '\'
-              OR i.operation ILIKE $4 ESCAPE '\'
-              OR COALESCE(i.customer_ref, '') ILIKE $4 ESCAPE '\'
-              OR r.findings::TEXT ILIKE $4 ESCAPE '\')
-            AND ($5::TEXT IS NULL OR i.operation = $5)
-            AND ($6::TEXT IS NULL OR i.customer_ref = $6)
+          WHERE i.environment_id = $1 AND i.occurred_at >= $2 AND r.created_at >= $3
+            AND ($4::TIMESTAMPTZ IS NULL OR r.created_at <= $4)
+            AND ($5::TEXT IS NULL OR r.summary ILIKE $5 ESCAPE '\'
+              OR i.operation ILIKE $5 ESCAPE '\'
+              OR COALESCE(i.customer_ref, '') ILIKE $5 ESCAPE '\'
+              OR r.findings::TEXT ILIKE $5 ESCAPE '\')
+            AND ($6::TEXT IS NULL OR i.operation = $6)
+            AND ($7::TEXT IS NULL OR i.customer_ref = $7)
         ), facet_values AS (
           SELECT id AS report_id, 'status'::TEXT AS facet, workflow_status AS value FROM base
+            WHERE matches_impact AND matches_surface AND matches_topic
+              AND matches_finding_kind AND matches_severity AND matches_tag
+              AND matches_assignee AND matches_workaround
           UNION ALL SELECT id, 'impact', impact FROM base
+            WHERE matches_status AND matches_surface AND matches_topic
+              AND matches_finding_kind AND matches_severity AND matches_tag
+              AND matches_assignee AND matches_workaround
           UNION ALL SELECT id, 'surface', surface FROM base
+            WHERE matches_status AND matches_impact AND matches_topic
+              AND matches_finding_kind AND matches_severity AND matches_tag
+              AND matches_assignee AND matches_workaround
           UNION ALL SELECT id, 'assignee', assignee FROM base
+            WHERE matches_status AND matches_impact AND matches_surface AND matches_topic
+              AND matches_finding_kind AND matches_severity AND matches_tag
+              AND matches_workaround
           UNION ALL SELECT id, 'workaround', workaround FROM base
+            WHERE matches_status AND matches_impact AND matches_surface AND matches_topic
+              AND matches_finding_kind AND matches_severity AND matches_tag
+              AND matches_assignee
           UNION ALL SELECT id, 'tag', tag FROM base CROSS JOIN LATERAL UNNEST(tags) tag
+            WHERE matches_status AND matches_impact AND matches_surface AND matches_topic
+              AND matches_finding_kind AND matches_severity AND matches_assignee
+              AND matches_workaround
           UNION ALL SELECT id, 'topic', finding ->> 'topic'
             FROM base CROSS JOIN LATERAL jsonb_array_elements(findings) finding
+            WHERE matches_status AND matches_impact AND matches_surface
+              AND matches_finding_kind AND matches_severity AND matches_tag
+              AND matches_assignee AND matches_workaround
           UNION ALL SELECT id, 'finding_kind', finding ->> 'kind'
             FROM base CROSS JOIN LATERAL jsonb_array_elements(findings) finding
+            WHERE matches_status AND matches_impact AND matches_surface AND matches_topic
+              AND matches_severity AND matches_tag AND matches_assignee
+              AND matches_workaround
           UNION ALL SELECT id, 'severity', finding ->> 'severity'
             FROM base CROSS JOIN LATERAL jsonb_array_elements(findings) finding
+            WHERE matches_status AND matches_impact AND matches_surface AND matches_topic
+              AND matches_finding_kind AND matches_tag AND matches_assignee
+              AND matches_workaround
         )
         SELECT facet, value, COUNT(DISTINCT report_id)::BIGINT
         FROM facet_values
@@ -2735,11 +2786,22 @@ async fn dashboard_feedback_facets(
         ORDER BY facet, COUNT(DISTINCT report_id) DESC, value",
     )
     .bind(environment_id)
+    .bind(retained_since)
     .bind(since)
     .bind(until)
     .bind(search)
-    .bind(operation)
-    .bind(customer_ref)
+    .bind(&filters.operation)
+    .bind(&filters.customer_ref)
+    .bind(&filters.statuses)
+    .bind(&filters.impacts)
+    .bind(&filters.surfaces)
+    .bind(&filters.topics)
+    .bind(&filters.finding_kinds)
+    .bind(&filters.severities)
+    .bind(&filters.tags)
+    .bind(&filters.assignees)
+    .bind(filters.include_unassigned)
+    .bind(&filters.workarounds)
     .fetch_all(pool)
     .await?;
 
@@ -2825,13 +2887,14 @@ pub(crate) async fn dashboard_sessions_page(
                 COUNT(r.id)::BIGINT AS report_count
               FROM interactions_v2 i
               LEFT JOIN feedback_reports r ON r.interaction_id = i.id
-              WHERE i.session_id = s.id
+              WHERE i.session_id = s.id AND i.occurred_at >= $9
             ) activity
             WHERE s.environment_id = $1 AND s.last_seen_at >= $2
               AND ($3::TIMESTAMPTZ IS NULL OR s.last_seen_at <= $3)
               AND ($4::TEXT IS NULL OR s.ref_hint ILIKE $4 ESCAPE '\'
                 OR s.source ILIKE $4 ESCAPE '\'
                 OR EXISTS (SELECT 1 FROM interactions_v2 i WHERE i.session_id = s.id
+                  AND i.occurred_at >= $9
                   AND (i.operation ILIKE $4 ESCAPE '\'
                     OR COALESCE(i.customer_ref, '') ILIKE $4 ESCAPE '\')))
               AND ($5::TEXT IS NULL OR $5 = 'all'
@@ -2840,11 +2903,14 @@ pub(crate) async fn dashboard_sessions_page(
                 OR ($5 = 'no_feedback' AND activity.report_count = 0))
               AND ($6::TEXT[] IS NULL OR EXISTS (
                 SELECT 1 FROM interactions_v2 i JOIN feedback_reports r ON r.interaction_id = i.id
-                WHERE i.session_id = s.id AND COALESCE(r.impact, 'unknown') = ANY($6)))
+                WHERE i.session_id = s.id AND i.occurred_at >= $9
+                  AND COALESCE(r.impact, 'unknown') = ANY($6)))
               AND ($7::TEXT IS NULL OR EXISTS (
-                SELECT 1 FROM interactions_v2 i WHERE i.session_id = s.id AND i.operation = $7))
+                SELECT 1 FROM interactions_v2 i WHERE i.session_id = s.id
+                  AND i.occurred_at >= $9 AND i.operation = $7))
               AND ($8::TEXT IS NULL OR EXISTS (
-                SELECT 1 FROM interactions_v2 i WHERE i.session_id = s.id AND i.customer_ref = $8))",
+                SELECT 1 FROM interactions_v2 i WHERE i.session_id = s.id
+                  AND i.occurred_at >= $9 AND i.customer_ref = $8))",
         )
         .bind(environment.id)
         .bind(since)
@@ -2854,6 +2920,7 @@ pub(crate) async fn dashboard_sessions_page(
         .bind(&filters.impacts)
         .bind(&filters.operation)
         .bind(&filters.customer_ref)
+        .bind(retained_since)
         .fetch_one(pool)
         .await?;
 
@@ -2881,13 +2948,14 @@ pub(crate) async fn dashboard_sessions_page(
               r.created_at DESC) FILTER (WHERE r.impact IS NOT NULL))[1] AS strongest_impact
           FROM interactions_v2 i
           LEFT JOIN feedback_reports r ON r.interaction_id = i.id
-          WHERE i.session_id = s.id
+          WHERE i.session_id = s.id AND i.occurred_at >= $9
         ) activity
         WHERE s.environment_id = $1 AND s.last_seen_at >= $2
           AND ($3::TIMESTAMPTZ IS NULL OR s.last_seen_at <= $3)
           AND ($4::TEXT IS NULL OR s.ref_hint ILIKE $4 ESCAPE '\'
             OR s.source ILIKE $4 ESCAPE '\'
             OR EXISTS (SELECT 1 FROM interactions_v2 i WHERE i.session_id = s.id
+              AND i.occurred_at >= $9
               AND (i.operation ILIKE $4 ESCAPE '\'
                 OR COALESCE(i.customer_ref, '') ILIKE $4 ESCAPE '\')))
           AND ($5::TEXT IS NULL OR $5 = 'all'
@@ -2896,13 +2964,16 @@ pub(crate) async fn dashboard_sessions_page(
             OR ($5 = 'no_feedback' AND activity.report_count = 0))
           AND ($6::TEXT[] IS NULL OR EXISTS (
             SELECT 1 FROM interactions_v2 i JOIN feedback_reports r ON r.interaction_id = i.id
-            WHERE i.session_id = s.id AND COALESCE(r.impact, 'unknown') = ANY($6)))
+            WHERE i.session_id = s.id AND i.occurred_at >= $9
+              AND COALESCE(r.impact, 'unknown') = ANY($6)))
           AND ($7::TEXT IS NULL OR EXISTS (
-            SELECT 1 FROM interactions_v2 i WHERE i.session_id = s.id AND i.operation = $7))
+            SELECT 1 FROM interactions_v2 i WHERE i.session_id = s.id
+              AND i.occurred_at >= $9 AND i.operation = $7))
           AND ($8::TEXT IS NULL OR EXISTS (
-            SELECT 1 FROM interactions_v2 i WHERE i.session_id = s.id AND i.customer_ref = $8))
-          AND ($9::TIMESTAMPTZ IS NULL OR (s.last_seen_at, s.id) < ($9, $10))
-        ORDER BY s.last_seen_at DESC, s.id DESC LIMIT $11",
+            SELECT 1 FROM interactions_v2 i WHERE i.session_id = s.id
+              AND i.occurred_at >= $9 AND i.customer_ref = $8))
+          AND ($10::TIMESTAMPTZ IS NULL OR (s.last_seen_at, s.id) < ($10, $11))
+        ORDER BY s.last_seen_at DESC, s.id DESC LIMIT $12",
     )
     .bind(environment.id)
     .bind(since)
@@ -2912,6 +2983,7 @@ pub(crate) async fn dashboard_sessions_page(
     .bind(filters.impacts)
     .bind(filters.operation)
     .bind(filters.customer_ref)
+    .bind(retained_since)
     .bind(cursor_last_seen_at)
     .bind(cursor_id)
     .bind(limit + 1)
@@ -3324,13 +3396,20 @@ pub(crate) async fn purge_expired_product_data(
 async fn dashboard_insights(
     pool: &PgPool,
     environment_id: Option<Uuid>,
+    retained_since: Option<DateTime<Utc>>,
 ) -> Result<Insights, ApiError> {
     const WINDOW_DAYS: i32 = 30;
     const COMPARISON_DAYS: i32 = 7;
     let now = Utc::now();
-    let window_start = now - Duration::days(WINDOW_DAYS.into());
+    let window_start = retained_since.map_or_else(
+        || now - Duration::days(WINDOW_DAYS.into()),
+        |retained_since| retained_since.max(now - Duration::days(WINDOW_DAYS.into())),
+    );
     let recent_start = now - Duration::days(COMPARISON_DAYS.into());
-    let previous_start = recent_start - Duration::days(COMPARISON_DAYS.into());
+    let previous_start = retained_since.map_or_else(
+        || recent_start - Duration::days(COMPARISON_DAYS.into()),
+        |retained_since| retained_since.max(recent_start - Duration::days(COMPARISON_DAYS.into())),
+    );
     let counts = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64)>(
         r"SELECT
           COUNT(i.id) FILTER (WHERE i.occurred_at >= $2),
@@ -3557,6 +3636,9 @@ pub(crate) async fn dashboard_with_limits(
     let environment_id = current_environment
         .as_ref()
         .map(|environment| environment.id);
+    let retained_since = current_environment
+        .as_ref()
+        .map(|environment| Utc::now() - Duration::days(environment.retention_days.into()));
     let api_keys = sqlx::query_as::<_, ApiKeyPublic>(
         r"SELECT k.id, k.environment_id, k.label, k.prefix, k.kind, k.created_at,
           k.last_used_at, k.revoked_at, k.expires_at,
@@ -3568,7 +3650,7 @@ pub(crate) async fn dashboard_with_limits(
             COUNT(r.id)::BIGINT AS report_count
           FROM interactions_v2 i
           LEFT JOIN feedback_reports r ON r.interaction_id = i.id
-          WHERE i.environment_id = $1
+          WHERE i.environment_id = $1 AND i.occurred_at >= $2
           GROUP BY i.api_key_id
         ) activity ON activity.api_key_id = k.id
         WHERE k.environment_id = $1
@@ -3577,15 +3659,18 @@ pub(crate) async fn dashboard_with_limits(
         ORDER BY k.created_at DESC",
     )
     .bind(environment_id)
+    .bind(retained_since)
     .fetch_all(pool)
     .await?;
     let interactions = sqlx::query_as::<_, ProductInteraction>(
         r"SELECT id, workspace_id, environment_id, api_key_id, session_id, surface, operation,
         status_code, duration_ms, customer_ref, classification, confirmation_method,
         runtime_hint, runtime_hint_source, occurred_at, created_at, updated_at
-        FROM interactions_v2 WHERE environment_id = $1 ORDER BY occurred_at DESC LIMIT $2",
+        FROM interactions_v2 WHERE environment_id = $1 AND occurred_at >= $2
+        ORDER BY occurred_at DESC LIMIT $3",
     )
     .bind(environment_id)
+    .bind(retained_since)
     .bind(interaction_limit)
     .fetch_all(pool)
     .await?;
@@ -3600,9 +3685,11 @@ pub(crate) async fn dashboard_with_limits(
         w.updated_at AS workflow_updated_at
         FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id
         LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
-        WHERE i.environment_id = $1 ORDER BY r.created_at DESC LIMIT $2",
+        WHERE i.environment_id = $1 AND i.occurred_at >= $2
+        ORDER BY r.created_at DESC LIMIT $3",
     )
     .bind(environment_id)
+    .bind(retained_since)
     .bind(report_limit)
     .fetch_all(pool)
     .await?;
@@ -3611,9 +3698,9 @@ pub(crate) async fn dashboard_with_limits(
           SELECT id, workspace_id, environment_id, source, ref_hint,
             started_at, last_seen_at, created_at
           FROM sessions_v2
-          WHERE environment_id = $1
+          WHERE environment_id = $1 AND last_seen_at >= $2
           ORDER BY last_seen_at DESC
-          LIMIT $2
+          LIMIT $3
         )
         SELECT s.id, s.workspace_id, s.environment_id, s.source, s.ref_hint,
           s.started_at, s.last_seen_at, s.created_at,
@@ -3646,23 +3733,28 @@ pub(crate) async fn dashboard_with_limits(
               FILTER (WHERE r.impact IS NOT NULL))[1] AS strongest_impact
           FROM interactions_v2 i
           LEFT JOIN feedback_reports r ON r.interaction_id = i.id
-          WHERE i.session_id = s.id
+          WHERE i.session_id = s.id AND i.occurred_at >= $2
         ) activity ON TRUE
         ORDER BY s.last_seen_at DESC",
     )
     .bind(environment_id)
+    .bind(retained_since)
     .bind(session_limit)
     .fetch_all(pool)
     .await?;
-    let insights = dashboard_insights(pool, environment_id).await?;
+    let insights = dashboard_insights(pool, environment_id, retained_since).await?;
     let (interactions_total, reports_total, sessions_total) =
         sqlx::query_as::<_, (i64, i64, i64)>(
             r"SELECT
-              (SELECT COUNT(*) FROM interactions_v2 WHERE environment_id = $1),
-              (SELECT COUNT(*) FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id WHERE i.environment_id = $1),
-              (SELECT COUNT(*) FROM sessions_v2 WHERE environment_id = $1)",
+              (SELECT COUNT(*) FROM interactions_v2
+                WHERE environment_id = $1 AND occurred_at >= $2),
+              (SELECT COUNT(*) FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id
+                WHERE i.environment_id = $1 AND i.occurred_at >= $2),
+              (SELECT COUNT(*) FROM sessions_v2
+                WHERE environment_id = $1 AND last_seen_at >= $2)",
         )
         .bind(environment_id)
+        .bind(retained_since)
         .fetch_one(pool)
         .await?;
     let list_state = DashboardListState {
@@ -3736,7 +3828,8 @@ pub(crate) async fn dashboard_report_by_id(
         JOIN interactions_v2 i ON i.id = r.interaction_id
         JOIN product_environments e ON e.id = i.environment_id
         LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
-        WHERE r.id = $1 AND i.workspace_id = $2 AND e.product_id = $3",
+        WHERE r.id = $1 AND i.workspace_id = $2 AND e.product_id = $3
+          AND i.occurred_at >= NOW() - make_interval(days => e.retention_days)",
     )
     .bind(report_id)
     .bind(workspace_id)
@@ -3808,6 +3901,7 @@ pub(crate) async fn update_feedback_workflow(
         JOIN interactions_v2 i ON i.id = r.interaction_id
         JOIN product_environments e ON e.id = i.environment_id
         WHERE r.id = $1 AND r.workspace_id = $2 AND e.product_id = $3
+          AND i.occurred_at >= NOW() - make_interval(days => e.retention_days)
         ON CONFLICT (report_id) DO UPDATE SET
           status = EXCLUDED.status,
           assignee_os_user_id = EXCLUDED.assignee_os_user_id,
@@ -3844,7 +3938,8 @@ pub(crate) async fn dashboard_interaction_by_id(
         i.classification, i.confirmation_method, i.runtime_hint, i.runtime_hint_source,
         i.occurred_at, i.created_at, i.updated_at
         FROM interactions_v2 i JOIN product_environments e ON e.id = i.environment_id
-        WHERE i.id = $1 AND i.workspace_id = $2 AND e.product_id = $3",
+        WHERE i.id = $1 AND i.workspace_id = $2 AND e.product_id = $3
+          AND i.occurred_at >= NOW() - make_interval(days => e.retention_days)",
     )
     .bind(interaction_id)
     .bind(workspace_id)
@@ -3864,7 +3959,8 @@ pub(crate) async fn dashboard_session_by_id(
         r"SELECT s.id, s.workspace_id, s.environment_id, s.source, s.ref_hint,
         s.started_at, s.last_seen_at, s.created_at
         FROM sessions_v2 s JOIN product_environments e ON e.id = s.environment_id
-        WHERE s.id = $1 AND s.workspace_id = $2 AND e.product_id = $3",
+        WHERE s.id = $1 AND s.workspace_id = $2 AND e.product_id = $3
+          AND s.last_seen_at >= NOW() - make_interval(days => e.retention_days)",
     )
     .bind(session_id)
     .bind(workspace_id)
@@ -3873,11 +3969,15 @@ pub(crate) async fn dashboard_session_by_id(
     .await?
     .ok_or_else(|| ApiError::not_found("Session not found"))?;
     let interactions = sqlx::query_as::<_, ProductInteraction>(
-        r"SELECT id, workspace_id, environment_id, api_key_id, session_id, surface,
-        operation, status_code, duration_ms, customer_ref, classification,
-        confirmation_method, runtime_hint, runtime_hint_source, occurred_at, created_at, updated_at
-        FROM interactions_v2 WHERE session_id = $1
-        ORDER BY occurred_at, client_sequence NULLS LAST, id",
+        r"SELECT i.id, i.workspace_id, i.environment_id, i.api_key_id, i.session_id, i.surface,
+        i.operation, i.status_code, i.duration_ms, i.customer_ref, i.classification,
+        i.confirmation_method, i.runtime_hint, i.runtime_hint_source,
+        i.occurred_at, i.created_at, i.updated_at
+        FROM interactions_v2 i
+        JOIN product_environments e ON e.id = i.environment_id
+        WHERE i.session_id = $1
+          AND i.occurred_at >= NOW() - make_interval(days => e.retention_days)
+        ORDER BY i.occurred_at, i.client_sequence NULLS LAST, i.id",
     )
     .bind(session_id)
     .fetch_all(pool)
@@ -3892,8 +3992,11 @@ pub(crate) async fn dashboard_session_by_id(
         COALESCE(w.tags, '{}'::TEXT[]) AS tags, w.internal_note,
         w.updated_at AS workflow_updated_at
         FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id
+        JOIN product_environments e ON e.id = i.environment_id
         LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
-        WHERE i.session_id = $1 ORDER BY r.created_at",
+        WHERE i.session_id = $1
+          AND i.occurred_at >= NOW() - make_interval(days => e.retention_days)
+        ORDER BY r.created_at",
     )
     .bind(session_id)
     .fetch_all(pool)
@@ -7668,6 +7771,7 @@ mod product_tests {
             let now = Utc::now();
             let checkout_session = Uuid::new_v4();
             let search_session = Uuid::new_v4();
+            let expired_session = Uuid::new_v4();
             for (id, environment_id, source, hint, started_at, last_seen_at) in [
                 (
                     checkout_session,
@@ -7684,6 +7788,14 @@ mod product_tests {
                     "search-session",
                     now - Duration::minutes(4),
                     now - Duration::minutes(3),
+                ),
+                (
+                    expired_session,
+                    environment.id,
+                    "mcp",
+                    "expired-session",
+                    now - Duration::days(31),
+                    now - Duration::days(31),
                 ),
             ] {
                 sqlx::query(
@@ -7706,12 +7818,16 @@ mod product_tests {
             let checkout = Uuid::new_v4();
             let checkout_retry = Uuid::new_v4();
             let search = Uuid::new_v4();
+            let expired_mixed_interaction = Uuid::new_v4();
+            let expired_interaction = Uuid::new_v4();
             let sibling_interaction = Uuid::new_v4();
             let isolated_interaction = Uuid::new_v4();
             for (id, owning_workspace, environment_id, session_id, operation, customer_ref, occurred_at) in [
                 (checkout, workspace.id, environment.id, Some(checkout_session), "checkout", "tenant-a", now - Duration::minutes(5)),
                 (checkout_retry, workspace.id, environment.id, Some(checkout_session), "checkout_retry", "tenant-a", now - Duration::minutes(2)),
                 (search, workspace.id, environment.id, Some(search_session), "search", "tenant-b", now - Duration::minutes(3)),
+                (expired_mixed_interaction, workspace.id, environment.id, Some(checkout_session), "expired_checkout_history", "tenant-old", now - Duration::days(31)),
+                (expired_interaction, workspace.id, environment.id, Some(expired_session), "expired_operation", "tenant-old", now - Duration::days(31)),
                 (sibling_interaction, workspace.id, sibling_environment.id, None, "checkout", "tenant-a", now - Duration::minutes(1)),
                 (isolated_interaction, isolated_workspace.id, isolated_environment.id, None, "checkout", "tenant-a", now),
             ] {
@@ -7733,11 +7849,15 @@ mod product_tests {
             }
             let checkout_report = Uuid::new_v4();
             let search_report = Uuid::new_v4();
+            let expired_mixed_report = Uuid::new_v4();
+            let expired_report = Uuid::new_v4();
             let sibling_report = Uuid::new_v4();
             let isolated_report = Uuid::new_v4();
             for (id, owning_workspace, interaction_id, summary, impact, findings, created_at) in [
                 (checkout_report, workspace.id, checkout, "Checkout timed out before confirmation.", "blocked", serde_json::json!([{"kind":"defect","topic":"timeout","severity":"blocking","detail":"The agent could not complete checkout."}]), now - Duration::minutes(5)),
                 (search_report, workspace.id, search, "Search returned the expected current result.", "helped", serde_json::json!([{"kind":"strength","topic":"freshness","severity":"minor","detail":"The newest document was returned."}]), now - Duration::minutes(3)),
+                (expired_mixed_report, workspace.id, expired_mixed_interaction, "Expired checkout history must remain hidden.", "hindered", serde_json::json!([{"kind":"friction","topic":"expired_mixed_topic","severity":"major","detail":"Expired evidence must not affect a retained session."}]), now),
+                (expired_report, workspace.id, expired_interaction, "A late report must not resurrect expired evidence.", "blocked", serde_json::json!([{"kind":"defect","topic":"expired_topic","severity":"blocking","detail":"The interaction is outside retention."}]), now),
                 (sibling_report, workspace.id, sibling_interaction, "Sibling checkout timed out before confirmation.", "blocked", serde_json::json!([]), now - Duration::minutes(1)),
                 (isolated_report, isolated_workspace.id, isolated_interaction, "Isolated checkout timed out before confirmation.", "blocked", serde_json::json!([]), now),
             ] {
@@ -7759,6 +7879,8 @@ mod product_tests {
             for (report_id, owning_workspace, status) in [
                 (checkout_report, workspace.id, "investigating"),
                 (search_report, workspace.id, "resolved"),
+                (expired_mixed_report, workspace.id, "planned"),
+                (expired_report, workspace.id, "new"),
                 (sibling_report, workspace.id, "new"),
                 (isolated_report, isolated_workspace.id, "new"),
             ] {
@@ -7839,6 +7961,57 @@ mod product_tests {
                     .collect::<BTreeMap<_, _>>()
                     == BTreeMap::from([("investigating", 1), ("resolved", 1)])
             );
+            anyhow::ensure!(
+                status_filtered
+                    .facets
+                    .impact
+                    .iter()
+                    .map(|item| (item.name.as_str(), item.count))
+                    .collect::<BTreeMap<_, _>>()
+                    == BTreeMap::from([("blocked", 1)])
+            );
+            anyhow::ensure!(
+                status_filtered
+                    .facets
+                    .topic
+                    .iter()
+                    .map(|item| (item.name.as_str(), item.count))
+                    .collect::<BTreeMap<_, _>>()
+                    == BTreeMap::from([("timeout", 1)])
+            );
+
+            let incompatible_facets = dashboard_feedback_page(
+                &pool,
+                workspace.id,
+                product.id,
+                DashboardFeedbackFilters {
+                    statuses: Some(vec!["investigating".into()]),
+                    impacts: Some(vec!["helped".into()]),
+                    ..DashboardFeedbackFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(incompatible_facets.total == 0);
+            anyhow::ensure!(
+                incompatible_facets
+                    .facets
+                    .status
+                    .iter()
+                    .map(|item| (item.name.as_str(), item.count))
+                    .collect::<BTreeMap<_, _>>()
+                    == BTreeMap::from([("resolved", 1)])
+            );
+            anyhow::ensure!(
+                incompatible_facets
+                    .facets
+                    .impact
+                    .iter()
+                    .map(|item| (item.name.as_str(), item.count))
+                    .collect::<BTreeMap<_, _>>()
+                    == BTreeMap::from([("blocked", 1)])
+            );
+            anyhow::ensure!(incompatible_facets.facets.topic.is_empty());
 
             let filtered = dashboard_feedback_page(
                 &pool,
@@ -7887,6 +8060,138 @@ mod product_tests {
             anyhow::ensure!(sessions.rollup.interactions == 2);
             anyhow::ensure!(sessions.rollup.multi_step_sessions == 1);
             anyhow::ensure!(sessions.sessions[0].id == checkout_session);
+
+            let all_sessions = dashboard_sessions_page(
+                &pool,
+                workspace.id,
+                product.id,
+                DashboardSessionFilters::default(),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(all_sessions.rollup.sessions == 2);
+            anyhow::ensure!(all_sessions.rollup.interactions == 3);
+            anyhow::ensure!(all_sessions.rollup.multi_step_sessions == 1);
+            anyhow::ensure!(
+                all_sessions
+                    .sessions
+                    .iter()
+                    .all(|session| session.id != expired_session)
+            );
+            let checkout_summary = all_sessions
+                .sessions
+                .iter()
+                .find(|session| session.id == checkout_session)
+                .expect("retained checkout session should be listed");
+            anyhow::ensure!(checkout_summary.interaction_count == 2);
+            anyhow::ensure!(checkout_summary.report_count == 1);
+            anyhow::ensure!(checkout_summary.first_operation.as_deref() == Some("checkout"));
+
+            let expired_activity_filter = dashboard_sessions_page(
+                &pool,
+                workspace.id,
+                product.id,
+                DashboardSessionFilters {
+                    operation: Some("expired_checkout_history".into()),
+                    ..DashboardSessionFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(expired_activity_filter.rollup.sessions == 0);
+            anyhow::ensure!(expired_activity_filter.sessions.is_empty());
+
+            let context = DashboardContext {
+                user: CurrentUser {
+                    id: "usr_dashboard_retention".into(),
+                    handle: "dashboard-retention".into(),
+                    email: None,
+                    display_name: "Dashboard Retention".into(),
+                },
+                workspace: workspace.clone(),
+                role: "owner".into(),
+                workspace_memberships: vec![],
+            };
+            let bootstrap = dashboard_with_limits(
+                &pool,
+                context,
+                Some(product.id),
+                None,
+                100,
+                100,
+                100,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(bootstrap.list_state.interactions_total == 3);
+            anyhow::ensure!(bootstrap.list_state.reports_total == 2);
+            anyhow::ensure!(bootstrap.list_state.sessions_total == 2);
+            anyhow::ensure!(bootstrap.insights.opportunities == 3);
+            anyhow::ensure!(bootstrap.insights.reports == 2);
+            anyhow::ensure!(
+                bootstrap
+                    .interactions
+                    .iter()
+                    .all(|interaction| interaction.id != expired_interaction
+                        && interaction.id != expired_mixed_interaction)
+            );
+            anyhow::ensure!(
+                bootstrap
+                    .reports
+                    .iter()
+                    .all(|report| report.id != expired_report && report.id != expired_mixed_report)
+            );
+            let bootstrap_checkout = bootstrap
+                .sessions
+                .iter()
+                .find(|session| session.id == checkout_session)
+                .expect("bootstrap should include the retained checkout session");
+            anyhow::ensure!(bootstrap_checkout.interaction_count == 2);
+            anyhow::ensure!(bootstrap_checkout.report_count == 1);
+
+            let expired_report_error = dashboard_report_by_id(
+                &pool,
+                workspace.id,
+                product.id,
+                expired_report,
+            )
+            .await
+            .expect_err("expired reports must not be addressable before purge");
+            anyhow::ensure!(expired_report_error.status == StatusCode::NOT_FOUND);
+            let expired_interaction_error = dashboard_interaction_by_id(
+                &pool,
+                workspace.id,
+                product.id,
+                expired_interaction,
+            )
+            .await
+            .expect_err("expired interactions must not be addressable before purge");
+            anyhow::ensure!(expired_interaction_error.status == StatusCode::NOT_FOUND);
+            let expired_session_error = dashboard_session_by_id(
+                &pool,
+                workspace.id,
+                product.id,
+                expired_session,
+            )
+            .await
+            .expect_err("expired sessions must not be addressable before purge");
+            anyhow::ensure!(expired_session_error.status == StatusCode::NOT_FOUND);
+            let checkout_detail = dashboard_session_by_id(
+                &pool,
+                workspace.id,
+                product.id,
+                checkout_session,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(checkout_detail.interactions.len() == 2);
+            anyhow::ensure!(checkout_detail.reports.len() == 1);
+            anyhow::ensure!(
+                checkout_detail
+                    .interactions
+                    .iter()
+                    .all(|interaction| interaction.id != expired_mixed_interaction)
+            );
 
             let sibling_page = dashboard_feedback_page(
                 &pool,
