@@ -9,6 +9,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
+import { assertPortAvailable } from "./setup-matrix-process.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const backendUrl = (process.env.SETUP_MATRIX_BACKEND_URL || "http://127.0.0.1:3180").replace(
@@ -84,22 +85,49 @@ function start(command, args, { cwd, env = {}, label }) {
   return child;
 }
 
-async function stop(child) {
-  if (!child || child.exitCode !== null) return;
+function childLogTail() {
+  const logs = [...children]
+    .map((child) => `--- ${child.label} ---\n${child.log || "(no output captured)"}`)
+    .join("\n");
+  return logs ? `\nProcess log tails:\n${logs}` : "\nNo child process logs were available.";
+}
+
+function responseDiagnostic(response, body, label) {
+  let rendered;
   try {
-    process.kill(-child.pid, "SIGTERM");
+    rendered = typeof body === "string" ? body : JSON.stringify(body);
   } catch {
-    child.kill("SIGTERM");
+    rendered = String(body);
   }
-  await Promise.race([
-    new Promise((resolveExit) => child.once("exit", resolveExit)),
-    new Promise((resolveWait) => setTimeout(resolveWait, 2_000)),
-  ]);
+  return `${label} returned HTTP ${response.status}: ${rendered}${childLogTail()}`;
+}
+
+function assertResponseStatus(response, expected, body, label) {
+  assert.equal(response.status, expected, responseDiagnostic(response, body, label));
+}
+
+async function stop(child) {
+  if (!child) return;
   if (child.exitCode === null) {
     try {
-      process.kill(-child.pid, "SIGKILL");
+      process.kill(-child.pid, "SIGTERM");
     } catch {
-      child.kill("SIGKILL");
+      child.kill("SIGTERM");
+    }
+    await Promise.race([
+      new Promise((resolveExit) => child.once("exit", resolveExit)),
+      new Promise((resolveWait) => setTimeout(resolveWait, 2_000)),
+    ]);
+    if (child.exitCode === null) {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+      await Promise.race([
+        new Promise((resolveExit) => child.once("exit", resolveExit)),
+        new Promise((resolveWait) => setTimeout(resolveWait, 2_000)),
+      ]);
     }
   }
   children.delete(child);
@@ -259,7 +287,7 @@ async function decide(envelope, decision) {
     body: JSON.stringify({ decision }),
   });
   const body = await response.json();
-  assert.equal(response.status, 200, JSON.stringify(body));
+  assertResponseStatus(response, 200, body, "consent decision");
   assert.equal(body.state, decision);
   if (decision === "approved") {
     assert.ok(body.feedback);
@@ -285,7 +313,7 @@ async function inspectFeedbackHandle(feedbackHandle) {
     body: "{}",
   });
   const body = await response.json();
-  assert.equal(response.status, 200, JSON.stringify(body));
+  assertResponseStatus(response, 200, body, "capability inspection");
   return { authorization, body };
 }
 
@@ -315,7 +343,7 @@ async function submitAction(action, summary) {
     body: JSON.stringify(report),
   });
   const body = await response.json();
-  assert.equal(response.status, 200, JSON.stringify(body));
+  assertResponseStatus(response, 200, body, "feedback submission");
   assert.equal(body.accepted, true);
   assert.equal(body.report.summary, summary);
   assert.equal(body.report.impact, "helped_with_friction");
@@ -326,7 +354,7 @@ async function submitAction(action, summary) {
     body: JSON.stringify({ summary: "This duplicate report must not replace the first report." }),
   });
   const duplicateBody = await duplicate.json();
-  assert.equal(duplicate.status, 200);
+  assertResponseStatus(duplicate, 200, duplicateBody, "duplicate feedback replay");
   assert.equal(duplicateBody.report.id, body.report.id);
   assert.equal(duplicateBody.report.summary, summary);
   return body;
@@ -344,7 +372,7 @@ async function testHttp(base, stack) {
     const response = await fetch(`${base}${path}`);
     const contentType = response.headers.get("content-type") || "";
     const body = contentType.includes("json") ? await response.json() : await response.text();
-    assert.equal(response.status, 200);
+    assertResponseStatus(response, 200, body, `${stack}/${surfaceName} product response`);
     const envelope = envelopeFrom(response, body);
     assert.ok(envelope, `${stack}/${surfaceName} did not expose feedback metadata`);
     assertFeedbackEnvelope(envelope);
@@ -366,7 +394,7 @@ async function readHttpSurface(base, path, customerRef) {
   });
   const contentType = response.headers.get("content-type") || "";
   const body = contentType.includes("json") ? await response.json() : await response.text();
-  assert.equal(response.status, 200);
+  assertResponseStatus(response, 200, body, `HTTP product response ${path}`);
   return { body, envelope: envelopeFrom(response, body) };
 }
 
@@ -503,7 +531,7 @@ async function mcpPost(url, body, { expectedStatus = 200, headerOverrides = {} }
     body: JSON.stringify(body),
   });
   const payload = await readMcpPayload(response);
-  assert.equal(response.status, expectedStatus, JSON.stringify(payload));
+  assertResponseStatus(response, expectedStatus, payload, `MCP ${body.method}`);
   assert.equal(
     response.headers.get("mcp-session-id"),
     null,
@@ -621,7 +649,7 @@ async function testMcp(url, stack) {
     }),
   });
   const legacy = await readMcpPayload(legacyResponse);
-  assert.equal(legacyResponse.status, 200, JSON.stringify(legacy));
+  assertResponseStatus(legacyResponse, 200, legacy, "legacy MCP initialize");
   assert.equal(legacy.result.protocolVersion, "2025-11-25");
   assert.equal(legacyResponse.headers.get("mcp-session-id"), null);
   console.log(
@@ -900,6 +928,7 @@ async function prepareManual(fixtureName) {
 
 async function runHttpApp(label, command, args, cwd, port, mode = "never_ask") {
   database("set-mode", mode);
+  await assertPortAvailable(port, `${label}/${mode}`);
   const child = start(command, args, {
     cwd,
     label: `${label}/${mode}`,
@@ -916,7 +945,7 @@ async function runHttpApp(label, command, args, cwd, port, mode = "never_ask") {
     if (mode === "never_ask") await testHttp(`http://127.0.0.1:${port}`, label);
     else await testHttpConsent(`http://127.0.0.1:${port}`, label, mode);
   } catch (error) {
-    throw new Error(`${error instanceof Error ? error.stack : error}\n${child.log}`);
+    throw new Error(`${error instanceof Error ? error.stack : error}${childLogTail()}`);
   }
   await waitForPersistedExpected();
   await stop(child);
@@ -924,6 +953,7 @@ async function runHttpApp(label, command, args, cwd, port, mode = "never_ask") {
 
 async function runMcpApp(label, command, args, cwd, port, mode = "never_ask") {
   database("set-mode", mode);
+  await assertPortAvailable(port, `${label}/${mode}`);
   const child = start(command, args, {
     cwd,
     label: `${label}/${mode}`,
@@ -940,7 +970,7 @@ async function runMcpApp(label, command, args, cwd, port, mode = "never_ask") {
     if (mode === "never_ask") await testMcp(`http://127.0.0.1:${port}/mcp`, label);
     else await testMcpConsent(`http://127.0.0.1:${port}/mcp`, label, mode);
   } catch (error) {
-    throw new Error(`${error instanceof Error ? error.stack : error}\n${child.log}`);
+    throw new Error(`${error instanceof Error ? error.stack : error}${childLogTail()}`);
   }
   await waitForPersistedExpected();
   await stop(child);
@@ -1007,6 +1037,7 @@ try {
   if (!databaseUrl)
     throw new Error(`Postgres in ${databaseEnvironment} has no DATABASE_PUBLIC_URL`);
   if (localBackend) {
+    await assertPortAvailable(3180, "Epode Rust backend");
     const backend = start("cargo", ["run", "--quiet", "--bin", "agent-feedback"], {
       cwd: join(repo, "backend"),
       label: "Epode Rust backend",
