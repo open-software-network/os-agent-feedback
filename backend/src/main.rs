@@ -958,12 +958,35 @@ async fn auth_callback(
     Ok(response)
 }
 
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+#[serde(rename_all = "camelCase")]
+struct GithubInstallQuery {
+    /// Team to configure when the `x-workspace-id` header cannot be sent, as on
+    /// a plain link. Ignored when the header is present.
+    workspace_id: Option<Uuid>,
+}
+
+/// Header wins when both are supplied; the query parameter is the no-header
+/// fallback. Neither is trusted on its own — the winner is handed to
+/// `dashboard_auth`, which rejects a team the caller is not a member of.
+const fn install_workspace_id(
+    header_workspace_id: Option<Uuid>,
+    query_workspace_id: Option<Uuid>,
+) -> Option<Uuid> {
+    match header_workspace_id {
+        Some(workspace_id) => Some(workspace_id),
+        None => query_workspace_id,
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/api/github/install",
     tag = "github",
     params(
-        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; wins over workspaceId when both are present"),
+        GithubInstallQuery
     ),
     responses(
         (
@@ -988,9 +1011,16 @@ async fn auth_callback(
 async fn github_install_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(query): Query<GithubInstallQuery>,
 ) -> Result<Response, ApiError> {
-    let (context, tokens) =
-        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    // The install entry point is a plain top-level link, so it cannot set the
+    // x-workspace-id header the rest of the dashboard API uses. Accept the team
+    // as a query parameter too, and resolve it through the SAME dashboard_auth
+    // path: `resolve_workspace_access` is what proves membership, so a crafted
+    // link cannot install into a team the caller does not belong to.
+    let requested_workspace =
+        install_workspace_id(requested_workspace_id(&headers)?, query.workspace_id);
+    let (context, tokens) = dashboard_auth(&state, &headers, requested_workspace).await?;
     require_workspace_editor(&context)?;
     let github = require_github(&state)?;
     let github_state = random_token("");
@@ -4831,8 +4861,8 @@ mod page_tests {
         GroupIssueReconciliationInconclusive, build_app_router, comma_values, feedback_discovery,
         github_callback_redirect_target, group_issue_reconciliation_resolution,
         group_issue_state_refresh_due, group_issue_sync_needed, group_marker_comment,
-        mcp_auth_error, mcp_tool_allowed, mcp_tools, resolve_web_app_url, reveal_auth_error,
-        valid_report_group_key, validated_return_to,
+        install_workspace_id, mcp_auth_error, mcp_tool_allowed, mcp_tools, resolve_web_app_url,
+        reveal_auth_error, valid_report_group_key, validated_return_to,
     };
     use chrono::{Duration, TimeZone as _, Utc};
     use serde_json::{Value, json};
@@ -4870,6 +4900,25 @@ mod page_tests {
         let revealed = reveal_auth_error(html);
         assert!(revealed.contains(r#"id="auth-error" class="auth-error">Try again"#));
         assert!(!revealed.contains("auth-error\" hidden"));
+    }
+
+    #[test]
+    fn install_workspace_id_prefers_the_header_and_falls_back_to_the_query() {
+        let header = uuid::Uuid::from_u128(1);
+        let query = uuid::Uuid::from_u128(2);
+
+        // Header wins when both are present.
+        assert_eq!(
+            install_workspace_id(Some(header), Some(query)),
+            Some(header)
+        );
+        // Query parameter is the fallback for the plain install link, which
+        // cannot set headers.
+        assert_eq!(install_workspace_id(None, Some(query)), Some(query));
+        // Header alone keeps working for the header-driven dashboard calls.
+        assert_eq!(install_workspace_id(Some(header), None), Some(header));
+        // Neither: dashboard_auth falls back to the caller's personal team.
+        assert_eq!(install_workspace_id(None, None), None);
     }
 
     #[test]

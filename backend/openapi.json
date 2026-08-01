@@ -171,13 +171,23 @@
           {
             "name": "x-workspace-id",
             "in": "header",
-            "description": "Team to configure; defaults to the caller's personal team",
+            "description": "Team to configure; wins over workspaceId when both are present",
             "required": false,
             "schema": {
               "type": [
                 "string",
                 "null"
               ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "description": "Team to configure when the `x-workspace-id` header cannot be sent, as on\na plain link. Ignored when the header is present.",
+            "required": false,
+            "schema": {
+              "type": "string",
               "format": "uuid"
             }
           }
