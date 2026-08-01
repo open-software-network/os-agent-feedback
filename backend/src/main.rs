@@ -3,6 +3,7 @@ mod error;
 mod github;
 mod grouping;
 mod issue_template;
+mod migration_bridge;
 mod models;
 mod os_accounts;
 mod security;
@@ -311,7 +312,7 @@ async fn main() -> anyhow::Result<()> {
         .max_connections(database_max_connections)
         .connect(&database_url)
         .await?;
-    sqlx::migrate!().run(&pool).await?;
+    migration_bridge::prepare_database(&pool, production).await?;
     if command.as_deref() == Some("--backfill-report-groups") {
         let summary = backfill_report_groups(&pool, &FingerprintGrouper, None)
             .await
