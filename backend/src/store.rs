@@ -39,7 +39,7 @@ use crate::{
     },
     os_accounts::OsUser,
     security::{
-        bearer_token, parse_capability, random_token, sha256, valid_consent_subject,
+        bearer_token, parse_capability, random_token, sha256, sha256_bytes, valid_consent_subject,
         verify_capability,
     },
 };
@@ -4134,12 +4134,13 @@ async fn resolve_v2_session(
 ) -> Result<Uuid, ApiError> {
     let session_id = Uuid::new_v4();
     let ref_hint = format!("session-{}", &session_id.simple().to_string()[..8]);
+    let scoped_ref_hash = scoped_session_ref_hash(customer_scope_hash, session_ref_hash);
     let resolved = sqlx::query_scalar::<_, Uuid>(
         r"INSERT INTO sessions_v2
         (id, workspace_id, environment_id, customer_scope_hash, source, ref_hash,
-         ref_hint, started_at, last_seen_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
-        ON CONFLICT (environment_id, customer_scope_hash, source, ref_hash) DO UPDATE
+         raw_ref_hash, ref_hint, started_at, last_seen_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+        ON CONFLICT (environment_id, source, ref_hash) DO UPDATE
         SET started_at = LEAST(sessions_v2.started_at, EXCLUDED.started_at),
             last_seen_at = GREATEST(sessions_v2.last_seen_at, EXCLUDED.last_seen_at)
         RETURNING id",
@@ -4149,12 +4150,22 @@ async fn resolve_v2_session(
     .bind(environment_id)
     .bind(customer_scope_hash)
     .bind(session_source)
+    .bind(scoped_ref_hash)
     .bind(session_ref_hash)
     .bind(ref_hint)
     .bind(occurred_at)
     .fetch_one(&mut **tx)
     .await?;
     Ok(resolved)
+}
+
+fn scoped_session_ref_hash(customer_scope_hash: &[u8], session_ref_hash: &[u8]) -> Vec<u8> {
+    // Including scope in the existing unique key preserves the legacy
+    // three-column ON CONFLICT contract during a rolling deployment.
+    let mut material = Vec::with_capacity(customer_scope_hash.len() + session_ref_hash.len());
+    material.extend_from_slice(customer_scope_hash);
+    material.extend_from_slice(session_ref_hash);
+    sha256_bytes(&material)
 }
 
 fn customer_scope_hash(customer_ref: Option<&str>) -> Vec<u8> {
@@ -4460,7 +4471,7 @@ async fn correlate_telemetry_sessions(
     let interaction_ids = evidence_by_interaction.keys().copied().collect::<Vec<_>>();
     let states = sqlx::query_as::<_, InteractionSessionState>(
         r"SELECT i.id AS interaction_id, i.occurred_at, i.customer_ref, i.session_id,
-          s.source AS session_source, s.ref_hash AS session_ref_hash,
+          s.source AS session_source, COALESCE(s.raw_ref_hash, s.ref_hash) AS session_ref_hash,
           s.customer_scope_hash AS session_customer_scope_hash
         FROM interactions_v2 i
         LEFT JOIN sessions_v2 s ON s.id = i.session_id
@@ -8971,6 +8982,120 @@ mod product_tests {
 
     #[tokio::test]
     #[ignore = "requires DATABASE_URL"]
+    async fn tenant_scoped_sessions_preserve_the_legacy_upsert_during_rollout() -> anyhow::Result<()>
+    {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Session rollout compatibility").await?;
+
+        let result = async {
+            let (_, auth) = telemetry_test_product(&pool, &workspace, "Session rollout").await?;
+            let occurred_at = Utc::now();
+            let canonical_ref = "workflow:overlap_42";
+            let raw_ref_hash = sha256(canonical_ref);
+            let legacy_session_id = Uuid::new_v4();
+            let legacy_upsert = r"INSERT INTO sessions_v2
+                (id, workspace_id, environment_id, source, ref_hash, ref_hint,
+                 started_at, last_seen_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+                ON CONFLICT (environment_id, source, ref_hash) DO UPDATE
+                SET started_at = LEAST(sessions_v2.started_at, EXCLUDED.started_at),
+                    last_seen_at = GREATEST(sessions_v2.last_seen_at, EXCLUDED.last_seen_at)
+                RETURNING id";
+
+            let first_legacy_result: Uuid = sqlx::query_scalar(legacy_upsert)
+                .bind(legacy_session_id)
+                .bind(workspace.id)
+                .bind(auth.environment.id)
+                .bind("mcp")
+                .bind(&raw_ref_hash)
+                .bind("legacy-overlap")
+                .bind(occurred_at)
+                .fetch_one(&pool)
+                .await?;
+            anyhow::ensure!(first_legacy_result == legacy_session_id);
+
+            let acme_id = Uuid::new_v4();
+            let globex_id = Uuid::new_v4();
+            let mut tenant_a = mcp_telemetry_event(
+                acme_id,
+                Some(1),
+                "tenant_a_overlap",
+                Some(canonical_ref),
+                Some("mcp"),
+                occurred_at,
+            );
+            tenant_a.customer_ref = Some("tenant-a".into());
+            let mut tenant_b = mcp_telemetry_event(
+                globex_id,
+                Some(2),
+                "tenant_b_overlap",
+                Some(canonical_ref),
+                Some("mcp"),
+                occurred_at,
+            );
+            tenant_b.customer_ref = Some("tenant-b".into());
+            let accepted = ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![tenant_a, tenant_b],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(accepted.accepted == 2 && accepted.dropped == 0);
+
+            let acme_session = interaction_session(&pool, acme_id)
+                .await?
+                .expect("tenant A should receive a scoped session");
+            let globex_session = interaction_session(&pool, globex_id)
+                .await?
+                .expect("tenant B should receive a scoped session");
+            anyhow::ensure!(acme_session != globex_session);
+            anyhow::ensure!(acme_session != legacy_session_id);
+            anyhow::ensure!(globex_session != legacy_session_id);
+
+            let retried_legacy_result: Uuid = sqlx::query_scalar(legacy_upsert)
+                .bind(Uuid::new_v4())
+                .bind(workspace.id)
+                .bind(auth.environment.id)
+                .bind("mcp")
+                .bind(&raw_ref_hash)
+                .bind("legacy-overlap-retry")
+                .bind(occurred_at + Duration::seconds(1))
+                .fetch_one(&pool)
+                .await?;
+            anyhow::ensure!(retried_legacy_result == legacy_session_id);
+
+            let legacy_constraint_present: bool = sqlx::query_scalar(
+                r"SELECT EXISTS(
+                  SELECT 1 FROM pg_constraint
+                  WHERE conrelid = 'sessions_v2'::regclass
+                    AND conname = 'sessions_v2_environment_source_ref_hash_key'
+                    AND contype = 'u'
+                )",
+            )
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(legacy_constraint_present);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
     async fn session_correlation_is_proof_backed_end_to_end() -> anyhow::Result<()> {
         let database_url = std::env::var("DATABASE_URL")?;
         let pool = PgPoolOptions::new()
@@ -9160,12 +9285,22 @@ mod product_tests {
                     .is_some_and(|session_id| session_id != mcp_session)
             );
 
-            let (ref_hash, ref_hint): (Vec<u8>, String) =
-                sqlx::query_as("SELECT ref_hash, ref_hint FROM sessions_v2 WHERE id = $1")
+            let (ref_hash, raw_ref_hash, scope_hash, ref_hint): (
+                Vec<u8>,
+                Option<Vec<u8>>,
+                Vec<u8>,
+                String,
+            ) = sqlx::query_as(
+                "SELECT ref_hash, raw_ref_hash, customer_scope_hash, ref_hint FROM sessions_v2 WHERE id = $1",
+            )
                     .bind(mcp_session)
                     .fetch_one(&pool)
                     .await?;
-            anyhow::ensure!(ref_hash == sha256(canonical_ref));
+            let expected_raw_ref_hash = sha256(canonical_ref);
+            anyhow::ensure!(raw_ref_hash.as_deref() == Some(expected_raw_ref_hash.as_slice()));
+            anyhow::ensure!(
+                ref_hash == scoped_session_ref_hash(&scope_hash, &expected_raw_ref_hash)
+            );
             anyhow::ensure!(!ref_hint.contains(canonical_ref));
             let detail =
                 dashboard_session_by_id(&pool, workspace.id, primary_product.id, mcp_session)
@@ -9405,15 +9540,26 @@ mod product_tests {
             .await
             .map_err(test_error)?;
             anyhow::ensure!(coalesced.accepted == 3 && coalesced.dropped == 0);
-            let coalesced_ref_hash: Vec<u8> = sqlx::query_scalar(
-                r"SELECT s.ref_hash FROM sessions_v2 s
+            let (coalesced_ref_hash, coalesced_raw_ref_hash, coalesced_scope_hash): (
+                Vec<u8>,
+                Option<Vec<u8>>,
+                Vec<u8>,
+            ) = sqlx::query_as(
+                r"SELECT s.ref_hash, s.raw_ref_hash, s.customer_scope_hash FROM sessions_v2 s
                 JOIN interactions_v2 i ON i.session_id = s.id
                 WHERE i.id = $1",
             )
             .bind(coalesced_id)
             .fetch_one(&pool)
             .await?;
-            anyhow::ensure!(coalesced_ref_hash == sha256("workflow:first_valid_proof"));
+            let expected_raw_ref_hash = sha256("workflow:first_valid_proof");
+            anyhow::ensure!(
+                coalesced_raw_ref_hash.as_deref() == Some(expected_raw_ref_hash.as_slice())
+            );
+            anyhow::ensure!(
+                coalesced_ref_hash
+                    == scoped_session_ref_hash(&coalesced_scope_hash, &expected_raw_ref_hash)
+            );
 
             let isolated_valid_id = Uuid::new_v4();
             let cross_environment = ingest_telemetry_batch(

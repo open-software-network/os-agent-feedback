@@ -45,7 +45,11 @@ pub(crate) fn random_token(prefix: &str) -> String {
 }
 
 pub(crate) fn sha256(value: &str) -> Vec<u8> {
-    Sha256::digest(value.as_bytes()).to_vec()
+    sha256_bytes(value.as_bytes())
+}
+
+pub(crate) fn sha256_bytes(value: &[u8]) -> Vec<u8> {
+    Sha256::digest(value).to_vec()
 }
 
 pub(crate) fn parse_capability(token: &str) -> Result<ParsedCapability, ApiError> {
