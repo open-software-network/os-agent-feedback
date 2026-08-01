@@ -102,7 +102,12 @@ export function HomeView({
               {readoutDetail(insights)}
             </p>
             <p className="mt-4 text-xs text-muted-foreground">
-              {countLabel(feedbackGap, "feedback gap", "feedback gaps")} ·{" "}
+              {countLabel(
+                feedbackGap,
+                "confirmed use without feedback",
+                "confirmed uses without feedback",
+              )}{" "}
+              ·{" "}
               {countLabel(
                 insights.reportsWithWorkarounds,
                 "report with a workaround",

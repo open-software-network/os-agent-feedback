@@ -159,6 +159,12 @@ export function dashboardFixture(overrides: Partial<DashboardData> = {}): Dashbo
         startedAt: now,
         lastSeenAt: now,
         createdAt: now,
+        interactionCount: 1,
+        reportCount: 1,
+        firstOperation: "search",
+        lastOperation: "search",
+        customerRef: "account-42",
+        strongestImpact: "degraded",
       },
     ],
     insights: {

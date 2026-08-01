@@ -1,0 +1,29 @@
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+
+import { dashboardFixture } from "@/components/dashboard/test-fixture";
+import { PolicyView } from "./policy-view";
+
+describe("PolicyView", () => {
+  it("explains durable Ask once consent and its safe no-reference fallback", () => {
+    render(
+      <PolicyView
+        data={dashboardFixture()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        setNotice={vi.fn()}
+        embedded
+      />,
+    );
+
+    expect(
+      screen.getByText(/remembered by Epode for this product and an opaque customer reference/i),
+    ).toBeVisible();
+    expect(screen.getByText(/survive new agent sessions/i)).toBeVisible();
+    expect(
+      screen.getByText(
+        /without a customer reference, permission is safely requested for each use/i,
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText(/one agent runtime/i)).not.toBeInTheDocument();
+  });
+});

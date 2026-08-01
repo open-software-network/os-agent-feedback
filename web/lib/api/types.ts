@@ -680,7 +680,7 @@ export interface components {
             listState: components["schemas"]["DashboardListState"];
             products: components["schemas"]["Product"][];
             reports: components["schemas"]["ProductFeedbackReportWithInteraction"][];
-            sessions: components["schemas"]["ProductSession"][];
+            sessions: components["schemas"]["DashboardSessionSummary"][];
             teamInvitations: components["schemas"]["TeamInvitation"][];
             teamMembers: components["schemas"]["TeamMember"][];
             user: components["schemas"]["CurrentUser"];
@@ -708,6 +708,37 @@ export interface components {
             interactions: components["schemas"]["ProductInteraction"][];
             reports: components["schemas"]["ProductFeedbackReportWithInteraction"][];
             session: components["schemas"]["ProductSession"];
+        };
+        /**
+         * @description A session row enriched with complete server-side rollups for the dashboard.
+         *
+         *     Dashboard interaction and report windows are independently paginated. Keeping
+         *     these counts on the session summary prevents an older session from appearing
+         *     empty merely because its interactions are outside the currently loaded window.
+         */
+        DashboardSessionSummary: {
+            /** Format: date-time */
+            createdAt: string;
+            customerRef: string | null;
+            /** Format: uuid */
+            environmentId: string;
+            firstOperation: string | null;
+            /** Format: uuid */
+            id: string;
+            /** Format: int64 */
+            interactionCount: number;
+            lastOperation: string | null;
+            /** Format: date-time */
+            lastSeenAt: string;
+            refHint: string;
+            /** Format: int64 */
+            reportCount: number;
+            source: string;
+            /** Format: date-time */
+            startedAt: string;
+            strongestImpact: string | null;
+            /** Format: uuid */
+            workspaceId: string;
         };
         DeleteProductInput: {
             confirmation: string;

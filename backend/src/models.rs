@@ -361,6 +361,34 @@ pub(crate) struct ProductSession {
     pub created_at: DateTime<Utc>,
 }
 
+/// A session row enriched with complete server-side rollups for the dashboard.
+///
+/// Dashboard interaction and report windows are independently paginated. Keeping
+/// these counts on the session summary prevents an older session from appearing
+/// empty merely because its interactions are outside the currently loaded window.
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardSessionSummary {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub environment_id: Uuid,
+    pub source: String,
+    pub ref_hint: String,
+    pub started_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub interaction_count: i64,
+    pub report_count: i64,
+    #[schema(required = true, nullable)]
+    pub first_operation: Option<String>,
+    #[schema(required = true, nullable)]
+    pub last_operation: Option<String>,
+    #[schema(required = true, nullable)]
+    pub customer_ref: Option<String>,
+    #[schema(required = true, nullable)]
+    pub strongest_impact: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProductInteraction {
@@ -790,7 +818,7 @@ pub(crate) struct DashboardData {
     pub api_keys: Vec<ApiKeyPublic>,
     pub interactions: Vec<ProductInteraction>,
     pub reports: Vec<ProductFeedbackReportWithInteraction>,
-    pub sessions: Vec<ProductSession>,
+    pub sessions: Vec<DashboardSessionSummary>,
     pub insights: Insights,
     pub list_state: DashboardListState,
 }

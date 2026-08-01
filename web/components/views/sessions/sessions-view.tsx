@@ -25,9 +25,7 @@ import { apiRequest } from "@/lib/api/client";
 import type {
   DashboardData,
   DashboardSessionDetail,
-  ProductFeedbackReport,
-  ProductInteraction,
-  ProductSession,
+  DashboardSessionSummary,
 } from "@/lib/api/dashboard";
 import {
   formatDate,
@@ -40,15 +38,6 @@ import { cn } from "@/lib/utils";
 
 type SessionFilter = "all" | "multi" | "feedback" | "no_feedback";
 
-const impactRank: Record<string, number> = {
-  blocked: 5,
-  hindered: 4,
-  helped_with_friction: 3,
-  neutral: 2,
-  unknown: 1,
-  helped: 0,
-};
-
 const impactLabels: Record<string, string> = {
   blocked: "Blocked",
   hindered: "Hindered",
@@ -58,11 +47,11 @@ const impactLabels: Record<string, string> = {
   unknown: "Unknown",
 };
 
-function sessionJourney(interactions: ProductInteraction[]) {
-  if (!interactions.length) return "No loaded interactions";
-  if (interactions.length === 1) return interactions[0]?.operation ?? "Single event";
-  if (interactions.length > 3) return `${interactions.length}-step journey`;
-  return `${interactions[0]?.operation} → ${interactions.at(-1)?.operation}`;
+function sessionJourney(session: DashboardSessionSummary) {
+  if (!session.interactionCount) return "No interactions";
+  if (session.interactionCount === 1) return session.firstOperation ?? "Single event";
+  if (session.interactionCount > 3) return `${session.interactionCount}-step journey`;
+  return `${session.firstOperation ?? "Unknown"} → ${session.lastOperation ?? "Unknown"}`;
 }
 
 function elapsedLabel(startedAt: string, occurredAt: string) {
@@ -115,41 +104,16 @@ export function SessionsView({
     enabled: Boolean(selectedSessionId && productId),
   });
 
-  const interactionsBySession = useMemo(() => {
-    const result = new Map<string, ProductInteraction[]>();
-    for (const interaction of data.interactions) {
-      if (!interaction.sessionId) continue;
-      const interactions = result.get(interaction.sessionId) ?? [];
-      interactions.push(interaction);
-      result.set(interaction.sessionId, interactions);
-    }
-    for (const interactions of result.values()) {
-      interactions.sort((left, right) => left.occurredAt.localeCompare(right.occurredAt));
-    }
-    return result;
-  }, [data.interactions]);
-
-  const reportsBySession = useMemo(() => {
-    const result = new Map<string, ProductFeedbackReport[]>();
-    for (const report of data.reports) {
-      if (!report.sessionId) continue;
-      const reports = result.get(report.sessionId) ?? [];
-      reports.push(report);
-      result.set(report.sessionId, reports);
-    }
-    return result;
-  }, [data.reports]);
-
   const sessionRows = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return data.sessions.filter((session) => {
-      const interactions = interactionsBySession.get(session.id) ?? [];
-      const reports = reportsBySession.get(session.id) ?? [];
       const haystack = [
         session.refHint,
         session.source,
-        ...interactions.flatMap((item) => [item.operation, item.surface, item.customerRef]),
-        ...reports.map((report) => report.summary),
+        session.firstOperation,
+        session.lastOperation,
+        session.customerRef,
+        session.strongestImpact,
       ]
         .filter(Boolean)
         .join(" ")
@@ -157,20 +121,18 @@ export function SessionsView({
       return (
         (!needle || haystack.includes(needle)) &&
         (filter === "all" ||
-          (filter === "multi" && interactions.length > 1) ||
-          (filter === "feedback" && reports.length > 0) ||
-          (filter === "no_feedback" && reports.length === 0))
+          (filter === "multi" && session.interactionCount > 1) ||
+          (filter === "feedback" && session.reportCount > 0) ||
+          (filter === "no_feedback" && session.reportCount === 0))
       );
     });
-  }, [data.sessions, filter, interactionsBySession, query, reportsBySession]);
+  }, [data.sessions, filter, query]);
 
-  const loadedInteractions = Array.from(interactionsBySession.values()).reduce(
-    (total, interactions) => total + interactions.length,
+  const loadedInteractions = data.sessions.reduce(
+    (total, session) => total + session.interactionCount,
     0,
   );
-  const multiStep = Array.from(interactionsBySession.values()).filter(
-    (interactions) => interactions.length > 1,
-  ).length;
+  const multiStep = data.sessions.filter((session) => session.interactionCount > 1).length;
   const average = data.sessions.length
     ? (loadedInteractions / data.sessions.length).toFixed(1)
     : "0";
@@ -196,9 +158,9 @@ export function SessionsView({
       <MetricStrip
         items={[
           { label: "Proven sessions", value: data.listState.sessionsTotal.toLocaleString() },
-          { label: "Loaded interactions", value: loadedInteractions },
-          { label: "Multi-step", value: multiStep },
-          { label: "Average interactions", value: average },
+          { label: "Interactions in view", value: loadedInteractions },
+          { label: "Multi-step in view", value: multiStep },
+          { label: "Average in view", value: average },
         ]}
       />
       <p className="border-b bg-muted/25 px-4 py-2 text-xs text-muted-foreground">
@@ -253,8 +215,6 @@ export function SessionsView({
                 <SessionRow
                   key={session.id}
                   session={session}
-                  interactions={interactionsBySession.get(session.id) ?? []}
-                  reports={reportsBySession.get(session.id) ?? []}
                   selected={selectedSessionId === session.id}
                   onOpen={() => selectSession(session.id)}
                 />
@@ -295,52 +255,45 @@ export function SessionsView({
 
 function SessionRow({
   session,
-  interactions,
-  reports,
   selected,
   onOpen,
 }: {
-  session: ProductSession;
-  interactions: ProductInteraction[];
-  reports: ProductFeedbackReport[];
+  session: DashboardSessionSummary;
   selected: boolean;
   onOpen: () => void;
 }) {
-  const strongest = [...reports].sort(
-    (left, right) =>
-      (impactRank[right.impact ?? "unknown"] ?? 0) - (impactRank[left.impact ?? "unknown"] ?? 0),
-  )[0];
-
   return (
     <TableRow
       data-state={selected ? "selected" : undefined}
       aria-selected={selected}
-      tabIndex={0}
-      className="cursor-pointer bg-background hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring data-[state=selected]:bg-selected data-[state=selected]:shadow-[inset_2px_0_0_var(--attention)]"
+      className="cursor-pointer bg-background hover:bg-muted/40 data-[state=selected]:bg-selected data-[state=selected]:shadow-[inset_2px_0_0_var(--attention)]"
       onClick={onOpen}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onOpen();
-        }
-      }}
     >
       <TableCell className="h-[66px] overflow-hidden pl-5">
-        <p className="truncate font-mono text-xs font-medium">{session.refHint}</p>
+        <Button
+          variant="link"
+          className="h-auto max-w-full justify-start truncate p-0 font-mono text-xs font-medium"
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpen();
+          }}
+        >
+          {session.refHint}
+        </Button>
         <p className="mt-1 truncate text-xs text-muted-foreground">
           {interfaceLabel(session.source)}
         </p>
       </TableCell>
       <TableCell className="overflow-hidden">
-        <p className="truncate font-mono text-xs">{sessionJourney(interactions)}</p>
+        <p className="truncate font-mono text-xs">{sessionJourney(session)}</p>
         <p className="mt-1 truncate text-xs text-muted-foreground">
-          {interactions[0]?.customerRef ?? "Unknown customer"}
+          {session.customerRef ?? "Unknown customer"}
         </p>
       </TableCell>
-      <TableCell className="text-xs">{interactions.length}</TableCell>
+      <TableCell className="text-xs">{session.interactionCount}</TableCell>
       <TableCell className="text-xs">
-        {reports.length
-          ? `${reports.length} · ${impactLabels[strongest?.impact ?? "unknown"]}`
+        {session.reportCount
+          ? `${session.reportCount} · ${impactLabels[session.strongestImpact ?? "unknown"]}`
           : "None"}
       </TableCell>
       <TableCell

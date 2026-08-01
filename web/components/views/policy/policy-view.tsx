@@ -95,8 +95,9 @@ export function PolicyView({
             <option value="off">Off: do not request feedback</option>
           </NativeSelect>
           <p className="max-w-3xl text-sm text-muted-foreground">
-            Ask modes require a matching consent attestation. Permission is scoped to this product
-            in one agent runtime, not to a human identity.
+            Ask once is remembered by Epode for this product and an opaque customer reference, so it
+            can survive new agent sessions. Without a customer reference, permission is safely
+            requested for each use. Ask every time always requires fresh permission.
           </p>
         </Panel>
         <Panel title="Outside the feedback protocol">

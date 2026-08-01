@@ -70,7 +70,7 @@ describe("SessionsView", () => {
     expect(selectSession).toHaveBeenCalledWith(null);
   });
 
-  it("opens a session from the full row with pointer or keyboard input", () => {
+  it("opens a session from the full row or its explicit accessible control", () => {
     const data = dashboardFixture();
     const selectSession = vi.fn();
 
@@ -88,10 +88,51 @@ describe("SessionsView", () => {
 
     const row = screen.getByRole("row", { name: new RegExp(data.sessions[0].refHint) });
     fireEvent.click(row);
-    fireEvent.keyDown(row, { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: data.sessions[0].refHint }));
 
     expect(selectSession).toHaveBeenNthCalledWith(1, data.sessions[0].id);
     expect(selectSession).toHaveBeenNthCalledWith(2, data.sessions[0].id);
+  });
+
+  it("uses complete server rollups when interaction and report windows do not overlap", () => {
+    const base = dashboardFixture();
+    const data = dashboardFixture({
+      interactions: [],
+      reports: [],
+      sessions: [
+        {
+          ...base.sessions[0],
+          interactionCount: 12,
+          reportCount: 3,
+          firstOperation: "search",
+          lastOperation: "export",
+          customerRef: "account-high-volume",
+          strongestImpact: "blocked",
+        },
+      ],
+    });
+
+    renderWithQuery(
+      <SessionsView
+        data={data}
+        selectedSessionId={null}
+        selectSession={vi.fn()}
+        openFeedback={vi.fn()}
+        openInteraction={vi.fn()}
+        loadMore={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    const row = screen.getByRole("row", { name: new RegExp(base.sessions[0].refHint) });
+    expect(within(row).getByText("12-step journey")).toBeVisible();
+    expect(within(row).getByText("12")).toBeVisible();
+    expect(within(row).getByText("3 · Blocked")).toBeVisible();
+    expect(within(row).getByText("account-high-volume")).toBeVisible();
+    expect(screen.getByText("Interactions in view").parentElement).toHaveTextContent("12");
+
+    fireEvent.click(screen.getByRole("button", { name: "Has feedback" }));
+    expect(screen.getByRole("row", { name: new RegExp(base.sessions[0].refHint) })).toBeVisible();
   });
 });
 

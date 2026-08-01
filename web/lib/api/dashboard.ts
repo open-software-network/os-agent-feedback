@@ -10,6 +10,7 @@ export type ProductDeletedResponse = components["schemas"]["ProductDeletedRespon
 export type ProductFeedbackReport = components["schemas"]["ProductFeedbackReportWithInteraction"];
 export type ProductInteraction = components["schemas"]["ProductInteraction"];
 export type ProductSession = components["schemas"]["ProductSession"];
+export type DashboardSessionSummary = components["schemas"]["DashboardSessionSummary"];
 export type DashboardInteractionResponse = components["schemas"]["DashboardInteractionResponse"];
 export type DashboardSessionDetail = components["schemas"]["DashboardSessionDetail"];
 export type FeedbackFinding = components["schemas"]["FeedbackFinding"];

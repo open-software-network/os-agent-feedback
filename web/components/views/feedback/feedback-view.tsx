@@ -556,7 +556,6 @@ function SignalsTable({
                 )}
                 <p className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
                   {signal.detail ? <span className="truncate">{signal.detail}</span> : null}
-                  <span className="truncate font-mono">{group.groupKey}</span>
                 </p>
               </TableCell>
               <TableCell className="text-xs text-muted-foreground">
@@ -672,19 +671,21 @@ function FeedbackTable({
             key={report.id}
             data-state={selectedId === report.id ? "selected" : undefined}
             aria-selected={selectedId === report.id}
-            tabIndex={0}
-            className="cursor-pointer bg-background hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring data-[state=selected]:bg-selected data-[state=selected]:shadow-[inset_2px_0_0_var(--attention)]"
+            className="cursor-pointer bg-background hover:bg-muted/40 data-[state=selected]:bg-selected data-[state=selected]:shadow-[inset_2px_0_0_var(--attention)]"
             onClick={() => onSelect(report.id)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                onSelect(report.id);
-              }
-            }}
           >
             <TableCell className="h-[66px] overflow-hidden pl-4">
               <div className="min-w-0">
-                <p className="truncate text-[13px] font-medium leading-5">{report.summary}</p>
+                <Button
+                  variant="link"
+                  className="h-auto max-w-full justify-start truncate p-0 text-[13px] font-medium leading-5"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onSelect(report.id);
+                  }}
+                >
+                  {report.summary}
+                </Button>
                 <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
                   {report.operation} · {interfaceLabel(report.surface)}
                 </p>

@@ -210,8 +210,7 @@ describe("FeedbackView", () => {
     renderFeedback(data);
     fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
 
-    expect(await screen.findByText(first.groupKey)).toBeVisible();
-    expect(screen.getByText(first.explanation)).toBeVisible();
+    expect(await screen.findByText(first.explanation)).toBeVisible();
     expect(screen.queryByRole("button", { name: "File GitHub issue" })).not.toBeInTheDocument();
     expect(screen.getByText(/map this product to a GitHub repository/i)).toBeVisible();
     expect(screen.getByRole("link", { name: "Open Connectors" })).toHaveAttribute(
@@ -221,8 +220,10 @@ describe("FeedbackView", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Load more" }));
 
-    expect(await screen.findByText(second.groupKey)).toBeVisible();
-    expect(screen.getByText(first.groupKey)).toBeVisible();
+    expect(await screen.findByText(second.explanation)).toBeVisible();
+    expect(screen.getByText(first.explanation)).toBeVisible();
+    expect(screen.queryByText(first.groupKey)).not.toBeInTheDocument();
+    expect(screen.queryByText(second.groupKey)).not.toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes("offset=50"))).toBe(true);
     for (const [, init] of fetchMock.mock.calls) {
       expect(new Headers(init.headers).get("x-workspace-id")).toBe(data.workspace.id);
@@ -347,7 +348,7 @@ describe("FeedbackView", () => {
     expect(screen.getByRole("button", { name: "Save triage" })).toBeVisible();
   });
 
-  it("opens a report from the full row with pointer or keyboard input", () => {
+  it("opens a report from the full row or its explicit accessible control", () => {
     const data = dashboardFixture();
     const selectReport = vi.fn();
     renderWithQuery(
@@ -365,7 +366,7 @@ describe("FeedbackView", () => {
 
     const row = screen.getByRole("row", { name: new RegExp(data.reports[0].summary) });
     fireEvent.click(row);
-    fireEvent.keyDown(row, { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: data.reports[0].summary }));
 
     expect(selectReport).toHaveBeenNthCalledWith(1, data.reports[0].id);
     expect(selectReport).toHaveBeenNthCalledWith(2, data.reports[0].id);

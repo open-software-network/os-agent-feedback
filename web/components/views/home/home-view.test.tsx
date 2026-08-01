@@ -29,6 +29,14 @@ describe("HomeView", () => {
     expect(within(pipeline).getByText("18")).toBeVisible();
     expect(within(pipeline).getByText("81% confirmation")).toBeVisible();
     expect(screen.getByText("2 blocking")).toBeVisible();
+    expect(
+      screen.getByText(
+        (_, element) =>
+          element?.tagName === "P" &&
+          element.textContent?.includes("8 confirmed uses without feedback") === true,
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText(/feedback gaps?/i)).not.toBeInTheDocument();
     expect(screen.getByText("620ms")).toBeVisible();
     expect(screen.getByText("9.8s")).toBeVisible();
     expect(screen.queryByRole("button", { name: /interactions/i })).not.toBeInTheDocument();

@@ -22,13 +22,13 @@ use crate::{
     models::{
         ApiKeyPublic, CapabilityInspectionResponse, ConsentDecisionInput, ConsentStateInput,
         ConsentStateResponse, CreateProductInput, CreateTeamInvitationInput, DashboardContext,
-        DashboardData, DashboardListState, DashboardSessionDetail, DeleteProductInput,
-        FeedbackFindingInput, FeedbackInteractionItem, FeedbackInteractionsPage,
-        FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackOperationSummary,
-        FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse, FeedbackSummary,
-        FeedbackSurfaceSummary, FeedbackWindow, GithubIssueLink, InsightCount, Insights,
-        InteractionTelemetryInput, MergeReportGroupsResponse, PolicyInput, Product, ProductAuth,
-        ProductEnvironment, ProductFeedbackReport, ProductFeedbackReportInput,
+        DashboardData, DashboardListState, DashboardSessionDetail, DashboardSessionSummary,
+        DeleteProductInput, FeedbackFindingInput, FeedbackInteractionItem,
+        FeedbackInteractionsPage, FeedbackListInteractionsInput, FeedbackListReportsInput,
+        FeedbackOperationSummary, FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse,
+        FeedbackSummary, FeedbackSurfaceSummary, FeedbackWindow, GithubIssueLink, InsightCount,
+        Insights, InteractionTelemetryInput, MergeReportGroupsResponse, PolicyInput, Product,
+        ProductAuth, ProductEnvironment, ProductFeedbackReport, ProductFeedbackReportInput,
         ProductFeedbackReportWithInteraction, ProductGithubRepo, ProductGithubRepoInput,
         ProductInteraction, ProductReportGroup, ProductSession, TeamInvitation, TeamMember,
         TelemetryBatchInput, TelemetryBatchResult, UpdateFeedbackWorkflowInput, UpdateNameInput,
@@ -3067,9 +3067,49 @@ pub(crate) async fn dashboard_with_limits(
     .bind(report_limit)
     .fetch_all(pool)
     .await?;
-    let sessions = sqlx::query_as::<_, ProductSession>(
-        r"SELECT id, workspace_id, environment_id, source, ref_hint, started_at, last_seen_at, created_at
-        FROM sessions_v2 WHERE environment_id = $1 ORDER BY last_seen_at DESC LIMIT $2",
+    let sessions = sqlx::query_as::<_, DashboardSessionSummary>(
+        r"WITH selected_sessions AS (
+          SELECT id, workspace_id, environment_id, source, ref_hint,
+            started_at, last_seen_at, created_at
+          FROM sessions_v2
+          WHERE environment_id = $1
+          ORDER BY last_seen_at DESC
+          LIMIT $2
+        )
+        SELECT s.id, s.workspace_id, s.environment_id, s.source, s.ref_hint,
+          s.started_at, s.last_seen_at, s.created_at,
+          COALESCE(activity.interaction_count, 0) AS interaction_count,
+          COALESCE(activity.report_count, 0) AS report_count,
+          activity.first_operation, activity.last_operation, activity.customer_ref,
+          activity.strongest_impact
+        FROM selected_sessions s
+        LEFT JOIN LATERAL (
+          SELECT
+            COUNT(i.id)::BIGINT AS interaction_count,
+            COUNT(r.id)::BIGINT AS report_count,
+            (ARRAY_AGG(i.operation ORDER BY i.occurred_at, i.client_sequence NULLS LAST, i.id)
+              FILTER (WHERE i.id IS NOT NULL))[1] AS first_operation,
+            (ARRAY_AGG(i.operation ORDER BY i.occurred_at DESC, i.client_sequence DESC NULLS LAST, i.id DESC)
+              FILTER (WHERE i.id IS NOT NULL))[1] AS last_operation,
+            (ARRAY_AGG(i.customer_ref ORDER BY i.occurred_at, i.client_sequence NULLS LAST, i.id)
+              FILTER (WHERE i.customer_ref IS NOT NULL))[1] AS customer_ref,
+            (ARRAY_AGG(r.impact ORDER BY
+              CASE r.impact
+                WHEN 'blocked' THEN 5
+                WHEN 'hindered' THEN 4
+                WHEN 'helped_with_friction' THEN 3
+                WHEN 'neutral' THEN 2
+                WHEN 'unknown' THEN 1
+                WHEN 'helped' THEN 0
+                ELSE -1
+              END DESC,
+              r.created_at DESC)
+              FILTER (WHERE r.impact IS NOT NULL))[1] AS strongest_impact
+          FROM interactions_v2 i
+          LEFT JOIN feedback_reports r ON r.interaction_id = i.id
+          WHERE i.session_id = s.id
+        ) activity ON TRUE
+        ORDER BY s.last_seen_at DESC",
     )
     .bind(environment_id)
     .bind(session_limit)

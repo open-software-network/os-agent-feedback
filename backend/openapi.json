@@ -5081,7 +5081,7 @@
           "sessions": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/ProductSession"
+              "$ref": "#/components/schemas/DashboardSessionSummary"
             }
           },
           "teamInvitations": {
@@ -5191,6 +5191,90 @@
           },
           "session": {
             "$ref": "#/components/schemas/ProductSession"
+          }
+        }
+      },
+      "DashboardSessionSummary": {
+        "type": "object",
+        "description": "A session row enriched with complete server-side rollups for the dashboard.\n\nDashboard interaction and report windows are independently paginated. Keeping\nthese counts on the session summary prevents an older session from appearing\nempty merely because its interactions are outside the currently loaded window.",
+        "required": [
+          "id",
+          "workspaceId",
+          "environmentId",
+          "source",
+          "refHint",
+          "startedAt",
+          "lastSeenAt",
+          "createdAt",
+          "interactionCount",
+          "reportCount",
+          "firstOperation",
+          "lastOperation",
+          "customerRef",
+          "strongestImpact"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "customerRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "environmentId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "firstOperation": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "interactionCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "lastOperation": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "refHint": {
+            "type": "string"
+          },
+          "reportCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "source": {
+            "type": "string"
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "strongestImpact": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
