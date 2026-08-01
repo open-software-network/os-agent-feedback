@@ -751,7 +751,11 @@ async function operationsMcpScenario() {
     });
     assert.equal(rejected.isError, true);
     assert.equal(rejected.structuredContent.accepted, false);
-    assert.equal(rejected.structuredContent.retryable, false);
+    assert.equal(rejected.structuredContent.retryable, true);
+    assert.match(
+      rejected.content[0].text,
+      /exactly once with only feedbackHandle and a concise summary/,
+    );
     const accepted = await reportToolWithRetry(base, 3, sentFeedback.feedbackHandle, {
       summary: "The transactional email was queued successfully on the first attempt.",
       impact: "helped",
