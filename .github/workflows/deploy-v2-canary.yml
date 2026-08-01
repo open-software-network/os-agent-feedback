@@ -185,7 +185,7 @@ jobs:
           # Stage them without an extra deployment; the image deployment below
           # applies the values once together with the reviewed artifact.
           railway variable set \
-            "PUBLIC_BASE_URL=https://${API_DOMAIN}" \
+            "PUBLIC_BASE_URL=https://${WEB_DOMAIN}" \
             "WEB_APP_URL=https://${WEB_DOMAIN}" \
             --project "$RAILWAY_PROJECT_ID" \
             --environment v2-canary \
@@ -202,7 +202,7 @@ jobs:
 
           api_variables="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$API_SERVICE" --json)"
           web_variables="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$WEB_SERVICE" --json)"
-          jq -e --arg public_url "https://${API_DOMAIN}" --arg web_url "https://${WEB_DOMAIN}" \
+          jq -e --arg public_url "https://${WEB_DOMAIN}" --arg web_url "https://${WEB_DOMAIN}" \
             '.PUBLIC_BASE_URL == $public_url and .WEB_APP_URL == $web_url' <<<"$api_variables" >/dev/null
           jq -e --arg api_url "https://${API_DOMAIN}" '.API_URL == $api_url' <<<"$web_variables" >/dev/null
 
@@ -236,7 +236,7 @@ jobs:
         run: |
           curl --fail --silent --show-error \
             --retry 12 --retry-all-errors --retry-delay 5 \
-            "https://${WEB_DOMAIN}/" >/dev/null
+            "https://${WEB_DOMAIN}/api/health" >/dev/null
 
       - name: Summarize verified canary
         run: |

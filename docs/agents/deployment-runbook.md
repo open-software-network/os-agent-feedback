@@ -33,6 +33,11 @@ database recovery:
   `OS_ACCOUNTS_API_URL`, and `OS_ACCOUNTS_CLIENT_ID`. They may be Railway
   references or sealed values. The workflow verifies that the keys exist but
   never prints their values.
+- Allow `https://<V2_CANARY_WEB_DOMAIN>` in the OS Accounts App and OAuth
+  client's origin policy, and allow
+  `https://<V2_CANARY_WEB_DOMAIN>/auth/callback` as a redirect URI. The browser
+  begins authentication through the web BFF, so the PKCE cookies and callback
+  must remain on that same public origin.
 - Configure the npm, PyPI, and crates.io trusted publishers described in
   `sdk/RELEASE.md`. The `sdk-release` environment approval is the review gate
   for the exact uploaded release candidate.
@@ -41,6 +46,11 @@ The canary workflow safely provisions only public routing values:
 `PUBLIC_BASE_URL`, `WEB_APP_URL`, and `API_URL`. It stages them without an
 extra deployment, re-reads them for equality, then deploys the API and checks
 its health before deploying the web service.
+
+`PUBLIC_BASE_URL` and `WEB_APP_URL` intentionally use the web domain. That
+keeps browser authentication cookies, the OAuth callback, same-origin feedback
+relay routes, and generated public links on one origin. `API_URL` on the web
+service points to the API domain only for server-to-server BFF forwarding.
 
 ## Canary deployment
 
