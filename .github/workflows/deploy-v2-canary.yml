@@ -342,13 +342,13 @@ jobs:
             "EPODE_CANARY_STATUS=pending" \
             "EPODE_CANARY_RUN_ID=$CANARY_RUN_ID" \
             "EPODE_CANARY_RUN_ATTEMPT=$CANARY_RUN_ATTEMPT" \
-            "EPODE_CANARY_API_REF=" \
-            "EPODE_CANARY_API_DIGEST=" \
-            "EPODE_CANARY_API_DEPLOYMENT_ID=" \
-            "EPODE_CANARY_REVISION=" \
-            "EPODE_CANARY_WEB_REF=" \
-            "EPODE_CANARY_WEB_DIGEST=" \
-            "EPODE_CANARY_WEB_DEPLOYMENT_ID=" \
+            "EPODE_CANARY_API_REF=invalidated" \
+            "EPODE_CANARY_API_DIGEST=invalidated" \
+            "EPODE_CANARY_API_DEPLOYMENT_ID=invalidated" \
+            "EPODE_CANARY_REVISION=invalidated" \
+            "EPODE_CANARY_WEB_REF=invalidated" \
+            "EPODE_CANARY_WEB_DIGEST=invalidated" \
+            "EPODE_CANARY_WEB_DEPLOYMENT_ID=invalidated" \
             --project "$RAILWAY_PROJECT_ID" \
             --environment v2-canary \
             --service "$API_SERVICE" \
