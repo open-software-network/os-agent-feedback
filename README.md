@@ -92,3 +92,24 @@ The Fastify example and public Sites URL are assigned during the v2 rollout.
 - Go `net/http`: https://example-go-agent-v2-canary.up.railway.app
 - Rust Axum: https://example-rust-axum-agent-v2-canary.up.railway.app
 - Protocol and SDK downloads: https://agent-feedback-api-v2-canary.up.railway.app/.well-known/agent-feedback-v1.json
+
+## Dashboard release browser check
+
+Run `make web-release-e2e` for the signed-in dashboard release check. It starts a
+disposable local API fixture and the Next.js app, then drives Chrome through the
+same root-host BFF routes used by `app.epode.ai`; it never calls OS Accounts or a
+shared database. The fixture issues a localhost-only, test-value session cookie
+and exists only inside the test process, so it cannot authenticate against a
+deployed API.
+
+The command covers root routing, the failed-auth retry handoff, product switching
+and creation, Home, server-filtered/paginated Feedback and Sessions detail views,
+Setup copy, Collection policy, Team invitations, and BFF path/header forwarding.
+It writes a screenshot and request trace under `.artifacts/browser-release-e2e/`
+only when it fails. Set `EPODE_E2E_BROWSER` to an explicit Chrome/Chromium binary
+when the runner does not expose one at a standard path.
+
+This is the CI-safe canary command. Keep one protected live smoke before a release:
+sign in through OS Accounts on `https://app.epode.ai`, verify one dashboard API
+response after the real cookie exchange, and sign out. That live check deliberately
+is not automated here because the fixture cookie must remain invalid in production.

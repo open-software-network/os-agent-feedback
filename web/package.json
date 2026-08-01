@@ -8,7 +8,8 @@
     "build": "next build",
     "check": "biome check .",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:release-e2e": "node tests/dashboard-release-e2e.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.1",
@@ -35,6 +36,7 @@
     "@types/react-dom": "^19.2.2",
     "agentation": "^3.0.2",
     "jsdom": "^29.0.2",
+    "puppeteer": "24.3.1",
     "tailwindcss": "^4.1.18",
     "typescript": "^5.9.3",
     "vitest": "^4.1.4"

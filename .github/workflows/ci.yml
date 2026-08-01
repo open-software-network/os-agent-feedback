@@ -266,6 +266,8 @@ jobs:
         run: make web-typecheck
       - name: Test web
         run: make web-test
+      - name: Run dashboard release browser check
+        run: make web-release-e2e
       - name: Build web
         run: make web-build
 
