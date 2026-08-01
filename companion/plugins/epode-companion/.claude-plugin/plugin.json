@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "epode-companion",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "A trusted, privacy-bounded bridge between HTTP product responses and Epode feedback.",
   "author": {
     "name": "Open Software Network"

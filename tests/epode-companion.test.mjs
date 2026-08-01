@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { createServer } from "node:http";
+import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 import test from "node:test";
 
+const repoRoot = new URL("../", import.meta.url).pathname;
+const companionRoot = new URL("../companion/", import.meta.url).pathname;
+const companionPluginDirectory = new URL("../companion/plugins/epode-companion/", import.meta.url)
+  .pathname;
 const companionServer = new URL(
   "../companion/plugins/epode-companion/scripts/mcp-server.mjs",
   import.meta.url,
@@ -31,6 +36,14 @@ const rootCodexMarketplaceFile = new URL("../.agents/plugins/marketplace.json", 
   .pathname;
 const rootClaudeMarketplaceFile = new URL("../.claude-plugin/marketplace.json", import.meta.url)
   .pathname;
+const companionCodexMarketplaceFile = new URL(
+  "../companion/.agents/plugins/marketplace.json",
+  import.meta.url,
+).pathname;
+const companionClaudeMarketplaceFile = new URL(
+  "../companion/.claude-plugin/marketplace.json",
+  import.meta.url,
+).pathname;
 
 async function listen(handler) {
   const server = createServer(handler);
@@ -544,6 +557,76 @@ test("Epode Companion treats backend consent as authoritative", async (testConte
         await api.close();
       }
     });
+  }
+});
+
+test("Epode Companion release metadata stays version-aligned", async () => {
+  const [
+    serverSource,
+    codexManifestText,
+    claudeManifestText,
+    rootCodexMarketplaceText,
+    rootClaudeMarketplaceText,
+    companionCodexMarketplaceText,
+    companionClaudeMarketplaceText,
+  ] = await Promise.all([
+    readFile(companionServer, "utf8"),
+    readFile(codexManifestFile, "utf8"),
+    readFile(claudeManifestFile, "utf8"),
+    readFile(rootCodexMarketplaceFile, "utf8"),
+    readFile(rootClaudeMarketplaceFile, "utf8"),
+    readFile(companionCodexMarketplaceFile, "utf8"),
+    readFile(companionClaudeMarketplaceFile, "utf8"),
+  ]);
+  const serverVersionMatch = /^const companionVersion = "([^"]+)";$/m.exec(serverSource);
+  assert.ok(serverVersionMatch, "Companion server must declare companionVersion");
+  const serverVersion = serverVersionMatch[1];
+  const codexManifest = JSON.parse(codexManifestText);
+  const claudeManifest = JSON.parse(claudeManifestText);
+
+  assert.equal(claudeManifest.version, serverVersion);
+  assert.equal(codexManifest.version.split("+", 1)[0], serverVersion);
+  assert.match(codexManifest.version, /^\d+\.\d+\.\d+\+codex\.\d{14}$/);
+
+  const expectedPluginDirectory = await realpath(companionPluginDirectory);
+  const marketplaces = [
+    {
+      metadata: JSON.parse(rootCodexMarketplaceText),
+      root: repoRoot,
+      manifest: ".codex-plugin/plugin.json",
+      expectedManifest: codexManifestFile,
+    },
+    {
+      metadata: JSON.parse(rootClaudeMarketplaceText),
+      root: repoRoot,
+      manifest: ".claude-plugin/plugin.json",
+      expectedManifest: claudeManifestFile,
+    },
+    {
+      metadata: JSON.parse(companionCodexMarketplaceText),
+      root: companionRoot,
+      manifest: ".codex-plugin/plugin.json",
+      expectedManifest: codexManifestFile,
+    },
+    {
+      metadata: JSON.parse(companionClaudeMarketplaceText),
+      root: companionRoot,
+      manifest: ".claude-plugin/plugin.json",
+      expectedManifest: claudeManifestFile,
+    },
+  ];
+
+  for (const marketplace of marketplaces) {
+    const entry = marketplace.metadata.plugins.find((plugin) => plugin.name === "epode-companion");
+    assert.ok(entry, `${marketplace.metadata.name} marketplace must list Epode Companion`);
+    const source = typeof entry.source === "string" ? entry.source : entry.source?.path;
+    assert.equal(typeof source, "string");
+    const sourceDirectory = await realpath(resolve(marketplace.root, source));
+    assert.equal(sourceDirectory, expectedPluginDirectory);
+    assert.equal(
+      await realpath(resolve(sourceDirectory, marketplace.manifest)),
+      await realpath(marketplace.expectedManifest),
+    );
   }
 });
 

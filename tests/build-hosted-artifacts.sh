@@ -10,6 +10,7 @@ python_bin="${PYTHON_BIN:-$(command -v python3.11 || command -v python3)}"
   pnpm --filter @agent-feedback/node install --ignore-scripts
   pnpm pack --pack-destination "$artifacts"
 )
+node "$repo_root/tests/sync-example-sdk-integrity.mjs" --write
 
 "$python_bin" -m pip wheel --no-deps "$repo_root/sdk/python" --wheel-dir "$artifacts"
 
