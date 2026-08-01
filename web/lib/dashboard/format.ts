@@ -49,6 +49,7 @@ export function relativeDate(value: string | null | undefined): string {
 
 export function formatDuration(milliseconds: number | null | undefined): string {
   if (milliseconds == null) return "—";
+  if (milliseconds === 0) return "<1 ms";
   if (milliseconds < 1000) return `${milliseconds}ms`;
   if (milliseconds < 60_000) {
     return `${(milliseconds / 1000).toFixed(milliseconds < 10_000 ? 1 : 0)}s`;

@@ -275,7 +275,7 @@ export function FeedbackView({
       ],
       workaround: [
         { value: "used", label: "Observed" },
-        { value: "suggested", label: "Suggested" },
+        { value: "suggested", label: "Not used" },
         { value: "none", label: "None recorded" },
       ],
     };
@@ -461,6 +461,7 @@ export function FeedbackView({
             mutationGroupKey={filing.variables}
             filingPending={filing.isPending}
             filingError={filing.error}
+            onReviewReports={() => selectMode("reports")}
             onFileIssue={(groupKey) => filing.mutate(groupKey)}
             onCheckAgain={async () => {
               await groups.refetch();
@@ -499,6 +500,7 @@ function SignalsView({
   mutationGroupKey,
   filingPending,
   filingError,
+  onReviewReports,
   onFileIssue,
   onCheckAgain,
   onLoadMore,
@@ -514,6 +516,7 @@ function SignalsView({
   mutationGroupKey: string | undefined;
   filingPending: boolean;
   filingError: Error | null;
+  onReviewReports: () => void;
   onFileIssue: (groupKey: string) => void;
   onCheckAgain: () => Promise<void>;
   onLoadMore: () => void;
@@ -566,6 +569,23 @@ function SignalsView({
 
   return (
     <div className="grid gap-3">
+      <section className="border bg-background px-4 py-3" aria-labelledby="signal-clusters-title">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 id="signal-clusters-title" className="text-sm font-medium">
+              Signal clusters
+            </h2>
+            <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
+              Each report belongs to one cluster using its operation, interface, status class, and
+              one deterministic primary finding (severity first, then finding type). Secondary
+              findings remain available on the full report.
+            </p>
+          </div>
+          <Button type="button" variant="outline" size="sm" onClick={onReviewReports}>
+            Review full reports
+          </Button>
+        </div>
+      </section>
       {!mappingAvailable && groups.groups.some((group) => !group.githubIssue) ? (
         <StatusMessage>
           Map this product to a GitHub repository before filing an issue.{" "}
@@ -618,7 +638,7 @@ function SignalsTable({
     <Table className="min-w-[680px] table-fixed">
       <TableHeader className="bg-background">
         <TableRow className="hover:bg-background">
-          <TableHead className="w-[52%] pl-4 text-xs text-muted-foreground">Signal</TableHead>
+          <TableHead className="w-[52%] pl-4 text-xs text-muted-foreground">Cluster</TableHead>
           <TableHead className="w-[12%] text-xs text-muted-foreground">Reports</TableHead>
           <TableHead className="w-[18%] text-xs text-muted-foreground">Latest observed</TableHead>
           <TableHead className="w-[18%] pr-4 text-xs text-muted-foreground">GitHub issue</TableHead>
@@ -951,11 +971,13 @@ function FeedbackDetailContent({
             <Separator className="my-5" />
             <section>
               <h3 className="text-xs font-medium">
-                {report.workaround.used ? "Workaround observed" : "Suggested workaround"}
+                {report.workaround.used ? "Workaround observed" : "No workaround used"}
               </h3>
-              <p className="mt-2 text-[13px] leading-5 text-muted-foreground">
-                {report.workaround.detail ?? "No detail provided."}
-              </p>
+              {report.workaround.detail ? (
+                <p className="mt-2 text-[13px] leading-5 text-muted-foreground">
+                  {report.workaround.detail}
+                </p>
+              ) : null}
             </section>
           </>
         ) : null}

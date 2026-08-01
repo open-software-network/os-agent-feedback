@@ -155,6 +155,77 @@ describe("observability onboarding states", () => {
     expect(notice).toHaveBeenCalledWith("Team renamed.");
     expect(refresh).toHaveBeenCalledOnce();
   });
+
+  it("renders sub-millisecond timing and an explicitly unused workaround without implying missing data", () => {
+    const base = dashboardFixture();
+    const report = {
+      ...base.reports[0],
+      durationMs: 0,
+      workaround: { used: false },
+    };
+    const data = dashboardFixture({ reports: [report] });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(json({ reports: [report], total: 1, limit: 50, nextCursor: null })),
+    );
+    renderWithQuery(
+      <FeedbackView
+        data={data}
+        selectedReportId={report.id}
+        selectReport={vi.fn()}
+        openInteraction={vi.fn()}
+        openSession={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        setNotice={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("<1 ms")).toBeVisible();
+    expect(screen.getByText("No workaround used")).toBeVisible();
+    expect(screen.queryByText("Suggested workaround")).not.toBeInTheDocument();
+    expect(screen.queryByText("No detail provided.")).not.toBeInTheDocument();
+  });
+
+  it("explains that Signals are primary-finding clusters and keeps full reports one click away", async () => {
+    const data = dashboardFixture();
+    const group = {
+      explanation: `product ${data.currentProduct?.id} · operation search · surface http · defect/freshness · 2xx`,
+      githubIssue: null,
+      groupKey: "search-http-defect-freshness",
+      latestOccurredAt: data.reports[0].occurredAt,
+      reportCount: 2,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.startsWith("/api/dashboard/feedback?")) {
+          return Promise.resolve(
+            json({ reports: data.reports, total: 1, limit: 50, nextCursor: null }),
+          );
+        }
+        if (path.includes("/groups?")) {
+          return Promise.resolve(json({ groups: [group], hasMore: false, limit: 50, offset: 0 }));
+        }
+        if (path.endsWith("/github-repo")) return Promise.resolve(json(null));
+        throw new Error(`Unexpected request: ${path}`);
+      }),
+    );
+    renderWithQuery(feedbackView(data));
+
+    fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Workaround" }));
+    expect(screen.getByRole("checkbox", { name: "Not used" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
+
+    expect(await screen.findByRole("heading", { name: "Signal clusters" })).toBeVisible();
+    expect(screen.getByText(/one deterministic primary finding/i)).toBeVisible();
+    expect(screen.getByText(/Secondary findings remain available/i)).toBeVisible();
+    expect(screen.getByRole("columnheader", { name: "Cluster" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Review full reports" }));
+    expect(screen.getByRole("tab", { name: "Reports" })).toHaveAttribute("aria-selected", "true");
+  });
 });
 
 function feedbackView(data: DashboardData) {
