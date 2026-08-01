@@ -9,4 +9,7 @@ await app.register(agentFeedback({
 }));
 ```
 
-HTML receives an embedded `application/json` feedback contract. JSON objects receive `_agentFeedback`. Both are best-effort for generic agents and deterministic when a feedback-aware agent runtime consumes the contract.
+HTML receives an embedded `application/json` feedback contract. JSON objects receive `_agentFeedback`. Both are
+best-effort for generic agents. The supported customer-facing path for Codex and Claude Code is the shared
+[Epode Companion](../../docs/integrations/companion.mdx), installed once per user runtime for every
+Epode-instrumented product.

@@ -20,6 +20,9 @@ curl -H 'x-agent-session: evaluation-123' https://example-status-agent-productio
 curl -H 'x-agent-session: evaluation-123' 'https://example-status-agent-production.up.railway.app/api/recommendation?priority=reliability'
 ```
 
-Generic agents may ignore side-effect instructions contained in HTTP data. Use `../customer-agent-http` to demonstrate deterministic submission by a feedback-aware agent runtime.
+Generic agents may ignore side-effect instructions contained in HTTP data. The supported customer-facing path
+for Codex and Claude Code is the shared [Epode Companion](../../docs/integrations/companion.mdx), installed once
+per user runtime for every Epode-instrumented product. `../customer-agent-http` remains a protocol/conformance
+harness; do not ask customers to install that example or the company SDK.
 
 Set `AGENT_FEEDBACK_MODE=never_ask` to submit autonomously, `ask_once` to let Epode remember approval or refusal by the configured opaque `customerRef`, or `ask_always` to run the answer-first decision flow for every report.

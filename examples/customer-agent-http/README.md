@@ -1,6 +1,8 @@
-# Feedback-aware HTTP customer agent
+# HTTP feedback protocol harness
 
-This code runs on the customer's agent side—not inside the company product.
+This code exercises the raw HTTP contract in tests and private runtime integrations. It is not the supported
+installation path for ordinary customers. Codex and Claude Code users install the shared
+[Epode Companion](../../docs/integrations/companion.mdx) once instead; companies install only their server SDK.
 
 Generic agents may treat instructions inside HTTP response data as untrusted and ignore them. A feedback-aware runtime makes the behavior deterministic by explicitly:
 
@@ -16,7 +18,7 @@ npm start -- https://company.example/api/status
 For a consent contract, the runtime must resolve consent before submission:
 
 - `AGENT_FEEDBACK_USER_DECISION=approved` represents permission granted just now.
-- `AGENT_FEEDBACK_USER_DECISION=refused` records refusal with Epode and skips the report.
+- `AGENT_FEEDBACK_USER_DECISION=declined` records refusal with Epode and skips the report.
 - Ask once needs the product integration's stable opaque `customerRef`; Epode, not this runtime, remembers the decision.
 
 With no decision, the example prints the exact permission question and does not submit, so Epode stores no decision.

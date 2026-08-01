@@ -2762,7 +2762,30 @@ pub(crate) async fn purge_expired_product_data(
     .bind(limit)
     .fetch_one(pool)
     .await?;
-    u64::try_from(removed_interactions + removed_sessions).map_err(ApiError::internal)
+    // Per-interaction consent is useful only while its short-lived capability
+    // can authorize a report. Keep it no longer than the product's configured
+    // retention window. Ask-once's durable, opaque subject decision lives in
+    // `feedback_consent_subjects` and is intentionally unaffected.
+    let removed_consent_interactions = sqlx::query_scalar::<_, i64>(
+        r"WITH doomed AS (
+          SELECT consent.interaction_id
+          FROM feedback_consent_interactions consent
+          JOIN product_environments environment ON environment.id = consent.environment_id
+          WHERE consent.decided_at < NOW() - make_interval(days => environment.retention_days)
+          ORDER BY consent.decided_at
+          LIMIT $1
+        ), removed AS (
+          DELETE FROM feedback_consent_interactions consent
+          USING doomed
+          WHERE consent.interaction_id = doomed.interaction_id
+          RETURNING 1
+        ) SELECT COUNT(*) FROM removed",
+    )
+    .bind(limit)
+    .fetch_one(pool)
+    .await?;
+    u64::try_from(removed_interactions + removed_sessions + removed_consent_interactions)
+        .map_err(ApiError::internal)
 }
 
 #[allow(
@@ -3394,6 +3417,39 @@ fn validate_telemetry(input: &InteractionTelemetryInput) -> Result<(), ApiError>
     {
         return Err(ApiError::bad_request("Invalid client interaction sequence"));
     }
+    match (
+        input.runtime_hint.as_deref(),
+        input.runtime_hint_source.as_deref(),
+    ) {
+        (None, None) => {}
+        (Some(hint), Some(source)) => {
+            let expected_source = if input.surface == "mcp" {
+                "mcp"
+            } else {
+                "http"
+            };
+            if source != expected_source {
+                return Err(ApiError::bad_request(
+                    "runtimeHintSource must match the interaction surface",
+                ));
+            }
+            if hint.trim().is_empty()
+                || hint.chars().count() > 200
+                || hint.contains('@')
+                || hint.chars().any(char::is_control)
+                || contains_sensitive_report_text(hint)
+            {
+                return Err(ApiError::bad_request(
+                    "runtimeHint must be a bounded, non-sensitive runtime label",
+                ));
+            }
+        }
+        _ => {
+            return Err(ApiError::bad_request(
+                "runtimeHint and runtimeHintSource must be provided together",
+            ));
+        }
+    }
     let classification = input.classification.as_deref().unwrap_or("unclassified");
     if !["unclassified", "confirmed"].contains(&classification) {
         return Err(ApiError::bad_request("Invalid classification"));
@@ -3556,8 +3612,8 @@ async fn ingest_telemetry_event(
     .bind(customer_ref)
     .bind(classification)
     .bind(confirmation_method)
-    .bind(event.runtime_hint.map(|value| clean(&value, 120)))
-    .bind(event.runtime_hint_source.map(|value| clean(&value, 60)))
+    .bind(event.runtime_hint.map(|value| clean(&value, 200)))
+    .bind(event.runtime_hint_source)
     .bind(event.sequence)
     .bind(occurred_at)
     .fetch_optional(&mut **tx)
@@ -4404,6 +4460,11 @@ pub(crate) async fn submit_product_feedback(
     capability: &str,
     input: ProductFeedbackReportInput,
 ) -> Result<(ProductInteraction, ProductFeedbackReport), ApiError> {
+    if input.summary.chars().count() > 700 {
+        return Err(ApiError::bad_request(
+            "summary must contain 8 to 700 characters",
+        ));
+    }
     let summary = clean(&input.summary, 700);
     if summary.len() < 8 {
         return Err(ApiError::bad_request(
@@ -4443,6 +4504,11 @@ pub(crate) async fn submit_product_feedback(
     }
     let mut findings = Vec::with_capacity(input.findings.len());
     for mut finding in input.findings {
+        if finding.topic.chars().count() > 64 || finding.detail.chars().count() > 350 {
+            return Err(ApiError::bad_request(
+                "Each finding requires a safe topic and 3 to 350 character detail",
+            ));
+        }
         if ![
             "strength",
             "friction",
@@ -4492,6 +4558,15 @@ pub(crate) async fn submit_product_feedback(
         findings.push(finding);
     }
     let workaround = if let Some(mut workaround) = input.workaround {
+        if workaround
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.chars().count() > 350)
+        {
+            return Err(ApiError::bad_request(
+                "A workaround detail must contain at most 350 characters",
+            ));
+        }
         workaround.detail = workaround
             .detail
             .map(|detail| clean(&detail, 350))
@@ -6926,6 +7001,43 @@ mod product_tests {
         assert!(validate_telemetry(&event("http_json", None, None)).is_ok());
         assert!(
             validate_telemetry(&InteractionTelemetryInput {
+                runtime_hint: Some("Mozilla/5.0 (compatible; Epode test)".into()),
+                runtime_hint_source: Some("http".into()),
+                ..event("http_json", None, None)
+            })
+            .is_ok()
+        );
+        for (surface, hint, source) in [
+            ("http_json", Some("codex"), None),
+            ("http_json", None, Some("http")),
+            ("http_json", Some("codex"), Some("mcp")),
+            ("mcp", Some("claude"), Some("http")),
+            ("mcp", Some("customer@example.com"), Some("mcp")),
+            ("mcp", Some("af_live_not_a_runtime"), Some("mcp")),
+        ] {
+            assert!(
+                validate_telemetry(&InteractionTelemetryInput {
+                    runtime_hint: hint.map(str::to_owned),
+                    runtime_hint_source: source.map(str::to_owned),
+                    ..event(
+                        surface,
+                        (surface == "mcp").then_some("confirmed"),
+                        (surface == "mcp").then_some("mcp")
+                    )
+                })
+                .is_err()
+            );
+        }
+        assert!(
+            validate_telemetry(&InteractionTelemetryInput {
+                runtime_hint: Some("x".repeat(201)),
+                runtime_hint_source: Some("http".into()),
+                ..event("http_json", None, None)
+            })
+            .is_err()
+        );
+        assert!(
+            validate_telemetry(&InteractionTelemetryInput {
                 operation: "/users/alice@example.com".into(),
                 ..event("http_json", None, None)
             })
@@ -6955,6 +7067,54 @@ mod product_tests {
             assert_eq!(opaque_ref(Some(invalid_ref)), None);
         }
         assert!(session_evidence(Some("workflow_42".into()), Some("transport".into())).is_err());
+    }
+
+    #[tokio::test]
+    async fn feedback_report_limits_reject_instead_of_silently_truncating() -> anyhow::Result<()> {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://epode:epode@127.0.0.1:1/validation_only")?;
+        let capability = "afr2_invalid.invalid.invalid";
+
+        let oversized_summary = feedback_input(&"s".repeat(701));
+        let error = submit_product_feedback(&pool, capability, oversized_summary)
+            .await
+            .expect_err("oversized summary must fail before database access");
+        anyhow::ensure!(error.status == StatusCode::BAD_REQUEST);
+
+        let mut oversized_topic = feedback_input("The product returned a useful result.");
+        oversized_topic.findings = vec![FeedbackFindingInput {
+            kind: "strength".into(),
+            topic: "t".repeat(65),
+            severity: Some("minor".into()),
+            detail: "The result was accurate.".into(),
+        }];
+        let error = submit_product_feedback(&pool, capability, oversized_topic)
+            .await
+            .expect_err("oversized topic must fail before database access");
+        anyhow::ensure!(error.status == StatusCode::BAD_REQUEST);
+
+        let mut oversized_detail = feedback_input("The product returned a useful result.");
+        oversized_detail.findings = vec![FeedbackFindingInput {
+            kind: "strength".into(),
+            topic: "accuracy".into(),
+            severity: Some("minor".into()),
+            detail: "d".repeat(351),
+        }];
+        let error = submit_product_feedback(&pool, capability, oversized_detail)
+            .await
+            .expect_err("oversized finding detail must fail before database access");
+        anyhow::ensure!(error.status == StatusCode::BAD_REQUEST);
+
+        let mut oversized_workaround = feedback_input("The product returned a useful result.");
+        oversized_workaround.workaround = Some(crate::models::FeedbackWorkaroundInput {
+            used: true,
+            detail: Some("w".repeat(351)),
+        });
+        let error = submit_product_feedback(&pool, capability, oversized_workaround)
+            .await
+            .expect_err("oversized workaround must fail before database access");
+        anyhow::ensure!(error.status == StatusCode::BAD_REQUEST);
+        Ok(())
     }
 
     #[tokio::test]

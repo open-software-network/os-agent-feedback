@@ -78,4 +78,11 @@ Run the signing vector, validate produced envelopes and decisions against `envel
 Simulate Epode downtime and verify that a duplicate report returns the first accepted result. See
 [Protocol overview](/reference/overview).
 
+## Customer-agent coverage
+
+Your protocol implementation creates the HTTP/HTML feedback contract; it cannot make an independent customer
+agent act on it. For reliable Codex and Claude Code handling, customers install
+[Epode Companion](/integrations/companion) once for all Epode-instrumented products. This is a user-side plugin,
+not company-side protocol code, an account, or a product key.
+
 [View the runnable language-neutral HTTP example](https://github.com/open-software-network/os-epode/tree/main/examples/setup-matrix-manual-http)

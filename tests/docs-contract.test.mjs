@@ -190,6 +190,11 @@ test("all fourteen HTTP and website setup permutations have copyable, current in
       /runnable .*example/i,
       `${integration.id} docs do not link a runnable example`,
     );
+    assert.match(
+      content,
+      /Epode Companion.*\/integrations\/companion|\[Epode Companion\]\(\/integrations\/companion\)/i,
+      `${integration.id} docs omit the shared HTTP customer-agent path`,
+    );
     assert.ok(
       dashboard.includes(`"${integration.id}"`),
       `${integration.id} is not selectable in product Setup`,

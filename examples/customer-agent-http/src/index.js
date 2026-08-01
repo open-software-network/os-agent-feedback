@@ -29,6 +29,9 @@ const feedback = feedbackFromResponse(response, body);
 if (!feedback) throw new Error("Product response did not include feedback metadata");
 
 const currentDecision = process.env.AGENT_FEEDBACK_USER_DECISION;
+if (currentDecision && !["approved", "declined"].includes(currentDecision)) {
+  throw new Error("AGENT_FEEDBACK_USER_DECISION must be approved or declined");
+}
 const consentAction = feedbackConsentAction(feedback);
 let reportContract = feedback;
 if (consentAction === "ask") {
