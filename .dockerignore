@@ -13,7 +13,7 @@
 backend/*
 !backend/public/
 backend/public/*
-!backend/public/agent-feedback-node-0.1.0.tgz
+!backend/public/agent-feedback-node-*.tgz
 !examples/
 examples/*
 !examples/node-express/

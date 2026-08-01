@@ -106,6 +106,12 @@ test("published hosted artifact filenames retain their original bytes", async ()
   }
 });
 
+test("the example image build context includes every versioned Node artifact", async () => {
+  const dockerignore = await readFile(new URL("../.dockerignore", import.meta.url), "utf8");
+  assert.match(dockerignore, /^!backend\/public\/agent-feedback-node-\*\.tgz$/m);
+  assert.doesNotMatch(dockerignore, /^!backend\/public\/agent-feedback-node-\d/m);
+});
+
 test("hosted Node examples lock the exact committed SDK artifact", async () => {
   await syncExampleSdkIntegrity();
 });
