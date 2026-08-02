@@ -6,6 +6,9 @@ The Go SDK uses only the standard library.
 feedback, err := agentfeedback.New(agentfeedback.Options{
     APIKey: os.Getenv("AGENT_FEEDBACK_KEY"),
     Include: []string{"/search", "/docs/**"},
+    AccountRef: func(r *http.Request) string { return authenticatedAccountID(r.Context()) },
+    UserRef: func(r *http.Request) string { return authenticatedUserID(r.Context()) },
+    AnonymousRef: func(r *http.Request) string { return firstPartyVisitorID(r.Context()) },
     CustomerRef: func(r *http.Request) string {
         return authenticatedAccountID(r.Context())
     },
@@ -18,9 +21,11 @@ http.ListenAndServe(":8080", authenticateProductRequest(instrumented))
 ```
 
 Authentication and authorized tenant selection must wrap and run before Epode. Never derive
-`CustomerRef` from a caller-controlled raw header, cookie, query value, email, or name.
+identity references from agent arguments, a caller-controlled raw header, query value, email, or name.
+`AccountRef` and `UserRef` are verified company assertions; `AnonymousRef` is a product-scoped
+first-party pre-login reference. They are background telemetry only and never enter the capability.
 
-It instruments finite JSON and HTML responses, detects `Flush` and leaves streams untouched, and sends telemetry through a bounded background queue with a monotonic process-local sequence, a 10-second background deadline, and bounded exponential transient retries. `Shutdown` reports the last terminal telemetry delivery error. Response capture defaults to 1 MiB; larger responses pass through byte-for-byte without instrumentation. Set `MaxResponseBodyBytes` to choose a different positive bound. `FeedbackFromResponse` and `SubmitProductFeedback` provide the allow-listed feedback-aware agent path.
+It instruments finite JSON and HTML responses, detects `Flush` and leaves streams untouched, and sends telemetry through a bounded background queue with a monotonic process-local sequence, a 30-second background deadline, and six bounded exponential transient attempts. `Shutdown` reports the last terminal telemetry delivery error. Response capture defaults to 1 MiB; larger responses pass through byte-for-byte without instrumentation. Set `MaxResponseBodyBytes` to choose a different positive bound. `FeedbackFromResponse`, `InspectFeedbackConsent`, and `SubmitProductFeedback` provide the allow-listed feedback-aware agent path. Inspection is authoritative, bounded, and redirect-free; decision and report helpers inspect first so stale Ask-once envelopes cannot cause duplicate prompts or overwrite a remembered decision.
 
 The default `CacheMode: CacheSafe` leaves explicitly shared-cacheable responses completely unchanged. Set `CacheMode: CacheRequest` to instrument only requests carrying `Agent-Feedback-Request: 1`; both variants use `Vary` and eligible ordinary 2xx `GET`/`HEAD` responses carry a same-path-and-query discovery `Link`. Set `CacheMode: CachePrivate` when every included response is intentionally private. Every instrumented response becomes `Cache-Control: private, no-store` because its capability is unique.
 

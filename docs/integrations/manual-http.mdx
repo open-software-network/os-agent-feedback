@@ -9,8 +9,8 @@ HTTP, JSON, UUIDs, SHA-256, HMAC-SHA256, and base64url encoding.
 ## Download the contract
 
 ```bash
-curl -fsSLO https://app.epode.ai/static/agent-feedback-protocol-v1-0.2.2.zip
-unzip agent-feedback-protocol-v1-0.2.2.zip
+curl -fsSLO https://app.epode.ai/static/agent-feedback-protocol-v1-0.3.1.zip
+unzip agent-feedback-protocol-v1-0.3.1.zip
 ```
 
 The archive contains the protocol guide, JSON Schemas, and a deterministic signing vector.
@@ -22,8 +22,11 @@ AGENT_FEEDBACK_KEY=af_live_...
 AGENT_FEEDBACK_MODE=never_ask
 ```
 
-For durable `ask_once`, obtain a stable opaque customer or tenant ID from your existing product
-authentication. Never use a name, email address, prompt, or agent-supplied value.
+For customer intelligence, emit `accountRef` and `userRef` only from verified product authentication and
+`anonymousRef` only from a stable, product-owned first-party pre-login ID. Keep `customerRef` only for durable
+`ask_once`; when `accountRef` is also present it must be the exact same opaque account ID. Never pair
+`customerRef` with `userRef` alone, and never use a name, email address, prompt, caller value, or agent-supplied
+value. Emit `sessionRef` only from server/product state that already proves a journey.
 
 ## Implement the response path
 
@@ -66,8 +69,9 @@ authentication. Never use a name, email address, prompt, or agent-supplied value
     A failed background Ask once refresh leaves the cold subject-bound handoff intact.
   </Step>
   <Step title="Queue telemetry">
-    Send opportunity telemetry in bounded background batches. Neither telemetry delivery nor Ask once state
-    refresh may delay the response.
+    Send opportunity telemetry in bounded background batches. Identity and journey references belong only in
+    this private telemetry event; they never enter the agent-facing envelope. Neither telemetry delivery nor
+    Ask once state refresh may delay the response.
   </Step>
 </Steps>
 

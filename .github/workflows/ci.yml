@@ -226,7 +226,7 @@ jobs:
             --no-save \
             --package-lock=false \
             wrangler@4.118.0 \
-            "$GITHUB_WORKSPACE/backend/public/agent-feedback-node-0.2.2.tgz"
+            "$GITHUB_WORKSPACE/backend/public/agent-feedback-node-0.3.1.tgz"
       - name: Check entry points
         run: |
           node --check examples/node-express/src/index.js

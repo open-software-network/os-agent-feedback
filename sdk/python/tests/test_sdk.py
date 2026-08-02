@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 from io import BytesIO
+from unittest.mock import patch
 
 from agent_feedback import (
     AgentFeedbackASGI,
@@ -14,6 +15,7 @@ from agent_feedback import (
     AgentFeedbackOptions,
     feedback_consent_action,
     feedback_from_response,
+    inspect_product_feedback,
     sign_capability,
     submit_feedback_consent,
     submit_product_feedback,
@@ -171,6 +173,9 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
             app,
             api_key=KEY,
             cache_mode="private",
+            account_ref=lambda _scope: "org_verified",
+            user_ref=lambda _scope: "user_verified",
+            anonymous_ref=lambda _scope: "anon_verified",
             sender=lambda _url, _headers, body: telemetry.append(json.loads(body)),
         )
 
@@ -192,7 +197,11 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
             send,
         )
         self.assertTrue(middleware.shutdown())
-        self.assertEqual(telemetry[0]["events"][0]["operation"], "/accounts/{account}")
+        event = telemetry[0]["events"][0]
+        self.assertEqual(event["operation"], "/accounts/{account}")
+        self.assertEqual(event["accountRef"], "org_verified")
+        self.assertEqual(event["userRef"], "user_verified")
+        self.assertEqual(event["anonymousRef"], "anon_verified")
 
     async def test_asgi_existing_html_marker_uses_fresh_header_fallback(self) -> None:
         original = b'<html><head></head><body><script ID="AGENT-FEEDBACK">owned</script></body></html>'
@@ -511,6 +520,12 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         default = AgentFeedback(AgentFeedbackOptions(api_key=KEY))
         self.assertEqual(default.options.endpoint, "https://app.epode.ai")
 
+    def test_telemetry_delivery_defaults_match_the_node_sdk(self) -> None:
+        options = AgentFeedbackOptions(api_key=KEY)
+        self.assertEqual(options.telemetry_timeout, 30.0)
+        self.assertEqual(options.max_telemetry_attempts, 6)
+        self.assertEqual(options.shutdown_timeout, 10.0)
+
     def test_ask_once_without_customer_ref_warns_once(self) -> None:
         runtime = AgentFeedback(
             AgentFeedbackOptions(api_key=KEY, feedback_mode="ask_once", sender=lambda *_: None)
@@ -601,6 +616,7 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
                 endpoint="https://feedback.test",
                 flush_interval=0.001,
                 max_telemetry_attempts=1,
+                shutdown_timeout=1.0,
                 sender=blocked_sender,
             )
         )
@@ -620,6 +636,49 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         release_delivery.set()
         if runtime.telemetry.thread:
             runtime.telemetry.thread.join(0.5)
+
+    def test_partial_telemetry_receipt_is_a_delivery_failure(self) -> None:
+        captured_timeouts: list[float] = []
+
+        class PartialReceipt:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return b'{"accepted":0,"dropped":1}'
+
+        def partial_urlopen(_request, *, timeout):
+            captured_timeouts.append(timeout)
+            return PartialReceipt()
+
+        runtime = AgentFeedback(
+            AgentFeedbackOptions(
+                api_key=KEY,
+                endpoint="https://feedback.test",
+                flush_interval=3600,
+                max_telemetry_attempts=1,
+                shutdown_timeout=0.25,
+            )
+        )
+        runtime.record(
+            runtime.prepare(),
+            surface="http_json",
+            operation="/search",
+            status_code=200,
+            duration_ms=1,
+        )
+        with (
+            patch("urllib.request.urlopen", side_effect=partial_urlopen),
+            self.assertLogs("agent_feedback", level="WARNING") as captured,
+        ):
+            self.assertFalse(runtime.shutdown())
+        self.assertEqual(len(captured_timeouts), 1)
+        self.assertGreater(captured_timeouts[0], 0)
+        self.assertLessEqual(captured_timeouts[0], 0.25)
+        self.assertIn("product responses were not affected", captured.output[0])
 
     def test_wildcards_match_one_segment_and_double_wildcards_match_any_depth(self) -> None:
         self.assertTrue(match_pattern("/docs/page", "/docs/*"))
@@ -677,6 +736,60 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         middleware.shutdown()
         self.assertEqual(telemetry[0]["events"][0]["classification"], "unclassified")
         self.assertEqual(telemetry[0]["events"][0]["sequence"], 1)
+
+    async def test_asgi_lifespan_drains_telemetry_before_shutdown_complete(self) -> None:
+        telemetry: list[dict] = []
+        lifecycle = iter(
+            [
+                {"type": "lifespan.startup"},
+                {"type": "lifespan.shutdown"},
+            ]
+        )
+
+        def sender(_url: str, _headers: dict[str, str], body: bytes) -> None:
+            telemetry.append(json.loads(body))
+
+        async def app(_scope, receive, send):
+            while True:
+                message = await receive()
+                if message["type"] == "lifespan.startup":
+                    await send({"type": "lifespan.startup.complete"})
+                elif message["type"] == "lifespan.shutdown":
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
+
+        middleware = AgentFeedbackASGI(
+            app,
+            api_key=KEY,
+            endpoint="https://feedback.test",
+            flush_interval=3600,
+            sender=sender,
+        )
+        middleware.runtime.record(
+            middleware.runtime.prepare(),
+            surface="http_json",
+            operation="/search",
+            status_code=200,
+            duration_ms=1,
+        )
+        sent: list[dict] = []
+
+        async def receive():
+            return next(lifecycle)
+
+        async def send(message):
+            if message["type"] == "lifespan.shutdown.complete":
+                self.assertEqual(len(telemetry), 1)
+            sent.append(message)
+
+        await middleware({"type": "lifespan"}, receive, send)
+        self.assertEqual(
+            sent,
+            [
+                {"type": "lifespan.startup.complete"},
+                {"type": "lifespan.shutdown.complete"},
+            ],
+        )
 
     async def test_asgi_resolves_identity_established_by_wrapped_authentication(self) -> None:
         telemetry: list[dict] = []
@@ -1725,7 +1838,16 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         }
         sent: list[dict] = []
 
-        def sender(_url, _headers, body):
+        def sender(url, _headers, body):
+            if url.endswith("/api/v2/capabilities/introspect"):
+                return {
+                    "state": "feedback_ready",
+                    "configuredMode": "never_ask",
+                    "consentPolicy": "none",
+                    "productName": "Test product",
+                    "canonicalQuestion": None,
+                    "expiresAt": "2099-01-01T00:00:00Z",
+                }
             sent.append(json.loads(body))
             return {"accepted": True}
 
@@ -1767,24 +1889,57 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(per_use_envelope["mode"], "ask_always")
         self.assertEqual(per_use_envelope["configuredMode"], "ask_once")
         self.assertEqual(per_use_envelope["consentPolicy"], "always")
-        self.assertEqual(feedback_consent_action(per_use_envelope), "ask")
+        self.assertEqual(feedback_consent_action(per_use_envelope), "skip")
         self.assertNotIn("future uses", per_use_envelope["requiredAction"]["question"])
         self.assertIn("about this use", per_use_envelope["requiredAction"]["question"])
-        self.assertEqual(feedback_consent_action(envelope), "ask")
-        with self.assertRaisesRegex(ValueError, "Invalid Agent Feedback submission contract"):
+        self.assertEqual(feedback_consent_action(envelope), "skip")
+        unknown = inspect_product_feedback(
+            envelope,
+            allowed_submit_origins=("https://feedback.test",),
+            sender=lambda *_: {
+                "state": "consent_required",
+                "configuredMode": "ask_once",
+                "consentPolicy": "once",
+                "productName": "Test product",
+                "canonicalQuestion": "May I send feedback?",
+                "expiresAt": "2099-01-01T00:00:00Z",
+            },
+        )
+        self.assertEqual(unknown["action"], "ask")
+        for state, action in (("declined", "skip"), ("feedback_ready", "submit")):
+            current = inspect_product_feedback(
+                envelope,
+                allowed_submit_origins=("https://feedback.test",),
+                sender=lambda *_args, state=state: {
+                    "state": state,
+                    "configuredMode": "ask_once",
+                    "consentPolicy": "once" if state == "declined" else "none",
+                    "productName": "Test product",
+                    "canonicalQuestion": None,
+                    "expiresAt": "2099-01-01T00:00:00Z",
+                },
+            )
+            self.assertEqual(current["action"], action)
+        with self.assertRaisesRegex(ValueError, "does not allow submission"):
             submit_product_feedback(
                 envelope,
                 {"summary": "The product completed the task.", "impact": "helped"},
                 allowed_submit_origins=("https://feedback.test",),
-                sender=lambda *_: {"accepted": True},
+                sender=lambda *_: unknown,
             )
         approved_envelope = AgentFeedback(AgentFeedbackOptions(api_key=KEY)).prepare()["envelope"]
         decision_body: list[dict] = []
+        def decision_sender(url, _headers, body):
+            if url.endswith("/api/v2/capabilities/introspect"):
+                return unknown
+            decision_body.append(json.loads(body))
+            return {"state": "approved", "feedback": approved_envelope}
+
         decision = submit_feedback_consent(
             envelope,
             "approved",
             allowed_submit_origins=("https://feedback.test",),
-            sender=lambda _url, _headers, body: decision_body.append(json.loads(body)) or {"state": "approved", "feedback": approved_envelope},
+            sender=decision_sender,
         )
         self.assertEqual(decision_body[0], {"decision": "approved"})
         self.assertEqual(feedback_consent_action(decision["feedback"]), "submit")
@@ -1818,7 +1973,7 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("submit", always_envelope)
         self.assertNotIn("future uses", always_envelope["requiredAction"]["question"])
         self.assertIn("after the product answer", always_envelope["instruction"])
-        self.assertEqual(feedback_consent_action(always_envelope), "ask")
+        self.assertEqual(feedback_consent_action(always_envelope), "skip")
         always.shutdown()
 
     def test_agent_helper_rejects_malformed_consent_contracts(self) -> None:

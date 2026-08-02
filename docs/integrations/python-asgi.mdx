@@ -6,7 +6,7 @@ description: "Instrument FastAPI, Starlette, Quart, or Django ASGI responses."
 ## Install
 
 ```bash
-python -m pip install https://app.epode.ai/static/agent_feedback-0.2.2-py3-none-any.whl
+python -m pip install https://app.epode.ai/static/agent_feedback-0.3.1-py3-none-any.whl
 ```
 
 Python 3.10 or newer is required.
@@ -14,7 +14,8 @@ Python 3.10 or newer is required.
 ## Configure once
 
 Wrap the completed ASGI app, then put your product authentication/tenant middleware outside Epode so
-it executes first. `customer_ref` is a synchronous accessor, not an authentication hook:
+it executes first. Identity extractors are synchronous accessors over verified or product-owned state,
+not authentication hooks:
 
 ```python
 import os
@@ -27,20 +28,25 @@ app = FastAPI()
 async def search_endpoint(q: str):
     return {"results": await search(q)}
 
-def customer_ref(scope):
-    # Derive a stable, opaque account or tenant ID from your product's own
-    # authentication. A raw ASGI scope has no such key by default; populate
-    # scope["state"] (or read your session/auth header) in your auth middleware.
-    return scope.get("state", {}).get("account_id")
+def state(scope, key):
+    return scope.get("state", {}).get(key)
 
 instrumented_app = AgentFeedbackASGI(
     app,
     api_key=os.environ["AGENT_FEEDBACK_KEY"],
     include=("/search", "/docs/*"),
-    customer_ref=customer_ref,  # required for durable Ask once; optional otherwise
+    account_ref=lambda scope: state(scope, "account_id"),
+    user_ref=lambda scope: state(scope, "user_id"),
+    anonymous_ref=lambda scope: state(scope, "first_party_visitor_id"),
+    customer_ref=lambda scope: state(scope, "account_id"),  # durable Ask once compatibility
+    session_ref=lambda scope: state(scope, "journey_id"),  # optional server-issued journey
 )
 app = ProductTenantAuthMiddleware(instrumented_app)
 ```
+
+`account_id` and `user_id` must come from verified authentication; `first_party_visitor_id` must be a stable
+product-owned pre-login reference. `journey_id` must come from server/product state that already proves
+continuity. Never populate any of them from a name, email, prompt, raw header, query/body value, or agent argument.
 
 ## Server-rendered HTML
 
@@ -69,7 +75,7 @@ For the full automated check, run the integration doctor. It ships inside the No
 the npm registry), so any stack can run it with a throwaway install:
 
 ```bash
-npm install https://app.epode.ai/static/agent-feedback-node-0.2.2.tgz
+npm install https://app.epode.ai/static/agent-feedback-node-0.3.1.tgz
 npx agent-feedback-doctor --url https://your-product.example/search?q=epode-test
 ```
 

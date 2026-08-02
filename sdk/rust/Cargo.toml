@@ -1,6 +1,6 @@
 [package]
 name = "agent-feedback"
-version = "0.2.2"
+version = "0.3.1"
 edition = "2024"
 rust-version = "1.88"
 description = "Protocol-first Agent Feedback middleware for Rust web products"

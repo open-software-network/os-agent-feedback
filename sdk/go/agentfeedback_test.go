@@ -38,7 +38,14 @@ type blockingConsentTransport struct {
 
 func (transport *blockingConsentTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	if !strings.HasSuffix(request.URL.Path, "/api/v2/consent/state") {
-		return &http.Response{StatusCode: http.StatusAccepted, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+		var payload struct {
+			Events []json.RawMessage `json:"events"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			return nil, err
+		}
+		receipt := fmt.Sprintf(`{"accepted":%d,"dropped":0}`, len(payload.Events))
+		return &http.Response{StatusCode: http.StatusAccepted, Body: io.NopCloser(strings.NewReader(receipt)), Header: make(http.Header)}, nil
 	}
 	transport.calls.Add(1)
 	active := transport.active.Add(1)
@@ -153,6 +160,9 @@ func TestAskOnceUsesIdentityEstablishedByOuterAuthentication(t *testing.T) {
 		Endpoint:     "https://feedback.test",
 		FeedbackMode: FeedbackAskOnce,
 		Include:      []string{"/search"},
+		AccountRef:   func(*http.Request) string { return "org_verified" },
+		UserRef:      func(*http.Request) string { return "user_verified" },
+		AnonymousRef: func(*http.Request) string { return "anon_verified" },
 		CustomerRef: func(request *http.Request) string {
 			value, _ := request.Context().Value(accountKey{}).(string)
 			return value
@@ -200,8 +210,12 @@ func TestAskOnceUsesIdentityEstablishedByOuterAuthentication(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := telemetry["events"].([]any)
-	if events[0].(map[string]any)["customerRef"] != customerRef {
+	event := events[0].(map[string]any)
+	if event["customerRef"] != customerRef {
 		t.Fatalf("telemetry lost verified customerRef: %#v", telemetry)
+	}
+	if event["accountRef"] != "org_verified" || event["userRef"] != "user_verified" || event["anonymousRef"] != "anon_verified" {
+		t.Fatalf("telemetry lost progressive identity context: %#v", telemetry)
 	}
 }
 
@@ -1068,14 +1082,14 @@ func TestAskModesExposeDistinctConsentPolicies(t *testing.T) {
 		perUse.Envelope.ConsentPolicy != "always" {
 		t.Fatal("ask-once without customerRef did not fail safely to per-use consent")
 	}
-	if FeedbackConsentAction(perUse.Envelope) != "ask" {
-		t.Fatal("agent helper rejected the safe per-use consent fallback")
+	if FeedbackConsentAction(perUse.Envelope) != "skip" {
+		t.Fatal("agent helper trusted a stale per-use consent snapshot")
 	}
 	if envelope.Submit != nil || envelope.RequiredAction == nil {
 		t.Fatalf("report schema was exposed before approval: %#v", envelope)
 	}
-	if FeedbackConsentAction(envelope) != "ask" {
-		t.Fatal("ask-once question was not surfaced")
+	if FeedbackConsentAction(envelope) != "skip" {
+		t.Fatal("ask-once question was surfaced without authoritative inspection")
 	}
 	declined, err := runtime.prepare(time.Unix(1_715_000_000, 0), "acct_go_ask_once", "declined")
 	if err != nil {
@@ -1098,7 +1112,7 @@ func TestAskModesExposeDistinctConsentPolicies(t *testing.T) {
 	_, err = SubmitProductFeedback(context.Background(), envelope, FeedbackReport{
 		Summary: "The product completed the task.", Impact: "helped",
 	}, []string{"https://feedback.test"}, nil)
-	if err == nil || !strings.Contains(err.Error(), "invalid Agent Feedback") {
+	if err == nil {
 		t.Fatalf("report helper accepted a consent-only contract: %v", err)
 	}
 
@@ -1118,8 +1132,8 @@ func TestAskModesExposeDistinctConsentPolicies(t *testing.T) {
 		strings.Contains(alwaysPrepared.Envelope.RequiredAction.Question, "future uses") {
 		t.Fatalf("ask-always is not answer-first and per-use: %#v", alwaysPrepared.Envelope)
 	}
-	if FeedbackConsentAction(alwaysPrepared.Envelope) != "ask" {
-		t.Fatal("ask-always incorrectly reused stored approval")
+	if FeedbackConsentAction(alwaysPrepared.Envelope) != "skip" {
+		t.Fatal("ask-always prompted from a stale response snapshot")
 	}
 
 	ready, err := New(Options{APIKey: conformanceKey, FeedbackMode: FeedbackNeverAsk})
@@ -1135,6 +1149,64 @@ func TestAskModesExposeDistinctConsentPolicies(t *testing.T) {
 	_ = json.Unmarshal(feedbackSubmissionBody(readyPrepared.Envelope, FeedbackReport{Summary: "The product completed the task."}), &body)
 	if _, exists := body["consent"]; exists {
 		t.Fatal("report body still contains consent")
+	}
+}
+
+func TestAgentInspectionUsesCurrentAskOnceAuthority(t *testing.T) {
+	state := "consent_required"
+	reports := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/v2/capabilities/introspect":
+			if request.Header.Get("Authorization") != "Bearer afr2_test.payload.signature" {
+				t.Fatalf("inspection omitted capability: %q", request.Header.Get("Authorization"))
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"state": state, "configuredMode": "ask_once", "consentPolicy": "once",
+				"productName": "Test product", "canonicalQuestion": "May I send feedback?",
+				"expiresAt": "2099-01-01T00:00:00Z",
+			})
+		case "/api/v2/reports":
+			reports++
+			_ = json.NewEncoder(writer).Encode(map[string]any{"accepted": true})
+		default:
+			http.Error(writer, "unexpected path", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	runtime, err := New(Options{APIKey: conformanceKey, FeedbackMode: FeedbackAskOnce})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Shutdown(context.Background())
+	prepared, err := runtime.prepare(time.Now(), "acct_authority")
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := prepared.Envelope
+	envelope.RequiredAction.SubmitDecision.URL = server.URL + "/api/v2/consent/decisions"
+	envelope.RequiredAction.SubmitDecision.Authorization = "Bearer afr2_test.payload.signature"
+
+	inspection, err := InspectFeedbackConsent(context.Background(), envelope, []string{server.URL}, server.Client())
+	if err != nil || inspection.Action != "ask" || inspection.CanonicalQuestion != "May I send feedback?" {
+		t.Fatalf("unknown permission did not return the canonical ask: %#v %v", inspection, err)
+	}
+	state = "declined"
+	inspection, err = InspectFeedbackConsent(context.Background(), envelope, []string{server.URL}, server.Client())
+	if err != nil || inspection.Action != "skip" {
+		t.Fatalf("declined permission was not quiet: %#v %v", inspection, err)
+	}
+	state = "feedback_ready"
+	inspection, err = InspectFeedbackConsent(context.Background(), envelope, []string{server.URL}, server.Client())
+	if err != nil || inspection.Action != "submit" {
+		t.Fatalf("approved permission did not enable reporting: %#v %v", inspection, err)
+	}
+	_, err = SubmitProductFeedback(context.Background(), envelope, FeedbackReport{
+		Summary: "The product completed the task successfully.", Impact: "helped",
+	}, []string{server.URL}, server.Client())
+	if err != nil || reports != 1 {
+		t.Fatalf("approved permission did not submit exactly one report: reports=%d err=%v", reports, err)
 	}
 }
 
@@ -1202,7 +1274,9 @@ func TestTelemetryRetriesTransientHTTPStatus(t *testing.T) {
 			response.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
+		response.Header().Set("Content-Type", "application/json")
 		response.WriteHeader(http.StatusAccepted)
+		_, _ = response.Write([]byte(`{"accepted":1,"dropped":0}`))
 	}))
 	defer server.Close()
 	runtime, err := New(Options{
@@ -1217,6 +1291,66 @@ func TestTelemetryRetriesTransientHTTPStatus(t *testing.T) {
 	}
 	if attempts.Load() != 3 {
 		t.Fatalf("telemetry attempts = %d, want 3", attempts.Load())
+	}
+}
+
+func TestTelemetryDeliveryDefaults(t *testing.T) {
+	runtime, err := New(Options{APIKey: conformanceKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.options.TelemetryTimeout != 30*time.Second || runtime.options.MaxTelemetryAttempts != 6 || runtime.options.ShutdownTimeout != 10*time.Second {
+		t.Fatalf("unexpected telemetry defaults: timeout=%s attempts=%d shutdown=%s", runtime.options.TelemetryTimeout, runtime.options.MaxTelemetryAttempts, runtime.options.ShutdownTimeout)
+	}
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTelemetryRejectsPartialReceiptWithoutRetry(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		response.Header().Set("Content-Type", "application/json")
+		response.WriteHeader(http.StatusAccepted)
+		_, _ = response.Write([]byte(`{"accepted":0,"dropped":1}`))
+	}))
+	defer server.Close()
+	runtime, err := New(Options{
+		APIKey: conformanceKey, Endpoint: server.URL, FlushInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.record(TelemetryEvent{InteractionID: "partial-receipt", Surface: "http_json"})
+	if err := runtime.Shutdown(context.Background()); err == nil || !strings.Contains(err.Error(), "not fully accepted") {
+		t.Fatalf("partial telemetry receipt was not reported: %v", err)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("partial receipt attempts = %d, want 1", attempts.Load())
+	}
+}
+
+func TestTelemetryShutdownBoundsAnInflightAttempt(t *testing.T) {
+	runtime, err := New(Options{
+		APIKey: conformanceKey, FlushInterval: time.Hour,
+		ShutdownTimeout: 100 * time.Millisecond,
+		Sender: func(ctx context.Context, _ string, _ http.Header, _ []byte) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.record(TelemetryEvent{InteractionID: "blocked-attempt", Surface: "http_json"})
+	started := time.Now()
+	err = runtime.Shutdown(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("shutdown exceeded its configured bound: %s", elapsed)
 	}
 }
 
@@ -1263,7 +1397,7 @@ func TestTelemetrySenderReceivesBoundedContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	deadline := <-deadlineSeen
-	if deadline <= 0 || deadline > telemetryAttemptTimeout {
+	if deadline <= 0 || deadline > runtime.options.ShutdownTimeout {
 		t.Fatalf("unexpected telemetry deadline: %s", deadline)
 	}
 }

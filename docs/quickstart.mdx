@@ -41,29 +41,35 @@ a public repository, or an MCP client configuration.
     Follow the dedicated page for your framework. For Express:
 
     ```bash
-    npm install https://app.epode.ai/static/agent-feedback-node-0.2.2.tgz
+    npm install https://app.epode.ai/static/agent-feedback-node-0.3.1.tgz
     ```
 
     Hosted SDKs are pinned in the versioned
-    [integrity manifest](https://app.epode.ai/static/agent-feedback-integrations-0.2.2.json).
+    [integrity manifest](https://app.epode.ai/static/agent-feedback-integrations-0.3.1.json).
     The dashboard's Setup agent prompt verifies the selected filename and SHA-256 before installing it;
     package-manager lockfiles preserve that exact integrity afterward.
 
     ```ts
     import { agentFeedback } from "@agent-feedback/node/express";
 
+    app.use(authenticateProductRequest);
+    app.use(selectAuthorizedTenant);
     app.use(agentFeedback({
       apiKey: process.env.AGENT_FEEDBACK_KEY,
       include: ["/search", "/docs/*"],
-      customerRef: req => req.user?.accountId,
-      sessionRef: req => req.agentSession?.id, // optional, only for proven continuity
+      accountRef: req => req.user?.accountId,
+      userRef: req => req.user?.id,
+      anonymousRef: req => req.firstPartyVisitorId,
+      customerRef: req => req.user?.accountId, // durable Ask once compatibility
+      sessionRef: req => req.agentSession?.id, // optional server-issued journey
     }));
     ```
 
     Replace the example routes. Instrument only successful product surfaces that customer agents actually use.
-    `customerRef` must come from verified product authentication and be a stable opaque account or tenant ID;
-    never use a name, email, or caller-supplied unverified value. Add `sessionRef` only when your product already
-    knows that multiple interactions belong to one journey.
+    `accountRef` and `userRef` come only from verified product authentication. `anonymousRef` is a stable,
+    product-owned first-party pre-login ID. Keep `customerRef` only for durable Ask once compatibility. Never use
+    names, emails, prompts, caller values, or agent/tool arguments. Add `sessionRef` only when server/product state
+    already proves that interactions belong to one journey.
   </Step>
   <Step title="Send one real product request">
     Call the exact included route and confirm the original response still works. An eligible JSON object

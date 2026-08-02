@@ -306,9 +306,10 @@ export function SetupView({
         <CodeBlock label="Install" value={integration.install} copy={copy} />
         <CodeBlock label="Configure once" value={integration.code} copy={copy} />
         <p className="text-sm text-muted-foreground">
-          Replace the example route or tool names before deploying. Derive customerRef only from a
-          stable opaque ID established by your product authentication. Add sessionRef only for a
-          journey your product already knows belongs together.
+          Replace the example route or tool names before deploying. Derive accountRef and userRef
+          only from authenticated product context; anonymousRef must be a product-owned first-party
+          pre-login ID. Keep customerRef for durable Ask once compatibility. Add sessionRef only for
+          a journey your product already knows belongs together.
         </p>
         {surface === "mcp" ? (
           <p className="text-sm text-muted-foreground">

@@ -3,6 +3,7 @@
 import { IconBubbleText } from "central-icons/IconBubbleText";
 import { IconChevronGrabberVertical } from "central-icons/IconChevronGrabberVertical";
 import { IconListBulletsSquare } from "central-icons/IconListBulletsSquare";
+import { IconPeople } from "central-icons/IconPeople";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
 import { IconSparkle } from "central-icons/IconSparkle";
 import type { ComponentType, CSSProperties, ReactNode } from "react";
@@ -64,10 +65,14 @@ const navigation: Array<{
 }> = [
   { view: "home", label: "Home", icon: IconSparkle },
   {
-    view: "feedback",
-    label: "Feedback",
+    view: "customers",
+    label: "Customers",
+    icon: IconPeople,
+  },
+  {
+    view: "features",
+    label: "Features",
     icon: IconBubbleText,
-    count: (data) => data.listState.reportsTotal,
   },
   {
     view: "sessions",
@@ -223,7 +228,9 @@ function AppSidebar({
                 const active =
                   item.view === "configuration"
                     ? configurationViews.has(view)
-                    : view === item.view || (item.view === "feedback" && view === "interactions");
+                    : view === item.view ||
+                      (item.view === "features" &&
+                        (view === "feedback" || view === "interactions"));
                 const count = item.count?.(data);
                 return (
                   <SidebarMenuItem key={item.view}>
@@ -308,7 +315,9 @@ export function DashboardShell({
 }) {
   const shellTitle: Record<DashboardView, string> = {
     home: "Home",
-    feedback: "Feedback",
+    customers: "Customers",
+    features: "Features",
+    feedback: "Evidence",
     sessions: "Sessions",
     configuration: "Product",
     setup: "Setup",

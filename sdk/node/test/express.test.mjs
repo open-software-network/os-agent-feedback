@@ -91,6 +91,9 @@ test("Express preserves JSON shape and queues a non-blocking opportunity", async
     apiKey: key,
     endpoint: "https://feedback.test",
     include: ["/search"],
+    accountRef: () => "org_123",
+    userRef: () => "user_123",
+    anonymousRef: () => "anon_123",
     customerRef: () => "acct_123",
     flushIntervalMs: 1,
     fetch: async (_url, init) => {
@@ -128,6 +131,9 @@ test("Express preserves JSON shape and queues a non-blocking opportunity", async
   await middleware.shutdown();
   assert.equal(telemetry.length, 1);
   assert.equal(telemetry[0].events[0].operation, "/search");
+  assert.equal(telemetry[0].events[0].accountRef, "org_123");
+  assert.equal(telemetry[0].events[0].userRef, "user_123");
+  assert.equal(telemetry[0].events[0].anonymousRef, "anon_123");
   assert.equal(telemetry[0].events[0].customerRef, "acct_123");
   assert.equal(telemetry[0].events[0].classification, "unclassified");
   await server.close();

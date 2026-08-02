@@ -1,3 +1,10 @@
+import type {
+  CustomerDetail,
+  CustomerSignal,
+  CustomersPage,
+  FeatureDetail,
+  FeaturesPage,
+} from "@/lib/api/customer-intelligence";
 import type { DashboardData } from "@/lib/api/dashboard";
 
 export function dashboardFixture(overrides: Partial<DashboardData> = {}): DashboardData {
@@ -108,6 +115,7 @@ export function dashboardFixture(overrides: Partial<DashboardData> = {}): Dashbo
         environmentId,
         apiKeyId: "77777777-7777-4777-8777-777777777777",
         sessionId,
+        customerId: null,
         operation: "search",
         surface: "http",
         classification: "confirmed",
@@ -233,5 +241,204 @@ export function dashboardFixture(overrides: Partial<DashboardData> = {}): Dashbo
     ],
     teamInvitations: [],
     ...overrides,
+  };
+}
+
+export function signalFixture(overrides: Partial<CustomerSignal> = {}): CustomerSignal {
+  return {
+    id: "88888888-8888-4888-8888-888888888888",
+    customerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    sessionId: "55555555-5555-4555-8555-555555555555",
+    interactionId: "44444444-4444-4444-8444-444444444444",
+    feedbackReportId: "66666666-6666-4666-8666-666666666666",
+    featureKey: "freshness-gap",
+    type: "feature_need",
+    summary: "Results need to include newly indexed documents",
+    detail: "The current search path omitted a document needed for the task.",
+    provenance: "agent_reports_current_task",
+    confidence: 0.9,
+    collectedAt: "2026-07-30T12:00:00Z",
+    expiresAt: null,
+    consentScope: "share_outcome",
+    consentState: "approved",
+    ...overrides,
+  };
+}
+
+export function customersPageFixture(): CustomersPage {
+  return {
+    customers: [
+      {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        kind: "account",
+        parentCustomerId: null,
+        memberCount: 1,
+        displayName: "Acme workspace",
+        identityLevel: "verified",
+        identityConfidence: 1,
+        accountRefHint: "acct…0042",
+        userRefHint: null,
+        segments: ["Enterprise"],
+        lastActivityAt: "2026-07-30T12:00:00Z",
+        outcomeHealth: "blocked",
+        signalCount: 4,
+        sessionCount: 2,
+        activeNeedCount: 1,
+        consentState: "approved",
+      },
+      {
+        id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        kind: "anonymous",
+        parentCustomerId: null,
+        memberCount: 0,
+        displayName: "Anonymous actor B7D2",
+        identityLevel: "pseudonymous",
+        identityConfidence: null,
+        accountRefHint: null,
+        userRefHint: null,
+        segments: [],
+        lastActivityAt: "2026-07-29T12:00:00Z",
+        outcomeHealth: "helped",
+        signalCount: 1,
+        sessionCount: 1,
+        activeNeedCount: 0,
+        consentState: "unknown",
+      },
+    ],
+    rollup: {
+      customers: 2,
+      verified: 1,
+      pseudonymous: 1,
+      ephemeral: 0,
+      unclassified: 0,
+      active: 2,
+      atRisk: 1,
+    },
+    facets: {
+      identityLevel: [
+        { name: "verified", count: 1 },
+        { name: "pseudonymous", count: 1 },
+      ],
+      outcomeHealth: [
+        { name: "blocked", count: 1 },
+        { name: "helped", count: 1 },
+      ],
+      signalType: [{ name: "feature_need", count: 1 }],
+      consentState: [{ name: "approved", count: 1 }],
+      segment: [{ name: "Enterprise", count: 1 }],
+    },
+    limit: 50,
+    nextCursor: null,
+  };
+}
+
+export function customerDetailFixture(): CustomerDetail {
+  const dashboard = dashboardFixture();
+  const customer = customersPageFixture().customers[0];
+  return {
+    customer,
+    identifiers: [
+      {
+        id: "identifier-1",
+        kind: "account_ref",
+        displayHint: "acct…0042",
+        identityLevel: "verified",
+        provenance: "company_assertion",
+        verifiedAt: "2026-07-30T12:00:00Z",
+      },
+    ],
+    signals: [
+      signalFixture({
+        id: "signal-intent",
+        type: "intent",
+        summary: "Find the newest indexed policy",
+      }),
+      signalFixture(),
+      signalFixture({
+        id: "signal-inference",
+        type: "preference",
+        summary: "May prefer shorter answers",
+        provenance: "agent_inference",
+        confidence: 0.55,
+        consentScope: "share_preferences",
+        consentState: "expired",
+      }),
+    ],
+    sessions: dashboard.sessions,
+    consent: [
+      {
+        scope: "share_outcome",
+        state: "approved",
+        basis: "user_decision",
+        decidedAt: "2026-07-30T12:00:00Z",
+        expiresAt: null,
+        revokedAt: null,
+        revision: 1,
+      },
+      {
+        scope: "share_preferences",
+        state: "expired",
+        basis: "user_decision",
+        decidedAt: "2026-07-01T12:00:00Z",
+        expiresAt: "2026-07-15T12:00:00Z",
+        revokedAt: null,
+        revision: 2,
+      },
+    ],
+    consentHistory: [
+      {
+        id: "consent-event-1",
+        scope: "share_outcome",
+        priorState: null,
+        state: "approved",
+        basis: "user_consent",
+        revision: 1,
+        source: "feedback_consent",
+        decidedAt: "2026-07-30T12:00:00Z",
+        createdAt: "2026-07-30T12:00:01Z",
+      },
+    ],
+    counts: { signals: 3, sessions: 1, features: 1 },
+  };
+}
+
+export function featuresPageFixture(): FeaturesPage {
+  return {
+    features: [
+      {
+        key: "freshness-gap",
+        groupKey: "report-group-freshness",
+        title: "Fresh results after indexing",
+        summary: "Customers need newly indexed documents to appear immediately.",
+        signalTypes: ["feature_need", "friction"],
+        affectedCustomerCount: 2,
+        evidenceCount: 4,
+        strongestImpact: "blocked",
+        trend: 25,
+        status: "new",
+        lastObservedAt: "2026-07-30T12:00:00Z",
+        githubIssue: null,
+      },
+    ],
+    rollup: { features: 1, affectedCustomers: 2, evidence: 4, blocking: 1 },
+    facets: {
+      signalType: [{ name: "feature_need", count: 4 }],
+      impact: [{ name: "blocked", count: 4 }],
+      status: [{ name: "new", count: 1 }],
+      segment: [{ name: "Enterprise", count: 2 }],
+    },
+    limit: 50,
+    nextCursor: null,
+  };
+}
+
+export function featureDetailFixture(): FeatureDetail {
+  const dashboard = dashboardFixture();
+  return {
+    feature: featuresPageFixture().features[0],
+    signals: [signalFixture()],
+    customers: customersPageFixture().customers,
+    sessions: dashboard.sessions,
+    reports: dashboard.reports,
   };
 }

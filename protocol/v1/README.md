@@ -9,7 +9,10 @@ This protocol is the source of truth for every Agent Feedback SDK. It is deliber
 | HTTP JSON, HTML, or headers | `unclassified` opportunity | Best-effort for generic agents; deterministic when their runtime consumes the contract explicitly |
 | MCP tool call | `confirmed` interaction | Protocol-backed through registered consent and report tools |
 
-An SDK must never claim to identify an agent. `customerRef`, session continuity, and runtime hints are optional context with explicit provenance.
+Epode is identity-aware but never identity-inventing. Company-authenticated `accountRef` and
+`userRef`, a first-party `anonymousRef`, legacy `customerRef`, session continuity, and runtime hints
+are optional context with explicit provenance. None identify the agent itself. Runtime hints and
+agent claims never upgrade a customer to verified identity.
 
 ## Product key and capability
 
@@ -169,6 +172,13 @@ See `telemetry-batch.schema.json`. Emit the optional monotonic `sequence` field 
 the backend uses it to order very fast calls that share a wall-clock timestamp. Queues must be bounded,
 retry transient delivery failures with a bounded backoff, and stop retrying at a bounded graceful-shutdown
 deadline. Telemetry may ultimately be dropped rather than delaying or failing the product response.
+
+Identity references are company-side telemetry only. `accountRef` and `userRef` must come from
+authenticated product context; `anonymousRef` must be a stable, first-party, product-scoped identifier.
+Do not derive any reference from an agent argument, prompt, name, email, caller-controlled header, or
+behavioral similarity. A request may co-supply `anonymousRef` and a verified reference to authorize a
+deterministic progressive link. These fields must never be copied into capabilities, response envelopes,
+or report bodies.
 
 ## Feedback report submission
 

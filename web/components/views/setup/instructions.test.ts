@@ -9,7 +9,7 @@ describe("static edge setup instructions", () => {
     const instructions = setupInstructions("static-edge", "static", origin);
     const prompt = setupAgentPrompt("static", "static-edge", instructions, origin);
 
-    expect(instructions.install).toContain("agent-feedback-node-0.2.2.tgz");
+    expect(instructions.install).toContain("agent-feedback-node-0.3.1.tgz");
     expect(instructions.code).toContain("@agent-feedback/node/edge");
     expect(instructions.code).toContain("createStaticDocsProxy");
     expect(instructions.code).toContain('upstreamOrigin: "https://your-docs-origin.example"');
@@ -30,12 +30,12 @@ describe("static edge setup instructions", () => {
 
 describe("company setup instructions", () => {
   it.each([
-    ["node-express", /customerRef:/, /sessionRef:/],
-    ["node-fastify", /customerRef:/, /sessionRef:/],
-    ["python-asgi", /customer_ref=/, /session_ref=/],
-    ["python-wsgi", /customer_ref=/, /session_ref=/],
-    ["go", /CustomerRef:/, /SessionRef:/],
-    ["rust", /\.customer_ref\(/, /\.session_ref\(/],
+    ["node-express", /accountRef:/, /sessionRef:/],
+    ["node-fastify", /accountRef:/, /sessionRef:/],
+    ["python-asgi", /account_ref=/, /session_ref=/],
+    ["python-wsgi", /account_ref=/, /session_ref=/],
+    ["go", /AccountRef:/, /SessionRef:/],
+    ["rust", /\.account_ref\(/, /\.session_ref\(/],
   ] as const)("%s includes authenticated customer grouping and optional proven session grouping", (stack, customerRef, sessionRef) => {
     const instructions = setupInstructions(stack, "api", origin);
 
@@ -50,7 +50,9 @@ describe("company setup instructions", () => {
     const prompt = setupAgentPrompt("mcp", "node-mcp", instructions, origin);
 
     expect(instructions.code).toContain("includeTools");
-    expect(instructions.code).toContain("customerRef");
+    expect(instructions.code).toContain("accountRef");
+    expect(instructions.code).toContain("userRef");
+    expect(instructions.code).toContain("anonymousRef");
     expect(instructions.code).toContain("sessionRef");
     expect(instructions.code).toContain("new McpServer");
     expect(instructions.code).toContain("instructions:");
@@ -100,18 +102,18 @@ describe("company setup instructions", () => {
     expect(prompt).toMatch(/real tester's explicit decision/i);
   });
 
-  it("pins every downloadable SDK instruction to the advertised 0.2.2 release", () => {
+  it("pins every downloadable SDK instruction to the advertised 0.3.1 release", () => {
     expect(setupInstructions("node-express", "api", origin).install).toContain(
-      "agent-feedback-node-0.2.2.tgz",
+      "agent-feedback-node-0.3.1.tgz",
     );
     expect(setupInstructions("python-asgi", "api", origin).install).toContain(
-      "agent_feedback-0.2.2-py3-none-any.whl",
+      "agent_feedback-0.3.1-py3-none-any.whl",
     );
     expect(setupInstructions("go", "api", origin).install).toContain(
-      "agent-feedback-go-0.2.2.tar.gz",
+      "agent-feedback-go-0.3.1.tar.gz",
     );
     expect(setupInstructions("rust", "api", origin).install).toContain(
-      "agent-feedback-rust-0.2.2.tar.gz",
+      "agent-feedback-rust-0.3.1.tar.gz",
     );
   });
 
@@ -123,7 +125,7 @@ describe("company setup instructions", () => {
     ] as const) {
       const install = setupInstructions(stack, surface, origin).install;
       expect(install).toContain("mkdir -p .epode/artifacts");
-      expect(install).toContain('epode_artifact=".epode/artifacts/agent-feedback-node-0.2.2.tgz"');
+      expect(install).toContain('epode_artifact=".epode/artifacts/agent-feedback-node-0.3.1.tgz"');
       expect(install).toContain('npm install "$epode_artifact"');
       expect(install).not.toContain("mktemp");
     }

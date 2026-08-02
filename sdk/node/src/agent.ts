@@ -64,6 +64,18 @@ export interface ProductFeedbackSubmission {
   [key: string]: unknown;
 }
 
+export interface ProductFeedbackInspection {
+  action: FeedbackConsentAction;
+  state: "feedback_ready" | "consent_required" | "declined" | "feedback_disabled";
+  configuredMode?: "never_ask" | "ask_once" | "ask_always" | "off";
+  consentPolicy?: "none" | "once" | "always";
+  productName?: string;
+  canonicalQuestion?: string;
+  expiresAt?: string;
+  /** Fixed, trusted endpoint derived from the allowlisted Epode origin. */
+  submit?: { url: string; authorization: string };
+}
+
 const DEFAULT_SUBMIT_ORIGIN = "https://app.epode.ai";
 
 /** A report transport failure after the product answer is safe to retry once. */
@@ -97,7 +109,9 @@ export type FeedbackConsentAction = "submit" | "ask" | "skip";
 export function feedbackConsentAction(feedback: FeedbackEnvelope): FeedbackConsentAction {
   if (!parseEnvelope(feedback)) return "skip";
   if (feedback.state === "feedback_ready") return "submit";
-  if (feedback.state === "consent_required") return "ask";
+  // A response envelope is only a snapshot. Asking from it directly can
+  // repeat a question after the user has already approved or declined.
+  // inspectProductFeedback is the authoritative path for Ask once.
   return "skip";
 }
 
@@ -181,6 +195,105 @@ function parseEnvelope(value: unknown): FeedbackEnvelope | undefined {
   return value as unknown as FeedbackEnvelope;
 }
 
+function feedbackCapability(feedback: FeedbackEnvelope): {
+  authorization: string;
+  origin: string;
+} {
+  const parsed = parseEnvelope(feedback);
+  const action =
+    parsed?.state === "feedback_ready" ? parsed.submit : parsed?.requiredAction?.submitDecision;
+  if (!parsed || !action) throw new Error("Invalid Agent Feedback contract");
+  const actionUrl = new URL(action.url);
+  if (actionUrl.protocol !== "https:") throw new Error("Agent Feedback inspection requires HTTPS");
+  return { authorization: action.authorization, origin: actionUrl.origin };
+}
+
+/**
+ * Resolve the current server-authoritative permission state for a response
+ * capability. Never prompt or report from the response snapshot alone.
+ */
+export async function inspectProductFeedback(
+  feedback: FeedbackEnvelope,
+  options: SubmitProductFeedbackOptions = {},
+): Promise<ProductFeedbackInspection> {
+  const capability = feedbackCapability(feedback);
+  const allowedOrigins = new Set(
+    (options.allowedSubmitOrigins || [DEFAULT_SUBMIT_ORIGIN]).map((value) => new URL(value).origin),
+  );
+  if (!allowedOrigins.has(capability.origin)) {
+    throw new Error(`Refusing to inspect feedback at untrusted origin ${capability.origin}`);
+  }
+  const inspectionUrl = new URL("/api/v2/capabilities/introspect", capability.origin);
+  const response = await (options.fetch || globalThis.fetch)(inspectionUrl, {
+    method: "POST",
+    headers: {
+      authorization: capability.authorization,
+      "content-type": "application/json",
+      "user-agent": "@agent-feedback/node-agent/0.3.1",
+    },
+    body: "{}",
+    redirect: "error",
+    signal: AbortSignal.timeout(options.timeoutMs ?? 5_000),
+  });
+  if (response.status === 410) {
+    return { action: "skip", state: "feedback_disabled" };
+  }
+  const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!response.ok) throw new Error(`Feedback inspection failed with HTTP ${response.status}`);
+  const state = body.state;
+  if (state !== "feedback_ready" && state !== "consent_required" && state !== "declined") {
+    throw new Error("Epode returned an invalid feedback inspection");
+  }
+  const configuredMode = body.configuredMode;
+  const consentPolicy = body.consentPolicy;
+  const productName = body.productName;
+  const expiresAt = body.expiresAt;
+  if (
+    typeof configuredMode !== "string" ||
+    typeof consentPolicy !== "string" ||
+    typeof productName !== "string" ||
+    typeof expiresAt !== "string"
+  ) {
+    throw new Error("Epode returned an incomplete feedback inspection");
+  }
+  if (state === "feedback_ready") {
+    return {
+      action: "submit",
+      state,
+      configuredMode: configuredMode as ProductFeedbackInspection["configuredMode"],
+      consentPolicy: consentPolicy as ProductFeedbackInspection["consentPolicy"],
+      productName,
+      expiresAt,
+      submit: {
+        url: new URL("/api/v2/reports", capability.origin).toString(),
+        authorization: capability.authorization,
+      },
+    };
+  }
+  if (state === "declined") {
+    return {
+      action: "skip",
+      state,
+      configuredMode: configuredMode as ProductFeedbackInspection["configuredMode"],
+      consentPolicy: consentPolicy as ProductFeedbackInspection["consentPolicy"],
+      productName,
+      expiresAt,
+    };
+  }
+  if (typeof body.canonicalQuestion !== "string" || body.canonicalQuestion.length === 0) {
+    throw new Error("Epode did not return the canonical permission question");
+  }
+  return {
+    action: "ask",
+    state,
+    configuredMode: configuredMode as ProductFeedbackInspection["configuredMode"],
+    consentPolicy: consentPolicy as ProductFeedbackInspection["consentPolicy"],
+    productName,
+    canonicalQuestion: body.canonicalQuestion,
+    expiresAt,
+  };
+}
+
 export async function submitFeedbackConsent(
   feedback: FeedbackEnvelope,
   decision: "approved" | "declined",
@@ -191,22 +304,23 @@ export async function submitFeedbackConsent(
   if (!parsed || parsed.state !== "consent_required" || !action) {
     throw new Error("Invalid Agent Feedback consent contract");
   }
-  const url = new URL(action.url);
-  if (url.protocol !== "https:") throw new Error("Agent Feedback decisions require HTTPS");
-  const allowedOrigins = new Set(
-    (options.allowedSubmitOrigins || [DEFAULT_SUBMIT_ORIGIN]).map((value) => new URL(value).origin),
-  );
-  if (!allowedOrigins.has(url.origin)) {
-    throw new Error(`Refusing to submit a consent decision to untrusted origin ${url.origin}`);
+  const inspection = await inspectProductFeedback(parsed, options);
+  if (inspection.state === "declined") return { state: "declined" };
+  if (inspection.state === "feedback_ready") return { state: "approved" };
+  if (inspection.state !== "consent_required") {
+    throw new Error("Feedback permission is no longer available");
   }
+  const capability = feedbackCapability(parsed);
+  const url = new URL("/api/v2/consent/decisions", capability.origin);
   const response = await (options.fetch || globalThis.fetch)(url, {
     method: "POST",
     headers: {
       authorization: action.authorization,
       "content-type": action.contentType,
-      "user-agent": "@agent-feedback/node-agent/0.2.2",
+      "user-agent": "@agent-feedback/node-agent/0.3.1",
     },
     body: JSON.stringify({ decision }),
+    redirect: "error",
     signal: AbortSignal.timeout(options.timeoutMs ?? 5_000),
   });
   const body = (await response.json().catch(() => ({}))) as {
@@ -279,8 +393,10 @@ export async function submitProductFeedback(
   options: SubmitProductFeedbackOptions = {},
 ): Promise<ProductFeedbackSubmission> {
   const parsed = parseEnvelope(feedback);
-  if (!parsed?.submit || parsed.state !== "feedback_ready")
-    throw new Error("Invalid Agent Feedback submission contract");
+  if (!parsed) throw new Error("Invalid Agent Feedback submission contract");
+  const inspection = await inspectProductFeedback(parsed, options);
+  if (inspection.state !== "feedback_ready" || !inspection.submit)
+    throw new Error("Current Agent Feedback permission does not allow submission");
   const summary = report.summary.trim();
   if (summary.length < 8 || summary.length > 700)
     throw new Error("summary must contain 8 to 700 characters");
@@ -313,7 +429,7 @@ export async function submitProductFeedback(
   if (report.workaround?.used && !report.workaround.detail?.trim())
     throw new Error("workaround detail is required when a workaround was used");
 
-  const submitUrl = new URL(parsed.submit.url);
+  const submitUrl = new URL(inspection.submit.url);
   if (submitUrl.protocol !== "https:") {
     throw new Error("Agent Feedback submissions require HTTPS");
   }
@@ -331,7 +447,7 @@ export async function submitProductFeedback(
     ...(report.findings ? { findings: report.findings } : {}),
     ...(report.workaround ? { workaround: report.workaround } : {}),
   });
-  const idempotencyKey = reportIdempotencyKey(parsed.submit.authorization);
+  const idempotencyKey = reportIdempotencyKey(inspection.submit.authorization);
   const fetchImplementation = options.fetch || globalThis.fetch;
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -340,12 +456,13 @@ export async function submitProductFeedback(
       response = await fetchImplementation(submitUrl, {
         method: "POST",
         headers: {
-          authorization: parsed.submit.authorization,
+          authorization: inspection.submit.authorization,
           "content-type": "application/json",
           "idempotency-key": idempotencyKey,
-          "user-agent": "@agent-feedback/node-agent/0.2.2",
+          "user-agent": "@agent-feedback/node-agent/0.3.1",
         },
         body: requestBody,
+        redirect: "error",
         signal: AbortSignal.timeout(options.timeoutMs ?? 5_000),
       });
     } catch {

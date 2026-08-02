@@ -3,11 +3,20 @@ import { agentFeedback } from "@agent-feedback/node/express";
 
 const app = express();
 app.use((request, _response, next) => {
-  // This demo token stands in for the product's normal authentication
-  // middleware. customerRef must come from verified server-side auth, never a
-  // caller-supplied account header.
+  // These demo tokens stand in for the product's normal verified account and
+  // signed first-party anonymous-session authentication.
   if (request.get("authorization") === "Bearer demo-search-workspace-token") {
-    request.auth = { accountId: "acct_search_42" };
+    request.auth = {
+      accountId: "acct_search_42",
+      userId: "user_search_7",
+      anonymousId: "anon_search_99",
+      sessionId: "run_search_42",
+    };
+  } else if (request.get("authorization") === "Bearer demo-search-anonymous-token") {
+    request.auth = {
+      anonymousId: "anon_search_99",
+      sessionId: "run_search_42",
+    };
   }
   next();
 });
@@ -18,8 +27,14 @@ const feedback = agentFeedback({
   // Search responses are CDN-cacheable for ordinary callers. Agents opt in
   // without forcing the public cache policy to change for everyone else.
   cacheMode: "request",
-  customerRef: (request) => request.auth?.accountId,
-  sessionRef: (request) => request.get("x-agent-run-id"),
+  accountRef: (request) => request.auth?.accountId,
+  userRef: (request) => request.auth?.userId,
+  anonymousRef: (request) => request.auth?.anonymousId,
+  customerRef:
+    process.env.AGENT_FEEDBACK_MODE === "ask_once"
+      ? (request) => request.auth?.accountId
+      : undefined,
+  sessionRef: (request) => request.auth?.sessionId,
   runtimeHint: (request) => request.get("x-agent-runtime"),
 });
 app.use(feedback);

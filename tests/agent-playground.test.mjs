@@ -61,7 +61,13 @@ test("public examples use verified or deliberately anonymous customer identity",
   assert.doesNotMatch(pythonAsgiSource, /customer_ref=.*x-customer-ref/);
   assert.match(pythonAsgiSource, /public example is anonymous/);
   assert.match(crawlSource, /Bearer demo-crawl-team-token/);
-  assert.match(crawlSource, /customerRef: \(request\) => request\.productAuth\?\.accountId/);
+  assert.match(crawlSource, /accountRef: \(request\) => request\.productAuth\?\.accountId/);
+  assert.match(crawlSource, /userRef: \(request\) => request\.productAuth\?\.userId/);
+  assert.match(crawlSource, /anonymousRef: \(request\) => request\.productAuth\?\.anonymousId/);
+  assert.match(
+    crawlSource,
+    /AGENT_FEEDBACK_MODE === "ask_once"[\s\S]{0,100}\(request\) => request\.productAuth\?\.accountId/,
+  );
   assert.match(crawlSource, /sessionRef: \(request\) => request\.params\?\.id/);
   assert.doesNotMatch(crawlSource, /customerRef:.*x-team-id/);
 });

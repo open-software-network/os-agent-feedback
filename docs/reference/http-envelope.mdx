@@ -154,7 +154,7 @@ A generic HTTP agent may ignore this second-action instruction. A runtime that e
 5. for verified `consent_required`, ask the canonical question and submit only `approved` or `declined`;
 6. for verified `feedback_ready`, submit one bounded report without asking; for verified `declined`, do nothing.
 
-The Node SDK exports `feedbackFromResponse`, `feedbackConsentAction`, `submitFeedbackConsent`, and `submitProductFeedback` for this path.
+The Node SDK exports `feedbackFromResponse`, `inspectProductFeedback`, `submitFeedbackConsent`, and `submitProductFeedback` for this path. The latter three resolve the current server-authoritative capability state before prompting, deciding, or reporting; never prompt directly from a response snapshot.
 
 Epode Companion supplies the preferred tool path for Codex and Claude Code. The response names its
 three fixed tools directly, while the installed Companion skill provides additional validation and

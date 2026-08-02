@@ -19,12 +19,12 @@ use the machine-readable envelope in whichever one of those two locations is pre
 
 ```bash
 mkdir -p .epode/artifacts &&
-curl -fsSL https://app.epode.ai/static/agent-feedback-node-0.2.2.tgz \
-  -o .epode/artifacts/agent-feedback-node-0.2.2.tgz &&
+curl -fsSL https://app.epode.ai/static/agent-feedback-node-0.3.1.tgz \
+  -o .epode/artifacts/agent-feedback-node-0.3.1.tgz &&
 printf '%s  %s\n' \
-  'a108603544c2d17af6859c45d994593a246401ca2f0def1fbeb43f74f5c16fe8' \
-  '.epode/artifacts/agent-feedback-node-0.2.2.tgz' | shasum -a 256 -c - &&
-npm install ./.epode/artifacts/agent-feedback-node-0.2.2.tgz &&
+  'f5f88617367855adcf10eb11c2e26b197f8a46a99140c1ca170c4d5e9047acb9' \
+  '.epode/artifacts/agent-feedback-node-0.3.1.tgz' | shasum -a 256 -c - &&
+npm install ./.epode/artifacts/agent-feedback-node-0.3.1.tgz &&
 npm install @modelcontextprotocol/server @modelcontextprotocol/node @modelcontextprotocol/express zod
 ```
 
@@ -55,30 +55,26 @@ import { productTokenVerifier } from "./product-auth.js";
 const app = createMcpExpressApp({ host: "0.0.0.0", allowedOrigins: [] });
 
 // Adapt your existing signature/introspection verifier. It must authorize the
-// selected tenant and put its stable opaque ID in authInfo.extra.accountId.
+// selected tenant and put only verified/product-owned context in authInfo.extra.
 app.use("/mcp", requireBearerAuth({
   verifier: productTokenVerifier,
   requiredScopes: ["mcp"],
 }));
 
-function stringField(value: unknown, key: string): string | undefined {
-  if (typeof value !== "object" || value === null) return undefined;
-  const field = Reflect.get(value, key);
-  return typeof field === "string" && field.length > 0 ? field : undefined;
-}
-
-function authenticatedAccountId(context: McpInstrumentationContext) {
-  const accountId = context.http?.authInfo?.extra?.accountId;
-  return typeof accountId === "string" && accountId.length > 0 ? accountId : undefined;
+function verifiedField(context: McpInstrumentationContext, key: string) {
+  const value = context.http?.authInfo?.extra?.[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 const feedback = createMcpInstrumentation({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
   includeTools: ["search", "fetch_result"],
   feedbackTools: ["fetch_result"],
-  customerRef: (_args, context) => authenticatedAccountId(context),
-  sessionRef: (args, _context, result) =>
-    stringField(args, "runId") ?? stringField(result?.structuredContent, "runId"),
+  accountRef: (_args, context) => verifiedField(context, "accountId"),
+  userRef: (_args, context) => verifiedField(context, "userId"),
+  anonymousRef: (_args, context) => verifiedField(context, "visitorId"),
+  customerRef: (_args, context) => verifiedField(context, "accountId"), // durable Ask once compatibility
+  sessionRef: (_args, context) => verifiedField(context, "journeyId"), // server-issued journey only
 });
 
 const feedbackInstructions =
@@ -116,12 +112,14 @@ app.listen(Number(process.env.PORT || 3000), "0.0.0.0");
 or example token table. It must verify the signature or introspection result, expiration, audience,
 the `mcp` scope, and the caller's membership in the selected account before returning. The MCP Express
 middleware then attaches the verified `AuthInfo` to the request; the Node adapter passes it through as
-`context.http.authInfo`. Never populate `accountId` from a request header, query parameter, tool argument,
-email address, or unverified JWT payload.
+`context.http.authInfo`. `accountRef` and `userRef` are verified company assertions; `anonymousRef` is a
+product-owned first-party pre-login ID. When both are present, `customerRef` must exactly equal `accountRef`
+and exists only for durable Ask once consent compatibility. Never populate these values from a request header,
+query parameter, name, email, prompt, tool argument, or unverified JWT payload.
 
 <Warning>
-Do not create or depend on `Mcp-Session-Id` for modern requests. MCP 2026-07-28 is stateless. Use an
-explicit application-level handle if your product has a meaningful multi-tool journey.
+Do not create or depend on `Mcp-Session-Id` for modern requests. MCP 2026-07-28 is stateless. Use a
+server-issued application journey only after product state has established it.
 </Warning>
 
 ## Multi-tool journeys
@@ -133,9 +131,9 @@ const feedback = createMcpInstrumentation({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
   includeTools: ["browser_*"],
   feedbackTools: ["browser_close"],
-  sessionRef: (args, _context, result) =>
-    stringField(args, "sessionId") ?? stringField(result?.structuredContent, "sessionId"),
-  customerRef: (_args, context) => authenticatedAccountId(context),
+  accountRef: (_args, context) => verifiedField(context, "accountId"),
+  customerRef: (_args, context) => verifiedField(context, "accountId"),
+  sessionRef: (_args, context) => verifiedField(context, "journeyId"),
 });
 ```
 
@@ -144,10 +142,11 @@ const feedback = createMcpInstrumentation({
 - `feedbackTools` selects outcome boundaries that receive feedback instructions. An empty array records
   interactions without asking for feedback.
 - `shouldRequestFeedback` can inspect a completed result when the boundary is dynamic.
-- `sessionRef` may inspect both arguments and the completed result, so a session-creation call can use the
-  identifier it returns.
-- `customerRef` must come from verified product authentication and is required to remember Ask once across
-  interactions. Without it, Ask once safely falls back to per-interaction permission.
+- `sessionRef` must come from server/product state that already proves continuity. Tool arguments, caller
+  headers, and model-proposed IDs are not evidence of a shared journey.
+- `accountRef`/`userRef` come from verified product authentication; `anonymousRef` comes from a product-owned
+  first-party ID. `customerRef` is only the durable Ask once compatibility subject and, when paired with richer
+  identity, must exactly equal `accountRef`. Without it, Ask once safely falls back to per-interaction permission.
 - Never ask is the most reliable mode on current Codex and Claude MCP clients. Ask once and Ask every
   time depend on client support for surfacing and resuming consent; treat them as experimental until
   you verify the exact client versions you support. Never infer approval when a client stops early.

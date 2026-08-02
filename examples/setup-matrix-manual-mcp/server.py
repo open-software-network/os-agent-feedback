@@ -10,7 +10,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "setup-matrix-manual-http"))
-from server import API_KEY, ENDPOINT, MODE, prepared, verified_customer_ref  # noqa: E402
+from server import API_KEY, ENDPOINT, MODE, prepared, verified_identity  # noqa: E402
 
 PROTOCOL_VERSION = "2026-07-28"
 PROTOCOL_META = "io.modelcontextprotocol/protocolVersion"
@@ -141,8 +141,8 @@ class Handler(BaseHTTPRequestHandler):
         return None
 
     def do_POST(self):
-        self.customer_ref = verified_customer_ref(self.headers)
-        if self.customer_ref is None:
+        self.identity = verified_identity(self.headers)
+        if self.identity is None:
             self.reply({"jsonrpc": "2.0", "id": None, "error": {"code": -32001, "message": "Unauthorized"}}, status=401)
             return
         try:
@@ -255,8 +255,7 @@ class Handler(BaseHTTPRequestHandler):
         name = params.get("name")
         arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
         if method == "tools/call" and name == "search":
-            customer_ref = self.customer_ref
-            interaction_id, sequence, envelope = prepared(customer_ref)
+            interaction_id, sequence, envelope = prepared(self.identity.get("customerRef"))
             feedback = feedback_metadata(envelope)
 
             def confirmed():
@@ -269,6 +268,7 @@ class Handler(BaseHTTPRequestHandler):
                     "durationMs": 1,
                     "classification": "confirmed",
                     "confirmationMethod": "mcp",
+                    **self.identity,
                     "occurredAt": occurred_at,
                 }]}).encode()
                 req = urllib.request.Request(

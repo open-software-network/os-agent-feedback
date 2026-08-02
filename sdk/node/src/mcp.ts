@@ -25,6 +25,9 @@ type McpResult = {
 export interface McpInstrumentationOptions
   extends Omit<
     AgentFeedbackOptions<McpContext>,
+    | "accountRef"
+    | "userRef"
+    | "anonymousRef"
     | "customerRef"
     | "sessionRef"
     | "runtimeHint"
@@ -33,6 +36,21 @@ export interface McpInstrumentationOptions
     | "cacheMode"
     | "shouldInstrument"
   > {
+  accountRef?: (
+    arguments_: unknown,
+    context: McpContext,
+    result?: McpResult,
+  ) => string | undefined | null;
+  userRef?: (
+    arguments_: unknown,
+    context: McpContext,
+    result?: McpResult,
+  ) => string | undefined | null;
+  anonymousRef?: (
+    arguments_: unknown,
+    context: McpContext,
+    result?: McpResult,
+  ) => string | undefined | null;
   customerRef?: (
     arguments_: unknown,
     context: McpContext,
@@ -237,6 +255,9 @@ function instrumentServer(
       } catch (error) {
         if (runtime.enabled && observed) {
           const sessionRef = contextValue(options.sessionRef);
+          const accountRef = contextValue(options.accountRef);
+          const userRef = contextValue(options.userRef);
+          const anonymousRef = contextValue(options.anonymousRef);
           const customerRef = contextValue(options.customerRef);
           const runtimeHint = contextValue(options.runtimeHint);
           const prepared = runtime.prepare({ customerRef, consentState: "unavailable" });
@@ -247,6 +268,9 @@ function instrumentServer(
             durationMs: Math.max(0, Math.round(performance.now() - started)),
             classification: "confirmed",
             confirmationMethod: "mcp",
+            accountRef,
+            userRef,
+            anonymousRef,
             customerRef,
             runtimeHint,
             runtimeHintSource: runtimeHint ? "mcp" : undefined,
@@ -264,6 +288,9 @@ function instrumentServer(
       // MCP transport sessions are not product-session proof. Only an
       // explicit application-level extractor may group interactions.
       const sessionRef = contextValue(options.sessionRef, result);
+      const accountRef = contextValue(options.accountRef, result);
+      const userRef = contextValue(options.userRef, result);
+      const anonymousRef = contextValue(options.anonymousRef, result);
       const customerRef = contextValue(options.customerRef, result);
       const runtimeHint = contextValue(options.runtimeHint, result);
       const feedbackTool =
@@ -299,6 +326,9 @@ function instrumentServer(
         durationMs: Math.max(0, Math.round(performance.now() - started)),
         classification: "confirmed",
         confirmationMethod: "mcp",
+        accountRef,
+        userRef,
+        anonymousRef,
         customerRef,
         runtimeHint,
         runtimeHintSource: runtimeHint ? "mcp" : undefined,
@@ -446,7 +476,7 @@ function instrumentServer(
             headers: {
               authorization: `Bearer ${feedbackHandle}`,
               "content-type": "application/json",
-              "user-agent": "@agent-feedback/node/0.2.2",
+              "user-agent": "@agent-feedback/node/0.3.1",
             },
             body: JSON.stringify({ decision }),
             signal: AbortSignal.timeout(options.reportTimeoutMs ?? 10_000),
@@ -578,7 +608,7 @@ function instrumentServer(
             headers: {
               authorization: `Bearer ${feedbackHandle}`,
               "content-type": "application/json",
-              "user-agent": "@agent-feedback/node/0.2.2",
+              "user-agent": "@agent-feedback/node/0.3.1",
             },
             body: JSON.stringify({
               summary,

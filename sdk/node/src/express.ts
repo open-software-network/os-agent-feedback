@@ -21,6 +21,9 @@ type Instrumentation = {
   surface: ProductSurface;
   operation: string;
   context: {
+    accountRef?: string;
+    userRef?: string;
+    anonymousRef?: string;
     customerRef?: string;
     sessionRef?: string;
     runtimeHint?: string;
@@ -249,6 +252,9 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
         operation: instrumentation.operation,
         statusCode: response.statusCode,
         durationMs: Math.max(0, Math.round(performance.now() - started)),
+        accountRef: instrumentation.context.accountRef,
+        userRef: instrumentation.context.userRef,
+        anonymousRef: instrumentation.context.anonymousRef,
         customerRef: instrumentation.context.customerRef,
         classification: "unclassified",
         runtimeHint: instrumentation.context.runtimeHint,

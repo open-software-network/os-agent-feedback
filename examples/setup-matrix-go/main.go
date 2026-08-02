@@ -9,23 +9,46 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	agentfeedback "github.com/open-software-network/os-epode/sdk/go"
 )
 
-type accountIDKey struct{}
+type productIdentityKey struct{}
+
+type productIdentity struct {
+	accountID   string
+	userID      string
+	anonymousID string
+}
 
 func main() {
-	feedback, err := agentfeedback.New(agentfeedback.Options{
+	options := agentfeedback.Options{
 		APIKey: os.Getenv("AGENT_FEEDBACK_KEY"), Endpoint: os.Getenv("AGENT_FEEDBACK_URL"),
 		Include: []string{"/search", "/docs/*"},
-		CustomerRef: func(request *http.Request) string {
-			value, _ := request.Context().Value(accountIDKey{}).(string)
-			return value
+		AccountRef: func(request *http.Request) string {
+			value, _ := request.Context().Value(productIdentityKey{}).(productIdentity)
+			return value.accountID
 		},
-	})
+		UserRef: func(request *http.Request) string {
+			value, _ := request.Context().Value(productIdentityKey{}).(productIdentity)
+			return value.userID
+		},
+		AnonymousRef: func(request *http.Request) string {
+			value, _ := request.Context().Value(productIdentityKey{}).(productIdentity)
+			return value.anonymousID
+		},
+	}
+	if os.Getenv("AGENT_FEEDBACK_MODE") == "ask_once" {
+		options.CustomerRef = func(request *http.Request) string {
+			value, _ := request.Context().Value(productIdentityKey{}).(productIdentity)
+			return value.accountID
+		}
+	}
+	feedback, err := agentfeedback.New(options)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -40,10 +63,22 @@ func main() {
 	})
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
 	server := &http.Server{Addr: "127.0.0.1:" + env("PORT", "4105"), Handler: authenticate(feedback.Middleware(mux)), ReadHeaderTimeout: 5 * time.Second}
+	shutdownSignal := make(chan os.Signal, 1)
+	signal.Notify(shutdownSignal, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-shutdownSignal
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = server.Shutdown(ctx)
+	}()
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
-	_ = feedback.Shutdown(context.Background())
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := feedback.Shutdown(shutdownContext); err != nil {
+		log.Printf("agent feedback shutdown: %v", err)
+	}
 }
 
 func authenticate(next http.Handler) http.Handler {
@@ -67,7 +102,12 @@ func authenticate(next http.Handler) http.Handler {
 			http.Error(writer, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
-		next.ServeHTTP(writer, request.WithContext(context.WithValue(request.Context(), accountIDKey{}, accountID)))
+		identity := productIdentity{
+			accountID:   accountID,
+			userID:      "user." + accountID,
+			anonymousID: "anon." + accountID,
+		}
+		next.ServeHTTP(writer, request.WithContext(context.WithValue(request.Context(), productIdentityKey{}, identity)))
 	})
 }
 

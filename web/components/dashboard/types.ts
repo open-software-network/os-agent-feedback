@@ -1,8 +1,15 @@
 import type { DashboardData } from "@/lib/api/dashboard";
 
-export const DASHBOARD_NAV_VIEWS = ["home", "feedback", "sessions", "configuration"] as const;
+export const DASHBOARD_NAV_VIEWS = [
+  "home",
+  "customers",
+  "features",
+  "sessions",
+  "configuration",
+] as const;
 export const DASHBOARD_VIEWS = [
   ...DASHBOARD_NAV_VIEWS,
+  "feedback",
   "setup",
   "policy",
   "connectors",

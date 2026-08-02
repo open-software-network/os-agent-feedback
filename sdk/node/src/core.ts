@@ -46,6 +46,13 @@ export interface AgentFeedbackOptions<Request = unknown> {
   cacheMode?: HttpCacheMode;
   /** Decide at response time whether this particular successful result is outcome-bearing. */
   shouldInstrument?: (request: Request, response: HttpInstrumentationContext) => boolean;
+  /** Company-authenticated account or tenant reference. Never exposed to the agent. */
+  accountRef?: (request: Request) => string | undefined | null;
+  /** Company-authenticated end-user reference. Never exposed to the agent. */
+  userRef?: (request: Request) => string | undefined | null;
+  /** Stable first-party pre-authentication reference. Never exposed to the agent. */
+  anonymousRef?: (request: Request) => string | undefined | null;
+  /** Legacy opaque identity reference. Prefer accountRef/userRef for new integrations. */
   customerRef?: (request: Request) => string | undefined | null;
   sessionRef?: (request: Request) => string | undefined | null;
   runtimeHint?: (request: Request) => string | undefined | null;
@@ -149,6 +156,9 @@ export interface TelemetryEvent {
   operation: string;
   statusCode?: number;
   durationMs?: number;
+  accountRef?: string;
+  userRef?: string;
+  anonymousRef?: string;
   customerRef?: string;
   classification: InteractionClassification;
   confirmationMethod?: "mcp";
@@ -353,7 +363,7 @@ class TelemetryQueue {
         headers: {
           authorization: `Bearer ${this.#apiKey}`,
           "content-type": "application/json",
-          "user-agent": "@agent-feedback/node/0.2.2",
+          "user-agent": "@agent-feedback/node/0.3.1",
         },
         body: JSON.stringify({ events: batch.map(({ event }) => event) }),
         signal: AbortSignal.timeout(
@@ -550,7 +560,7 @@ export class AgentFeedbackRuntime<Request = unknown> {
           headers: {
             authorization: `Bearer ${this.options.apiKey}`,
             "content-type": "application/json",
-            "user-agent": "@agent-feedback/node/0.2.2",
+            "user-agent": "@agent-feedback/node/0.3.1",
           },
           body: JSON.stringify({ subject }),
           signal: AbortSignal.timeout(
@@ -797,6 +807,9 @@ export class AgentFeedbackRuntime<Request = unknown> {
   }
 
   context(request: Request): {
+    accountRef?: string;
+    userRef?: string;
+    anonymousRef?: string;
     customerRef?: string;
     sessionRef?: string;
     runtimeHint?: string;
@@ -814,6 +827,9 @@ export class AgentFeedbackRuntime<Request = unknown> {
       }
     };
     return {
+      accountRef: read(this.options.accountRef, "accountRef"),
+      userRef: read(this.options.userRef, "userRef"),
+      anonymousRef: read(this.options.anonymousRef, "anonymousRef"),
       customerRef: read(this.options.customerRef, "customerRef"),
       sessionRef: read(this.options.sessionRef, "sessionRef"),
       runtimeHint: read(this.options.runtimeHint, "runtimeHint"),
