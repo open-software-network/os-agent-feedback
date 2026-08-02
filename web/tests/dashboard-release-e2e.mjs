@@ -28,6 +28,8 @@ const ids = {
   sessionTwo: "55555555-5555-4555-8555-555555555556",
   interactionOne: "44444444-4444-4444-8444-444444444444",
   interactionTwo: "44444444-4444-4444-8444-444444444445",
+  customerOne: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  signalOne: "88888888-8888-4888-8888-888888888888",
 };
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -196,6 +198,55 @@ const secondSession = session({
   reportCount: 1,
   customerRef: "account-99",
 });
+const firstCustomer = {
+  id: ids.customerOne,
+  kind: "account",
+  parentCustomerId: null,
+  memberCount: 1,
+  displayName: "Acme workspace",
+  identityLevel: "verified",
+  identityConfidence: 1,
+  accountRefHint: "acco…t-42",
+  userRefHint: null,
+  segments: ["Enterprise"],
+  lastActivityAt: now,
+  outcomeHealth: "blocked",
+  signalCount: 1,
+  sessionCount: 1,
+  activeNeedCount: 1,
+  consentState: "approved",
+};
+const firstSignal = {
+  id: ids.signalOne,
+  customerId: ids.customerOne,
+  sessionId: ids.sessionOne,
+  interactionId: ids.interactionOne,
+  feedbackReportId: ids.reportOne,
+  featureKey: "freshness-gap",
+  type: "feature_need",
+  summary: "Results need to include newly indexed documents",
+  detail: "The current search path omitted a document needed for the task.",
+  provenance: "agent_reports_current_task",
+  confidence: 0.9,
+  collectedAt: now,
+  expiresAt: null,
+  consentScope: "share_outcome",
+  consentState: "approved",
+};
+const firstFeature = {
+  key: "freshness-gap",
+  groupKey: "report-group-freshness",
+  title: "Fresh results after indexing",
+  summary: "Customers need newly indexed documents to appear immediately.",
+  signalTypes: ["feature_need", "friction"],
+  affectedCustomerCount: 1,
+  evidenceCount: 1,
+  strongestImpact: "blocked",
+  trend: 25,
+  status: "new",
+  lastObservedAt: now,
+  githubIssue: null,
+};
 
 function createFixture() {
   const state = {
@@ -378,6 +429,97 @@ function createFixture() {
 
     if (url.pathname === "/api/dashboard") {
       json(response, 200, dashboard(url.searchParams.get("productId") ?? undefined));
+      return;
+    }
+
+    if (url.pathname === "/api/dashboard/customers") {
+      const selectedSearchProduct = url.searchParams.get("productId") === ids.search;
+      json(response, 200, {
+        customers: selectedSearchProduct ? [firstCustomer] : [],
+        rollup: {
+          customers: selectedSearchProduct ? 1 : 0,
+          verified: selectedSearchProduct ? 1 : 0,
+          pseudonymous: 0,
+          ephemeral: 0,
+          unclassified: 0,
+          active: selectedSearchProduct ? 1 : 0,
+          atRisk: selectedSearchProduct ? 1 : 0,
+        },
+        facets: {
+          identityLevel: selectedSearchProduct ? [{ name: "verified", count: 1 }] : [],
+          outcomeHealth: selectedSearchProduct ? [{ name: "blocked", count: 1 }] : [],
+          signalType: selectedSearchProduct ? [{ name: "feature_need", count: 1 }] : [],
+          consentState: selectedSearchProduct ? [{ name: "approved", count: 1 }] : [],
+          segment: selectedSearchProduct ? [{ name: "Enterprise", count: 1 }] : [],
+        },
+        limit: Number(url.searchParams.get("limit") ?? 50),
+        nextCursor: null,
+      });
+      return;
+    }
+
+    if (url.pathname === `/api/dashboard/customers/${ids.customerOne}`) {
+      json(response, 200, {
+        customer: firstCustomer,
+        identifiers: [
+          {
+            id: "identifier-1",
+            kind: "account_ref",
+            displayHint: "acco…t-42",
+            identityLevel: "verified",
+            provenance: "company_assertion",
+            verifiedAt: now,
+          },
+        ],
+        signals: [firstSignal],
+        sessions: [firstSession],
+        consent: [
+          {
+            scope: "share_outcome",
+            state: "approved",
+            basis: "user_decision",
+            decidedAt: now,
+            expiresAt: null,
+            revokedAt: null,
+            revision: 1,
+          },
+        ],
+        consentHistory: [],
+        counts: { signals: 1, sessions: 1, features: 1 },
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/dashboard/features") {
+      const selectedSearchProduct = url.searchParams.get("productId") === ids.search;
+      json(response, 200, {
+        features: selectedSearchProduct ? [firstFeature] : [],
+        rollup: {
+          features: selectedSearchProduct ? 1 : 0,
+          affectedCustomers: selectedSearchProduct ? 1 : 0,
+          evidence: selectedSearchProduct ? 1 : 0,
+          blocking: selectedSearchProduct ? 1 : 0,
+        },
+        facets: {
+          signalType: selectedSearchProduct ? [{ name: "feature_need", count: 1 }] : [],
+          impact: selectedSearchProduct ? [{ name: "blocked", count: 1 }] : [],
+          status: selectedSearchProduct ? [{ name: "new", count: 1 }] : [],
+          segment: selectedSearchProduct ? [{ name: "Enterprise", count: 1 }] : [],
+        },
+        limit: Number(url.searchParams.get("limit") ?? 50),
+        nextCursor: null,
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/dashboard/features/freshness-gap") {
+      json(response, 200, {
+        feature: firstFeature,
+        signals: [firstSignal],
+        customers: [firstCustomer],
+        sessions: [firstSession],
+        reports: [firstReport],
+      });
       return;
     }
 
@@ -683,17 +825,17 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   );
 
   await clickText(page, "Continue with OS Accounts");
-  await textVisible(page, "Evidence pipeline");
+  await textVisible(page, "Fresh results after indexing is the leading customer need.");
   assert.equal(new URL(page.url()).pathname, "/", "the dashboard must live at the root, not /app");
   assert.equal(state.authStarts, 2, "retry should reach the same OS Accounts handoff route");
   await fixtureRequest(state, requestPath("/api/dashboard"), "initial dashboard data");
 
-  await textVisible(page, "Feedback patterns");
-  await textVisible(page, "Usage and reliability");
+  await textVisible(page, "Needs and opportunities");
+  await textVisible(page, "Customers requiring attention");
 
   await page.click("button[aria-label*='open context menu']");
   await clickText(page, "Billing API");
-  await textVisible(page, "No product activity has been recorded yet.");
+  await textVisible(page, "No customer intelligence has been collected yet.");
   await page.click("button[aria-label*='open context menu']");
   await clickText(page, "New product");
   await textVisible(page, "Product management");
@@ -713,37 +855,36 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await clickText(page, "Home");
   await page.click("button[aria-label*='open context menu']");
   await clickText(page, "Search API");
-  await textVisible(page, "Evidence pipeline");
+  await textVisible(page, "Fresh results after indexing is the leading customer need.");
 
-  await clickText(page, "Feedback");
-  await textVisible(page, "Load 50 more");
-  await clickText(page, "Load 50 more");
-  await textVisible(page, "Checkout retry hid the confirmation receipt");
-  await input(page, "input[aria-label='Search feedback']", "checkout");
-  await fixtureRequest(
+  await clickText(page, "Customers");
+  await clickText(page, "Acme workspace");
+  await textVisible(page, "Identity and provenance");
+  const customerDetail = await fixtureRequest(
     state,
-    (request) =>
-      request.path.includes("/api/dashboard/feedback") && request.path.includes("q=checkout"),
-    "server feedback search",
+    requestPath(`/api/dashboard/customers/${ids.customerOne}`),
+    "customer detail BFF route",
   );
-  await clickText(page, "Filters");
-  await clickText(page, "Workflow");
-  await page.click("label[for='feedback-filter-status-1']");
-  const filteredFeedback = await fixtureRequest(
+  assert.equal(customerDetail.headers["x-workspace-id"], ids.workspace);
+
+  await clickText(page, "Features");
+  await clickText(page, "Fresh results after indexing");
+  await textVisible(page, "Underlying evidence");
+  await clickText(page, "Open report");
+  await textVisible(page, "Search results omitted the newest document");
+  const featureDetail = await fixtureRequest(
     state,
-    (request) =>
-      request.path.includes("/api/dashboard/feedback") &&
-      request.path.includes("status=investigating"),
-    "server feedback workflow filter",
+    requestPath("/api/dashboard/features/freshness-gap"),
+    "feature evidence BFF route",
   );
-  assert.equal(filteredFeedback.headers["x-workspace-id"], ids.workspace);
+  assert.equal(featureDetail.headers["x-workspace-id"], ids.workspace);
   assert.equal(
-    filteredFeedback.headers.host,
+    featureDetail.headers.host,
     upstreamHost,
     "the browser must reach the API only through the root-host BFF",
   );
   assert.ok(
-    String(filteredFeedback.headers.cookie).includes(TEST_COOKIE),
+    String(featureDetail.headers.cookie).includes(TEST_COOKIE),
     "BFF must forward the real browser session cookie to its API origin",
   );
 
