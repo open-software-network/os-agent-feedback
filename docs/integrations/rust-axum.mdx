@@ -8,17 +8,17 @@ description: "Add Epode as a Tower layer around selected Axum routes."
 Until the crate registry release is available, vendor the production artifact:
 
 ```bash
-epode_artifact="$(mktemp -d)/agent-feedback-rust-0.3.1.tar.gz" &&
-curl -fsSL https://app.epode.ai/static/agent-feedback-rust-0.3.1.tar.gz -o "$epode_artifact" &&
-printf '%s  %s\n' '0d26e766d1e12ced3919a33d06575ba2dc4aaa8a285f8e7e3b9b069a4144b77b' "$epode_artifact" \
+epode_artifact="$(mktemp -d)/agent-feedback-rust-0.4.0.tar.gz" &&
+curl -fsSL https://app.epode.ai/static/agent-feedback-rust-0.4.0.tar.gz -o "$epode_artifact" &&
+printf '%s  %s\n' 'cd6eb2361095a37efeebcc92ba029bfca696cab67e0b0815d90b1432f104bd9e' "$epode_artifact" \
   | shasum -a 256 -c - &&
-mkdir -p vendor/agent-feedback-rust-0.3.1 &&
-tar -xzf "$epode_artifact" -C vendor/agent-feedback-rust-0.3.1
+mkdir -p vendor/agent-feedback-rust-0.4.0 &&
+tar -xzf "$epode_artifact" -C vendor/agent-feedback-rust-0.4.0
 ```
 
 ```toml
 [dependencies]
-agent-feedback = { path = "vendor/agent-feedback-rust-0.3.1" }
+agent-feedback = { path = "vendor/agent-feedback-rust-0.4.0" }
 ```
 
 ## Configure once

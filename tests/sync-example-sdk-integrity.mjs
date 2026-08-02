@@ -13,7 +13,7 @@ const artifactPath = resolve(
   `backend/public/agent-feedback-node-${sdkManifest.version}.tgz`,
 );
 const publicArtifactUrl = `https://app.epode.ai/static/${basename(artifactPath)}`;
-const dependencyName = "@agent-feedback/node";
+const dependencyName = "@epode/node";
 const dependencySections = ["dependencies", "devDependencies", "optionalDependencies"];
 
 async function findFiles(directory, filename) {
@@ -42,7 +42,7 @@ function resolvesToHostedArtifact(specifier, ownerPath) {
 function hostedLockEntries(lockfile, lockfilePath) {
   return Object.entries(lockfile.packages || {}).filter(
     ([packagePath, metadata]) =>
-      packagePath.endsWith("node_modules/@agent-feedback/node") &&
+      packagePath.endsWith("node_modules/@epode/node") &&
       resolvesToHostedArtifact(metadata?.resolved, lockfilePath),
   );
 }

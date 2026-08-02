@@ -3,7 +3,7 @@ import {
   feedbackFromResponse,
   submitFeedbackConsent,
   submitProductFeedback,
-} from "@agent-feedback/node/agent";
+} from "@epode/node/agent";
 
 const productUrl = process.argv[2] || process.env.PRODUCT_URL;
 if (!productUrl) {

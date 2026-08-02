@@ -1,9 +1,9 @@
 [package]
 name = "agent-feedback"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.88"
-description = "Protocol-first Agent Feedback middleware for Rust web products"
+description = "Epode customer-enrichment and agent-feedback SDK for Rust products"
 license = "MIT"
 repository = "https://github.com/open-software-network/os-epode"
 homepage = "https://github.com/open-software-network/os-epode/tree/main/sdk/rust"

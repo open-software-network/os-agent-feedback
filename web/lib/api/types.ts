@@ -678,6 +678,102 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/enrichment/requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["enrichment_request_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/enrichment/consent/decisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["enrichment_consent_decision_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/enrichment/answers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["enrichment_answer_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/customer-context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["customer_context_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/personalization/decisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["personalization_decision_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/personalization/outcomes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["personalization_outcome_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/mcp": {
         parameters: {
             query?: never;
@@ -776,6 +872,7 @@ export interface components {
             createdAt: string;
             /** Format: date-time */
             decidedAt: string;
+            enrichmentPurpose: string | null;
             /** Format: uuid */
             id: string;
             priorState: string | null;
@@ -789,6 +886,7 @@ export interface components {
             basis: string;
             /** Format: date-time */
             decidedAt: string;
+            enrichmentPurpose: string | null;
             /** Format: date-time */
             expiresAt: string | null;
             /** Format: uuid */
@@ -828,6 +926,41 @@ export interface components {
             email: string | null;
             handle: string;
             id: string;
+        };
+        CustomerContextInput: {
+            accountRef?: string | null;
+            anonymousRef?: string | null;
+            customerRef?: string | null;
+            /** Format: uuid */
+            interactionId?: string | null;
+            purpose: string;
+            userRef?: string | null;
+        };
+        CustomerContextItem: {
+            allowedUses: string[];
+            /** Format: double */
+            confidence: number | null;
+            /** Format: date-time */
+            expiresAt: string | null;
+            key: string;
+            provenance: string;
+            remembered: boolean;
+            /** Format: uuid */
+            signalId: string;
+            summary: string;
+            type: string;
+            value: unknown;
+        };
+        CustomerContextResponse: {
+            contextVersion: string;
+            /** Format: uuid */
+            customerId: string | null;
+            identityLevel: string;
+            /** Format: uuid */
+            interactionId: string | null;
+            items: components["schemas"]["CustomerContextItem"][];
+            /** Format: uuid */
+            retrievalId: string;
         };
         CustomerDetailCounts: {
             /** Format: int64 */
@@ -871,6 +1004,7 @@ export interface components {
             verified: number;
         };
         CustomerSignal: {
+            allowedUses: string[];
             /** Format: date-time */
             collectedAt: string;
             /** Format: double */
@@ -892,8 +1026,10 @@ export interface components {
             provenance: string;
             /** Format: uuid */
             sessionId: string | null;
+            signalKey: string | null;
             summary: string;
             type: string;
+            value: unknown;
         };
         CustomerSummary: {
             accountRefHint: string | null;
@@ -1090,6 +1226,99 @@ export interface components {
         };
         DeleteProductInput: {
             confirmation: string;
+        };
+        EnrichmentAnswerAction: {
+            authorization: string;
+            bodySchema: components["schemas"]["EnrichmentAnswerBodySchema"];
+            contentType: string;
+            method: string;
+            url: string;
+        };
+        EnrichmentAnswerBodySchema: {
+            items: components["schemas"]["EnrichmentAnswerItemsSchema"];
+            status: string[];
+        };
+        EnrichmentAnswerInput: {
+            items?: components["schemas"]["EnrichmentAnswerItemInput"][];
+            status: string;
+        };
+        EnrichmentAnswerItemInput: {
+            /** Format: double */
+            confidence?: number | null;
+            /** Format: date-time */
+            expiresAt?: string | null;
+            key: string;
+            provenance: string;
+            remember: boolean;
+            summary: string;
+            type: string;
+            value: string;
+        };
+        EnrichmentAnswerItemsSchema: {
+            /** Format: int32 */
+            maximum: number;
+            provenance: string[];
+            required: string[];
+            type: string[];
+        };
+        EnrichmentAnswerResponse: {
+            accepted: boolean;
+            /** Format: uuid */
+            customerId: string | null;
+            /** Format: uuid */
+            interactionId: string;
+            /** Format: uuid */
+            requestId: string;
+            signals: components["schemas"]["CustomerContextItem"][];
+        };
+        EnrichmentConsentAction: {
+            authorization: string;
+            bodySchema: components["schemas"]["EnrichmentConsentBodySchema"];
+            contentType: string;
+            method: string;
+            url: string;
+        };
+        EnrichmentConsentBodySchema: {
+            decision: string[];
+        };
+        EnrichmentConsentDecisionInput: {
+            decision: string;
+        };
+        EnrichmentConsentDecisionResponse: {
+            answerInstruction: string | null;
+            changed: boolean;
+            /** Format: uuid */
+            requestId: string;
+            stageInstruction: string;
+            state: string;
+            submit: null | components["schemas"]["EnrichmentAnswerAction"];
+        };
+        EnrichmentRequestInput: {
+            accountRef?: string | null;
+            anonymousRef?: string | null;
+            customerRef?: string | null;
+            /** Format: uuid */
+            interactionId: string;
+            operation: string;
+            purpose: string;
+            remember: boolean;
+            userRef?: string | null;
+        };
+        EnrichmentRequestResponse: {
+            answerInstruction: string | null;
+            consent: null | components["schemas"]["EnrichmentConsentAction"];
+            /** Format: date-time */
+            expiresAt: string;
+            identityLevel: string;
+            /** Format: uuid */
+            interactionId: string;
+            purpose: string;
+            question: string | null;
+            /** Format: uuid */
+            requestId: string;
+            stageInstruction: string;
+            state: string;
+            submit: null | components["schemas"]["EnrichmentAnswerAction"];
         };
         EnvironmentResponse: {
             environment: components["schemas"]["ProductEnvironment"];
@@ -1288,6 +1517,12 @@ export interface components {
             confirmationRate: number;
             /** Format: int64 */
             confirmedInteractions: number;
+            /** Format: int64 */
+            contextRetrievals: number;
+            /** Format: int64 */
+            customerContextItems: number;
+            /** Format: int64 */
+            customersWithContext: number;
             findingKinds: components["schemas"]["InsightCount"][];
             impacts: components["schemas"]["InsightCount"][];
             /** Format: int64 */
@@ -1296,6 +1531,12 @@ export interface components {
             p50DurationMs: number | null;
             /** Format: int64 */
             p95DurationMs: number | null;
+            /** Format: int64 */
+            personalizationDecisions: number;
+            /** Format: int64 */
+            personalizationOutcomes: number;
+            /** Format: int64 */
+            personalizationReadyCustomers: number;
             /** Format: int64 */
             previousConfirmedInteractions: number;
             /** Format: int64 */
@@ -1378,6 +1619,49 @@ export interface components {
         };
         /** @description Opaque JSON object whose fields depend on the MCP JSON-RPC method. */
         OpaqueJsonObject: Record<string, never>;
+        PersonalizationDecision: {
+            /** Format: date-time */
+            createdAt: string;
+            externalDecisionId: string;
+            /** Format: uuid */
+            id: string;
+            purpose: string;
+            signalIds: string[];
+            variant: string | null;
+        };
+        PersonalizationDecisionInput: {
+            /** Format: uuid */
+            contextRetrievalId: string;
+            externalDecisionId: string;
+            signalIds: string[];
+            variant?: string | null;
+        };
+        PersonalizationDecisionResponse: {
+            decision: components["schemas"]["PersonalizationDecision"];
+        };
+        PersonalizationOutcome: {
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: uuid */
+            decisionId: string;
+            externalOutcomeId: string;
+            /** Format: uuid */
+            id: string;
+            /** Format: date-time */
+            occurredAt: string;
+            outcome: string;
+        };
+        PersonalizationOutcomeInput: {
+            /** Format: uuid */
+            decisionId: string;
+            externalOutcomeId: string;
+            /** Format: date-time */
+            occurredAt?: string | null;
+            outcome: string;
+        };
+        PersonalizationOutcomeResponse: {
+            outcome: components["schemas"]["PersonalizationOutcome"];
+        };
         PolicyInput: {
             collectEventSummaries: boolean;
             /** Format: uuid */
@@ -5531,6 +5815,393 @@ export interface operations {
                 };
             };
             /** @description Feedback submission failed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    enrichment_request_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EnrichmentRequestInput"];
+            };
+        };
+        responses: {
+            /** @description Question and permission action selected for the interaction */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrichmentRequestResponse"];
+                };
+            };
+            /** @description Invalid purpose, operation, or identity context */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Invalid product API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Interaction or identity context conflicts */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Enrichment request could not be created */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    enrichment_consent_decision_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EnrichmentConsentDecisionInput"];
+            };
+        };
+        responses: {
+            /** @description Enrichment permission decision recorded idempotently */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrichmentConsentDecisionResponse"];
+                };
+            };
+            /** @description Invalid decision */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Invalid or expired enrichment capability */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Decision could not be stored */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    enrichment_answer_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EnrichmentAnswerInput"];
+            };
+        };
+        responses: {
+            /** @description Permissioned customer context accepted idempotently */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrichmentAnswerResponse"];
+                };
+            };
+            /** @description Invalid, sensitive, or unbounded customer context */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Invalid or expired enrichment capability */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Customer context sharing is not approved */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Request already has a different answer */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Answer could not be stored */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    customer_context_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CustomerContextInput"];
+            };
+        };
+        responses: {
+            /** @description Active permissioned context for a known, anonymous, or ephemeral customer */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CustomerContextResponse"];
+                };
+            };
+            /** @description Invalid identity or purpose */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Invalid product API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Customer or interaction context not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Identity references conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Customer context could not be retrieved */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    personalization_decision_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PersonalizationDecisionInput"];
+            };
+        };
+        responses: {
+            /** @description Personalization decision linked to exact retrieved signal evidence */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PersonalizationDecisionResponse"];
+                };
+            };
+            /** @description Invalid decision or evidence */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Invalid product API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Context retrieval not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Idempotency key has a different payload */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Decision could not be stored */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    personalization_outcome_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PersonalizationOutcomeInput"];
+            };
+        };
+        responses: {
+            /** @description Business outcome linked to an exact personalization decision */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PersonalizationOutcomeResponse"];
+                };
+            };
+            /** @description Invalid outcome */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Invalid product API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Personalization decision not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Idempotency key has a different payload */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Outcome could not be stored */
             500: {
                 headers: {
                     [name: string]: unknown;

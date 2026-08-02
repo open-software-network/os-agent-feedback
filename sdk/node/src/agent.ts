@@ -229,7 +229,7 @@ export async function inspectProductFeedback(
     headers: {
       authorization: capability.authorization,
       "content-type": "application/json",
-      "user-agent": "@agent-feedback/node-agent/0.3.1",
+      "user-agent": "@epode/node-agent/0.4.0",
     },
     body: "{}",
     redirect: "error",
@@ -317,7 +317,7 @@ export async function submitFeedbackConsent(
     headers: {
       authorization: action.authorization,
       "content-type": action.contentType,
-      "user-agent": "@agent-feedback/node-agent/0.3.1",
+      "user-agent": "@epode/node-agent/0.4.0",
     },
     body: JSON.stringify({ decision }),
     redirect: "error",
@@ -459,7 +459,7 @@ export async function submitProductFeedback(
           authorization: inspection.submit.authorization,
           "content-type": "application/json",
           "idempotency-key": idempotencyKey,
-          "user-agent": "@agent-feedback/node-agent/0.3.1",
+          "user-agent": "@epode/node-agent/0.4.0",
         },
         body: requestBody,
         redirect: "error",

@@ -1,6 +1,44 @@
 # Epode
 
-Epode tells companies whether their product actually worked for the independent customer agents using it.
+Epode helps companies learn permissioned context about every customer—known, anonymous, or ephemeral—through
+the AI agent acting for them, then use that context to personalize the product and measure the outcome.
+
+The company installs Epode. Customers do not create an Epode account, install a plugin, or receive a product
+key. The thin MVP is one complete loop:
+
+```text
+Ask → learn → retrieve → personalize → measure
+```
+
+The dashboard is organized around four jobs: **Customers**, **Insights**, **Setup**, and **Data controls**.
+Feedback, sessions, evidence, identity resolution, and consent support those jobs under the hood.
+
+## Customer enrichment
+
+```ts
+import { epode } from "@epode/node/express";
+
+const customer = epode({
+  apiKey: process.env.EPODE_API_KEY,
+  include: ["/api/recommendations"],
+  purpose: "product_personalization",
+  identify: req => ({
+    accountRef: req.user?.accountId,
+    userRef: req.user?.id,
+    anonymousRef: req.firstPartyVisitorId,
+  }),
+});
+app.use(customer);
+```
+
+HTTP answers use company-owned `/_epode/v1/...` routes. MCP registers the equivalent actions on the company's
+own MCP server. Context retrieval, personalization decisions, and business outcomes remain server-to-server with
+`EPODE_API_KEY`. Product personalization and targeted advertising are separately permissioned purposes.
+
+See the [quickstart](docs/quickstart.mdx) and the
+[anonymous-to-known retail example](examples/mvp-retail-express).
+
+## Structured outcome feedback foundation
 
 A company instruments selected API, website, or MCP surfaces once. Every SDK creates a short-lived, write-only interaction receipt locally and adds the same feedback contract to eligible successful responses. Telemetry is always asynchronous, and HTTP responses never wait on Epode. In Ask once mode, the receipt carries an opaque subject so Epode Companion can resolve the remembered decision through its trusted inspection tool. After the customer agent understands the product's contribution, it can submit:
 
@@ -36,7 +74,7 @@ First-class adapters currently cover:
 For example, Express remains one global middleware:
 
 ```ts
-import { agentFeedback } from "@agent-feedback/node/express";
+import { agentFeedback } from "@epode/node/express";
 
 app.use(agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
@@ -57,7 +95,7 @@ For Codex and Claude Code users, **Epode Companion** is the trusted host adapter
 ## Repository
 
 - `backend/` — Rust/Axum/PostgreSQL API, OS Accounts dashboard, migrations, and acceptance tests
-- `sdk/node/` — `@agent-feedback/node` with Express, Fastify, MCP, and the integration doctor
+- `sdk/node/` — `@epode/node` with company-owned Express, Fastify, MCP, and customer-context entrypoints
 - `sdk/python/` — dependency-free ASGI/WSGI middleware and agent helper
 - `sdk/go/` — standard-library HTTP middleware and agent helper
 - `sdk/rust/` — Axum/Tower middleware and agent helper

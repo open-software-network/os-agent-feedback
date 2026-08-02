@@ -1,6 +1,6 @@
 import Fastify from "fastify";
 
-import { agentFeedback } from "@agent-feedback/node/fastify";
+import { agentFeedback } from "@epode/node/fastify";
 
 const apiKey = process.env.AGENT_FEEDBACK_KEY;
 if (!apiKey) throw new Error("AGENT_FEEDBACK_KEY is required");

@@ -7,7 +7,9 @@ description: "Server environment variables and adapter options."
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `AGENT_FEEDBACK_KEY` | Yes | Server-side product write key |
+| `EPODE_API_KEY` | Yes | Server-side product key for enrichment, context, decisions, and outcomes |
+| `EPODE_API_URL` | No | Override the Epode origin for local/canary testing only |
+| `AGENT_FEEDBACK_KEY` | Legacy | Temporary compatibility name for the same server-side product key |
 | `AGENT_FEEDBACK_MODE` | No | `never_ask` (default), `ask_once`, `ask_always`, or `off` |
 | `AGENT_FEEDBACK_ENABLED` | No | Set to `false` for the emergency kill switch |
 | `AGENT_FEEDBACK_URL` | No | Override the Epode origin for local/canary testing only |
@@ -15,7 +17,25 @@ description: "Server environment variables and adapter options."
 Do not use `AGENT_FEEDBACK_READ_KEY` in a product integration. Read keys are for the optional Epode dashboard MCP
 client and cannot sign feedback capabilities.
 
-## Mode alignment
+## Customer enrichment options
+
+| Option | Purpose |
+| --- | --- |
+| `include` | Explicit company routes or tools eligible for a context request |
+| `authenticate` | Express/Fastify product authentication for included business routes; exact capability relay paths bypass it |
+| `purpose` | `product_personalization` or `targeted_advertising` |
+| `identify` | Returns verified `accountRef`/`userRef`, product-owned `anonymousRef`, or nothing for ephemeral use |
+| `remember` | Requests permission to retain useful context; stable identities default to true |
+| `shouldRequest` | Optional product-owned outcome boundary; errors preserve the original response |
+| `shouldRequestHtml` | Optional HTML-specific outcome boundary |
+| `maxHtmlBytes` | Largest server-rendered HTML string eligible for injection (default 512 KiB) |
+| `timeoutMs` | Enrichment and company-context timeout (default 250 ms); selected responses wait up to this bound and fail open |
+| `relayTimeoutMs` | Same-origin consent/answer relay timeout (default 5 seconds); retryable outages return `503` |
+
+The Node HTTP adapters automatically reserve and mount the company-owned enrichment relay at `/_epode/v1/enrichment/consent` and
+`/_epode/v1/enrichment/answers`. Do not implement application behavior on those paths.
+
+## Legacy feedback mode alignment
 
 The SDK signs the initial feedback action locally so Epode never sits on the product response path.
 `feedbackMode` / `AGENT_FEEDBACK_MODE` therefore controls the question or report action agents see.

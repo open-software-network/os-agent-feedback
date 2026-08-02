@@ -1,0 +1,133 @@
+---
+title: "Customer context API"
+description: "The exact company and agent contracts for enrichment, retrieval, personalization, and outcomes."
+---
+
+Company endpoints use `Authorization: Bearer $EPODE_API_KEY`. Agent answer endpoints use only the short-lived
+`aqr1_...` request handle returned for that interaction. The company key must never enter an agent response.
+
+## Request enrichment
+
+`POST /api/v2/enrichment/requests`
+
+```json
+{
+  "interactionId": "018f1f2e-7b4a-7c12-9c8d-123456789abc",
+  "operation": "/api/recommendations",
+  "surface": "http_json",
+  "statusCode": 200,
+  "durationMs": 18,
+  "sessionRef": "journey_42",
+  "runtimeHint": "shopping-agent/1.2",
+  "purpose": "product_personalization",
+  "remember": true,
+  "accountRef": "account_42",
+  "userRef": "user_7",
+  "anonymousRef": "visitor_99"
+}
+```
+
+Identity references are optional; omit all of them for an ephemeral interaction. The response can be
+`consent_required`, `answer_ready`, `declined`, `answered`, or `no_relevant_context` and contains only the
+currently allowed next action.
+`targeted_advertising` is the other supported purpose and always requires its own separate permission; a
+`product_personalization` grant is never reused for it.
+
+`statusCode`, `durationMs`, `sessionRef`, and `runtimeHint` are optional same-call evidence. Framework adapters
+set status and duration automatically. A company may add only a product-issued `sessionRef` and a bounded,
+non-sensitive runtime label; agent/model arguments are not evidence.
+
+`surface` is exactly `http_json`, `html`, or `mcp`. Node adapters set it automatically. JSON and HTML begin as
+unclassified opportunities; an MCP business-tool result is confirmed immediately by the same enrichment request,
+so companies do not install a second observability wrapper.
+
+The Node HTTP adapter rewrites agent action URLs to:
+
+- `POST /_epode/v1/enrichment/consent`
+- `POST /_epode/v1/enrichment/answers`
+
+Those are fixed company-owned relay paths. They forward only the `aqr1_` handle and allowlisted body—never the
+company key, product request, prompt, transcript, cookies, or arbitrary headers.
+
+Both the initial response and the post-consent relay response preserve the backend's explicit
+`stageInstruction`, optional `answerInstruction`, and exact `bodySchema` for the currently allowed action. Every
+action returned by the relay is rewritten again, so an HTTP agent is never instructed to write to the Epode
+origin.
+
+## Submit an answer
+
+`POST /api/v2/enrichment/answers` accepts:
+
+```json
+{
+  "status": "answered",
+  "items": [
+    {
+      "key": "shopping.budget_band",
+      "type": "constraint",
+      "value": "50_150",
+      "provenance": "agent_reports_user_statement",
+      "confidence": 1,
+      "remember": true,
+      "expiresAt": "2026-09-01T00:00:00Z"
+    }
+  ]
+}
+```
+
+`status` is `answered`, `declined`, or `no_relevant_context`. `items` contains at most eight entries and must be
+empty for the latter two statuses. The action's `bodySchema.catalog` is the only accepted key, type, and value
+vocabulary; unknown combinations fail closed. Epode generates the stored summary from that catalog instead of
+storing agent-written prose. Remembered items require the matching grant. Requested expiry is clamped to the
+product retention policy.
+
+## Retrieve permitted context
+
+`POST /api/v2/customer-context`
+
+```json
+{
+  "userRef": "user_7",
+  "anonymousRef": "visitor_99",
+  "purpose": "product_personalization"
+}
+```
+
+The response includes a `retrievalId`, identity level, context version, and active items with `signalId`,
+provenance, allowed uses, remembered state, and expiry. It is read-only: unknown references do not create a
+customer. Revoked, expired, unresolved, or wrong-purpose items are omitted.
+
+For an ephemeral interaction, pass the original `interactionId` instead of an identity reference. The Node HTTP
+adapter exposes this as `Epode-Context-Interaction` for the immediate retry and `customer.contextFor(request)`
+validates and reads it. It is not durable identity and must not be reused for another operation or later visit.
+
+## Record the decision
+
+`POST /api/v2/personalization/decisions`
+
+```json
+{
+  "externalDecisionId": "recommendation_42",
+  "contextRetrievalId": "retrieval_42",
+  "signalIds": ["signal_1", "signal_2"],
+  "variant": "customer-context-ranking-v1"
+}
+```
+
+Every signal ID must be an exact subset of that retrieval. Identical retries are idempotent; changing a retry
+returns `409`.
+
+## Record the outcome
+
+`POST /api/v2/personalization/outcomes`
+
+```json
+{
+  "externalOutcomeId": "order_42",
+  "decisionId": "decision_42",
+  "outcome": "conversion"
+}
+```
+
+Outcome is `conversion`, `completion`, `engagement`, `dismissal`, or `abandonment`. Identical retries are
+idempotent and conflicting retries return `409`.

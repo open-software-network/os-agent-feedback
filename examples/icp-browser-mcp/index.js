@@ -1,4 +1,4 @@
-import { createMcpInstrumentation } from "@agent-feedback/node/mcp";
+import { createMcpInstrumentation } from "@epode/node/mcp";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";

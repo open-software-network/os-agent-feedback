@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  customerDetailFixture,
   customersPageFixture,
   dashboardFixture,
   featureDetailFixture,
@@ -27,9 +28,10 @@ describe("dashboard data flow", () => {
       </Providers>,
     );
 
-    expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Configuration" })).toBeVisible();
-    expect(screen.getByText("Search results omitted the newest document")).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Insights" })).toBeVisible();
+    for (const view of ["Customers", "Insights", "Setup", "Data controls"]) {
+      expect(screen.getByRole("button", { name: view })).toBeVisible();
+    }
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining("interactionLimit=250"),
       expect.any(Object),
@@ -43,10 +45,12 @@ describe("dashboard data flow", () => {
       expect.any(Object),
     );
 
-    expect(screen.queryByRole("button", { name: "Feedback" })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Features" }));
-    expect(await screen.findByRole("heading", { name: "Features" })).toBeVisible();
-    expect(await screen.findByRole("row", { name: /Fresh results after indexing/ })).toBeVisible();
+    for (const hidden of ["Features", "Sessions", "Feedback", "Interactions"]) {
+      expect(screen.queryByRole("button", { name: hidden })).not.toBeInTheDocument();
+    }
+    fireEvent.click(screen.getByRole("button", { name: "Customers" }));
+    expect(await screen.findByRole("heading", { name: "Customers" })).toBeVisible();
+    expect(await screen.findByRole("row", { name: /Acme workspace/ })).toBeVisible();
   });
 
   it("keeps shown-once product keys in page memory instead of browser storage", async () => {
@@ -116,7 +120,7 @@ describe("dashboard data flow", () => {
       </Providers>,
     );
 
-    expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Insights" })).toBeVisible();
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining(`workspaceId=${staleTeam}`),
       expect.any(Object),
@@ -165,9 +169,9 @@ describe("dashboard data flow", () => {
       </Providers>,
     );
 
-    expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Insights" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Setup" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Policy" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Data controls" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Connectors" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "New product" })).not.toBeInTheDocument();
     await waitFor(() => expect(window.location.search).not.toContain("view=connectors"));
@@ -175,7 +179,8 @@ describe("dashboard data flow", () => {
       fetchMock.mock.calls.some(([input]) => String(input) === "/api/github/installations"),
     ).toBe(false);
 
-    fireEvent.click(screen.getByRole("button", { name: "Configuration" }));
+    fireEvent.click(screen.getByRole("button", { name: /Owner User/ }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Configuration" }));
     expect(await screen.findByRole("heading", { name: "Product" })).toBeVisible();
     expect(screen.getByRole("tab", { name: "Team" })).toBeVisible();
     expect(screen.queryByRole("tab", { name: "Setup" })).not.toBeInTheDocument();
@@ -231,9 +236,10 @@ describe("dashboard data flow", () => {
     );
 
     expect(await screen.findByText(message)).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Home" }));
-    expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Configuration" }));
+    fireEvent.click(screen.getByRole("button", { name: "Insights" }));
+    expect(await screen.findByRole("heading", { name: "Insights" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /Owner User/ }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Configuration" }));
     fireEvent.click(await screen.findByRole("tab", { name: "Connectors" }));
 
     expect(await screen.findByRole("heading", { name: "Connectors" })).toBeVisible();
@@ -249,29 +255,12 @@ describe("dashboard data flow", () => {
       </Providers>,
     );
 
-    expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Search results omitted the newest document" }),
-    );
-    expect(
-      await screen.findByRole("heading", { name: "Search results omitted the newest document" }),
-    ).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Open interaction" }));
-    expect(await screen.findByRole("heading", { name: "search" })).toBeVisible();
-
+    expect(await screen.findByRole("heading", { name: "Insights" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Customers" }));
+    expect(await screen.findByRole("heading", { name: "Customers" })).toBeVisible();
     window.history.back();
 
-    expect(
-      await screen.findByRole("heading", { name: "Search results omitted the newest document" }),
-    ).toBeVisible();
-    window.history.back();
-
-    await waitFor(() =>
-      expect(
-        screen.queryByRole("heading", { name: "Search results omitted the newest document" }),
-      ).not.toBeInTheDocument(),
-    );
-    expect(screen.getByRole("heading", { name: "Home" })).toBeVisible();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Insights" })).toBeVisible());
   });
 
   it("surfaces an invalid invitation and removes it from the URL", async () => {
@@ -299,7 +288,7 @@ describe("dashboard data flow", () => {
     expect(message).not.toBeInTheDocument();
   });
 
-  it("keeps legacy settings deep links inside the unified Configuration surface", async () => {
+  it("opens Setup and Data controls as first-class product screens", async () => {
     window.history.replaceState({}, "", "/?view=policy");
     vi.stubGlobal(
       "fetch",
@@ -312,18 +301,15 @@ describe("dashboard data flow", () => {
       </Providers>,
     );
 
-    expect(await screen.findByRole("heading", { name: "Collection" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Configuration" })).toHaveAttribute(
+    expect(
+      (await screen.findAllByRole("heading", { name: "Data controls" })).length,
+    ).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Data controls" })).toHaveAttribute(
       "aria-current",
       "page",
     );
-    expect(screen.getByRole("tab", { name: "Collection" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
-
-    fireEvent.click(screen.getByRole("tab", { name: "Setup" }));
-    expect(await screen.findByRole("heading", { name: "Setup" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Setup" }));
+    expect((await screen.findAllByRole("heading", { name: "Setup" })).length).toBeGreaterThan(0);
     expect(new URL(window.location.href).searchParams.get("view")).toBe("setup");
   });
 
@@ -346,15 +332,16 @@ describe("dashboard data flow", () => {
       </Providers>,
     );
 
-    expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Configuration" }));
+    expect(await screen.findByRole("heading", { name: "Insights" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /Owner User/ }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Configuration" }));
     expect(await screen.findByRole("heading", { name: "Product" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Rename" }));
     fireEvent.change(screen.getByLabelText("New name"), { target: { value: "Search API 2" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(await screen.findByText("Product renamed.")).toBeVisible();
 
-    fireEvent.click(screen.getByRole("button", { name: "Features" }));
+    fireEvent.click(screen.getByRole("button", { name: "Customers" }));
 
     expect(screen.queryByText("Product renamed.")).not.toBeInTheDocument();
   });
@@ -379,6 +366,9 @@ function feedbackApiResponse(
   }
   if (path.startsWith("/api/dashboard/customers?")) {
     return json(customersPageFixture());
+  }
+  if (path.startsWith("/api/dashboard/customers/")) {
+    return json(customerDetailFixture());
   }
   if (path.startsWith("/api/dashboard/features/")) {
     return json(featureDetailFixture());

@@ -1,128 +1,129 @@
 ---
 title: "Quickstart"
-description: "Connect one product and verify the complete feedback loop."
+description: "Learn one customer preference, use it, and measure the resulting experience."
 ---
 
-This quickstart assumes you already created a product in the Epode dashboard. The dashboard creates
-its server-side product key automatically. Product and key creation is dashboard-only today: there
-is no public API or CLI for creating products or keys, so plan to click through
-[app.epode.ai](https://app.epode.ai) for those steps.
-
-<Warning>
-Keep `AGENT_FEEDBACK_KEY` on your server. Never place it in browser JavaScript, a mobile app,
-a public repository, or an MCP client configuration.
-</Warning>
+This quickstart uses Express. The same company-layer contract is available for Fastify, MCP, and any backend
+that can send HTTPS JSON.
 
 <Steps>
-  <Step title="Open Setup">
-    In [Epode](https://app.epode.ai), choose your product and open **Setup**. Pick the surface and
-    framework that match your deployed product.
-  </Step>
-  <Step title="Save the product key">
-    A newly created product redirects to Setup and shows its key once. Add it to your server environment:
+  <Step title="Create a product">
+    Create the product in [Epode](https://app.epode.ai), then copy the shown-once server key into your secret
+    manager:
 
     ```bash
-    AGENT_FEEDBACK_KEY=af_live_...
-    AGENT_FEEDBACK_MODE=never_ask
+    EPODE_API_KEY=af_live_...
     ```
 
-    Move the write key directly into your deployment secret manager. Do not leave it in shell history,
-    a committed `.env` file, browser storage, a mobile app, or an MCP client. Setup keeps a newly created
-    secret only for the current page load; Epode cannot recover it later.
-
-    `never_ask` asks the agent to submit its own assessment without interrupting the human.
-    [Compare all feedback modes](/concepts/feedback-modes).
-
-    If you already left the page or lost the value, rotate the existing product key from Setup. The previous
-    key remains valid for one hour so you can deploy the replacement safely. If no write key is active, Setup
-    offers **Create product key**. Existing secret values cannot be recovered from Epode.
+    Never put this key in browser code, a mobile app, an agent configuration, source control, or logs.
   </Step>
-  <Step title="Install one server-side adapter">
-    Follow the dedicated page for your framework. For Express:
-
+  <Step title="Install Epode once">
     ```bash
-    npm install https://app.epode.ai/static/agent-feedback-node-0.3.1.tgz
+    npm install @epode/node express
     ```
-
-    Hosted SDKs are pinned in the versioned
-    [integrity manifest](https://app.epode.ai/static/agent-feedback-integrations-0.3.1.json).
-    The dashboard's Setup agent prompt verifies the selected filename and SHA-256 before installing it;
-    package-manager lockfiles preserve that exact integrity afterward.
 
     ```ts
-    import { agentFeedback } from "@agent-feedback/node/express";
+    import express from "express";
+    import { epode } from "@epode/node/express";
 
-    app.use(authenticateProductRequest);
-    app.use(selectAuthorizedTenant);
-    app.use(agentFeedback({
-      apiKey: process.env.AGENT_FEEDBACK_KEY,
-      include: ["/search", "/docs/*"],
-      accountRef: req => req.user?.accountId,
-      userRef: req => req.user?.id,
-      anonymousRef: req => req.firstPartyVisitorId,
-      customerRef: req => req.user?.accountId, // durable Ask once compatibility
-      sessionRef: req => req.agentSession?.id, // optional server-issued journey
-    }));
+    const app = express();
+    app.use(express.json());
+    app.use(issueOrVerifyFirstPartyVisitor);
+
+    const customer = epode({
+      apiKey: process.env.EPODE_API_KEY,
+      include: ["/api/recommendations"],
+      purpose: "product_personalization",
+      authenticate: authenticateProductRequest,
+      identify: req => ({
+        accountRef: req.user?.accountId,
+        userRef: req.user?.id,
+        anonymousRef: req.firstPartyVisitorId,
+      }),
+    });
+
+    app.use(customer);
     ```
 
-    Replace the example routes. Instrument only successful product surfaces that customer agents actually use.
-    `accountRef` and `userRef` come only from verified product authentication. `anonymousRef` is a stable,
-    product-owned first-party pre-login ID. Keep `customerRef` only for durable Ask once compatibility. Never use
-    names, emails, prompts, caller values, or agent/tool arguments. Add `sessionRef` only when server/product state
-    already proves that interactions belong to one journey.
+    This one middleware also mounts the company-owned
+    `/_epode/v1/enrichment/consent` and `/_epode/v1/enrichment/answers` routes. The agent never needs an Epode
+    account, key, plugin, or direct write to an unfamiliar domain. Put rejecting product authentication in the
+    `authenticate` option—not in middleware above Epode—so the adapter can bypass it only for those two exact,
+    capability-authenticated relay routes.
   </Step>
-  <Step title="Send one real product request">
-    Call the exact included route and confirm the original response still works. An eligible JSON object
-    has an additional `_agentFeedback` field; HTML and immutable JSON shapes use the documented
-    HTML/header handoff.
-  </Step>
-  <Step title="Choose customer-agent coverage">
-    This is a separate decision from your server integration:
+  <Step title="Use permitted context">
+    ```ts
+    app.get("/api/recommendations", async (req, res) => {
+      const context = await customer.contextFor(req);
 
-    - **MCP:** nothing else is required. Your product's MCP server exposes the feedback tools directly.
-    - **HTTP API or website:** the response contract is best effort in a generic agent. For reliable Codex
-      and Claude Code handling, share the one-time [Epode Companion install](/integrations/companion) with
-      customers who use those runtimes. It is a user-side plugin shared across every Epode-instrumented
-      product—not another SDK, account, key, or per-company configuration.
+      const products = context.available
+        ? rankForCustomer(catalog, context.items)
+        : rankNormally(catalog);
 
-    A company cannot silently install software into an independent customer's agent. Customers without the
-    Companion can still use your product normally; Epode records an opportunity and the product response is
-    never blocked.
-  </Step>
-  <Step title="Verify the loop">
-    For Node HTTP integrations, run:
+      let decisionId;
+      if (context.available && context.items.length) {
+        const result = await customer.personalization.decide({
+          externalDecisionId: crypto.randomUUID(),
+          contextRetrievalId: context.retrievalId,
+          signalIds: context.items.map(item => item.signalId),
+          variant: "customer-context-ranking-v1",
+        });
+        if (result.recorded) decisionId = result.decision.id;
+      }
 
-    ```bash
-    npx agent-feedback-doctor https://your-product.example/search?q=epode-test
+      res.json({ products, decisionId });
+    });
     ```
 
-    The doctor validates response injection, the trusted Epode origin, and the scoped capability without
-    creating feedback or pretending a customer agent used the product. In an ask mode, it validates
-    the consent contract but never impersonates user permission. MCP integrations should call `server/discover` and one
-    normal product tool. For `consent_required`, ask the exact question and call
-    `record_product_feedback_consent`; call `report_product_feedback` only from a `feedback_ready` action. If the
-    report tool returns `retryable: true`, retry it exactly once with the same handle and report.
+    `contextFor` safely combines company-authenticated identity with the bounded ephemeral continuation header,
+    when one exists. It returns an empty, unavailable context instead of failing the product when Epode is down.
+  </Step>
+  <Step title="Measure the outcome">
+    ```ts
+    app.post("/api/orders", async (req, res) => {
+      if (req.body.decisionId) {
+        await customer.outcomes.track({
+          externalOutcomeId: req.order.id,
+          decisionId: req.body.decisionId,
+          outcome: "conversion",
+        });
+      }
+      res.status(201).json({ orderId: req.order.id });
+    });
+    ```
+
+    Identical retries are idempotent. A changed retry fails closed instead of rewriting history.
+  </Step>
+  <Step title="Run a real customer journey">
+    First call the product as a fresh anonymous or known customer. The response preserves the original fields and
+    adds `_epode.customerContext`. A capable agent finishes the product task, asks only the returned permission
+    question when required, and submits bounded context through the same-origin route. Call the product again and
+    verify that the permitted context changes the result. Finally submit the business outcome.
+
+    The enrichment lookup is on this selected response path, with a 250 ms timeout by default. The original
+    response is returned unchanged on timeout or failure. Tune `timeoutMs` to your latency budget and monitor
+    timeout warnings.
   </Step>
 </Steps>
 
-<Tip>
-Use `AGENT_FEEDBACK_ENABLED=false` as an emergency server-side kill switch. Your normal product
-response continues to work either way.
-</Tip>
+## Identity states
 
-## What success looks like
+| What the company has | Send | Behavior |
+| --- | --- | --- |
+| Authenticated account and user | `accountRef` + `userRef` | Verified customer continuity |
+| First-party pre-login visitor | `anonymousRef` | Pseudonymous continuity and remembered permission |
+| Both after sign-in | all applicable references | Deterministic anonymous-to-known resolution |
+| Nothing stable | no reference | Current-interaction context only |
 
-- **First opportunity:** the deployed product key and selected route/tool produced telemetry.
-- **First confirmed interaction:** MCP proves a product-tool call immediately; HTTP/HTML becomes confirmed when
-  its feedback capability returns with a report.
-- **First report:** **Feedback** shows the structured report linked to the confirmed product interaction.
-- If you supplied a stable session reference, **Sessions** shows the linked journey.
+For the last row, the response tells the agent to return `Epode-Context-Interaction` on the immediate retry of
+that same product operation. `customer.contextFor(req)` validates and reads it automatically. This handle does
+not create identity or continuity across unrelated interactions, products, or later visits, and expires with the
+enrichment request.
 
-These are separate activation milestones. An HTTP opportunity proves the company-side connection, but it does not
-prove that a customer agent followed the feedback action.
+Use opaque internal IDs from verified company state. Never send names, email addresses, prompts, raw request
+content, bearer tokens, or agent-supplied identity.
 
-<Note>
-The doctor proves only the company-side connection and first-opportunity handoff. For HTTP and websites, test one
-fresh Codex or Claude Code task with Epode Companion installed; only that real journey can prove confirmation and
-the first report.
-</Note>
+<Warning>
+`product_personalization` permission never authorizes `targeted_advertising`. Advertising is a separate purpose,
+question, consent grant, retrieval, and decision trail.
+</Warning>

@@ -7,12 +7,10 @@ import { Tabs, TabsList, TabsPanel, TabsTab } from "@/components/ui/tabs";
 import type { DashboardData } from "@/lib/api/dashboard";
 import { titleCase } from "@/lib/dashboard/format";
 
-export type ConfigurationSection = "configuration" | "setup" | "policy" | "connectors" | "team";
+export type ConfigurationSection = "configuration" | "connectors" | "team";
 
 const sectionContent: Record<ConfigurationSection, { label: string }> = {
   configuration: { label: "Product" },
-  setup: { label: "Setup" },
-  policy: { label: "Collection" },
   connectors: { label: "Connectors" },
   team: { label: "Team" },
 };
@@ -30,7 +28,7 @@ export function ConfigurationView({
 }) {
   const editor = data.currentRole === "owner" || data.currentRole === "admin";
   const sections: ConfigurationSection[] = editor
-    ? ["configuration", "setup", "policy", "connectors", "team"]
+    ? ["configuration", "connectors", "team"]
     : ["configuration", "team"];
   return (
     <div className="flex size-full min-h-0 flex-col bg-canvas">

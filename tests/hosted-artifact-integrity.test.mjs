@@ -27,6 +27,10 @@ const immutableArtifacts = new Map([
     "b802632b17760d1bbf8df3a96be080bf1468c708e4b3a85bb8ce0d70e267857a",
   ],
   [
+    "agent-feedback-integrations-0.4.0.json",
+    "2e7f6f88dcde87fc86029f6d4be17af4f64e2cba6c0960a227c0c65adc0f48fd",
+  ],
+  [
     "agent-feedback-go-0.1.0.tar.gz",
     "4d2eaf5172283ce6b26c280135d2798df0771f8919d116775977dd76dd73ef78",
   ],
@@ -53,6 +57,10 @@ const immutableArtifacts = new Map([
   [
     "agent-feedback-node-0.3.1.tgz",
     "f5f88617367855adcf10eb11c2e26b197f8a46a99140c1ca170c4d5e9047acb9",
+  ],
+  [
+    "agent-feedback-node-0.4.0.tgz",
+    "ecad0dc8b17c5d973e1f97b4f691b7076af223aaa1a9ac697daa499b59c585e3",
   ],
   [
     "agent-feedback-rust-0.1.0.tar.gz",
@@ -83,6 +91,10 @@ const immutableArtifacts = new Map([
     "bc1bdc56eb086d81734ff5dcbd21066a8a17c9bfc5b3dacc961ab3a96305303c",
   ],
   [
+    "agent_feedback-0.4.0-py3-none-any.whl",
+    "a3d79b6d5eb5fe101f2cd7a6c1ca4ae2415358b81276fde06d30bbf3aef2b685",
+  ],
+  [
     "agent-feedback-go-0.2.0.tar.gz",
     "5bab7a77474111c0650b514511f1adf1b247b1913c8af605d5fa52e9a7bbd13e",
   ],
@@ -101,6 +113,10 @@ const immutableArtifacts = new Map([
   [
     "agent-feedback-go-0.3.1.tar.gz",
     "aa39c1fd9b64cf602942520711a6feac1d5c75cfef4dad35d590e2b76d83538e",
+  ],
+  [
+    "agent-feedback-go-0.4.0.tar.gz",
+    "5d4ee89ad47d61a7d3f38dbd6320585b4e1c4de40beae12d526c3858683ad85e",
   ],
   [
     "agent-feedback-rust-0.2.0.tar.gz",
@@ -123,6 +139,10 @@ const immutableArtifacts = new Map([
     "0d26e766d1e12ced3919a33d06575ba2dc4aaa8a285f8e7e3b9b069a4144b77b",
   ],
   [
+    "agent-feedback-rust-0.4.0.tar.gz",
+    "cd6eb2361095a37efeebcc92ba029bfca696cab67e0b0815d90b1432f104bd9e",
+  ],
+  [
     "agent-feedback-protocol-v1.zip",
     "84c74beccabdbf771070cad001223df9335aa19894f9305b30afd224266188a6",
   ],
@@ -138,9 +158,13 @@ const immutableArtifacts = new Map([
     "agent-feedback-protocol-v1-0.3.1.zip",
     "ae3a670fcaf903c781155ec5002874cbe079996b2c6d28221414100e5d86735b",
   ],
+  [
+    "agent-feedback-protocol-v1-0.4.0.zip",
+    "ae3a670fcaf903c781155ec5002874cbe079996b2c6d28221414100e5d86735b",
+  ],
 ]);
 
-const releaseVersion = "0.3.1";
+const releaseVersion = "0.4.0";
 
 test("SDK metadata and user agents share the current release version", async () => {
   const nodeManifest = JSON.parse(
@@ -162,11 +186,15 @@ test("SDK metadata and user agents share the current release version", async () 
     "sdk/node/src/agent.ts",
     "sdk/node/src/core.ts",
     "sdk/node/src/mcp.ts",
+    "sdk/node/src/customer.ts",
     "sdk/python/src/agent_feedback/agent.py",
     "sdk/python/src/agent_feedback/core.py",
+    "sdk/python/src/agent_feedback/customer.py",
     "sdk/go/agent.go",
     "sdk/go/agentfeedback.go",
+    "sdk/go/customer.go",
     "sdk/rust/src/lib.rs",
+    "sdk/rust/src/customer.rs",
   ]) {
     const source = await readFile(new URL(`../${sourcePath}`, import.meta.url), "utf8");
     assert.ok(source.includes(`/${releaseVersion}`), `${sourcePath} omits ${releaseVersion}`);
@@ -295,7 +323,10 @@ esac
 test("public integration manifest pins every current hosted artifact", async () => {
   const manifest = JSON.parse(
     await readFile(
-      new URL("../backend/public/agent-feedback-integrations-0.3.1.json", import.meta.url),
+      new URL(
+        `../backend/public/agent-feedback-integrations-${releaseVersion}.json`,
+        import.meta.url,
+      ),
       "utf8",
     ),
   );

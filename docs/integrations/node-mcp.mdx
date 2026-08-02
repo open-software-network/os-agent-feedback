@@ -3,6 +3,41 @@ title: "Node MCP"
 description: "Instrument a stateless MCP 2026-07-28 server and register structured feedback automatically."
 ---
 
+## Customer enrichment (recommended)
+
+```ts
+import { epode } from "@epode/node/mcp";
+
+const customer = epode({
+  apiKey: process.env.EPODE_API_KEY,
+  includeTools: ["search_stays"],
+  purpose: "product_personalization",
+  identify: (_args, context) => ({
+    accountRef: context.http?.authInfo?.extra?.accountId,
+    userRef: context.http?.authInfo?.extra?.userId,
+  }),
+  sessionRef: context => context.http?.authInfo?.extra?.journeyId,
+  runtimeHint: context => context.http?.authInfo?.extra?.runtimeHint,
+});
+
+customer.instrument(server);
+```
+
+Epode registers `record_customer_context_consent` and `share_customer_context` on the company's own MCP server,
+then decorates selected business-tool results with the exact allowed action. The customer needs no Epode account,
+plugin, or direct connection. Context retrieval, personalization decisions, and outcomes remain server-to-server.
+Failed (`isError`), canceled, incomplete, and `input_required` results are never decorated or counted as a
+completed enrichment opportunity.
+
+The enrichment request itself carries `surface: "mcp"`, so the initial successful product-tool interaction is
+confirmed immediately. Do not add separate Epode telemetry instrumentation around the same MCP server.
+The session/runtime extractors deliberately receive only MCP server context. Resolve them from verified auth or
+product-owned state; tool arguments and model-authored result fields cannot establish a journey or runtime.
+
+[Run the travel MCP example](https://github.com/open-software-network/os-epode/tree/main/examples/mvp-travel-mcp)
+
+## Legacy structured outcome feedback
+
 MCP is Epode's strongest integration: every completed product-tool call is a confirmed interaction. Epode
 registers `record_product_feedback_consent` and `report_product_feedback`; the product result tells the
 customer agent which action is currently allowed.
@@ -19,12 +54,12 @@ use the machine-readable envelope in whichever one of those two locations is pre
 
 ```bash
 mkdir -p .epode/artifacts &&
-curl -fsSL https://app.epode.ai/static/agent-feedback-node-0.3.1.tgz \
-  -o .epode/artifacts/agent-feedback-node-0.3.1.tgz &&
+curl -fsSL https://app.epode.ai/static/agent-feedback-node-0.4.0.tgz \
+  -o .epode/artifacts/agent-feedback-node-0.4.0.tgz &&
 printf '%s  %s\n' \
-  'f5f88617367855adcf10eb11c2e26b197f8a46a99140c1ca170c4d5e9047acb9' \
-  '.epode/artifacts/agent-feedback-node-0.3.1.tgz' | shasum -a 256 -c - &&
-npm install ./.epode/artifacts/agent-feedback-node-0.3.1.tgz &&
+  'ecad0dc8b17c5d973e1f97b4f691b7076af223aaa1a9ac697daa499b59c585e3' \
+  '.epode/artifacts/agent-feedback-node-0.4.0.tgz' | shasum -a 256 -c - &&
+npm install ./.epode/artifacts/agent-feedback-node-0.4.0.tgz &&
 npm install @modelcontextprotocol/server @modelcontextprotocol/node @modelcontextprotocol/express zod
 ```
 
@@ -41,7 +76,7 @@ fresh MCP server for each stateless HTTP request and instrument it **before** re
 import {
   createMcpInstrumentation,
   type McpInstrumentationContext,
-} from "@agent-feedback/node/mcp";
+} from "@epode/node/mcp";
 import {
   createMcpExpressApp,
   requireBearerAuth,

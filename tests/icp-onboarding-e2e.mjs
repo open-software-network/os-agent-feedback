@@ -179,8 +179,8 @@ async function prepareExample(name) {
   await cp(join(repo, "examples", name), target, { recursive: true });
   const manifestPath = join(target, "package.json");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-  manifest.dependencies["@agent-feedback/node"] =
-    process.env.ICP_LAB_NODE_SDK_SPEC || `${backendUrl}/static/agent-feedback-node-0.3.1.tgz`;
+  manifest.dependencies["@epode/node"] =
+    process.env.ICP_LAB_NODE_SDK_SPEC || `${backendUrl}/static/agent-feedback-node-0.4.0.tgz`;
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund"], {
     cwd: target,

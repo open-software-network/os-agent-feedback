@@ -72,19 +72,23 @@ use crate::{
     models::{
         CapabilityInspectionResponse, ClassificationDiscovery, ConsentDecisionInput,
         ConsentStateInput, ConsentStateResponse, CreateApiKeyInput, CreateProductInput,
-        CreateTeamInvitationInput, CurrentUser, DashboardContext, DashboardCustomerDetail,
-        DashboardCustomerFilters, DashboardCustomersPage, DashboardData, DashboardFeedbackFilters,
-        DashboardFeedbackPage, DashboardSessionDetail, DashboardSessionFilters,
-        DashboardSessionsPage, DashboardSignalFilters, DashboardSignalsPage, DeleteProductInput,
+        CreateTeamInvitationInput, CurrentUser, CustomerContextInput, CustomerContextResponse,
+        DashboardContext, DashboardCustomerDetail, DashboardCustomerFilters,
+        DashboardCustomersPage, DashboardData, DashboardFeedbackFilters, DashboardFeedbackPage,
+        DashboardSessionDetail, DashboardSessionFilters, DashboardSessionsPage,
+        DashboardSignalFilters, DashboardSignalsPage, DeleteProductInput, EnrichmentAnswerInput,
+        EnrichmentAnswerResponse, EnrichmentConsentDecisionInput,
+        EnrichmentConsentDecisionResponse, EnrichmentRequestInput, EnrichmentRequestResponse,
         FeedbackConsentDiscovery, FeedbackDiscoveryResponse, FeedbackFindingShapeDiscovery,
         FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackModesDiscovery,
         FeedbackRequiredFieldsDiscovery, FeedbackSubmissionDiscovery,
         FeedbackWorkaroundShapeDiscovery, GithubIssueLink, HealthResponse, IntegrationsDiscovery,
-        McpDiscovery, MergeReportGroupsInput, MergeReportGroupsResponse, PolicyInput, ProductAuth,
-        ProductFeedbackAcceptedResponse, ProductFeedbackReportInput, ProductGithubRepo,
-        ProductGithubRepoInput, ProductGroupsResponse, ReliabilityDiscovery, TelemetryBatchInput,
-        TelemetryBatchResult, TelemetryDiscovery, UpdateFeedbackWorkflowInput, UpdateNameInput,
-        UpdateTeamMemberInput,
+        McpDiscovery, MergeReportGroupsInput, MergeReportGroupsResponse,
+        PersonalizationDecisionInput, PersonalizationDecisionResponse, PersonalizationOutcomeInput,
+        PersonalizationOutcomeResponse, PolicyInput, ProductAuth, ProductFeedbackAcceptedResponse,
+        ProductFeedbackReportInput, ProductGithubRepo, ProductGithubRepoInput,
+        ProductGroupsResponse, ReliabilityDiscovery, TelemetryBatchInput, TelemetryBatchResult,
+        TelemetryDiscovery, UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput,
     },
     os_accounts::{
         ACCESS_COOKIE, OsAccountsClient, PKCE_COOKIE, REFRESH_COOKIE, STATE_COOKIE, TokenPair,
@@ -98,23 +102,25 @@ use crate::{
         backfill_customer_intelligence, backfill_report_groups, bump_last_commented_report_count,
         claim_group_issue_filing, claim_group_issue_reconciliation,
         claim_group_issue_state_refresh, clear_product_github_repo, complete_group_issue_filing,
-        complete_group_issue_reconciliation, create_api_key, create_product_with_default_key,
-        create_team_invitation, dashboard_customer_by_id, dashboard_customers_page,
-        dashboard_feedback_page, dashboard_interaction_by_id, dashboard_report_by_id,
-        dashboard_session_by_id, dashboard_sessions_page, dashboard_signals_page,
-        dashboard_with_limits, delete_product, feedback_consent_state, feedback_list_interactions,
-        feedback_list_reports, get_group_github_issue, get_or_create_workspace,
-        get_product_github_repo, github_installation_workspace, group_issue_context,
-        group_issue_sync_context, ingest_telemetry_batch, inspect_feedback_capability,
-        list_github_installations, list_product_groups, mark_group_issue_filing_for_reconciliation,
-        merge_report_groups, purge_expired_product_data, read_product_auth,
-        record_feedback_consent_decision, regroup_report_groups, release_group_issue_filing_claim,
-        release_group_issue_reconciliation_claim, remove_team_member, rename_product,
-        rename_workspace, resolve_workspace_access, revert_last_commented_report_count,
-        revoke_api_key, revoke_github_installation, revoke_team_invitation, rotate_api_key,
-        set_product_github_repo, submit_product_feedback, transfer_team_ownership,
-        update_feedback_workflow, update_group_issue_state, update_policy, update_team_member_role,
-        upsert_github_installation,
+        complete_group_issue_reconciliation, create_api_key, create_enrichment_request,
+        create_product_with_default_key, create_team_invitation, dashboard_customer_by_id,
+        dashboard_customers_page, dashboard_feedback_page, dashboard_interaction_by_id,
+        dashboard_report_by_id, dashboard_session_by_id, dashboard_sessions_page,
+        dashboard_signals_page, dashboard_with_limits, decide_enrichment_consent, delete_product,
+        feedback_consent_state, feedback_list_interactions, feedback_list_reports,
+        get_group_github_issue, get_or_create_workspace, get_product_github_repo,
+        github_installation_workspace, group_issue_context, group_issue_sync_context,
+        ingest_telemetry_batch, inspect_feedback_capability, list_github_installations,
+        list_product_groups, mark_group_issue_filing_for_reconciliation, merge_report_groups,
+        purge_expired_product_data, read_product_auth, record_feedback_consent_decision,
+        record_personalization_decision, record_personalization_outcome, regroup_report_groups,
+        release_group_issue_filing_claim, release_group_issue_reconciliation_claim,
+        remove_team_member, rename_product, rename_workspace, resolve_workspace_access,
+        retrieve_customer_context, revert_last_commented_report_count, revoke_api_key,
+        revoke_github_installation, revoke_team_invitation, rotate_api_key,
+        set_product_github_repo, submit_enrichment_answer, submit_product_feedback,
+        transfer_team_ownership, update_feedback_workflow, update_group_issue_state, update_policy,
+        update_team_member_role, upsert_github_installation,
     },
 };
 
@@ -262,6 +268,12 @@ fn build_app_router() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(capability_inspection_handler))
         .routes(routes!(consent_decision_handler))
         .routes(routes!(product_feedback_handler))
+        .routes(routes!(enrichment_request_handler))
+        .routes(routes!(enrichment_consent_decision_handler))
+        .routes(routes!(enrichment_answer_handler))
+        .routes(routes!(customer_context_handler))
+        .routes(routes!(personalization_decision_handler))
+        .routes(routes!(personalization_outcome_handler))
         .routes(routes!(mcp_info, mcp_handler))
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(cors)
@@ -786,21 +798,21 @@ fn feedback_discovery(public_base_url: &str) -> FeedbackDiscoveryResponse {
         },
         integrations: IntegrationsDiscovery {
             node: format!(
-                "{public_base_url}/static/agent-feedback-node-0.3.1.tgz"
+                "{public_base_url}/static/agent-feedback-node-0.4.0.tgz"
             ),
             python: format!(
-                "{public_base_url}/static/agent_feedback-0.3.1-py3-none-any.whl"
+                "{public_base_url}/static/agent_feedback-0.4.0-py3-none-any.whl"
             ),
-            go: format!("{public_base_url}/static/agent-feedback-go-0.3.1.tar.gz"),
+            go: format!("{public_base_url}/static/agent-feedback-go-0.4.0.tar.gz"),
             rust: format!(
-                "{public_base_url}/static/agent-feedback-rust-0.3.1.tar.gz"
+                "{public_base_url}/static/agent-feedback-rust-0.4.0.tar.gz"
             ),
             protocol: format!(
-                "{public_base_url}/static/agent-feedback-protocol-v1-0.3.1.zip"
+                "{public_base_url}/static/agent-feedback-protocol-v1-0.4.0.zip"
             ),
         },
         integrity_manifest: format!(
-            "{public_base_url}/static/agent-feedback-integrations-0.3.1.json"
+            "{public_base_url}/static/agent-feedback-integrations-0.4.0.json"
         ),
         reliability: ReliabilityDiscovery {
             http: "best effort for generic agents; deterministic with a feedback-aware runtime"
@@ -4118,6 +4130,225 @@ async fn product_feedback_handler(
 }
 
 #[utoipa::path(
+    post,
+    path = "/api/v2/enrichment/requests",
+    tag = "enrichment",
+    request_body = EnrichmentRequestInput,
+    responses(
+        (status = 200, description = "Question and permission action selected for the interaction", body = EnrichmentRequestResponse),
+        (status = 400, description = "Invalid purpose, operation, or identity context", body = ApiErrorEnvelope),
+        (status = 401, description = "Invalid product API key", body = ApiErrorEnvelope),
+        (status = 409, description = "Interaction or identity context conflicts", body = ApiErrorEnvelope),
+        (status = 500, description = "Enrichment request could not be created", body = ApiErrorEnvelope)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn enrichment_request_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(value): Json<Value>,
+) -> Result<Response, ApiError> {
+    let auth = agent_product_auth(&state.pool, &headers).await?;
+    let result = create_enrichment_request(
+        &state.pool,
+        &auth,
+        &state.identity_hmac_secret,
+        &state.public_base_url,
+        safe_input::<EnrichmentRequestInput>(value)?,
+    )
+    .await?;
+    let mut response = Json(result).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/enrichment/consent/decisions",
+    tag = "enrichment",
+    request_body = EnrichmentConsentDecisionInput,
+    responses(
+        (status = 200, description = "Enrichment permission decision recorded idempotently", body = EnrichmentConsentDecisionResponse),
+        (status = 400, description = "Invalid decision", body = ApiErrorEnvelope),
+        (status = 401, description = "Invalid or expired enrichment capability", body = ApiErrorEnvelope),
+        (status = 500, description = "Decision could not be stored", body = ApiErrorEnvelope)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn enrichment_consent_decision_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(value): Json<Value>,
+) -> Result<Response, ApiError> {
+    let capability = bearer_token(&headers)
+        .filter(|token| token.starts_with("aqr1_"))
+        .ok_or_else(ApiError::unauthorized)?;
+    let result = decide_enrichment_consent(
+        &state.pool,
+        &state.public_base_url,
+        &capability,
+        safe_input::<EnrichmentConsentDecisionInput>(value)?,
+    )
+    .await?;
+    let mut response = Json(result).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/enrichment/answers",
+    tag = "enrichment",
+    request_body = EnrichmentAnswerInput,
+    responses(
+        (status = 200, description = "Permissioned customer context accepted idempotently", body = EnrichmentAnswerResponse),
+        (status = 400, description = "Invalid, sensitive, or unbounded customer context", body = ApiErrorEnvelope),
+        (status = 401, description = "Invalid or expired enrichment capability", body = ApiErrorEnvelope),
+        (status = 403, description = "Customer context sharing is not approved", body = ApiErrorEnvelope),
+        (status = 409, description = "Request already has a different answer", body = ApiErrorEnvelope),
+        (status = 500, description = "Answer could not be stored", body = ApiErrorEnvelope)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn enrichment_answer_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(value): Json<Value>,
+) -> Result<Response, ApiError> {
+    let capability = bearer_token(&headers)
+        .filter(|token| token.starts_with("aqr1_"))
+        .ok_or_else(ApiError::unauthorized)?;
+    let result = submit_enrichment_answer(
+        &state.pool,
+        &capability,
+        safe_input::<EnrichmentAnswerInput>(value)?,
+    )
+    .await?;
+    let mut response = Json(result).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/customer-context",
+    tag = "personalization",
+    request_body = CustomerContextInput,
+    responses(
+        (status = 200, description = "Active permissioned context for a known, anonymous, or ephemeral customer", body = CustomerContextResponse),
+        (status = 400, description = "Invalid identity or purpose", body = ApiErrorEnvelope),
+        (status = 401, description = "Invalid product API key", body = ApiErrorEnvelope),
+        (status = 404, description = "Customer or interaction context not found", body = ApiErrorEnvelope),
+        (status = 409, description = "Identity references conflict", body = ApiErrorEnvelope),
+        (status = 500, description = "Customer context could not be retrieved", body = ApiErrorEnvelope)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn customer_context_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(value): Json<Value>,
+) -> Result<Response, ApiError> {
+    let auth = agent_product_auth(&state.pool, &headers).await?;
+    let result = retrieve_customer_context(
+        &state.pool,
+        &auth,
+        &state.identity_hmac_secret,
+        safe_input::<CustomerContextInput>(value)?,
+    )
+    .await?;
+    let mut response = Json(result).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/personalization/decisions",
+    tag = "personalization",
+    request_body = PersonalizationDecisionInput,
+    responses(
+        (status = 200, description = "Personalization decision linked to exact retrieved signal evidence", body = PersonalizationDecisionResponse),
+        (status = 400, description = "Invalid decision or evidence", body = ApiErrorEnvelope),
+        (status = 401, description = "Invalid product API key", body = ApiErrorEnvelope),
+        (status = 404, description = "Context retrieval not found", body = ApiErrorEnvelope),
+        (status = 409, description = "Idempotency key has a different payload", body = ApiErrorEnvelope),
+        (status = 500, description = "Decision could not be stored", body = ApiErrorEnvelope)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn personalization_decision_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(value): Json<Value>,
+) -> Result<Response, ApiError> {
+    let auth = agent_product_auth(&state.pool, &headers).await?;
+    let mut response = Json(
+        record_personalization_decision(
+            &state.pool,
+            &auth,
+            safe_input::<PersonalizationDecisionInput>(value)?,
+        )
+        .await?,
+    )
+    .into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/personalization/outcomes",
+    tag = "personalization",
+    request_body = PersonalizationOutcomeInput,
+    responses(
+        (status = 200, description = "Business outcome linked to an exact personalization decision", body = PersonalizationOutcomeResponse),
+        (status = 400, description = "Invalid outcome", body = ApiErrorEnvelope),
+        (status = 401, description = "Invalid product API key", body = ApiErrorEnvelope),
+        (status = 404, description = "Personalization decision not found", body = ApiErrorEnvelope),
+        (status = 409, description = "Idempotency key has a different payload", body = ApiErrorEnvelope),
+        (status = 500, description = "Outcome could not be stored", body = ApiErrorEnvelope)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn personalization_outcome_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(value): Json<Value>,
+) -> Result<Response, ApiError> {
+    let auth = agent_product_auth(&state.pool, &headers).await?;
+    let mut response = Json(
+        record_personalization_outcome(
+            &state.pool,
+            &auth,
+            safe_input::<PersonalizationOutcomeInput>(value)?,
+        )
+        .await?,
+    )
+    .into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
+}
+
+#[utoipa::path(
     get,
     path = "/mcp",
     tag = "mcp",
@@ -4910,13 +5141,13 @@ mod page_tests {
                 "legacyCompatibility": ["2025-11-25"]
             },
             "integrations": {
-                "node": "https://epode.test/static/agent-feedback-node-0.3.1.tgz",
-                "python": "https://epode.test/static/agent_feedback-0.3.1-py3-none-any.whl",
-                "go": "https://epode.test/static/agent-feedback-go-0.3.1.tar.gz",
-                "rust": "https://epode.test/static/agent-feedback-rust-0.3.1.tar.gz",
-                "protocol": "https://epode.test/static/agent-feedback-protocol-v1-0.3.1.zip"
+                "node": "https://epode.test/static/agent-feedback-node-0.4.0.tgz",
+                "python": "https://epode.test/static/agent_feedback-0.4.0-py3-none-any.whl",
+                "go": "https://epode.test/static/agent-feedback-go-0.4.0.tar.gz",
+                "rust": "https://epode.test/static/agent-feedback-rust-0.4.0.tar.gz",
+                "protocol": "https://epode.test/static/agent-feedback-protocol-v1-0.4.0.zip"
             },
-            "integrityManifest": "https://epode.test/static/agent-feedback-integrations-0.3.1.json",
+            "integrityManifest": "https://epode.test/static/agent-feedback-integrations-0.4.0.json",
             "reliability": {
                 "http": "best effort for generic agents; deterministic with a feedback-aware runtime",
                 "mcp": "protocol-backed explicit feedback tool"

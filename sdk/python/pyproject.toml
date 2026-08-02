@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-feedback"
-version = "0.3.1"
-description = "Protocol-first Agent Feedback middleware for Python web products."
+version = "0.4.0"
+description = "Epode customer-enrichment and agent-feedback SDK for Python products."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

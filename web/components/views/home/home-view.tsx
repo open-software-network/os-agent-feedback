@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { IconArrowUpRight } from "central-icons/IconArrowUpRight";
 import type { ReactNode } from "react";
 
-import { IdentityBadge, OutcomeHealth } from "@/components/dashboard/intelligence-badges";
+import { IdentityBadge, ProvenanceBadge } from "@/components/dashboard/intelligence-badges";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -15,18 +15,25 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  type FeatureSummary,
+  type CustomerSignal,
   fetchCustomersPage,
-  fetchFeaturesPage,
+  fetchSignalsPage,
 } from "@/lib/api/customer-intelligence";
 import type { DashboardData } from "@/lib/api/dashboard";
 import { isEditor, relativeDate, titleCase } from "@/lib/dashboard/format";
 
+type EnrichmentInsights = {
+  customerContextItems: number;
+  customersWithContext: number;
+  contextRetrievals: number;
+  personalizationReadyCustomers: number;
+  personalizationDecisions: number;
+  personalizationOutcomes: number;
+};
+
 export function HomeView({
   data,
   openCustomer = () => undefined,
-  openFeature = () => undefined,
-  openFeedback,
   refresh,
 }: {
   data: DashboardData;
@@ -37,168 +44,161 @@ export function HomeView({
 }) {
   const productId = data.currentProduct?.id;
   const customers = useQuery({
-    queryKey: ["home-customers", data.workspace.id, productId],
+    queryKey: ["insights-customers", data.workspace.id, productId],
     queryFn: () => fetchCustomersPage(data.workspace.id, { productId: productId ?? "", limit: 8 }),
     enabled: Boolean(productId),
   });
-  const features = useQuery({
-    queryKey: ["home-features", data.workspace.id, productId],
-    queryFn: () => fetchFeaturesPage(data.workspace.id, { productId: productId ?? "", limit: 8 }),
+  const context = useQuery({
+    queryKey: ["insights-context", data.workspace.id, productId],
+    queryFn: () =>
+      fetchSignalsPage(data.workspace.id, {
+        productId: productId ?? "",
+        type: ["intent", "preference", "constraint"],
+        limit: 100,
+      }),
     enabled: Boolean(productId),
   });
-  const customerPage = customers.data;
-  const featurePage = features.data;
-  const featureItems = Array.isArray(featurePage?.features) ? featurePage.features : [];
-  const customerItems = Array.isArray(customerPage?.customers) ? customerPage.customers : [];
-  const leadingFeature = featureItems[0];
-  const needsSetup = data.insights.opportunities === 0 && isEditor(data.currentRole);
-  const recentReports = data.reports.slice(0, 5);
-  const outcomeReports = data.insights.reports;
-  const helpedReports = data.insights.impacts
-    .filter((impact) => impact.name === "helped" || impact.name === "healthy")
-    .reduce((total, impact) => total + impact.count, 0);
-  const outcomeSuccessRate = outcomeReports
-    ? Math.round((helpedReports / outcomeReports) * 100)
-    : null;
 
-  async function refreshHome() {
-    await Promise.all([refresh(), customers.refetch(), features.refetch()]);
+  const customerPage = customers.data;
+  const customerItems = Array.isArray(customerPage?.customers) ? customerPage.customers : [];
+  const contextItems = (Array.isArray(context.data?.signals) ? context.data.signals : []).filter(
+    isAvailableContext,
+  );
+  const insights = data.insights as typeof data.insights & Partial<EnrichmentInsights>;
+  const customersWithContext = insights.customersWithContext ?? 0;
+  const contextLearned = insights.customerContextItems ?? 0;
+  const personalizationReady = insights.personalizationReadyCustomers ?? 0;
+  const retrievals = insights.contextRetrievals ?? 0;
+  const decisions = insights.personalizationDecisions ?? 0;
+  const outcomes = insights.personalizationOutcomes ?? 0;
+  const common = commonContext(contextItems);
+  const needsSetup = data.insights.opportunities === 0 && isEditor(data.currentRole);
+
+  async function refreshInsights() {
+    await Promise.all([refresh(), customers.refetch(), context.refetch()]);
   }
 
   return (
     <div className="mx-auto grid max-w-6xl gap-5">
-      <section aria-labelledby="customer-readout-title" className="border bg-background">
+      <section aria-labelledby="insights-readout-title" className="border bg-background">
         <div className="grid lg:grid-cols-[minmax(0,1fr)_22rem]">
           <div className="p-5 md:p-6">
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <span aria-hidden="true" className="size-1.5 bg-attention" />
-                Customer intelligence · last {data.insights.windowDays} days
+                Customer context · last {data.insights.windowDays} days
               </div>
-              <Button variant="ghost" size="sm" onClick={() => void refreshHome()}>
+              <Button variant="ghost" size="sm" onClick={() => void refreshInsights()}>
                 Refresh
               </Button>
             </div>
-            <h2 id="customer-readout-title" className="mt-4 max-w-2xl text-2xl font-medium">
-              {readoutHeadline(leadingFeature, customerPage?.rollup?.atRisk ?? 0, data)}
+            <h2 id="insights-readout-title" className="mt-4 max-w-2xl text-2xl font-medium">
+              {contextLearned
+                ? `Epode learned ${contextLearned.toLocaleString()} useful context ${contextLearned === 1 ? "item" : "items"}.`
+                : "Connect your product to start learning what customers want."}
             </h2>
             <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">
-              {readoutDetail(leadingFeature, customerPage?.rollup?.atRisk ?? 0, data)}
+              Known and anonymous customer profiles are included. Context without a stable company
+              reference stays interaction-only evidence. Every item preserves its source,
+              permission, confidence, and expiration before it can be used for personalization.
             </p>
             <div className="mt-6 flex flex-wrap gap-2">
               {needsSetup ? (
                 <Button onClick={() => navigateToDashboardView("setup")}>Finish setup</Button>
-              ) : null}
-              {leadingFeature ? (
-                <Button variant="outline" onClick={() => openFeature(leadingFeature.key)}>
-                  Review evidence
-                  <IconArrowUpRight data-icon="inline-end" />
-                </Button>
               ) : (
-                <Button variant="outline" onClick={() => navigateToDashboardView("features")}>
-                  Explore features
+                <Button onClick={() => navigateToDashboardView("customers")}>
+                  View customers
                   <IconArrowUpRight data-icon="inline-end" />
                 </Button>
               )}
+              <Button variant="outline" onClick={() => navigateToDashboardView("setup")}>
+                Retrieve context
+              </Button>
             </div>
           </div>
           <div className="border-t p-5 lg:border-t-0 lg:border-l">
-            <h3 className="text-sm font-medium">Evidence coverage</h3>
+            <h3 className="text-sm font-medium">Identity coverage</h3>
             <p className="mt-1 text-xs text-muted-foreground">
-              Collection health, not a claim about customer identity
+              Authentication is optional; identity is never invented.
             </p>
             <dl className="mt-4 grid gap-3 text-xs">
-              <CompactMetric label="Opportunities" value={data.insights.opportunities} />
+              <CompactMetric label="Known" value={customerPage?.rollup?.verified ?? 0} />
+              <CompactMetric label="Anonymous" value={customerPage?.rollup?.pseudonymous ?? 0} />
               <CompactMetric
-                label="Confirmed interactions"
-                value={data.insights.confirmedInteractions}
+                label="Unresolved interactions"
+                value={customerPage?.rollup?.unclassified ?? 0}
               />
-              <CompactMetric label="Outcome reports" value={data.insights.reports} />
-              <CompactMetric label="Review coverage" value={`${data.insights.reviewRate}%`} />
             </dl>
           </div>
         </div>
       </section>
 
-      <section aria-labelledby="customer-health-title" className="border bg-background">
-        <SectionHeader id="customer-health-title" title="Customer health" />
-        <dl className="grid sm:grid-cols-2 lg:grid-cols-4 lg:divide-x">
+      <section aria-labelledby="context-health-title" className="border bg-background">
+        <SectionHeader id="context-health-title" title="Customer understanding" />
+        <dl className="grid sm:grid-cols-2 lg:grid-cols-3">
           <Metric
-            label="Customers observed"
-            value={customerPage?.rollup?.customers ?? 0}
-            detail="Known and anonymous actors"
+            label="Customers with context"
+            value={customersWithContext}
+            detail="Known or anonymous profiles with usable context"
           />
           <Metric
-            label="Verified customers"
-            value={customerPage?.rollup?.verified ?? 0}
-            detail="Company-authorized identity"
+            label="Context learned"
+            value={contextLearned}
+            detail={`Active intent, preference, and constraint ${contextLearned === 1 ? "item" : "items"}`}
           />
           <Metric
-            label="At risk"
-            value={customerPage?.rollup?.atRisk ?? 0}
-            detail="Blocked or hindered outcomes"
+            label="Personalization-ready"
+            value={personalizationReady}
+            detail="Customers with active permissioned context"
           />
           <Metric
-            label="Outcome success"
-            value={outcomeSuccessRate === null ? "—" : `${outcomeSuccessRate}%`}
-            detail="Helped outcomes among reports"
+            label="Context retrievals"
+            value={retrievals}
+            detail="Server-side personalization requests"
+          />
+          <Metric
+            label="Personalization decisions"
+            value={decisions}
+            detail="Responses adapted using returned customer context"
+          />
+          <Metric
+            label="Measured outcomes"
+            value={outcomes}
+            detail="Personalized decisions linked to subsequent outcomes"
           />
         </dl>
       </section>
 
-      <section aria-labelledby="needs-title" className="border bg-background">
+      <section aria-labelledby="common-context-title" className="border bg-background">
         <SectionHeader
-          id="needs-title"
-          title="Needs and opportunities"
-          description="Ranked by affected customers and linked evidence"
-          action={
-            <Button variant="ghost" size="sm" onClick={() => navigateToDashboardView("features")}>
-              View all features
-              <IconArrowUpRight data-icon="inline-end" />
-            </Button>
-          }
+          id="common-context-title"
+          title="What customers care about"
+          description="Common context Epode can make available for personalization"
         />
-        {features.isError ? (
+        {context.isError ? (
           <p className="px-4 py-6 text-sm text-destructive" role="alert">
-            Feature intelligence could not be loaded.
+            Customer context could not be loaded.
           </p>
-        ) : features.isPending ? (
-          <p className="px-4 py-6 text-sm text-muted-foreground">Loading customer needs…</p>
-        ) : featureItems.length ? (
-          <Table className="min-w-[720px]">
+        ) : context.isPending ? (
+          <p className="px-4 py-6 text-sm text-muted-foreground">Loading customer context…</p>
+        ) : common.length ? (
+          <Table className="min-w-[680px]">
             <TableHeader>
               <TableRow className="hover:bg-transparent">
-                <TableHead className="pl-4">Need or opportunity</TableHead>
+                <TableHead className="pl-4">Context</TableHead>
+                <TableHead>Type</TableHead>
                 <TableHead>Customers</TableHead>
-                <TableHead>Evidence</TableHead>
-                <TableHead>Impact</TableHead>
-                <TableHead className="pr-4 text-right">Change</TableHead>
+                <TableHead className="pr-4">Strongest source</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {featureItems.slice(0, 6).map((feature) => (
-                <TableRow key={feature.key}>
-                  <TableCell className="max-w-lg pl-4">
-                    <Button
-                      variant="link"
-                      className="h-auto justify-start whitespace-normal p-0 text-left"
-                      onClick={() => openFeature(feature.key)}
-                    >
-                      {feature.title}
-                    </Button>
-                    <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">
-                      {feature.summary}
-                    </p>
-                  </TableCell>
-                  <TableCell>{feature.affectedCustomerCount}</TableCell>
-                  <TableCell>{feature.evidenceCount}</TableCell>
-                  <TableCell>
-                    <OutcomeHealth value={feature.strongestImpact} />
-                  </TableCell>
-                  <TableCell className="pr-4 text-right text-muted-foreground">
-                    {feature.trend === null
-                      ? "—"
-                      : `${feature.trend > 0 ? "+" : ""}${feature.trend}%`}
+              {common.slice(0, 8).map((item) => (
+                <TableRow key={`${item.type}-${item.summary}`}>
+                  <TableCell className="max-w-xl pl-4 font-medium">{item.summary}</TableCell>
+                  <TableCell>{titleCase(item.type)}</TableCell>
+                  <TableCell>{item.customers}</TableCell>
+                  <TableCell className="pr-4">
+                    <ProvenanceBadge provenance={item.provenance} />
                   </TableCell>
                 </TableRow>
               ))}
@@ -206,16 +206,16 @@ export function HomeView({
           </Table>
         ) : (
           <p className="px-4 py-8 text-sm text-muted-foreground">
-            No evidence-backed customer needs yet.
+            No permissioned intent, preference, or constraint context yet.
           </p>
         )}
       </section>
 
-      <section aria-labelledby="customers-title" className="border bg-background">
+      <section aria-labelledby="recent-context-title" className="border bg-background">
         <SectionHeader
-          id="customers-title"
-          title="Customers requiring attention"
-          description="Identity level and outcome health stay explicitly separate"
+          id="recent-context-title"
+          title="Recently understood customers"
+          description="Known and anonymous profiles with recent evidence"
           action={
             <Button variant="ghost" size="sm" onClick={() => navigateToDashboardView("customers")}>
               View all customers
@@ -225,23 +225,22 @@ export function HomeView({
         />
         {customers.isError ? (
           <p className="px-4 py-6 text-sm text-destructive" role="alert">
-            Customer intelligence could not be loaded.
+            Customers could not be loaded.
           </p>
         ) : customers.isPending ? (
           <p className="px-4 py-6 text-sm text-muted-foreground">Loading customers…</p>
         ) : customerItems.length ? (
-          <Table className="min-w-[680px]">
+          <Table className="min-w-[660px]">
             <TableHeader>
               <TableRow className="hover:bg-transparent">
                 <TableHead className="pl-4">Customer</TableHead>
-                <TableHead>Identity</TableHead>
-                <TableHead>Outcome</TableHead>
-                <TableHead>Needs</TableHead>
-                <TableHead className="pr-4 text-right">Last active</TableHead>
+                <TableHead>Type</TableHead>
+                <TableHead>Context</TableHead>
+                <TableHead className="pr-4 text-right">Updated</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {customerItems.slice(0, 6).map((customer) => (
+              {customerItems.slice(0, 8).map((customer) => (
                 <TableRow key={customer.id}>
                   <TableCell className="pl-4">
                     <Button
@@ -255,10 +254,7 @@ export function HomeView({
                   <TableCell>
                     <IdentityBadge level={customer.identityLevel} />
                   </TableCell>
-                  <TableCell>
-                    <OutcomeHealth value={customer.outcomeHealth} />
-                  </TableCell>
-                  <TableCell>{customer.activeNeedCount}</TableCell>
+                  <TableCell>{customer.contextCount ?? customer.signalCount} active</TableCell>
                   <TableCell className="pr-4 text-right text-muted-foreground">
                     {relativeDate(customer.lastActivityAt)}
                   </TableCell>
@@ -267,53 +263,45 @@ export function HomeView({
             </TableBody>
           </Table>
         ) : (
-          <p className="px-4 py-8 text-sm text-muted-foreground">No customers observed yet.</p>
-        )}
-      </section>
-
-      <section aria-labelledby="recent-evidence-title" className="border bg-background">
-        <SectionHeader
-          id="recent-evidence-title"
-          title="Recent outcome evidence"
-          description="Feedback remains evidence throughout the product"
-        />
-        {recentReports.length ? (
-          <Table className="min-w-[680px]">
-            <TableHeader>
-              <TableRow className="hover:bg-transparent">
-                <TableHead className="pl-4">Summary</TableHead>
-                <TableHead>Impact</TableHead>
-                <TableHead>Operation</TableHead>
-                <TableHead className="pr-4 text-right">When</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {recentReports.map((report) => (
-                <TableRow key={report.id}>
-                  <TableCell className="max-w-md pl-4">
-                    <Button
-                      variant="link"
-                      className="h-auto justify-start whitespace-normal p-0 text-left"
-                      onClick={() => openFeedback(report.id)}
-                    >
-                      {report.summary}
-                    </Button>
-                  </TableCell>
-                  <TableCell>{titleCase(report.impact ?? "unknown")}</TableCell>
-                  <TableCell className="font-mono text-xs">{report.operation}</TableCell>
-                  <TableCell className="pr-4 text-right text-muted-foreground">
-                    {relativeDate(report.occurredAt)}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        ) : (
-          <p className="px-4 py-8 text-sm text-muted-foreground">No outcome evidence yet.</p>
+          <p className="px-4 py-8 text-sm text-muted-foreground">No customers understood yet.</p>
         )}
       </section>
     </div>
   );
+}
+
+function commonContext(signals: CustomerSignal[]) {
+  const buckets = new Map<
+    string,
+    {
+      type: string;
+      summary: string;
+      customers: number;
+      provenance: string;
+      customerIds: Set<string>;
+    }
+  >();
+  for (const signal of signals) {
+    const key = `${signal.type}:${signal.summary.trim().toLowerCase()}`;
+    const bucket = buckets.get(key) ?? {
+      type: signal.type,
+      summary: signal.summary,
+      customers: 0,
+      provenance: signal.provenance,
+      customerIds: new Set<string>(),
+    };
+    if (signal.customerId) bucket.customerIds.add(signal.customerId);
+    bucket.customers = bucket.customerIds.size || bucket.customers + 1;
+    if (signal.provenance !== "agent_inference") bucket.provenance = signal.provenance;
+    buckets.set(key, bucket);
+  }
+  return [...buckets.values()].sort((a, b) => b.customers - a.customers);
+}
+
+function isAvailableContext(signal: CustomerSignal) {
+  if (signal.provenance === "agent_inference") return false;
+  if (!signal.allowedUses.length || signal.consentState !== "approved") return false;
+  return !signal.expiresAt || new Date(signal.expiresAt).getTime() > Date.now();
 }
 
 function SectionHeader({
@@ -359,27 +347,7 @@ function CompactMetric({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-function readoutHeadline(feature: FeatureSummary | undefined, atRisk: number, data: DashboardData) {
-  if (feature) return `${feature.title} is the leading customer need.`;
-  if (atRisk > 0)
-    return `${atRisk} ${atRisk === 1 ? "customer needs" : "customers need"} attention.`;
-  if (data.insights.confirmedInteractions > 0)
-    return "Customer activity is arriving without enough semantic evidence yet.";
-  return "No customer intelligence has been collected yet.";
-}
-
-function readoutDetail(feature: FeatureSummary | undefined, atRisk: number, data: DashboardData) {
-  if (feature) {
-    return `${feature.affectedCustomerCount} customers are affected across ${feature.evidenceCount} evidence items. Open the feature to inspect the exact signals and journeys behind this result.`;
-  }
-  if (atRisk > 0) return "Review the exact outcomes, needs, and sessions behind the at-risk group.";
-  if (data.insights.confirmedInteractions > 0) {
-    return "Confirmed product use exists, but customer intent and outcome reports are still sparse.";
-  }
-  return "Finish setup and send a product request to begin collecting permissioned evidence.";
-}
-
-type VisibleDashboardView = "customers" | "features" | "sessions" | "setup";
+type VisibleDashboardView = "customers" | "setup";
 
 function navigateToDashboardView(view: VisibleDashboardView) {
   const url = new URL(window.location.href);

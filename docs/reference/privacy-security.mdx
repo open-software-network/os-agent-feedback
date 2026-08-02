@@ -1,6 +1,6 @@
 ---
 title: "Privacy and security"
-description: "Keep product keys private and feedback reports intentionally bounded."
+description: "Keep product keys private and customer context purpose-bound, permissioned, and auditable."
 ---
 
 ## Never submit
@@ -13,12 +13,25 @@ description: "Keep product keys private and feedback reports intentionally bound
 - full product responses;
 - unknown report fields.
 
+Customer enrichment accepts only bounded intent, preference, constraint, and interest items. Every item has an
+explicit provenance. Do not request or infer sensitive characteristics, and never treat
+`agent_reports_user_statement`, `agent_reports_current_task`, and `agent_inference` as equivalent evidence.
+
+## Purpose separation
+
+`product_personalization` and `targeted_advertising` are separate permission scopes. Approval, retrieval, and
+decision evidence for one cannot be reused for the other. A company must request advertising permission
+explicitly; generic personalization consent is insufficient.
+
+The company may request durable memory, but the customer can approve sharing without approving memory. Revoked,
+declined, expired, and wrong-purpose items are omitted from customer-context retrieval immediately.
+
 Epode rejects unknown fields and common sensitive patterns recursively. Your product and the submitting runtime are
 still responsible for keeping sensitive material out of summaries and finding details.
 
 ## Product key
 
-The `af_live_...` key belongs only in trusted server configuration. SDKs derive a signing key with SHA-256 and use
+The `af_live_...` key is configured as `EPODE_API_KEY` and belongs only in trusted server configuration. SDKs derive a signing key with SHA-256 and use
 it to create a scoped `afr2_...` capability locally. A capability never contains the raw customer reference,
 product response, prompt, or personal identity. Ask-once capabilities do contain a public key ID, a
 pseudonymous HMAC-derived consent subject, and a non-negative consent revision so Epode can remember
@@ -28,6 +41,9 @@ Setup shows a newly created or rotated key only for the current page load and do
 browser storage. Move it directly into a deployment secret manager. Never paste it into shell history, CI output,
 a committed `.env` file, browser or mobile code, an MCP client, a product-auth header, or a support message. If the
 value is lost, rotate it; Epode cannot reveal it again.
+
+The company-owned enrichment relay never forwards this key. It accepts only an `aqr1_` request handle and the
+allowlisted consent or answer body, then forwards them to fixed Epode endpoints without redirects.
 
 ## Data retention
 

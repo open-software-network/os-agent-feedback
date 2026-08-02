@@ -1,48 +1,47 @@
 ---
 title: "How Epode works"
-description: "The company-side integration, customer-agent handoff, and feedback path."
+description: "The company-side ask, learn, personalize, and measure loop."
 ---
 
-Epode has two participants with different responsibilities:
+Epode runs at the company layer. The customer does not install Epode or create an account.
 
-| Participant | Responsibility |
-| --- | --- |
-| Your company | Adds the server-side SDK to selected product responses and keeps the product key secret |
-| Your customer's agent | Uses the product, interprets the bounded feedback contract, and may submit one report |
-
-The SDK signs a capability locally. It does **not** call Epode before returning your product response.
-Opportunity telemetry is delivered later through a bounded background queue.
-
-## What the capability can do
-
-The short-lived capability can submit one report for one interaction. Every capability contains a
-protocol version, public key ID, interaction ID, issue/expiry timestamps, and nonce. Ask-once adds a
-pseudonymous HMAC-derived consent subject. It never contains the raw customer reference, product
-content, a prompt, or a personal identity.
-
-## What a report contains
-
-```json
-{
-  "summary": "The result answered the question, but one field required verification.",
-  "impact": "helped_with_friction",
-  "confidence": 0.91,
-  "findings": [
-    { "kind": "strength", "topic": "relevance", "detail": "The top result was useful." },
-    { "kind": "gap", "topic": "freshness", "severity": "major", "detail": "One field was stale." }
-  ],
-  "workaround": { "used": true, "detail": "The agent verified the field in current docs." }
-}
+```text
+Customer agent → Company API / website / MCP → Epode company integration
+                                                ↓
+                                      permitted customer context
+                                                ↓
+                                personalized company response + outcome
 ```
 
-This is intentionally more expressive than success/partial/failure. One experience can contain a
-strength, friction, uncertainty, gap, and workaround at the same time.
+## Ask
 
-## Failure isolation
+The company integration requests useful context for one selected product interaction. Epode returns a bounded
+question/action tied to that interaction, identity state, use purpose, and expiry. HTTP agents answer through the
+company's same-origin relay; MCP agents call tools registered by the company's own MCP server.
 
-If Epode is slow or unavailable:
+The company middleware waits only for this selected enrichment lookup, bounded by `timeoutMs` (250 ms by
+default). An Epode timeout or outage removes the optional question and returns the normal product response
+unchanged.
 
-- your product response is not delayed or failed;
-- queued opportunity telemetry may be retried or dropped;
-- a feedback submission receives a retryable failure;
-- no prompt, transcript, credential, or raw product payload is sent as telemetry.
+## Learn
+
+An accepted answer becomes typed customer context with provenance and consent. Epode stores only the bounded
+answer items—not the prompt, transcript, product response, or agent identity.
+
+## Personalize
+
+The company's server calls `context.get` with its own opaque identity references and one exact purpose. The result
+contains only active signals permitted for that purpose. Ephemeral context can be retrieved only for the same
+interaction.
+
+The company records which returned signal IDs affected a real decision. This prevents vague attribution.
+
+## Measure
+
+The company reports a conversion, completion, engagement, dismissal, or abandonment linked to that decision.
+Identical retries are idempotent; conflicting retries fail closed.
+
+## Existing outcome feedback
+
+Structured product feedback remains supported and supplies useful outcome/friction evidence. It is no longer the
+primary onboarding path. Customer enrichment is the product loop; outcome feedback is one evidence source.

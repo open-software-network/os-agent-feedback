@@ -3,10 +3,69 @@ title: "Node + Express"
 description: "Instrument selected Express JSON and HTML responses with one global middleware."
 ---
 
+## Customer enrichment (recommended)
+
+```bash
+npm install @epode/node express
+```
+
+```ts
+import { epode } from "@epode/node/express";
+
+app.use(express.json());
+app.use(issueOrVerifyFirstPartyVisitor);
+
+const customer = epode({
+  apiKey: process.env.EPODE_API_KEY,
+  include: ["/api/recommendations"],
+  purpose: "product_personalization",
+  authenticate: authenticateProductRequest,
+  identify: req => ({
+    accountRef: req.user?.accountId,
+    userRef: req.user?.id,
+    anonymousRef: req.firstPartyVisitorId,
+  }),
+  sessionRef: req => req.productJourney?.id,
+  runtimeHint: req => req.verifiedAgentRuntime,
+});
+app.use(customer);
+```
+
+This one middleware instruments eligible JSON and server-rendered HTML responses and mounts the company-owned
+same-origin consent and answer relay. The customer installs nothing. Epode failures preserve the original
+response. Use `customer.context.get`, `customer.personalization.decide`, and `customer.outcomes.track` as shown
+in the [quickstart](/quickstart).
+
+The same enrichment request records the final HTTP status, product-handler duration, optional product-issued
+journey, and optional bounded runtime label. Never populate `sessionRef` or `runtimeHint` from query parameters,
+agent input, or other unverified values.
+
+The selected response waits at most `timeoutMs` (250 ms by default) for the enrichment request. A timeout or
+failure returns the original JSON unchanged. For routes without a stable company identity, use
+`customer.contextFor(request)`; it validates the agent-returned `Epode-Context-Interaction` header so context is
+available only on the immediate retry of the same interaction.
+
+`authenticate` runs only on included business routes. The adapter bypasses it only for the exact POST relay
+paths, which authenticate with their short-lived `aqr1_` capability. Do not mount rejecting global product auth
+above the Epode middleware.
+
+## Server-rendered HTML
+
+Bounded successful HTML strings on included routes receive a non-executable
+`<meta name="epode-customer-context">` marker containing base64url JSON. This preserves the page's CSP and visible
+content. Streams, buffers, documents over `maxHtmlBytes` (512 KiB by default), and pages that already own the
+marker remain unchanged. Mutated pages become `private, no-store`; stale length, digest, and ETag headers are
+removed or regenerated.
+
+[Run the anonymous-to-known retail example](https://github.com/open-software-network/os-epode/tree/main/examples/mvp-retail-express) ·
+[Run the anonymous advertising example](https://github.com/open-software-network/os-epode/tree/main/examples/mvp-anonymous-express)
+
+## Legacy structured outcome feedback
+
 ## Install
 
 ```bash
-npm install https://app.epode.ai/static/agent-feedback-node-0.3.1.tgz express
+npm install https://app.epode.ai/static/agent-feedback-node-0.4.0.tgz express
 ```
 
 Node 20 or newer is required.
@@ -18,7 +77,7 @@ included route handlers. Identity accessors only read state your product already
 
 ```ts
 import express from "express";
-import { agentFeedback } from "@agent-feedback/node/express";
+import { agentFeedback } from "@epode/node/express";
 
 const app = express();
 

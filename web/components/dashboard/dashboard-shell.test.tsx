@@ -5,11 +5,11 @@ import { dashboardFixture } from "@/components/dashboard/test-fixture";
 import { DashboardShell } from "./dashboard-shell";
 
 describe("DashboardShell", () => {
-  it("uses the customer-intelligence navigation without a standalone feedback tab", () => {
+  it("uses the thin customer-enrichment navigation", () => {
     render(
       <DashboardShell
         data={dashboardFixture()}
-        view="home"
+        view="insights"
         onNavigate={vi.fn()}
         onWorkspaceChange={vi.fn()}
         onProductChange={vi.fn()}
@@ -19,9 +19,11 @@ describe("DashboardShell", () => {
       </DashboardShell>,
     );
 
-    const labels = ["Home", "Customers", "Features", "Sessions", "Configuration"];
+    const labels = ["Customers", "Insights", "Setup", "Data controls"];
     for (const label of labels) expect(screen.getByRole("button", { name: label })).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Feedback" })).not.toBeInTheDocument();
+    for (const hidden of ["Home", "Features", "Sessions", "Feedback", "Interactions"]) {
+      expect(screen.queryByRole("button", { name: hidden })).not.toBeInTheDocument();
+    }
   });
 
   it("offers product creation from the context switcher even with one product", async () => {
@@ -30,7 +32,7 @@ describe("DashboardShell", () => {
     render(
       <DashboardShell
         data={data}
-        view="home"
+        view="insights"
         onNavigate={onNavigate}
         onWorkspaceChange={vi.fn()}
         onProductChange={vi.fn()}
@@ -55,7 +57,7 @@ describe("DashboardShell", () => {
     render(
       <DashboardShell
         data={data}
-        view="home"
+        view="insights"
         onNavigate={vi.fn()}
         onWorkspaceChange={vi.fn()}
         onProductChange={vi.fn()}

@@ -14,6 +14,9 @@ import {
   requestDiscoveryLink,
 } from "./core.js";
 
+export type { EpodeFastify, EpodeFastifyOptions } from "./customer-fastify.js";
+export { epode } from "./customer-fastify.js";
+
 type RequestState = {
   started: number;
   prepared?: PreparedInteraction;

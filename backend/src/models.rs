@@ -697,6 +697,253 @@ pub(crate) struct InteractionTelemetryInput {
     pub occurred_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct EnrichmentRequestInput {
+    pub interaction_id: Uuid,
+    pub operation: String,
+    #[serde(default = "default_enrichment_surface")]
+    #[schema(default = "http_json")]
+    pub surface: String,
+    pub status_code: Option<i32>,
+    pub duration_ms: Option<i64>,
+    pub session_ref: Option<String>,
+    pub runtime_hint: Option<String>,
+    pub purpose: String,
+    pub remember: bool,
+    pub customer_ref: Option<String>,
+    pub account_ref: Option<String>,
+    pub user_ref: Option<String>,
+    pub anonymous_ref: Option<String>,
+}
+
+fn default_enrichment_surface() -> String {
+    "http_json".to_owned()
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnrichmentConsentBodySchema {
+    pub decision: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnrichmentAnswerItemsSchema {
+    pub maximum: u8,
+    pub required: Vec<String>,
+    #[serde(rename = "type")]
+    pub signal_types: Vec<String>,
+    pub provenance: Vec<String>,
+    pub catalog_version: String,
+    pub catalog: Vec<EnrichmentCatalogEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnrichmentCatalogEntry {
+    pub key: String,
+    #[serde(rename = "type")]
+    pub signal_type: String,
+    pub allowed_values: Vec<String>,
+    pub targeted_advertising_safe: bool,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnrichmentAnswerBodySchema {
+    pub status: Vec<String>,
+    pub items: EnrichmentAnswerItemsSchema,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnrichmentConsentAction {
+    pub url: String,
+    pub method: String,
+    pub authorization: String,
+    pub content_type: String,
+    pub body_schema: EnrichmentConsentBodySchema,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnrichmentAnswerAction {
+    pub url: String,
+    pub method: String,
+    pub authorization: String,
+    pub content_type: String,
+    pub body_schema: EnrichmentAnswerBodySchema,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnrichmentRequestResponse {
+    pub request_id: Uuid,
+    pub interaction_id: Uuid,
+    pub state: String,
+    pub purpose: String,
+    pub surface: String,
+    pub identity_level: String,
+    pub stage_instruction: String,
+    #[schema(required = true, nullable)]
+    pub question: Option<String>,
+    #[schema(required = true, nullable)]
+    pub answer_instruction: Option<String>,
+    pub expires_at: DateTime<Utc>,
+    #[schema(required = true, nullable)]
+    pub consent: Option<EnrichmentConsentAction>,
+    #[schema(required = true, nullable)]
+    pub submit: Option<EnrichmentAnswerAction>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct EnrichmentConsentDecisionInput {
+    pub decision: String,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnrichmentConsentDecisionResponse {
+    pub request_id: Uuid,
+    pub state: String,
+    pub changed: bool,
+    pub stage_instruction: String,
+    #[schema(required = true, nullable)]
+    pub answer_instruction: Option<String>,
+    #[schema(required = true, nullable)]
+    pub submit: Option<EnrichmentAnswerAction>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct EnrichmentAnswerItemInput {
+    pub key: String,
+    #[serde(rename = "type")]
+    pub signal_type: String,
+    pub value: String,
+    #[serde(default, skip_serializing, rename = "summary")]
+    #[schema(ignore)]
+    pub _summary: Option<String>,
+    pub provenance: String,
+    pub confidence: Option<f64>,
+    pub remember: bool,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct EnrichmentAnswerInput {
+    pub status: String,
+    #[serde(default)]
+    pub items: Vec<EnrichmentAnswerItemInput>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CustomerContextItem {
+    pub signal_id: Uuid,
+    pub key: String,
+    #[serde(rename = "type")]
+    pub signal_type: String,
+    pub value: Value,
+    pub summary: String,
+    pub provenance: String,
+    #[schema(required = true, nullable)]
+    pub confidence: Option<f64>,
+    #[schema(required = true, nullable)]
+    pub expires_at: Option<DateTime<Utc>>,
+    pub allowed_uses: Vec<String>,
+    pub remembered: bool,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnrichmentAnswerResponse {
+    pub accepted: bool,
+    pub request_id: Uuid,
+    pub interaction_id: Uuid,
+    #[schema(required = true, nullable)]
+    pub customer_id: Option<Uuid>,
+    pub signals: Vec<CustomerContextItem>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CustomerContextInput {
+    pub customer_ref: Option<String>,
+    pub account_ref: Option<String>,
+    pub user_ref: Option<String>,
+    pub anonymous_ref: Option<String>,
+    pub interaction_id: Option<Uuid>,
+    pub purpose: String,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CustomerContextResponse {
+    pub retrieval_id: Uuid,
+    pub identity_level: String,
+    #[schema(required = true, nullable)]
+    pub customer_id: Option<Uuid>,
+    #[schema(required = true, nullable)]
+    pub interaction_id: Option<Uuid>,
+    pub context_version: String,
+    pub items: Vec<CustomerContextItem>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PersonalizationDecisionInput {
+    pub external_decision_id: String,
+    pub context_retrieval_id: Uuid,
+    pub signal_ids: Vec<Uuid>,
+    pub variant: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PersonalizationDecision {
+    pub id: Uuid,
+    pub external_decision_id: String,
+    pub purpose: String,
+    pub signal_ids: Vec<Uuid>,
+    #[schema(required = true, nullable)]
+    pub variant: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub(crate) struct PersonalizationDecisionResponse {
+    pub decision: PersonalizationDecision,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PersonalizationOutcomeInput {
+    pub external_outcome_id: String,
+    pub decision_id: Uuid,
+    pub outcome: String,
+    pub occurred_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PersonalizationOutcome {
+    pub id: Uuid,
+    pub external_outcome_id: String,
+    pub decision_id: Uuid,
+    pub outcome: String,
+    pub occurred_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub(crate) struct PersonalizationOutcomeResponse {
+    pub outcome: PersonalizationOutcome,
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CustomerIdentifier {
@@ -714,6 +961,8 @@ pub(crate) struct CustomerIdentifier {
 pub(crate) struct ConsentGrant {
     pub id: Uuid,
     pub scope: String,
+    #[schema(required = true, nullable)]
+    pub enrichment_purpose: Option<String>,
     pub state: String,
     pub basis: String,
     pub decided_at: DateTime<Utc>,
@@ -729,6 +978,8 @@ pub(crate) struct ConsentGrant {
 pub(crate) struct ConsentEventSummary {
     pub id: Uuid,
     pub scope: String,
+    #[schema(required = true, nullable)]
+    pub enrichment_purpose: Option<String>,
     #[schema(required = true, nullable)]
     pub prior_state: Option<String>,
     pub state: String,
@@ -753,6 +1004,12 @@ pub(crate) struct CustomerSignal {
     pub feedback_report_id: Option<Uuid>,
     #[schema(required = true, nullable)]
     pub feature_key: Option<String>,
+    #[sqlx(default)]
+    #[schema(required = true, nullable)]
+    pub signal_key: Option<String>,
+    #[sqlx(default)]
+    #[schema(required = true, nullable)]
+    pub value: Option<Value>,
     #[serde(rename = "type")]
     pub signal_type: String,
     pub summary: String,
@@ -768,6 +1025,8 @@ pub(crate) struct CustomerSignal {
     pub consent_scope: Option<String>,
     #[schema(required = true, nullable)]
     pub consent_state: Option<String>,
+    #[sqlx(default)]
+    pub allowed_uses: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
@@ -955,6 +1214,12 @@ pub(crate) struct InsightCount {
 pub(crate) struct Insights {
     pub window_days: i32,
     pub comparison_days: i32,
+    pub customer_context_items: i64,
+    pub customers_with_context: i64,
+    pub context_retrievals: i64,
+    pub personalization_ready_customers: i64,
+    pub personalization_decisions: i64,
+    pub personalization_outcomes: i64,
     pub opportunities: i64,
     pub confirmed_interactions: i64,
     pub reports: i64,

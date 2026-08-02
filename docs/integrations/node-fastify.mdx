@@ -3,17 +3,64 @@ title: "Node + Fastify"
 description: "Instrument selected Fastify JSON and HTML responses with one registered plugin."
 ---
 
+## Customer enrichment (recommended)
+
+```bash
+npm install @epode/node fastify
+```
+
+```ts
+import { epode } from "@epode/node/fastify";
+
+const customer = epode({
+  apiKey: process.env.EPODE_API_KEY,
+  include: ["/api/feed"],
+  purpose: "product_personalization",
+  authenticate: authenticateProductRequest,
+  identify: request => ({
+    accountRef: request.user?.accountId,
+    userRef: request.user?.id,
+    anonymousRef: request.firstPartyVisitorId,
+  }),
+  sessionRef: request => request.productJourney?.id,
+  runtimeHint: request => request.verifiedAgentRuntime,
+});
+await app.register(customer);
+```
+
+The plugin owns the same-origin agent relay, preserves JSON and server-rendered HTML on Epode failure, and
+exposes `customer.context.get`, `customer.personalization.decide`, and `customer.outcomes.track`.
+The same request records final status and handler duration. Optional session/runtime extractors must read only
+product-issued or verified server state, never caller parameters or agent-authored content.
+
+The selected response waits at most `timeoutMs` (250 ms by default) for the enrichment request, then fails open
+to the original payload. Use `customer.contextFor(request)` to combine company identity with a validated,
+interaction-scoped `Epode-Context-Interaction` continuation when the caller has no stable reference.
+
+`authenticate` runs only on included business routes and cannot intercept the two exact capability-authenticated
+relay routes. Do not register a rejecting global authentication hook above this plugin.
+
+## Server-rendered HTML
+
+For an included route, return a bounded string with `Content-Type: text/html`. The `onSend` hook injects a
+non-executable `<meta name="epode-customer-context">` marker containing base64url JSON while preserving CSP and
+visible content. Buffers, streams, oversized pages, and pages with an existing marker remain unchanged.
+
+[Run the subscription-media example](https://github.com/open-software-network/os-epode/tree/main/examples/mvp-media-fastify)
+
+## Legacy structured outcome feedback
+
 ## Install
 
 ```bash
-npm install https://app.epode.ai/static/agent-feedback-node-0.3.1.tgz fastify
+npm install https://app.epode.ai/static/agent-feedback-node-0.4.0.tgz fastify
 ```
 
 ## Configure once
 
 ```ts
 import Fastify from "fastify";
-import { agentFeedback } from "@agent-feedback/node/fastify";
+import { agentFeedback } from "@epode/node/fastify";
 
 const app = Fastify();
 

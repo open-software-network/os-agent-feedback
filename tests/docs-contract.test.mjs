@@ -14,18 +14,13 @@ const httpIntegrations = [
   {
     id: "node-express",
     page: "docs/integrations/node-express.mdx",
-    required: [
-      "@agent-feedback/node/express",
-      "agentFeedback({",
-      "include:",
-      "agent-feedback-doctor",
-    ],
+    required: ["@epode/node/express", "agentFeedback({", "include:", "agent-feedback-doctor"],
   },
   {
     id: "node-fastify",
     page: "docs/integrations/node-fastify.mdx",
     required: [
-      "@agent-feedback/node/fastify",
+      "@epode/node/fastify",
       "app.register(agentFeedback({",
       "include:",
       "agent-feedback-doctor",
@@ -54,13 +49,13 @@ const httpIntegrations = [
   {
     id: "rust",
     page: "docs/integrations/rust-axum.mdx",
-    required: ["agent-feedback-rust-0.3.1.tar.gz", "AgentFeedbackLayer::new", ".include", "Tokio"],
+    required: ["agent-feedback-rust-0.4.0.tar.gz", "AgentFeedbackLayer::new", ".include", "Tokio"],
   },
   {
     id: "manual-http",
     page: "docs/integrations/manual-http.mdx",
     required: [
-      "agent-feedback-protocol-v1-0.3.1.zip",
+      "agent-feedback-protocol-v1-0.4.0.zip",
       "HMAC-SHA256",
       "_agentFeedback",
       "Cache-Control",
@@ -131,12 +126,14 @@ test("Mintlify navigation exposes the complete new-customer journey", async () =
   for (const required of [
     "index",
     "quickstart",
+    "concepts/customer-enrichment",
     "concepts/reliability",
     "concepts/feedback-modes",
     "guides/verify",
     "guides/real-world-patterns",
     "guides/troubleshooting",
     "reference/privacy-security",
+    "reference/customer-context",
   ]) {
     assert.ok(pages.has(required), `${required} is missing from navigation`);
   }
@@ -168,7 +165,7 @@ test("static-site guidance requires a trusted edge and ships an executable proxy
   const content = await read("docs/integrations/static-edge.mdx");
   for (const expected of [
     "createStaticDocsProxy",
-    "@agent-feedback/node/edge",
+    "@epode/node/edge",
     "DOCS_UPSTREAM_ORIGIN",
     "Agent-Feedback-Request: 1",
     "private, no-store",
@@ -261,7 +258,7 @@ test("Node MCP setup authenticates before dispatch and keeps hosted installs rep
     'sessionRef: (_args, context) => verifiedField(context, "journeyId")',
     "standalone JSON text block",
     "outputSchema",
-    ".epode/artifacts/agent-feedback-node-0.3.1.tgz",
+    ".epode/artifacts/agent-feedback-node-0.4.0.tgz",
     "shasum -a 256 -c -",
   ]) {
     assert.ok(content.includes(expected), `Node MCP docs omit ${expected}`);
@@ -336,9 +333,8 @@ test("customer-intelligence setup uses only verified or product-owned correlatio
   );
 });
 
-test("verification and reference docs preserve the two-stage consent workflow", async () => {
+test("legacy feedback verification and reference docs preserve the two-stage consent workflow", async () => {
   const pages = await Promise.all([
-    read("docs/quickstart.mdx"),
     read("docs/guides/verify.mdx"),
     read("docs/reference/mcp-2026-07-28.mdx"),
   ]);
@@ -357,8 +353,8 @@ test("docs explain the product/customer-agent boundary and evidence model", asyn
   const overview = await read("docs/index.mdx");
   const reliability = await read("docs/concepts/reliability.mdx");
   const privacy = await read("docs/reference/privacy-security.mdx");
-  assert.match(overview, /independent agents used by\s+their customers/i);
-  assert.match(overview, /customers do not install (?:an Epode |an )?SDK/i);
+  assert.match(overview, /AI agent acting for them/i);
+  assert.match(overview, /Customers do not create an Epode account, install\s+a plugin/i);
   assert.match(
     reliability,
     /does not label ordinary HTTP traffic as agent traffic without evidence/i,
@@ -394,6 +390,7 @@ test("every shipped agent handoff keeps routine feedback success out of the user
 test("docs and dashboard publish the same install artifacts and feedback modes", async () => {
   const pages = await Promise.all([
     read("docs/quickstart.mdx"),
+    read("docs/integrations/node-express.mdx"),
     read("docs/integrations/python-asgi.mdx"),
     read("docs/integrations/rust-axum.mdx"),
     read("docs/integrations/manual-http.mdx"),
@@ -401,10 +398,10 @@ test("docs and dashboard publish the same install artifacts and feedback modes",
   ]);
   const joined = pages.join("\n");
   for (const artifact of [
-    "agent-feedback-node-0.3.1.tgz",
-    "agent_feedback-0.3.1-py3-none-any.whl",
-    "agent-feedback-rust-0.3.1.tar.gz",
-    "agent-feedback-protocol-v1-0.3.1.zip",
+    "agent-feedback-node-0.4.0.tgz",
+    "agent_feedback-0.4.0-py3-none-any.whl",
+    "agent-feedback-rust-0.4.0.tar.gz",
+    "agent-feedback-protocol-v1-0.4.0.zip",
   ]) {
     assert.ok(joined.includes(artifact), `docs omit ${artifact}`);
     assert.ok(dashboard.includes(artifact), `dashboard omits ${artifact}`);
@@ -412,6 +409,22 @@ test("docs and dashboard publish the same install artifacts and feedback modes",
   for (const mode of ["never_ask", "ask_once", "ask_always", "off"]) {
     assert.ok(joined.includes(mode), `docs omit ${mode}`);
     assert.ok(dashboard.includes(mode), `dashboard omits ${mode}`);
+  }
+});
+
+test("verified install snippets pin the current manifest checksums", async () => {
+  const manifest = JSON.parse(await read("backend/public/agent-feedback-integrations-0.4.0.json"));
+  const pages = {
+    node: await read("docs/integrations/node-mcp.mdx"),
+    go: await read("docs/integrations/go-http.mdx"),
+    rust: await read("docs/integrations/rust-axum.mdx"),
+  };
+  for (const [kind, content] of Object.entries(pages)) {
+    const artifact = manifest.artifacts[kind];
+    assert.ok(content.includes(artifact.filename), `${kind} docs omit the current filename`);
+    assert.ok(content.includes(artifact.sha256), `${kind} docs omit the current SHA-256`);
+    assert.ok(dashboard.includes(artifact.filename), `dashboard omits ${kind} filename`);
+    assert.ok(dashboard.includes(artifact.sha256), `dashboard omits ${kind} SHA-256`);
   }
 });
 
@@ -441,7 +454,7 @@ test("dashboard setup stops before install or extraction when artifact verificat
   }
 });
 
-test("company onboarding docs preserve key safety and the three activation milestones", async () => {
+test("company onboarding docs preserve key safety and the enrichment loop", async () => {
   const [quickstart, verification, privacy, configuration] = await Promise.all([
     read("docs/quickstart.mdx"),
     read("docs/guides/verify.mdx"),
@@ -449,15 +462,38 @@ test("company onboarding docs preserve key safety and the three activation miles
     read("docs/reference/configuration.mdx"),
   ]);
 
-  for (const milestone of ["First opportunity", "First confirmed interaction", "First report"]) {
-    assert.match(quickstart, new RegExp(milestone, "i"));
-    assert.match(verification, new RegExp(milestone, "i"));
+  for (const milestone of ["Ask", "Learn", "Personalize", "Measure"]) {
+    assert.match(`${await read("docs/index.mdx")}\n${quickstart}`, new RegExp(milestone, "i"));
   }
-  assert.match(verification, /Recover by milestone/);
+  assert.match(verification, /First opportunity/);
   assert.match(privacy, /does not persist the full secret in\s+browser storage/i);
   assert.match(privacy, /deployment secret manager/i);
   assert.match(configuration, /`sessionRef` \/ `session_ref`/);
   assert.match(configuration, /omit it rather than infer continuity/i);
+});
+
+test("primary onboarding is company-only customer enrichment", async () => {
+  const [index, quickstart, customerContext, configuration] = await Promise.all([
+    read("docs/index.mdx"),
+    read("docs/quickstart.mdx"),
+    read("docs/reference/customer-context.mdx"),
+    read("docs/reference/configuration.mdx"),
+  ]);
+  const primary = `${index}\n${quickstart}`;
+  assert.match(primary, /Customers/);
+  assert.match(primary, /Insights/);
+  assert.match(primary, /Setup/);
+  assert.match(primary, /Data controls/);
+  assert.match(primary, /@epode\/node/);
+  assert.match(primary, /EPODE_API_KEY/);
+  assert.match(primary, /\/_epode\/v1\/enrichment\/consent/);
+  assert.match(primary, /contextFor/);
+  assert.match(primary, /personalization\.decide/);
+  assert.match(primary, /outcomes\.track/);
+  assert.doesNotMatch(primary, /Epode Companion|customer.*install.*plugin/i);
+  assert.match(customerContext, /targeted_advertising/);
+  assert.match(customerContext, /agent_reports_user_statement/);
+  assert.match(configuration, /company-owned enrichment relay/i);
 });
 
 test("public privacy docs explain operable retention and durable Ask-once permission", async () => {
@@ -504,7 +540,7 @@ test("every public docs page has a title and actionable description", async () =
 });
 
 test("the downloadable protocol bundle preserves the immutable v1 schema contract", async () => {
-  const bundle = new URL("../backend/public/agent-feedback-protocol-v1-0.3.1.zip", import.meta.url)
+  const bundle = new URL("../backend/public/agent-feedback-protocol-v1-0.4.0.zip", import.meta.url)
     .pathname;
   const schemaFiles = [
     "consent-decision.schema.json",

@@ -7,6 +7,9 @@ import {
   matchPattern,
 } from "./core.js";
 
+export type { EpodeMcp, EpodeMcpContext, EpodeMcpOptions } from "./customer-mcp.js";
+export { epode } from "./customer-mcp.js";
+
 export type McpInstrumentationContext = Record<string, unknown> & {
   http?: {
     authInfo?: {
@@ -476,7 +479,7 @@ function instrumentServer(
             headers: {
               authorization: `Bearer ${feedbackHandle}`,
               "content-type": "application/json",
-              "user-agent": "@agent-feedback/node/0.3.1",
+              "user-agent": "@epode/node/0.4.0",
             },
             body: JSON.stringify({ decision }),
             signal: AbortSignal.timeout(options.reportTimeoutMs ?? 10_000),
@@ -608,7 +611,7 @@ function instrumentServer(
             headers: {
               authorization: `Bearer ${feedbackHandle}`,
               "content-type": "application/json",
-              "user-agent": "@agent-feedback/node/0.3.1",
+              "user-agent": "@epode/node/0.4.0",
             },
             body: JSON.stringify({
               summary,

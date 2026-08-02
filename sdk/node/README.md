@@ -1,25 +1,127 @@
-# `@agent-feedback/node`
+# `@epode/node`
 
-Collect one structured feedback report from the independent customer agents using your product. The SDK never invents customer or agent identity and never sends prompts or product payloads. Optional customer references come only from your authenticated, server-side context. Telemetry and Ask once state resolution never block the HTTP response. Eligible Ask once responses always carry a subject-bound receipt; Epode Companion verifies that receipt and resolves the remembered decision before it asks or reports.
+Learn useful, permissioned context about known, anonymous, or ephemeral customers through the AI agents acting
+for them. Retrieve that context on the company's server, personalize the product, and link the business outcome
+to the exact context used.
 
-There are two reliability levels:
+The customer does not install Epode, create an Epode account, or receive a company product key.
 
-- **MCP is protocol-backed.** The SDK registers explicit `record_product_feedback_consent` and `report_product_feedback` tools. Each product result directs compatible agents to the action currently allowed.
-- **Ask once is Epode-managed.** Unknown customers receive only the exact question and an `approved|declined` action. Epode remembers the answer by product plus an opaque subject derived from `customerRef`; agents store nothing.
-- **Ask every time is also two phase.** Approval reveals a report action for that interaction only. Silence or refusal never reveals it.
-- **Consent is enforced end to end.** Ask-mode report schemas are withheld until approval, and report bodies never contain consent attestations.
-- **HTTP and HTML are best-effort by default.** Generic agents may treat response metadata as untrusted and ignore its side-effect instruction. A feedback-aware agent adapter can make submission deterministic.
+## Express customer enrichment
+
+```sh
+npm install @epode/node express
+```
+
+```ts
+import { epode } from "@epode/node/express";
+
+app.use(express.json());
+app.use(issueOrVerifyFirstPartyVisitor);
+
+const customer = epode({
+  apiKey: process.env.EPODE_API_KEY,
+  include: ["/api/recommendations"],
+  purpose: "product_personalization",
+  authenticate: authenticateProductRequest,
+  identify: req => ({
+    accountRef: req.user?.accountId,
+    userRef: req.user?.id,
+    anonymousRef: req.firstPartyVisitorId,
+  }),
+  sessionRef: req => req.productJourney?.id,
+  runtimeHint: req => req.verifiedAgentRuntime,
+});
+app.use(customer);
+```
+
+The middleware preserves the original JSON shape and adds `_epode.customerContext` only when Epode returns a
+useful request. It automatically mounts the fixed same-origin permission and answer routes. On timeout or Epode
+failure, it sends the original product response unchanged.
+
+Pass rejecting product authentication through `authenticate`. It runs only on included business routes and is
+bypassed only by the exact capability-authenticated relay paths. Successful bounded HTML strings receive a
+non-executable `epode-customer-context` meta marker; CSP, visible content, streams, buffers, and oversized pages
+are preserved.
+
+The selected response waits up to `timeoutMs` (250 ms by default) for enrichment, then fails open. For an
+ephemeral customer, use `customer.contextFor(req)`: it validates the bounded `Epode-Context-Interaction` header
+that the agent returns on the immediate retry. That handle does not persist across unrelated interactions.
+The same enrichment call records response status and duration. `sessionRef` must be a product-issued journey;
+`runtimeHint` is an optional bounded label. Neither should come from an untrusted request parameter.
+
+Retrieve and use context inside the company:
+
+```ts
+const context = await customer.contextFor(req);
+
+const products = context.available
+  ? rankForCustomer(catalog, context.items)
+  : rankNormally(catalog);
+```
+
+Record exactly which signals affected the experience, then link its outcome:
+
+```ts
+const result = await customer.personalization.decide({
+  externalDecisionId: recommendation.id,
+  contextRetrievalId: context.retrievalId,
+  signalIds: context.items.map(item => item.signalId),
+  variant: "customer-context-ranking-v1",
+});
+
+if (result.recorded) {
+  await customer.outcomes.track({
+    externalOutcomeId: order.id,
+    decisionId: result.decision.id,
+    outcome: "conversion",
+  });
+}
+```
+
+`product_personalization` and `targeted_advertising` are separate purposes. Approval, retrieval, decisions, and
+audit history never cross between them.
+
+## MCP customer enrichment
+
+```ts
+import { epode } from "@epode/node/mcp";
+
+const customer = epode({
+  apiKey: process.env.EPODE_API_KEY,
+  includeTools: ["search_products"],
+  purpose: "product_personalization",
+  identify: (_args, context) => ({
+    accountRef: context.http?.authInfo?.extra?.accountId,
+    userRef: context.http?.authInfo?.extra?.userId,
+  }),
+  sessionRef: context => context.http?.authInfo?.extra?.journeyId,
+  runtimeHint: context => context.http?.authInfo?.extra?.runtimeHint,
+});
+
+customer.instrument(server);
+```
+
+This registers `record_customer_context_consent` and `share_customer_context` on the company's MCP server and
+decorates only selected complete, successful business-tool results. The `surface: "mcp"` enrichment request also
+confirms that initial product interaction immediately; no second Epode instrumentation layer is needed. The agent
+never calls Epode directly.
+The session and runtime callbacks receive only the server context, never model-authored tool arguments or output.
+
+## Legacy structured outcome feedback
+
+The `agentFeedback`, `createMcpInstrumentation`, and feedback-agent helper exports remain available for the
+existing structured product-feedback workflow. New company onboarding should start with customer enrichment.
 
 ## Express
 
 Until the npm registry release is connected, install the signed build directly from the production service:
 
 ```sh
-npm install https://app.epode.ai/static/agent-feedback-node-0.3.1.tgz
+npm install https://app.epode.ai/static/agent-feedback-node-0.4.0.tgz
 ```
 
 ```ts
-import { agentFeedback } from "@agent-feedback/node/express";
+import { agentFeedback } from "@epode/node/express";
 
 app.use(agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY!,
@@ -46,7 +148,7 @@ The returned Express middleware and Fastify plugin expose `flush()`. In serverle
 ## Fastify
 
 ```ts
-import { agentFeedback } from "@agent-feedback/node/fastify";
+import { agentFeedback } from "@epode/node/fastify";
 
 await app.register(agentFeedback({
   apiKey: process.env.AGENT_FEEDBACK_KEY!,
@@ -71,7 +173,7 @@ second fail-closed boundary: unmatched paths return 404 and methods other than G
 contacting the upstream origin.
 
 ```ts
-import { createStaticDocsProxy } from "@agent-feedback/node/edge";
+import { createStaticDocsProxy } from "@epode/node/edge";
 
 let proxy;
 export default {
@@ -96,7 +198,7 @@ untouched. Store the key with the edge platform's secret manager, never in a sta
 The current MCP transport is stateless and creates a fresh server for each HTTP request. Create one process-level Epode runtime so telemetry remains batched, then instrument each server before registering business tools:
 
 ```ts
-import { createMcpInstrumentation } from "@agent-feedback/node/mcp";
+import { createMcpInstrumentation } from "@epode/node/mcp";
 import { originValidation } from "@modelcontextprotocol/express";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
@@ -141,7 +243,7 @@ import {
   inspectProductFeedback,
   submitFeedbackConsent,
   submitProductFeedback,
-} from "@agent-feedback/node/agent";
+} from "@epode/node/agent";
 
 const response = await fetch(productUrl);
 const body = await response.json();

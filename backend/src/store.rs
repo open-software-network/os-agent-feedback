@@ -3,7 +3,7 @@
     reason = "crate-restricted visibility satisfies unreachable_pub in this binary-only crate"
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -24,17 +24,25 @@ use crate::{
     models::{
         ApiKeyPublic, CapabilityInspectionResponse, ConsentDecisionInput, ConsentEventSummary,
         ConsentGrant, ConsentStateInput, ConsentStateResponse, CreateProductInput,
-        CreateTeamInvitationInput, CustomerDetailCounts, CustomerFacets, CustomerIdentifier,
+        CreateTeamInvitationInput, CustomerContextInput, CustomerContextItem,
+        CustomerContextResponse, CustomerDetailCounts, CustomerFacets, CustomerIdentifier,
         CustomerRollup, CustomerSignal, CustomerSummary, DashboardContext, DashboardCustomerDetail,
         DashboardCustomerFilters, DashboardCustomersPage, DashboardData, DashboardFeedbackFacets,
         DashboardFeedbackFilters, DashboardFeedbackPage, DashboardListState,
         DashboardSessionDetail, DashboardSessionFilters, DashboardSessionRollup,
         DashboardSessionSummary, DashboardSessionsPage, DashboardSignalFilters,
-        DashboardSignalsPage, DeleteProductInput, FeedbackFindingInput, FeedbackInteractionItem,
-        FeedbackInteractionsPage, FeedbackListInteractionsInput, FeedbackListReportsInput,
-        FeedbackOperationSummary, FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse,
-        FeedbackSummary, FeedbackSurfaceSummary, FeedbackWindow, GithubIssueLink, InsightCount,
-        Insights, InteractionTelemetryInput, MergeReportGroupsResponse, PolicyInput, Product,
+        DashboardSignalsPage, DeleteProductInput, EnrichmentAnswerAction,
+        EnrichmentAnswerBodySchema, EnrichmentAnswerInput, EnrichmentAnswerItemsSchema,
+        EnrichmentAnswerResponse, EnrichmentCatalogEntry, EnrichmentConsentAction,
+        EnrichmentConsentBodySchema, EnrichmentConsentDecisionInput,
+        EnrichmentConsentDecisionResponse, EnrichmentRequestInput, EnrichmentRequestResponse,
+        FeedbackFindingInput, FeedbackInteractionItem, FeedbackInteractionsPage,
+        FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackOperationSummary,
+        FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse, FeedbackSummary,
+        FeedbackSurfaceSummary, FeedbackWindow, GithubIssueLink, InsightCount, Insights,
+        InteractionTelemetryInput, MergeReportGroupsResponse, PersonalizationDecision,
+        PersonalizationDecisionInput, PersonalizationDecisionResponse, PersonalizationOutcome,
+        PersonalizationOutcomeInput, PersonalizationOutcomeResponse, PolicyInput, Product,
         ProductActivationMilestones, ProductAuth, ProductEnvironment, ProductFeedbackReport,
         ProductFeedbackReportInput, ProductFeedbackReportWithInteraction, ProductGithubRepo,
         ProductGithubRepoInput, ProductInteraction, ProductReportGroup, ProductSession,
@@ -44,8 +52,9 @@ use crate::{
     },
     os_accounts::OsUser,
     security::{
-        bearer_token, parse_capability, random_token, sha256, sha256_bytes, valid_consent_subject,
-        verify_capability,
+        bearer_token, parse_capability, parse_enrichment_capability, random_token, sha256,
+        sha256_bytes, sign_deterministic_enrichment_capability, valid_consent_subject,
+        verify_capability, verify_enrichment_capability,
     },
 };
 
@@ -3122,7 +3131,9 @@ fn validate_customer_filters(filters: &DashboardCustomerFilters) -> Result<(), A
     )?;
     validate_feedback_values(
         filters.consent_states.as_deref(),
-        &["approved", "declined", "revoked", "unknown"],
+        &[
+            "approved", "declined", "revoked", "expired", "mixed", "unknown",
+        ],
         "consentState",
     )?;
     validate_dashboard_text(filters.query.as_deref(), "query", 200)?;
@@ -3178,12 +3189,25 @@ async fn customer_facets(
         ), consents AS (
           SELECT customer.id,
             COALESCE((
-              SELECT grant_row.state FROM consent_grants grant_row
+              SELECT CASE
+                WHEN grant_row.state <> 'revoked' AND grant_row.expires_at <= NOW()
+                  THEN 'expired' ELSE grant_row.state
+              END
+              FROM consent_grants grant_row
               WHERE grant_row.workspace_id = $1 AND grant_row.product_id = $2
                 AND grant_row.customer_id = customer.id
-                AND grant_row.scope = 'share_outcome'
-                AND (grant_row.expires_at IS NULL OR grant_row.expires_at > NOW())
-              ORDER BY grant_row.updated_at DESC, grant_row.id DESC LIMIT 1
+                AND grant_row.scope = 'personalize'
+                AND grant_row.enrichment_purpose = 'product_personalization'
+                AND grant_row.subject = (
+                  SELECT candidate.subject FROM consent_grants candidate
+                  WHERE candidate.workspace_id = $1 AND candidate.product_id = $2
+                    AND candidate.customer_id = customer.id
+                    AND candidate.enrichment_purpose = 'product_personalization'
+                  ORDER BY candidate.decided_at DESC, candidate.revision DESC,
+                    CASE WHEN candidate.state IN ('declined', 'revoked') THEN 1 ELSE 0 END DESC,
+                    candidate.subject, candidate.id LIMIT 1
+                )
+              ORDER BY grant_row.id LIMIT 1
             ), 'unknown') AS consent_state
           FROM product_customers customer
         ), facet_values AS (
@@ -3193,7 +3217,8 @@ async fn customer_facets(
           UNION ALL SELECT 'consent_state', consent_state, id FROM consents
           UNION ALL SELECT 'segment', segment, customer.id
             FROM product_customers customer CROSS JOIN LATERAL UNNEST(customer.segments) segment
-          UNION ALL SELECT 'signal_type', signal.signal_type, signal.id
+          UNION ALL SELECT 'signal_type',
+            COALESCE(signal.attributes->>'enrichmentType', signal.signal_type), signal.id
             FROM customer_signals signal
             WHERE signal.workspace_id = $1 AND signal.product_id = $2
               AND signal.collected_at >= $3
@@ -3321,12 +3346,25 @@ pub(crate) async fn dashboard_customers_page(
             ORDER BY signal.collected_at DESC, signal.id DESC LIMIT 1
           ) outcome ON TRUE
           LEFT JOIN LATERAL (
-            SELECT grant_row.state AS consent_state FROM consent_grants grant_row
+            SELECT CASE
+              WHEN grant_row.state <> 'revoked' AND grant_row.expires_at <= NOW()
+                THEN 'expired' ELSE grant_row.state
+            END AS consent_state
+            FROM consent_grants grant_row
             WHERE grant_row.workspace_id = $1 AND grant_row.product_id = $2
               AND grant_row.customer_id = customer.id
-              AND grant_row.scope = 'share_outcome'
-              AND (grant_row.expires_at IS NULL OR grant_row.expires_at > NOW())
-            ORDER BY grant_row.updated_at DESC, grant_row.id DESC LIMIT 1
+              AND grant_row.scope = 'personalize'
+              AND grant_row.enrichment_purpose = 'product_personalization'
+              AND grant_row.subject = (
+                SELECT candidate.subject FROM consent_grants candidate
+                WHERE candidate.workspace_id = $1 AND candidate.product_id = $2
+                  AND candidate.customer_id = customer.id
+                  AND candidate.enrichment_purpose = 'product_personalization'
+                ORDER BY candidate.decided_at DESC, candidate.revision DESC,
+                  CASE WHEN candidate.state IN ('declined', 'revoked') THEN 1 ELSE 0 END DESC,
+                  candidate.subject, candidate.id LIMIT 1
+              )
+            ORDER BY grant_row.id LIMIT 1
           ) consent ON TRUE
           WHERE customer.workspace_id = $1 AND customer.merged_into_customer_id IS NULL
         )
@@ -3343,7 +3381,8 @@ pub(crate) async fn dashboard_customers_page(
           AND ($10::TEXT[] IS NULL OR EXISTS (
             SELECT 1 FROM customer_signals signal
             WHERE signal.workspace_id = $1 AND signal.product_id = $2
-              AND signal.customer_id = summaries.id AND signal.signal_type = ANY($10)
+              AND signal.customer_id = summaries.id
+              AND COALESCE(signal.attributes->>'enrichmentType', signal.signal_type) = ANY($10)
               AND signal.collected_at >= $3
               AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
           ))
@@ -3489,16 +3528,21 @@ pub(crate) async fn dashboard_signals_page(
     let search = filters.query.as_deref().map(dashboard_search_pattern);
     let total = sqlx::query_scalar::<_, i64>(
         r"SELECT COUNT(*) FROM customer_signals signal
+        LEFT JOIN enrichment_signal_items enrichment ON enrichment.signal_id = signal.id
+          AND enrichment.workspace_id = signal.workspace_id
         WHERE signal.workspace_id = $1 AND signal.product_id = $2
           AND signal.collected_at >= $3
           AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
           AND ($4::TIMESTAMPTZ IS NULL OR signal.collected_at <= $4)
           AND ($5::TEXT IS NULL OR signal.summary ILIKE $5 ESCAPE '\'
-            OR COALESCE(signal.detail, '') ILIKE $5 ESCAPE '\')
+            OR COALESCE(signal.detail, '') ILIKE $5 ESCAPE '\'
+            OR COALESCE(enrichment.signal_key, '') ILIKE $5 ESCAPE '\'
+            OR COALESCE(enrichment.signal_value, '') ILIKE $5 ESCAPE '\')
           AND ($6::UUID IS NULL OR signal.customer_id = $6)
           AND ($7::TEXT IS NULL OR signal.feature_key = $7)
           AND ($8::UUID IS NULL OR signal.session_id = $8)
-          AND ($9::TEXT[] IS NULL OR signal.signal_type = ANY($9))
+          AND ($9::TEXT[] IS NULL OR
+            COALESCE(signal.attributes->>'enrichmentType', signal.signal_type) = ANY($9))
           AND ($10::TEXT[] IS NULL OR signal.provenance = ANY($10))",
     )
     .bind(workspace_id)
@@ -3516,23 +3560,82 @@ pub(crate) async fn dashboard_signals_page(
     let mut signals = sqlx::query_as::<_, CustomerSignal>(
         r"SELECT signal.id, signal.customer_id, signal.session_id,
           signal.interaction_id, signal.feedback_report_id, signal.feature_key,
-          signal.signal_type, signal.summary, signal.detail, signal.provenance,
+          enrichment.signal_key, TO_JSONB(enrichment.signal_value) AS value,
+          COALESCE(signal.attributes->>'enrichmentType', signal.signal_type) AS signal_type,
+          signal.summary, signal.detail, signal.provenance,
           signal.confidence, signal.collected_at, signal.expires_at,
-          signal.consent_scope, grant_row.state AS consent_state
+          signal.consent_scope,
+          CASE WHEN request.id IS NULL THEN grant_row.state
+            WHEN effective_personalize.state <> 'revoked'
+              AND effective_personalize.expires_at <= NOW() THEN 'expired'
+            ELSE effective_personalize.state END AS consent_state,
+          CASE WHEN signal.provenance = 'agent_inference'
+              OR effective_share.id IS NULL OR effective_share.state <> 'approved'
+              OR (effective_share.expires_at IS NOT NULL
+                AND effective_share.expires_at <= NOW())
+              OR effective_personalize.id IS NULL
+              OR effective_personalize.state <> 'approved'
+              OR (effective_personalize.expires_at IS NOT NULL
+                AND effective_personalize.expires_at <= NOW())
+              OR grant_row.state <> 'approved'
+              OR (grant_row.expires_at IS NOT NULL AND grant_row.expires_at <= NOW())
+              OR (COALESCE(enrichment.remembered, FALSE)
+                AND remember_grant.id IS NULL)
+            THEN '{}'::TEXT[]
+            ELSE ARRAY[request.purpose] END AS allowed_uses
         FROM customer_signals signal
+        LEFT JOIN enrichment_signal_items enrichment ON enrichment.signal_id = signal.id
+          AND enrichment.workspace_id = signal.workspace_id
         LEFT JOIN consent_grants grant_row
           ON grant_row.id = signal.consent_grant_id
           AND grant_row.workspace_id = signal.workspace_id
+        LEFT JOIN enrichment_answers answer ON answer.id = enrichment.enrichment_answer_id
+          AND answer.workspace_id = signal.workspace_id
+        LEFT JOIN enrichment_requests request ON request.id = answer.request_id
+          AND request.workspace_id = answer.workspace_id
+        LEFT JOIN LATERAL (
+          SELECT candidate.subject
+          FROM consent_grants candidate
+          WHERE candidate.environment_id = request.environment_id
+            AND candidate.workspace_id = request.workspace_id
+            AND candidate.enrichment_purpose = request.purpose
+            AND (candidate.subject = request.consent_subject
+              OR (enrichment.customer_id IS NOT NULL
+                AND candidate.customer_id = enrichment.customer_id))
+          ORDER BY candidate.decided_at DESC, candidate.revision DESC,
+            CASE WHEN candidate.state IN ('declined', 'revoked') THEN 1 ELSE 0 END DESC,
+            candidate.subject, candidate.id LIMIT 1
+        ) effective_consent ON request.id IS NOT NULL
+        LEFT JOIN consent_grants effective_share
+          ON effective_share.environment_id = request.environment_id
+          AND effective_share.subject = effective_consent.subject
+          AND effective_share.scope = 'share_preferences'
+          AND effective_share.enrichment_purpose = request.purpose
+        LEFT JOIN consent_grants effective_personalize
+          ON effective_personalize.environment_id = request.environment_id
+          AND effective_personalize.subject = effective_consent.subject
+          AND effective_personalize.scope = 'personalize'
+          AND effective_personalize.enrichment_purpose = request.purpose
+        LEFT JOIN consent_grants remember_grant
+          ON remember_grant.environment_id = request.environment_id
+          AND remember_grant.subject = effective_consent.subject
+          AND remember_grant.scope = 'remember_preferences'
+          AND remember_grant.enrichment_purpose = request.purpose
+          AND remember_grant.state = 'approved'
+          AND (remember_grant.expires_at IS NULL OR remember_grant.expires_at > NOW())
         WHERE signal.workspace_id = $1 AND signal.product_id = $2
           AND signal.collected_at >= $3
           AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
           AND ($4::TIMESTAMPTZ IS NULL OR signal.collected_at <= $4)
           AND ($5::TEXT IS NULL OR signal.summary ILIKE $5 ESCAPE '\'
-            OR COALESCE(signal.detail, '') ILIKE $5 ESCAPE '\')
+            OR COALESCE(signal.detail, '') ILIKE $5 ESCAPE '\'
+            OR COALESCE(enrichment.signal_key, '') ILIKE $5 ESCAPE '\'
+            OR COALESCE(enrichment.signal_value, '') ILIKE $5 ESCAPE '\')
           AND ($6::UUID IS NULL OR signal.customer_id = $6)
           AND ($7::TEXT IS NULL OR signal.feature_key = $7)
           AND ($8::UUID IS NULL OR signal.session_id = $8)
-          AND ($9::TEXT[] IS NULL OR signal.signal_type = ANY($9))
+          AND ($9::TEXT[] IS NULL OR
+            COALESCE(signal.attributes->>'enrichmentType', signal.signal_type) = ANY($9))
           AND ($10::TEXT[] IS NULL OR signal.provenance = ANY($10))
           AND ($11::TIMESTAMPTZ IS NULL OR
             (signal.collected_at, signal.id) < ($11, $12))
@@ -3628,11 +3731,24 @@ async fn dashboard_customer_summary_by_id(
             AND signal.collected_at >= $4
             AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
           ORDER BY signal.collected_at DESC, signal.id DESC LIMIT 1) outcome ON TRUE
-        LEFT JOIN LATERAL (SELECT grant_row.state consent_state FROM consent_grants grant_row
+        LEFT JOIN LATERAL (SELECT CASE
+          WHEN grant_row.state <> 'revoked' AND grant_row.expires_at <= NOW()
+            THEN 'expired' ELSE grant_row.state
+        END consent_state FROM consent_grants grant_row
           WHERE grant_row.workspace_id = $1 AND grant_row.product_id = $2
-            AND grant_row.customer_id = customer.id AND grant_row.scope = 'share_outcome'
-            AND (grant_row.expires_at IS NULL OR grant_row.expires_at > NOW())
-          ORDER BY grant_row.updated_at DESC, grant_row.id DESC LIMIT 1) consent ON TRUE
+            AND grant_row.customer_id = customer.id
+            AND grant_row.scope = 'personalize'
+            AND grant_row.enrichment_purpose = 'product_personalization'
+            AND grant_row.subject = (
+              SELECT candidate.subject FROM consent_grants candidate
+              WHERE candidate.workspace_id = $1 AND candidate.product_id = $2
+                AND candidate.customer_id = customer.id
+                AND candidate.enrichment_purpose = 'product_personalization'
+              ORDER BY candidate.decided_at DESC, candidate.revision DESC,
+                CASE WHEN candidate.state IN ('declined', 'revoked') THEN 1 ELSE 0 END DESC,
+                candidate.subject, candidate.id LIMIT 1
+            )
+          ORDER BY grant_row.id LIMIT 1) consent ON TRUE
         WHERE customer.id = $3 AND customer.workspace_id = $1
           AND customer.merged_into_customer_id IS NULL",
     )
@@ -3718,7 +3834,7 @@ pub(crate) async fn dashboard_customer_by_id(
     .fetch_all(pool)
     .await?;
     let consent = sqlx::query_as::<_, ConsentGrant>(
-        r"SELECT id, scope,
+        r"SELECT id, scope, enrichment_purpose,
           CASE WHEN state <> 'revoked' AND expires_at <= NOW() THEN 'expired' ELSE state END AS state,
           basis, decided_at, expires_at, revoked_at, revision
         FROM consent_grants WHERE workspace_id = $1 AND product_id = $2
@@ -3731,9 +3847,20 @@ pub(crate) async fn dashboard_customer_by_id(
     .fetch_all(pool)
     .await?;
     let consent_history = sqlx::query_as::<_, ConsentEventSummary>(
-        r"SELECT event.id, event.scope, event.prior_state, event.state, event.basis,
+        r"SELECT event.id, event.scope, event.enrichment_purpose,
+          event.prior_state, event.state, event.basis,
           event.revision, event.source, event.decided_at, event.created_at
-        FROM consent_events event
+        FROM (
+          SELECT id, workspace_id, product_id, consent_grant_id, scope,
+            enrichment_purpose, prior_state, state, basis, revision, source,
+            decided_at, created_at
+          FROM consent_events
+          UNION ALL
+          SELECT id, workspace_id, product_id, consent_grant_id, scope,
+            enrichment_purpose, prior_state, state, basis, revision, source,
+            decided_at, created_at
+          FROM enrichment_consent_events
+        ) event
         JOIN consent_grants grant_row ON grant_row.id = event.consent_grant_id
           AND grant_row.workspace_id = event.workspace_id
         WHERE event.workspace_id = $1 AND event.product_id = $2
@@ -3809,7 +3936,7 @@ async fn feedback_summary(
             .await?;
     let counts = sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
         r"SELECT COUNT(i.id), COUNT(r.id),
-        COUNT(i.id) FILTER (WHERE i.classification = 'confirmed'),
+        COUNT(i.id) FILTER (WHERE i.classification = 'confirmed' OR ec.id IS NOT NULL),
         COUNT(r.id) FILTER (WHERE r.workaround ->> 'used' = 'true'),
         COUNT(r.id) FILTER (WHERE EXISTS (
           SELECT 1 FROM jsonb_array_elements(r.findings) finding
@@ -3817,6 +3944,7 @@ async fn feedback_summary(
         ))
         FROM interactions_v2 i
         LEFT JOIN feedback_reports r ON r.interaction_id = i.id
+        LEFT JOIN enrichment_interaction_confirmations ec ON ec.interaction_id = i.id
         WHERE i.environment_id = $1 AND i.occurred_at >= $2",
     )
     .bind(auth.environment.id)
@@ -4034,10 +4162,12 @@ pub(crate) async fn feedback_list_interactions(
     let cursor_occurred_at = cursor.as_ref().map(|cursor| cursor.occurred_at);
     let cursor_id = cursor.as_ref().map(|cursor| cursor.id);
     let mut interactions = sqlx::query_as::<_, FeedbackInteractionItem>(
-        r"SELECT i.id, i.operation, i.customer_ref, i.surface, i.classification,
+        r"SELECT i.id, i.operation, i.customer_ref, i.surface,
+        CASE WHEN ec.id IS NOT NULL THEN 'confirmed' ELSE i.classification END AS classification,
         i.duration_ms, i.status_code, i.occurred_at
         FROM interactions_v2 i
         LEFT JOIN feedback_reports r ON r.interaction_id = i.id
+        LEFT JOIN enrichment_interaction_confirmations ec ON ec.interaction_id = i.id
         WHERE i.environment_id = $1 AND i.occurred_at >= $2
           AND ($3::BOOLEAN IS NULL OR (r.id IS NOT NULL) = $3)
           AND ($4::TEXT IS NULL OR i.operation = $4)
@@ -4166,6 +4296,20 @@ pub(crate) async fn purge_expired_product_data(
     .bind(limit)
     .fetch_one(pool)
     .await?;
+    let removed_context_retrievals = sqlx::query_scalar::<_, i64>(
+        r"WITH doomed AS (
+          SELECT retrieval.id FROM customer_context_retrievals retrieval
+          JOIN product_environments environment ON environment.id = retrieval.environment_id
+          WHERE retrieval.created_at < NOW() - make_interval(days => environment.retention_days)
+          ORDER BY retrieval.created_at, retrieval.id LIMIT $1
+        ), removed AS (
+          DELETE FROM customer_context_retrievals retrieval USING doomed
+          WHERE retrieval.id = doomed.id RETURNING 1
+        ) SELECT COUNT(*) FROM removed",
+    )
+    .bind(limit)
+    .fetch_one(pool)
+    .await?;
     let removed_orphan_customers = sqlx::query_scalar::<_, i64>(
         r"WITH doomed AS (
           SELECT customer.id FROM customers customer
@@ -4201,6 +4345,7 @@ pub(crate) async fn purge_expired_product_data(
             + removed_sessions
             + removed_consent_interactions
             + removed_explicitly_expired_signals
+            + removed_context_retrievals
             + removed_orphan_customers,
     )
     .map_err(ApiError::internal)
@@ -4231,7 +4376,8 @@ async fn dashboard_insights(
     let counts = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64)>(
         r"SELECT
           COUNT(i.id) FILTER (WHERE i.occurred_at >= $2),
-          COUNT(i.id) FILTER (WHERE i.occurred_at >= $2 AND i.classification = 'confirmed'),
+          COUNT(i.id) FILTER (WHERE i.occurred_at >= $2
+            AND (i.classification = 'confirmed' OR ec.id IS NOT NULL)),
           COUNT(r.id) FILTER (WHERE i.occurred_at >= $2),
           COUNT(DISTINCT r.id) FILTER (WHERE i.occurred_at >= $2 AND EXISTS (
             SELECT 1 FROM jsonb_array_elements(r.findings) finding
@@ -4239,13 +4385,16 @@ async fn dashboard_insights(
           )),
           COUNT(r.id) FILTER (WHERE i.occurred_at >= $2 AND r.workaround ->> 'used' = 'true'),
           COUNT(i.id) FILTER (WHERE i.occurred_at >= $3),
-          COUNT(i.id) FILTER (WHERE i.occurred_at >= $3 AND i.classification = 'confirmed'),
+          COUNT(i.id) FILTER (WHERE i.occurred_at >= $3
+            AND (i.classification = 'confirmed' OR ec.id IS NOT NULL)),
           COUNT(r.id) FILTER (WHERE i.occurred_at >= $3),
           COUNT(i.id) FILTER (WHERE i.occurred_at >= $4 AND i.occurred_at < $3),
-          COUNT(i.id) FILTER (WHERE i.occurred_at >= $4 AND i.occurred_at < $3 AND i.classification = 'confirmed'),
+          COUNT(i.id) FILTER (WHERE i.occurred_at >= $4 AND i.occurred_at < $3
+            AND (i.classification = 'confirmed' OR ec.id IS NOT NULL)),
           COUNT(r.id) FILTER (WHERE i.occurred_at >= $4 AND i.occurred_at < $3)
         FROM interactions_v2 i
         LEFT JOIN feedback_reports r ON r.interaction_id = i.id
+        LEFT JOIN enrichment_interaction_confirmations ec ON ec.interaction_id = i.id
         WHERE i.environment_id = $1 AND i.occurred_at >= $4",
     )
     .bind(environment_id)
@@ -4260,6 +4409,75 @@ async fn dashboard_insights(
           PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms)
         FROM interactions_v2
         WHERE environment_id = $1 AND occurred_at >= $2 AND duration_ms IS NOT NULL",
+    )
+    .bind(environment_id)
+    .bind(window_start)
+    .fetch_one(pool)
+    .await?;
+    let context_counts = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64)>(
+        r"WITH eligible_context AS (
+          SELECT item.signal_id AS id, item.customer_id
+          FROM enrichment_signal_items item
+          JOIN customer_signals signal ON signal.id = item.signal_id
+            AND signal.workspace_id = item.workspace_id
+          JOIN enrichment_answers answer ON answer.id = item.enrichment_answer_id
+            AND answer.workspace_id = item.workspace_id
+          JOIN enrichment_requests request ON request.id = answer.request_id
+            AND request.workspace_id = answer.workspace_id
+          JOIN LATERAL (
+            SELECT candidate.subject
+            FROM consent_grants candidate
+            WHERE candidate.environment_id = request.environment_id
+              AND candidate.workspace_id = request.workspace_id
+              AND candidate.enrichment_purpose = request.purpose
+              AND (candidate.subject = request.consent_subject
+                OR (item.customer_id IS NOT NULL AND candidate.customer_id = item.customer_id))
+            ORDER BY candidate.decided_at DESC, candidate.revision DESC,
+              CASE WHEN candidate.state IN ('declined', 'revoked') THEN 1 ELSE 0 END DESC,
+              candidate.subject, candidate.id LIMIT 1
+          ) effective_consent ON TRUE
+          JOIN consent_grants original_share ON original_share.id = signal.consent_grant_id
+            AND original_share.workspace_id = signal.workspace_id
+            AND original_share.enrichment_purpose = request.purpose
+            AND original_share.state = 'approved'
+            AND (original_share.expires_at IS NULL OR original_share.expires_at > NOW())
+          JOIN consent_grants share_grant
+            ON share_grant.environment_id = request.environment_id
+            AND share_grant.subject = effective_consent.subject
+            AND share_grant.scope = 'share_preferences'
+            AND share_grant.enrichment_purpose = request.purpose
+            AND share_grant.state = 'approved'
+            AND (share_grant.expires_at IS NULL OR share_grant.expires_at > NOW())
+          JOIN consent_grants purpose_grant
+            ON purpose_grant.environment_id = request.environment_id
+            AND purpose_grant.subject = effective_consent.subject
+            AND purpose_grant.scope = 'personalize'
+            AND purpose_grant.enrichment_purpose = request.purpose
+            AND purpose_grant.state = 'approved'
+            AND (purpose_grant.expires_at IS NULL OR purpose_grant.expires_at > NOW())
+          JOIN consent_grants remember_grant
+            ON remember_grant.environment_id = request.environment_id
+            AND remember_grant.subject = effective_consent.subject
+            AND remember_grant.scope = 'remember_preferences'
+            AND remember_grant.enrichment_purpose = request.purpose
+            AND remember_grant.state = 'approved'
+            AND (remember_grant.expires_at IS NULL OR remember_grant.expires_at > NOW())
+          WHERE item.environment_id = $1 AND item.collected_at >= $2
+            AND item.customer_id IS NOT NULL
+            AND item.provenance <> 'agent_inference'
+            AND item.remembered AND item.expires_at > NOW()
+        )
+        SELECT
+          (SELECT COUNT(*) FROM eligible_context),
+          (SELECT COUNT(DISTINCT customer_id) FROM eligible_context),
+          (SELECT COUNT(*) FROM customer_context_retrievals retrieval
+            WHERE retrieval.environment_id = $1 AND retrieval.created_at >= $2),
+          (SELECT COUNT(DISTINCT customer_id) FROM eligible_context),
+          (SELECT COUNT(*) FROM personalization_decisions decision
+            WHERE decision.environment_id = $1 AND decision.created_at >= $2),
+          (SELECT COUNT(*) FROM personalization_outcomes outcome
+            JOIN personalization_decisions decision ON decision.id = outcome.decision_id
+            WHERE decision.environment_id = $1 AND outcome.occurred_at >= $2)",
     )
     .bind(environment_id)
     .bind(window_start)
@@ -4351,6 +4569,12 @@ async fn dashboard_insights(
     Ok(Insights {
         window_days: WINDOW_DAYS,
         comparison_days: COMPARISON_DAYS,
+        customer_context_items: context_counts.0,
+        customers_with_context: context_counts.1,
+        context_retrievals: context_counts.2,
+        personalization_ready_customers: context_counts.3,
+        personalization_decisions: context_counts.4,
+        personalization_outcomes: context_counts.5,
         opportunities: counts.0,
         confirmed_interactions: counts.1,
         reports: counts.2,
@@ -4495,11 +4719,15 @@ pub(crate) async fn dashboard_with_limits(
     .fetch_all(pool)
     .await?;
     let interactions = sqlx::query_as::<_, ProductInteraction>(
-        r"SELECT id, workspace_id, environment_id, api_key_id, session_id, surface, operation,
-        status_code, duration_ms, customer_ref, customer_id, classification, confirmation_method,
-        runtime_hint, runtime_hint_source, occurred_at, created_at, updated_at
-        FROM interactions_v2 WHERE environment_id = $1 AND occurred_at >= $2
-        ORDER BY occurred_at DESC LIMIT $3",
+        r"SELECT i.id, i.workspace_id, i.environment_id, i.api_key_id, i.session_id,
+        i.surface, i.operation, i.status_code, i.duration_ms, i.customer_ref, i.customer_id,
+        CASE WHEN ec.id IS NOT NULL THEN 'confirmed' ELSE i.classification END AS classification,
+        COALESCE(i.confirmation_method, ec.method) AS confirmation_method,
+        i.runtime_hint, i.runtime_hint_source, i.occurred_at, i.created_at, i.updated_at
+        FROM interactions_v2 i
+        LEFT JOIN enrichment_interaction_confirmations ec ON ec.interaction_id = i.id
+        WHERE i.environment_id = $1 AND i.occurred_at >= $2
+        ORDER BY i.occurred_at DESC LIMIT $3",
     )
     .bind(environment_id)
     .bind(retained_since)
@@ -4768,9 +4996,12 @@ pub(crate) async fn dashboard_interaction_by_id(
     sqlx::query_as::<_, ProductInteraction>(
         r"SELECT i.id, i.workspace_id, i.environment_id, i.api_key_id, i.session_id,
         i.surface, i.operation, i.status_code, i.duration_ms, i.customer_ref, i.customer_id,
-        i.classification, i.confirmation_method, i.runtime_hint, i.runtime_hint_source,
+        CASE WHEN ec.id IS NOT NULL THEN 'confirmed' ELSE i.classification END AS classification,
+        COALESCE(i.confirmation_method, ec.method) AS confirmation_method,
+        i.runtime_hint, i.runtime_hint_source,
         i.occurred_at, i.created_at, i.updated_at
         FROM interactions_v2 i JOIN product_environments e ON e.id = i.environment_id
+        LEFT JOIN enrichment_interaction_confirmations ec ON ec.interaction_id = i.id
         WHERE i.id = $1 AND i.workspace_id = $2 AND e.product_id = $3
           AND i.occurred_at >= NOW() - make_interval(days => e.retention_days)",
     )
@@ -4803,11 +5034,14 @@ pub(crate) async fn dashboard_session_by_id(
     .ok_or_else(|| ApiError::not_found("Session not found"))?;
     let interactions = sqlx::query_as::<_, ProductInteraction>(
         r"SELECT i.id, i.workspace_id, i.environment_id, i.api_key_id, i.session_id, i.surface,
-        i.operation, i.status_code, i.duration_ms, i.customer_ref, i.customer_id, i.classification,
-        i.confirmation_method, i.runtime_hint, i.runtime_hint_source,
+        i.operation, i.status_code, i.duration_ms, i.customer_ref, i.customer_id,
+        CASE WHEN ec.id IS NOT NULL THEN 'confirmed' ELSE i.classification END AS classification,
+        COALESCE(i.confirmation_method, ec.method) AS confirmation_method,
+        i.runtime_hint, i.runtime_hint_source,
         i.occurred_at, i.created_at, i.updated_at
         FROM interactions_v2 i
         JOIN product_environments e ON e.id = i.environment_id
+        LEFT JOIN enrichment_interaction_confirmations ec ON ec.interaction_id = i.id
         WHERE i.session_id = $1
           AND i.occurred_at >= NOW() - make_interval(days => e.retention_days)
         ORDER BY i.occurred_at, i.client_sequence NULLS LAST, i.id",
@@ -4958,14 +5192,17 @@ struct ValidatedIdentityRefs {
     anonymous_ref: Option<String>,
 }
 
-fn validate_identity_refs(
-    input: &InteractionTelemetryInput,
+fn validated_identity_refs(
+    customer_ref: Option<&str>,
+    account_ref: Option<&str>,
+    user_ref: Option<&str>,
+    anonymous_ref: Option<&str>,
 ) -> Result<ValidatedIdentityRefs, ApiError> {
     let refs = ValidatedIdentityRefs {
-        customer_ref: validate_identity_ref(input.customer_ref.as_deref(), "customerRef")?,
-        account_ref: validate_identity_ref(input.account_ref.as_deref(), "accountRef")?,
-        user_ref: validate_identity_ref(input.user_ref.as_deref(), "userRef")?,
-        anonymous_ref: validate_identity_ref(input.anonymous_ref.as_deref(), "anonymousRef")?,
+        customer_ref: validate_identity_ref(customer_ref, "customerRef")?,
+        account_ref: validate_identity_ref(account_ref, "accountRef")?,
+        user_ref: validate_identity_ref(user_ref, "userRef")?,
+        anonymous_ref: validate_identity_ref(anonymous_ref, "anonymousRef")?,
     };
     if let Some(customer_ref) = refs.customer_ref.as_deref()
         && (refs.account_ref.as_deref() != Some(customer_ref) || refs.account_ref.is_none())
@@ -4976,6 +5213,17 @@ fn validate_identity_refs(
         ));
     }
     Ok(refs)
+}
+
+fn validate_identity_refs(
+    input: &InteractionTelemetryInput,
+) -> Result<ValidatedIdentityRefs, ApiError> {
+    validated_identity_refs(
+        input.customer_ref.as_deref(),
+        input.account_ref.as_deref(),
+        input.user_ref.as_deref(),
+        input.anonymous_ref.as_deref(),
+    )
 }
 
 fn customer_identifier_hash(
@@ -5243,11 +5491,8 @@ async fn merge_anonymous_customer(
     .bind(anonymous_customer_id)
     .execute(&mut **tx)
     .await?;
-    let anonymous_scope = customer_scope_hash(None, Some(anonymous_customer_id));
-    let known_scope = customer_scope_hash(None, Some(known_customer_id));
-    rekey_customer_sessions(tx, auth, &anonymous_scope, &known_scope).await?;
     sqlx::query(
-        r"UPDATE consent_grants SET customer_id = $2, updated_at = NOW()
+        r"UPDATE enrichment_signal_items SET customer_id = $2
         WHERE workspace_id = $1 AND product_id = $3 AND customer_id = $4",
     )
     .bind(auth.workspace.id)
@@ -5256,6 +5501,36 @@ async fn merge_anonymous_customer(
     .bind(anonymous_customer_id)
     .execute(&mut **tx)
     .await?;
+    let anonymous_scope = customer_scope_hash(None, Some(anonymous_customer_id));
+    let known_scope = customer_scope_hash(None, Some(known_customer_id));
+    rekey_customer_sessions(tx, auth, &anonymous_scope, &known_scope).await?;
+    sqlx::query(
+        r"UPDATE consent_grants SET customer_id = $2
+        WHERE workspace_id = $1 AND product_id = $3 AND customer_id = $4",
+    )
+    .bind(auth.workspace.id)
+    .bind(known_customer_id)
+    .bind(auth.environment.product_id)
+    .bind(anonymous_customer_id)
+    .execute(&mut **tx)
+    .await?;
+    for table in [
+        "enrichment_requests",
+        "enrichment_answers",
+        "customer_context_retrievals",
+        "personalization_decisions",
+    ] {
+        let statement = format!(
+            "UPDATE {table} SET customer_id = $2 WHERE workspace_id = $1 AND product_id = $3 AND customer_id = $4"
+        );
+        sqlx::query(&statement)
+            .bind(auth.workspace.id)
+            .bind(known_customer_id)
+            .bind(auth.environment.product_id)
+            .bind(anonymous_customer_id)
+            .execute(&mut **tx)
+            .await?;
+    }
     sqlx::query(
         r"UPDATE customers SET merged_into_customer_id = $2, updated_at = NOW()
         WHERE id = $1 AND workspace_id = $3",
@@ -7528,6 +7803,1958 @@ pub(crate) async fn submit_product_feedback(
     Ok((interaction, report))
 }
 
+const ENRICHMENT_PURPOSES: &[&str] = &["product_personalization", "targeted_advertising"];
+const ENRICHMENT_PROVENANCES: &[&str] = &[
+    "agent_reports_user_statement",
+    "agent_reports_current_task",
+    "agent_inference",
+];
+
+#[derive(Debug, sqlx::FromRow)]
+struct EnrichmentRequestRow {
+    id: Uuid,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    environment_id: Uuid,
+    interaction_id: Uuid,
+    customer_id: Option<Uuid>,
+    surface: String,
+    purpose: String,
+    remember: bool,
+    consent_subject: String,
+    expected_consent_revision: i64,
+    identity_level: String,
+    state: String,
+    question: String,
+    request_hash: Vec<u8>,
+    capability_nonce_hash: Vec<u8>,
+    expires_at: DateTime<Utc>,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ExistingEnrichmentInteractionRow {
+    environment_id: Uuid,
+    session_id: Option<Uuid>,
+    surface: String,
+    operation: String,
+    status_code: Option<i32>,
+    duration_ms: Option<i64>,
+    customer_ref: Option<String>,
+    customer_id: Option<Uuid>,
+    runtime_hint: Option<String>,
+}
+
+fn validate_enrichment_purpose(value: &str) -> Result<(), ApiError> {
+    if ENRICHMENT_PURPOSES.contains(&value) {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(
+            "purpose must be product_personalization or targeted_advertising",
+        ))
+    }
+}
+
+fn validate_enrichment_surface(value: &str) -> Result<(&str, &str, Option<&str>), ApiError> {
+    match value {
+        "http_json" => Ok(("http_json", "unclassified", None)),
+        "html" => Ok(("http_html", "unclassified", None)),
+        "mcp" => Ok(("mcp", "confirmed", Some("mcp"))),
+        _ => Err(ApiError::bad_request(
+            "surface must be http_json, html, or mcp",
+        )),
+    }
+}
+
+fn validate_enrichment_runtime_hint(value: Option<&str>) -> Result<Option<String>, ApiError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.trim().is_empty()
+        || value.chars().count() > 200
+        || value.contains('@')
+        || value.chars().any(char::is_control)
+        || contains_sensitive_report_text(value)
+    {
+        return Err(ApiError::bad_request(
+            "runtimeHint must be a bounded, non-sensitive runtime label",
+        ));
+    }
+    Ok(Some(clean(value, 200)))
+}
+
+fn validate_opaque_event_id(value: &str, field: &str) -> Result<String, ApiError> {
+    if value.is_empty()
+        || value.len() > 100
+        || !value
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphanumeric())
+        || !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "_.:-".contains(character))
+    {
+        return Err(ApiError::bad_request(format!(
+            "{field} must be a bounded opaque identifier"
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_enrichment_operation(value: &str) -> Result<String, ApiError> {
+    if value.trim().is_empty()
+        || value.chars().count() > 160
+        || value.contains('@')
+        || value.contains('?')
+        || value.contains('#')
+        || value.chars().any(char::is_whitespace)
+        || !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "/_:.-*{}".contains(character))
+    {
+        return Err(ApiError::bad_request(
+            "operation must be a normalized route or tool name",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the request hash deliberately covers every externally supplied identity and interaction dimension"
+)]
+fn enrichment_request_hash(
+    identity_hmac_secret: &[u8],
+    auth: &ProductAuth,
+    input: &EnrichmentRequestInput,
+    operation: &str,
+    runtime_hint: Option<&str>,
+    session_ref_hash: Option<&[u8]>,
+    refs: &ValidatedIdentityRefs,
+    remember: bool,
+) -> Result<Vec<u8>, ApiError> {
+    let hash_ref = |kind: &str, value: Option<&str>| -> Result<Option<String>, ApiError> {
+        value
+            .map(|value| {
+                customer_identifier_hash(
+                    identity_hmac_secret,
+                    auth.workspace.id,
+                    auth.environment.product_id,
+                    kind,
+                    value,
+                )
+                .map(|digest| URL_SAFE_NO_PAD.encode(digest))
+            })
+            .transpose()
+    };
+    let material = serde_json::json!({
+        "version": 1,
+        "workspaceId": auth.workspace.id,
+        "productId": auth.environment.product_id,
+        "environmentId": auth.environment.id,
+        "apiKeyId": auth.api_key_id,
+        "interactionId": input.interaction_id,
+        "operation": operation,
+        "surface": &input.surface,
+        "statusCode": input.status_code,
+        "durationMs": input.duration_ms,
+        "runtimeHint": runtime_hint,
+        "sessionRefHash": session_ref_hash.map(|digest| URL_SAFE_NO_PAD.encode(digest)),
+        "purpose": &input.purpose,
+        "remember": remember,
+        "customerRefHash": hash_ref("customer_ref", refs.customer_ref.as_deref())?,
+        "accountRefHash": hash_ref("account_ref", refs.account_ref.as_deref())?,
+        "userRefHash": hash_ref("user_ref", refs.user_ref.as_deref())?,
+        "anonymousRefHash": hash_ref("anonymous_ref", refs.anonymous_ref.as_deref())?,
+    });
+    Ok(sha256_bytes(
+        &serde_json::to_vec(&material).map_err(ApiError::internal)?,
+    ))
+}
+
+fn enrichment_subject(
+    identity_hmac_secret: &[u8],
+    auth: &ProductAuth,
+    customer_id: Option<Uuid>,
+    interaction_id: Uuid,
+    purpose: &str,
+    remember: bool,
+) -> Result<String, ApiError> {
+    if !remember {
+        let digest = customer_identifier_hash(
+            identity_hmac_secret,
+            auth.workspace.id,
+            auth.environment.product_id,
+            &format!("enrichment_interaction_consent:{purpose}"),
+            &interaction_id.to_string(),
+        )?;
+        let scoped_id = Uuid::from_slice(&digest[..16]).map_err(ApiError::internal)?;
+        return Ok(format!("afint1_{}", scoped_id.simple()));
+    }
+    customer_id.map_or_else(
+        || Ok(format!("afint1_{}", interaction_id.simple())),
+        |customer_id| {
+            let digest = customer_identifier_hash(
+                identity_hmac_secret,
+                auth.workspace.id,
+                auth.environment.product_id,
+                &format!("enrichment_consent:{purpose}"),
+                &customer_id.to_string(),
+            )?;
+            Ok(format!("afsub1_{}", URL_SAFE_NO_PAD.encode(digest)))
+        },
+    )
+}
+
+fn enrichment_question(product_name: &str, purpose: &str, remember: bool) -> String {
+    let use_text = if purpose == "targeted_advertising" {
+        "personalize marketing and advertising"
+    } else {
+        "personalize your product experience"
+    };
+    let memory_text = if remember {
+        " and remember them for future visits"
+    } else {
+        " for this interaction only"
+    };
+    format!(
+        "May I share relevant, non-sensitive preferences, interests, intent, or constraints with {product_name} so it can {use_text}{memory_text}?"
+    )
+}
+
+fn answer_instruction(product_name: &str, purpose: &str, remember: bool) -> String {
+    let use_text = if purpose == "targeted_advertising" {
+        "marketing or advertising"
+    } else {
+        "this product experience"
+    };
+    let memory_text = if remember {
+        " Mark only durable preferences as remembered; keep situational context interaction-scoped."
+    } else {
+        " Every item must remain interaction-scoped."
+    };
+    format!(
+        "Provide only non-sensitive context the user explicitly shared or that is directly relevant to the current task for {use_text} by {product_name}.{memory_text} Never include prompts, transcripts, names, emails, credentials, or raw customer content."
+    )
+}
+
+fn enrichment_consent_action(public_base_url: &str, token: &str) -> EnrichmentConsentAction {
+    EnrichmentConsentAction {
+        url: format!("{public_base_url}/api/v2/enrichment/consent/decisions"),
+        method: "POST".to_owned(),
+        authorization: format!("Bearer {token}"),
+        content_type: "application/json".to_owned(),
+        body_schema: EnrichmentConsentBodySchema {
+            decision: vec!["approved".to_owned(), "declined".to_owned()],
+        },
+    }
+}
+
+fn enrichment_answer_action(public_base_url: &str, token: &str) -> EnrichmentAnswerAction {
+    EnrichmentAnswerAction {
+        url: format!("{public_base_url}/api/v2/enrichment/answers"),
+        method: "POST".to_owned(),
+        authorization: format!("Bearer {token}"),
+        content_type: "application/json".to_owned(),
+        body_schema: EnrichmentAnswerBodySchema {
+            status: vec![
+                "answered".to_owned(),
+                "declined".to_owned(),
+                "no_relevant_context".to_owned(),
+            ],
+            items: EnrichmentAnswerItemsSchema {
+                maximum: 8,
+                required: ["key", "type", "value", "provenance", "remember"]
+                    .map(str::to_owned)
+                    .to_vec(),
+                signal_types: ["intent", "preference", "constraint"]
+                    .map(str::to_owned)
+                    .to_vec(),
+                provenance: [
+                    "agent_reports_user_statement",
+                    "agent_reports_current_task",
+                    "agent_inference",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                catalog_version: "v1".to_owned(),
+                catalog: enrichment_catalog_schema(),
+            },
+        },
+    }
+}
+
+fn enrichment_stage_instruction(request: &EnrichmentRequestRow) -> String {
+    match request.state.as_str() {
+        "consent_required" => concat!(
+            "Finish the user's product task first. Then ask the exact question once and stop. ",
+            "Wait for the user's next explicit reply; never infer approval from silence, prior use, ",
+            "or the current request. Submit approved only for an unambiguous yes, declined only for ",
+            "an unambiguous no, and submit nothing when the reply is unclear."
+        )
+        .to_owned(),
+        "answer_ready" => concat!(
+            "Finish the user's product task first. Then submit at most one bounded answer using the ",
+            "provided schema. Include only relevant, non-sensitive context allowed by the explicit ",
+            "permission; do not infer identity or sensitive traits."
+        )
+        .to_owned(),
+        _ => "No enrichment action is permitted for this request.".to_owned(),
+    }
+}
+
+fn enrichment_response(
+    public_base_url: &str,
+    request: &EnrichmentRequestRow,
+    token: &str,
+) -> EnrichmentRequestResponse {
+    let consent_required = request.state == "consent_required";
+    let answer_ready = request.state == "answer_ready";
+    EnrichmentRequestResponse {
+        request_id: request.id,
+        interaction_id: request.interaction_id,
+        state: request.state.clone(),
+        purpose: request.purpose.clone(),
+        surface: request.surface.clone(),
+        identity_level: request.identity_level.clone(),
+        stage_instruction: enrichment_stage_instruction(request),
+        question: consent_required.then(|| request.question.clone()),
+        answer_instruction: answer_ready
+            .then(|| answer_instruction("this company", &request.purpose, request.remember)),
+        expires_at: request.expires_at,
+        consent: Some(enrichment_consent_action(public_base_url, token)),
+        submit: answer_ready.then(|| enrichment_answer_action(public_base_url, token)),
+    }
+}
+
+async fn product_key_hash(
+    tx: &mut Transaction<'_, Postgres>,
+    auth: &ProductAuth,
+) -> Result<Vec<u8>, ApiError> {
+    sqlx::query_scalar::<_, Vec<u8>>(
+        r"SELECT key_hash FROM api_keys
+        WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+          AND kind = 'write' AND revoked_at IS NULL
+          AND (expires_at IS NULL OR expires_at > NOW())",
+    )
+    .bind(auth.api_key_id)
+    .bind(auth.workspace.id)
+    .bind(auth.environment.id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(ApiError::unauthorized)
+}
+
+async fn current_enrichment_consent(
+    tx: &mut Transaction<'_, Postgres>,
+    auth: &ProductAuth,
+    subject: &str,
+    customer_id: Option<Uuid>,
+    purpose: &str,
+    remember: bool,
+) -> Result<(String, i64, String), ApiError> {
+    let customer_id = remember.then_some(customer_id).flatten();
+    let mut required = vec!["share_preferences", "personalize"];
+    if remember {
+        required.push("remember_preferences");
+    }
+    let rows = sqlx::query_as::<_, (String, String, i64, bool, String, DateTime<Utc>)>(
+        r"SELECT scope, state, revision,
+          (expires_at IS NULL OR expires_at > NOW()) AS active
+          , subject, decided_at
+        FROM consent_grants grant_row
+        WHERE environment_id = $1 AND workspace_id = $2
+          AND (subject = $3 OR ($5::UUID IS NOT NULL AND customer_id = $5))
+          AND scope = ANY($4) AND enrichment_purpose = $6
+        ORDER BY decided_at DESC, revision DESC,
+          CASE WHEN state IN ('declined', 'revoked') THEN 1 ELSE 0 END DESC,
+          subject, id",
+    )
+    .bind(auth.environment.id)
+    .bind(auth.workspace.id)
+    .bind(subject)
+    .bind(&required)
+    .bind(customer_id)
+    .bind(purpose)
+    .fetch_all(&mut **tx)
+    .await?;
+    let resolved_subject = rows
+        .first()
+        .map_or_else(|| subject.to_owned(), |row| row.4.clone());
+    let effective_rows = rows
+        .iter()
+        .filter(|row| row.4 == resolved_subject)
+        .collect::<Vec<_>>();
+    let revision = effective_rows.iter().map(|row| row.2).max().unwrap_or(0);
+    if effective_rows
+        .iter()
+        .any(|row| row.3 && (row.1 == "declined" || row.1 == "revoked"))
+    {
+        return Ok(("declined".to_owned(), revision, resolved_subject));
+    }
+    if required.iter().all(|scope| {
+        effective_rows
+            .iter()
+            .any(|row| row.0 == *scope && row.1 == "approved" && row.3)
+    }) {
+        Ok(("answer_ready".to_owned(), revision, resolved_subject))
+    } else {
+        Ok(("consent_required".to_owned(), revision, resolved_subject))
+    }
+}
+
+pub(crate) async fn create_enrichment_request(
+    pool: &PgPool,
+    auth: &ProductAuth,
+    identity_hmac_secret: &[u8],
+    public_base_url: &str,
+    input: EnrichmentRequestInput,
+) -> Result<EnrichmentRequestResponse, ApiError> {
+    validate_enrichment_purpose(&input.purpose)?;
+    let (interaction_surface, classification, confirmation_method) =
+        validate_enrichment_surface(&input.surface)?;
+    if input
+        .status_code
+        .is_some_and(|value| !(100..=599).contains(&value))
+        || input
+            .duration_ms
+            .is_some_and(|value| !(0..=86_400_000).contains(&value))
+    {
+        return Err(ApiError::bad_request("Invalid response status or duration"));
+    }
+    let session_ref = validate_identity_ref(input.session_ref.as_deref(), "sessionRef")?;
+    let runtime_hint = validate_enrichment_runtime_hint(input.runtime_hint.as_deref())?;
+    let operation = validate_enrichment_operation(&input.operation)?;
+    let refs = validated_identity_refs(
+        input.customer_ref.as_deref(),
+        input.account_ref.as_deref(),
+        input.user_ref.as_deref(),
+        input.anonymous_ref.as_deref(),
+    )?;
+    let has_identity_ref = refs.customer_ref.is_some()
+        || refs.account_ref.is_some()
+        || refs.user_ref.is_some()
+        || refs.anonymous_ref.is_some();
+    let remember = input.remember && has_identity_ref;
+    let session_ref_hash = session_ref
+        .as_deref()
+        .map(|session_ref| {
+            customer_identifier_hash(
+                identity_hmac_secret,
+                auth.workspace.id,
+                auth.environment.product_id,
+                "session_ref",
+                session_ref,
+            )
+        })
+        .transpose()?;
+    let request_hash = enrichment_request_hash(
+        identity_hmac_secret,
+        auth,
+        &input,
+        &operation,
+        runtime_hint.as_deref(),
+        session_ref_hash.as_deref(),
+        &refs,
+        remember,
+    )?;
+    let now = Utc::now();
+    let expires_at = now + Duration::hours(2);
+    let mut tx = pool.begin().await?;
+    let key_hash = product_key_hash(&mut tx, auth).await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "enrichment:{}:{}",
+            auth.environment.id, input.interaction_id
+        ))
+        .execute(&mut *tx)
+        .await?;
+    let existing_request = sqlx::query_as::<_, EnrichmentRequestRow>(
+        r"SELECT id, workspace_id, product_id, environment_id, interaction_id,
+          customer_id, surface, purpose, remember, consent_subject, expected_consent_revision,
+          identity_level, state, question, request_hash, capability_nonce_hash,
+          expires_at, created_at
+        FROM enrichment_requests
+        WHERE environment_id = $1 AND interaction_id = $2 FOR UPDATE",
+    )
+    .bind(auth.environment.id)
+    .bind(input.interaction_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(request) = existing_request {
+        if request.request_hash != request_hash || request.expires_at <= now {
+            return Err(ApiError::conflict(
+                "interactionId was already used with a different or expired enrichment request",
+            ));
+        }
+        let (token, expected_nonce_hash) = sign_deterministic_enrichment_capability(
+            auth.api_key_id,
+            &key_hash,
+            request.id,
+            request.interaction_id,
+            request.created_at,
+            request.expires_at,
+        )?;
+        if request.capability_nonce_hash != expected_nonce_hash {
+            return Err(ApiError::conflict(
+                "This enrichment request cannot be retried with the current product key",
+            ));
+        }
+        tx.commit().await?;
+        return Ok(enrichment_response(public_base_url, &request, &token));
+    }
+    let customer_id =
+        resolve_telemetry_customer(&mut tx, auth, identity_hmac_secret, &refs, now).await?;
+    let identity_level = if let Some(customer_id) = customer_id {
+        sqlx::query_scalar::<_, String>(
+            "SELECT identity_level FROM customers WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(customer_id)
+        .bind(auth.workspace.id)
+        .fetch_one(&mut *tx)
+        .await?
+    } else {
+        "ephemeral".to_owned()
+    };
+    if remember != (input.remember && identity_level != "ephemeral") {
+        return Err(ApiError::conflict(
+            "Identity resolution changed the remember policy",
+        ));
+    }
+    let customer_ref = refs.customer_ref.clone();
+    let existing_interaction = sqlx::query_as::<_, ExistingEnrichmentInteractionRow>(
+        r"SELECT environment_id, session_id, surface, operation, status_code,
+          duration_ms, customer_ref, customer_id, runtime_hint
+        FROM interactions_v2 WHERE id = $1 FOR UPDATE",
+    )
+    .bind(input.interaction_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(existing) = &existing_interaction {
+        let scalar_compatible = existing.environment_id == auth.environment.id
+            && existing.surface == interaction_surface
+            && (existing.operation == "pending" || existing.operation == operation)
+            && existing
+                .status_code
+                .is_none_or(|value| Some(value) == input.status_code)
+            && existing
+                .duration_ms
+                .is_none_or(|value| Some(value) == input.duration_ms)
+            && existing
+                .runtime_hint
+                .as_deref()
+                .is_none_or(|value| Some(value) == runtime_hint.as_deref())
+            && existing
+                .customer_ref
+                .as_deref()
+                .is_none_or(|value| Some(value) == customer_ref.as_deref())
+            && existing
+                .customer_id
+                .is_none_or(|value| Some(value) == customer_id);
+        if !scalar_compatible {
+            return Err(ApiError::conflict(
+                "interactionId belongs to a different interaction payload",
+            ));
+        }
+        match (existing.session_id, session_ref_hash.as_deref()) {
+            (Some(existing_session_id), Some(expected_ref_hash)) => {
+                let existing_ref_hash = sqlx::query_scalar::<_, Vec<u8>>(
+                    "SELECT COALESCE(raw_ref_hash, ref_hash) FROM sessions_v2 WHERE id = $1 AND workspace_id = $2",
+                )
+                .bind(existing_session_id)
+                .bind(auth.workspace.id)
+                .fetch_one(&mut *tx)
+                .await?;
+                if existing_ref_hash != expected_ref_hash {
+                    return Err(ApiError::conflict(
+                        "interactionId belongs to a different session",
+                    ));
+                }
+            }
+            (Some(_), None) => {
+                return Err(ApiError::conflict(
+                    "interactionId belongs to a different session",
+                ));
+            }
+            (None, _) => {}
+        }
+    }
+    let session_id = if let Some(existing_session_id) =
+        existing_interaction.as_ref().and_then(|row| row.session_id)
+    {
+        Some(existing_session_id)
+    } else if let Some(session_ref_hash) = session_ref_hash.as_deref() {
+        Some(
+            resolve_v2_session(
+                &mut tx,
+                auth.workspace.id,
+                auth.environment.id,
+                &customer_scope_hash(customer_ref.as_deref(), customer_id),
+                session_ref_hash,
+                if input.surface == "mcp" {
+                    "mcp"
+                } else {
+                    "customer"
+                },
+                now,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let runtime_hint_source = runtime_hint.as_ref().map(|_| {
+        if input.surface == "mcp" {
+            "mcp"
+        } else {
+            "http"
+        }
+    });
+    let interaction = sqlx::query_as::<_, (Uuid, Option<Uuid>, String, String, Option<String>)>(
+        r"INSERT INTO interactions_v2
+        (id, workspace_id, environment_id, api_key_id, session_id, surface, operation,
+         status_code, duration_ms, customer_ref, customer_id, classification,
+         confirmation_method, runtime_hint, runtime_hint_source, occurred_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        ON CONFLICT (id) DO UPDATE SET
+          api_key_id = COALESCE(interactions_v2.api_key_id, EXCLUDED.api_key_id),
+          session_id = COALESCE(interactions_v2.session_id, EXCLUDED.session_id),
+          operation = CASE WHEN interactions_v2.operation = 'pending'
+            THEN EXCLUDED.operation ELSE interactions_v2.operation END,
+          status_code = COALESCE(interactions_v2.status_code, EXCLUDED.status_code),
+          duration_ms = COALESCE(interactions_v2.duration_ms, EXCLUDED.duration_ms),
+          customer_ref = COALESCE(interactions_v2.customer_ref, EXCLUDED.customer_ref),
+          customer_id = COALESCE(interactions_v2.customer_id, EXCLUDED.customer_id),
+          runtime_hint = COALESCE(interactions_v2.runtime_hint, EXCLUDED.runtime_hint),
+          runtime_hint_source = COALESCE(
+            interactions_v2.runtime_hint_source, EXCLUDED.runtime_hint_source
+          ),
+          classification = CASE WHEN EXCLUDED.classification = 'confirmed'
+            THEN 'confirmed' ELSE interactions_v2.classification END,
+          confirmation_method = CASE WHEN EXCLUDED.classification = 'confirmed'
+            THEN EXCLUDED.confirmation_method ELSE interactions_v2.confirmation_method END,
+          updated_at = NOW()
+        WHERE interactions_v2.environment_id = EXCLUDED.environment_id
+          AND interactions_v2.surface = EXCLUDED.surface
+          AND (interactions_v2.operation = 'pending'
+            OR interactions_v2.operation = EXCLUDED.operation)
+          AND (interactions_v2.session_id IS NULL
+            OR interactions_v2.session_id = EXCLUDED.session_id)
+          AND (interactions_v2.status_code IS NULL
+            OR interactions_v2.status_code = EXCLUDED.status_code)
+          AND (interactions_v2.duration_ms IS NULL
+            OR interactions_v2.duration_ms = EXCLUDED.duration_ms)
+          AND (interactions_v2.runtime_hint IS NULL
+            OR interactions_v2.runtime_hint = EXCLUDED.runtime_hint)
+          AND (interactions_v2.customer_id IS NULL OR EXCLUDED.customer_id IS NULL
+            OR interactions_v2.customer_id = EXCLUDED.customer_id)
+          AND (interactions_v2.customer_ref IS NULL OR EXCLUDED.customer_ref IS NULL
+            OR interactions_v2.customer_ref = EXCLUDED.customer_ref)
+        RETURNING id, customer_id, surface, classification, confirmation_method",
+    )
+    .bind(input.interaction_id)
+    .bind(auth.workspace.id)
+    .bind(auth.environment.id)
+    .bind(auth.api_key_id)
+    .bind(session_id)
+    .bind(interaction_surface)
+    .bind(&operation)
+    .bind(input.status_code)
+    .bind(input.duration_ms)
+    .bind(customer_ref)
+    .bind(customer_id)
+    .bind(classification)
+    .bind(confirmation_method)
+    .bind(runtime_hint)
+    .bind(runtime_hint_source)
+    .bind(now)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| ApiError::conflict("interactionId belongs to another product context"))?;
+    if interaction.1 != customer_id {
+        return Err(ApiError::conflict(
+            "interactionId is already linked to a different customer",
+        ));
+    }
+    if interaction.2 != interaction_surface
+        || (input.surface == "mcp"
+            && (interaction.3 != "confirmed" || interaction.4.as_deref() != Some("mcp")))
+    {
+        return Err(ApiError::conflict(
+            "interactionId is already linked to a different product surface",
+        ));
+    }
+    let subject = enrichment_subject(
+        identity_hmac_secret,
+        auth,
+        customer_id,
+        input.interaction_id,
+        &input.purpose,
+        remember,
+    )?;
+    let (state, revision, subject) = current_enrichment_consent(
+        &mut tx,
+        auth,
+        &subject,
+        customer_id,
+        &input.purpose,
+        remember,
+    )
+    .await?;
+    let product_name = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM products WHERE id = $1 AND workspace_id = $2",
+    )
+    .bind(auth.environment.product_id)
+    .bind(auth.workspace.id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let proposed_request_id = Uuid::new_v4();
+    let (_, proposed_nonce_hash) = sign_deterministic_enrichment_capability(
+        auth.api_key_id,
+        &key_hash,
+        proposed_request_id,
+        input.interaction_id,
+        now,
+        expires_at,
+    )?;
+    let question = enrichment_question(&product_name, &input.purpose, remember);
+    let request = sqlx::query_as::<_, EnrichmentRequestRow>(
+        r"INSERT INTO enrichment_requests
+        (id, workspace_id, product_id, environment_id, interaction_id, api_key_id,
+         customer_id, surface, purpose, remember, consent_subject, expected_consent_revision,
+         identity_level, state, operation, question_key, question, request_hash,
+         capability_nonce_hash, expires_at, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+          $14, $15, 'customer_context.v1', $16, $17, $18, $19, $20, $20)
+        ON CONFLICT (environment_id, interaction_id) DO UPDATE SET
+          id = enrichment_requests.id
+        RETURNING id, workspace_id, product_id, environment_id, interaction_id,
+          customer_id, surface, purpose, remember, consent_subject, expected_consent_revision,
+          identity_level, state, question, request_hash, capability_nonce_hash,
+          expires_at, created_at",
+    )
+    .bind(proposed_request_id)
+    .bind(auth.workspace.id)
+    .bind(auth.environment.product_id)
+    .bind(auth.environment.id)
+    .bind(input.interaction_id)
+    .bind(auth.api_key_id)
+    .bind(customer_id)
+    .bind(&input.surface)
+    .bind(&input.purpose)
+    .bind(remember)
+    .bind(subject)
+    .bind(revision)
+    .bind(identity_level)
+    .bind(state)
+    .bind(operation)
+    .bind(question)
+    .bind(&request_hash)
+    .bind(proposed_nonce_hash)
+    .bind(expires_at)
+    .bind(now)
+    .fetch_one(&mut *tx)
+    .await?;
+    if request.request_hash != request_hash {
+        return Err(ApiError::conflict(
+            "interactionId was already used with a different enrichment request",
+        ));
+    }
+    let (token, expected_nonce_hash) = sign_deterministic_enrichment_capability(
+        auth.api_key_id,
+        &key_hash,
+        request.id,
+        request.interaction_id,
+        request.created_at,
+        request.expires_at,
+    )?;
+    if request.capability_nonce_hash != expected_nonce_hash {
+        return Err(ApiError::conflict(
+            "This enrichment request cannot be retried with the current contract",
+        ));
+    }
+    tx.commit().await?;
+    Ok(enrichment_response(public_base_url, &request, &token))
+}
+
+async fn verified_enrichment_request(
+    tx: &mut Transaction<'_, Postgres>,
+    capability: &str,
+) -> Result<(EnrichmentRequestRow, Vec<u8>), ApiError> {
+    let parsed = parse_enrichment_capability(capability)?;
+    let key_hash = sqlx::query_scalar::<_, Vec<u8>>(
+        r"SELECT key_hash FROM api_keys WHERE id = $1 AND kind = 'write'
+          AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())",
+    )
+    .bind(parsed.key_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(ApiError::unauthorized)?;
+    let claims = verify_enrichment_capability(parsed, &key_hash, Utc::now())?;
+    let request = sqlx::query_as::<_, EnrichmentRequestRow>(
+        r"SELECT id, workspace_id, product_id, environment_id, interaction_id,
+          customer_id, surface, purpose, remember, consent_subject, expected_consent_revision,
+          identity_level, state, question, request_hash, capability_nonce_hash,
+          expires_at, created_at
+        FROM enrichment_requests WHERE id = $1 AND interaction_id = $2
+          AND api_key_id = $3 FOR UPDATE",
+    )
+    .bind(claims.q)
+    .bind(claims.i)
+    .bind(parsed_enrichment_key_id(capability)?)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(ApiError::unauthorized)?;
+    if request.expires_at <= Utc::now() || request.capability_nonce_hash != sha256(&claims.n) {
+        return Err(ApiError::unauthorized());
+    }
+    Ok((request, key_hash))
+}
+
+fn parsed_enrichment_key_id(capability: &str) -> Result<Uuid, ApiError> {
+    parse_enrichment_capability(capability).map(|parsed| parsed.key_id)
+}
+
+async fn apply_enrichment_consent(
+    tx: &mut Transaction<'_, Postgres>,
+    request: &EnrichmentRequestRow,
+    state: &str,
+    decided_at: DateTime<Utc>,
+) -> Result<bool, ApiError> {
+    let mut scopes = vec!["share_preferences", "personalize"];
+    if request.remember {
+        scopes.push("remember_preferences");
+    }
+    let existing = sqlx::query_as::<_, (Uuid, String, String, i64)>(
+        r"SELECT id, scope, state, revision FROM consent_grants
+        WHERE environment_id = $1 AND subject = $2 AND scope = ANY($3)
+        ORDER BY scope FOR UPDATE",
+    )
+    .bind(request.environment_id)
+    .bind(&request.consent_subject)
+    .bind(&scopes)
+    .fetch_all(&mut **tx)
+    .await?;
+    let current_revision = existing.iter().map(|row| row.3).max().unwrap_or(0);
+    let desired_is_current = scopes
+        .iter()
+        .all(|scope| existing.iter().any(|row| row.1 == *scope && row.2 == state));
+    if desired_is_current || current_revision != request.expected_consent_revision {
+        return Ok(false);
+    }
+    let revision = request.expected_consent_revision + 1;
+    let expires_at =
+        (!request.remember || request.identity_level == "ephemeral").then_some(request.expires_at);
+    for scope in scopes {
+        let prior_state = existing
+            .iter()
+            .find(|row| row.1 == scope)
+            .map(|row| row.2.as_str());
+        let grant_id = sqlx::query_scalar::<_, Uuid>(
+            r"INSERT INTO consent_grants
+            (id, workspace_id, product_id, environment_id, customer_id, subject,
+             scope, enrichment_purpose, state, basis, revision, decided_at, expires_at, revoked_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+              'user_consent', $10, $11, $12, NULL)
+            ON CONFLICT (environment_id, subject, scope) DO UPDATE SET
+              customer_id = COALESCE(consent_grants.customer_id, EXCLUDED.customer_id),
+              enrichment_purpose = EXCLUDED.enrichment_purpose,
+              state = EXCLUDED.state, basis = EXCLUDED.basis,
+              revision = EXCLUDED.revision, decided_at = EXCLUDED.decided_at,
+              expires_at = EXCLUDED.expires_at, revoked_at = NULL, updated_at = NOW()
+            WHERE consent_grants.revision = $13
+            RETURNING id",
+        )
+        .bind(Uuid::new_v4())
+        .bind(request.workspace_id)
+        .bind(request.product_id)
+        .bind(request.environment_id)
+        .bind(request.customer_id)
+        .bind(&request.consent_subject)
+        .bind(scope)
+        .bind(&request.purpose)
+        .bind(state)
+        .bind(revision)
+        .bind(decided_at)
+        .bind(expires_at)
+        .bind(request.expected_consent_revision)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| ApiError::conflict("Enrichment permission changed; request it again"))?;
+        sqlx::query(
+            r"INSERT INTO enrichment_consent_events
+            (id, workspace_id, product_id, environment_id, consent_grant_id,
+             subject, scope, enrichment_purpose, prior_state, state, basis,
+             revision, source, decided_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+              'user_consent', $11, 'enrichment', $12)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(request.workspace_id)
+        .bind(request.product_id)
+        .bind(request.environment_id)
+        .bind(grant_id)
+        .bind(&request.consent_subject)
+        .bind(scope)
+        .bind(&request.purpose)
+        .bind(prior_state)
+        .bind(state)
+        .bind(revision)
+        .bind(decided_at)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(true)
+}
+
+pub(crate) async fn decide_enrichment_consent(
+    pool: &PgPool,
+    public_base_url: &str,
+    capability: &str,
+    input: EnrichmentConsentDecisionInput,
+) -> Result<EnrichmentConsentDecisionResponse, ApiError> {
+    if !["approved", "declined"].contains(&input.decision.as_str()) {
+        return Err(ApiError::bad_request(
+            "decision must be approved or declined",
+        ));
+    }
+    let mut tx = pool.begin().await?;
+    let (mut request, _) = verified_enrichment_request(&mut tx, capability).await?;
+    let decided_at = Utc::now();
+    let state = input.decision;
+    let changed = apply_enrichment_consent(&mut tx, &request, &state, decided_at).await?;
+    let auth = ProductAuth {
+        workspace: sqlx::query_as("SELECT * FROM workspaces WHERE id = $1")
+            .bind(request.workspace_id)
+            .fetch_one(&mut *tx)
+            .await?,
+        environment: sqlx::query_as(
+            "SELECT * FROM product_environments WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(request.environment_id)
+        .bind(request.workspace_id)
+        .fetch_one(&mut *tx)
+        .await?,
+        api_key_id: parsed_enrichment_key_id(capability)?,
+    };
+    let (resolved_state, _, _) = current_enrichment_consent(
+        &mut tx,
+        &auth,
+        &request.consent_subject,
+        request.customer_id,
+        &request.purpose,
+        request.remember,
+    )
+    .await?;
+    if !["answered", "no_relevant_context"].contains(&request.state.as_str()) {
+        request.state = resolved_state;
+    }
+    sqlx::query("UPDATE enrichment_requests SET state = $2, updated_at = NOW() WHERE id = $1")
+        .bind(request.id)
+        .bind(&request.state)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(EnrichmentConsentDecisionResponse {
+        request_id: request.id,
+        state: request.state.clone(),
+        changed,
+        stage_instruction: enrichment_stage_instruction(&request),
+        answer_instruction: (request.state == "answer_ready")
+            .then(|| answer_instruction("this company", &request.purpose, request.remember)),
+        submit: (request.state == "answer_ready")
+            .then(|| enrichment_answer_action(public_base_url, capability)),
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EnrichmentCatalogDefinition {
+    key: &'static str,
+    signal_type: &'static str,
+    allowed_values: &'static [&'static str],
+    targeted_advertising_safe: bool,
+}
+
+const ENRICHMENT_CATALOG: &[EnrichmentCatalogDefinition] = &[
+    EnrichmentCatalogDefinition {
+        key: "shopping.priority",
+        signal_type: "preference",
+        allowed_values: &["price", "quality", "speed", "convenience", "sustainability"],
+        targeted_advertising_safe: true,
+    },
+    EnrichmentCatalogDefinition {
+        key: "shopping.sustainability",
+        signal_type: "preference",
+        allowed_values: &["low", "medium", "high"],
+        targeted_advertising_safe: true,
+    },
+    EnrichmentCatalogDefinition {
+        key: "shopping.budget_band",
+        signal_type: "constraint",
+        allowed_values: &["under_50", "50_150", "150_500", "over_500", "flexible"],
+        targeted_advertising_safe: true,
+    },
+    EnrichmentCatalogDefinition {
+        key: "shopping.delivery_window",
+        signal_type: "constraint",
+        allowed_values: &[
+            "same_day",
+            "next_day",
+            "two_to_three_days",
+            "within_week",
+            "flexible",
+        ],
+        targeted_advertising_safe: true,
+    },
+    EnrichmentCatalogDefinition {
+        key: "content.format",
+        signal_type: "preference",
+        allowed_values: &["short", "long_form", "video", "audio", "interactive"],
+        targeted_advertising_safe: true,
+    },
+    EnrichmentCatalogDefinition {
+        key: "content.topic_depth",
+        signal_type: "preference",
+        allowed_values: &["overview", "practical", "expert"],
+        targeted_advertising_safe: true,
+    },
+    EnrichmentCatalogDefinition {
+        key: "b2b.company_size",
+        signal_type: "constraint",
+        allowed_values: &["solo", "small", "mid_market", "enterprise"],
+        targeted_advertising_safe: false,
+    },
+    EnrichmentCatalogDefinition {
+        key: "b2b.primary_goal",
+        signal_type: "intent",
+        allowed_values: &[
+            "evaluate",
+            "integrate",
+            "automate",
+            "analyze",
+            "collaborate",
+        ],
+        targeted_advertising_safe: false,
+    },
+    EnrichmentCatalogDefinition {
+        key: "b2b.purchase_timeline",
+        signal_type: "intent",
+        allowed_values: &["now", "this_month", "this_quarter", "later", "exploring"],
+        targeted_advertising_safe: false,
+    },
+    EnrichmentCatalogDefinition {
+        key: "b2b.integration_priority",
+        signal_type: "preference",
+        allowed_values: &[
+            "security",
+            "reliability",
+            "speed",
+            "ease_of_use",
+            "cost",
+            "interoperability",
+        ],
+        targeted_advertising_safe: false,
+    },
+];
+
+fn enrichment_catalog_schema() -> Vec<EnrichmentCatalogEntry> {
+    ENRICHMENT_CATALOG
+        .iter()
+        .map(|definition| EnrichmentCatalogEntry {
+            key: definition.key.to_owned(),
+            signal_type: definition.signal_type.to_owned(),
+            allowed_values: definition
+                .allowed_values
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            targeted_advertising_safe: definition.targeted_advertising_safe,
+        })
+        .collect()
+}
+
+fn catalog_summary(definition: &EnrichmentCatalogDefinition, value: &str) -> String {
+    let label = definition.key.replace(['.', '_'], " ");
+    let value = value.replace('_', " ");
+    format!("{label}: {value}")
+}
+
+fn validate_enrichment_item(
+    item: &crate::models::EnrichmentAnswerItemInput,
+    purpose: &str,
+) -> Result<&'static EnrichmentCatalogDefinition, ApiError> {
+    let definition = ENRICHMENT_CATALOG
+        .iter()
+        .find(|definition| definition.key == item.key)
+        .ok_or_else(|| ApiError::bad_request("Unknown customer context catalog key"))?;
+    if definition.signal_type != item.signal_type
+        || !definition.allowed_values.contains(&item.value.as_str())
+    {
+        return Err(ApiError::bad_request(
+            "Customer context type or value is not allowed by the catalog",
+        ));
+    }
+    if purpose == "targeted_advertising" && !definition.targeted_advertising_safe {
+        return Err(ApiError::bad_request(
+            "Customer context key is not approved for targeted advertising",
+        ));
+    }
+    if !ENRICHMENT_PROVENANCES.contains(&item.provenance.as_str()) {
+        return Err(ApiError::bad_request("Invalid customer context provenance"));
+    }
+    if item
+        .confidence
+        .is_some_and(|confidence| !(0.0..=1.0).contains(&confidence))
+    {
+        return Err(ApiError::bad_request("confidence must be between 0 and 1"));
+    }
+    Ok(definition)
+}
+
+async fn context_items_for_answer(
+    tx: &mut Transaction<'_, Postgres>,
+    answer_id: Uuid,
+    purpose: &str,
+) -> Result<Vec<CustomerContextItem>, ApiError> {
+    sqlx::query_as::<_, CustomerContextItem>(
+        r"SELECT signal.id AS signal_id, item.signal_key AS key,
+          COALESCE(signal.attributes->>'enrichmentType', signal.signal_type) AS signal_type,
+          TO_JSONB(item.signal_value) AS value, signal.summary,
+          signal.provenance, signal.confidence, item.expires_at,
+          CASE WHEN signal.provenance = 'agent_inference' THEN ARRAY[]::TEXT[]
+            ELSE ARRAY[$2::TEXT] END AS allowed_uses,
+          item.remembered
+        FROM enrichment_signal_items item
+        JOIN customer_signals signal ON signal.id = item.signal_id
+          AND signal.workspace_id = item.workspace_id
+        WHERE item.enrichment_answer_id = $1 AND item.purpose = $2
+        ORDER BY item.item_index",
+    )
+    .bind(answer_id)
+    .bind(purpose)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(Into::into)
+}
+
+async fn active_enrichment_share_grant(
+    tx: &mut Transaction<'_, Postgres>,
+    request: &EnrichmentRequestRow,
+    require_remember: bool,
+) -> Result<Uuid, ApiError> {
+    let mut required = vec!["share_preferences", "personalize"];
+    if require_remember {
+        required.push("remember_preferences");
+    }
+    let rows = sqlx::query_as::<_, (Uuid, String, String, bool)>(
+        r"SELECT id, scope, state, (expires_at IS NULL OR expires_at > NOW()) AS active
+        FROM consent_grants
+        WHERE workspace_id = $1 AND environment_id = $2 AND subject = $3
+          AND scope = ANY($4) AND enrichment_purpose = $5
+        ORDER BY scope FOR UPDATE",
+    )
+    .bind(request.workspace_id)
+    .bind(request.environment_id)
+    .bind(&request.consent_subject)
+    .bind(&required)
+    .bind(&request.purpose)
+    .fetch_all(&mut **tx)
+    .await?;
+    if !required.iter().all(|scope| {
+        rows.iter()
+            .any(|row| row.1 == *scope && row.2 == "approved" && row.3)
+    }) {
+        return Err(ApiError::forbidden(
+            "Customer context permission is no longer active",
+        ));
+    }
+    rows.into_iter()
+        .find(|row| row.1 == "share_preferences")
+        .map(|row| row.0)
+        .ok_or_else(|| ApiError::forbidden("Preference sharing permission is not active"))
+}
+
+pub(crate) async fn submit_enrichment_answer(
+    pool: &PgPool,
+    capability: &str,
+    input: EnrichmentAnswerInput,
+) -> Result<EnrichmentAnswerResponse, ApiError> {
+    if !["answered", "declined", "no_relevant_context"].contains(&input.status.as_str()) {
+        return Err(ApiError::bad_request("Invalid enrichment answer status"));
+    }
+    if (input.status == "answered") == input.items.is_empty() || input.items.len() > 8 {
+        return Err(ApiError::bad_request(
+            "answered requires 1 to 8 items; other statuses require none",
+        ));
+    }
+    let mut tx = pool.begin().await?;
+    let (request, _) = verified_enrichment_request(&mut tx, capability).await?;
+    for item in &input.items {
+        validate_enrichment_item(item, &request.purpose)?;
+    }
+    let payload_hash = sha256_bytes(&serde_json::to_vec(&input).map_err(ApiError::internal)?);
+    let existing = sqlx::query_as::<_, (Uuid, String, Vec<u8>)>(
+        "SELECT id, status, payload_hash FROM enrichment_answers WHERE request_id = $1",
+    )
+    .bind(request.id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if existing.is_none() && request.state != "answer_ready" {
+        return Err(ApiError::forbidden(
+            "Customer context sharing is not approved for this request",
+        ));
+    }
+    let share_grant_id = active_enrichment_share_grant(
+        &mut tx,
+        &request,
+        input.items.iter().any(|item| item.remember),
+    )
+    .await?;
+    if let Some((answer_id, _, existing_hash)) = existing {
+        if existing_hash != payload_hash {
+            return Err(ApiError::conflict(
+                "This enrichment request already has a different answer",
+            ));
+        }
+        let signals = context_items_for_answer(&mut tx, answer_id, &request.purpose).await?;
+        tx.commit().await?;
+        return Ok(EnrichmentAnswerResponse {
+            accepted: true,
+            request_id: request.id,
+            interaction_id: request.interaction_id,
+            customer_id: request.customer_id,
+            signals,
+        });
+    }
+    if request.identity_level == "ephemeral" && input.items.iter().any(|item| item.remember) {
+        return Err(ApiError::bad_request(
+            "Ephemeral context cannot be remembered without a stable company reference",
+        ));
+    }
+    if !request.remember && input.items.iter().any(|item| item.remember) {
+        return Err(ApiError::bad_request(
+            "This permission does not allow remembered context",
+        ));
+    }
+    let answer_id = Uuid::new_v4();
+    sqlx::query(
+        r"INSERT INTO enrichment_answers
+        (id, workspace_id, product_id, request_id, interaction_id, customer_id,
+         status, payload_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+    )
+    .bind(answer_id)
+    .bind(request.workspace_id)
+    .bind(request.product_id)
+    .bind(request.id)
+    .bind(request.interaction_id)
+    .bind(request.customer_id)
+    .bind(&input.status)
+    .bind(&payload_hash)
+    .execute(&mut *tx)
+    .await?;
+    let retained_until = Utc::now()
+        + Duration::days(i64::from(
+            sqlx::query_scalar::<_, i32>(
+                "SELECT retention_days FROM product_environments WHERE id = $1",
+            )
+            .bind(request.environment_id)
+            .fetch_one(&mut *tx)
+            .await?,
+        ));
+    for (index, item) in input.items.iter().enumerate() {
+        let definition = validate_enrichment_item(item, &request.purpose)?;
+        let default_expiry = if item.remember {
+            retained_until
+        } else {
+            request.expires_at
+        };
+        let expires_at = item.expires_at.unwrap_or(default_expiry);
+        let maximum_expiry = if item.remember {
+            retained_until
+        } else {
+            request.expires_at.min(retained_until)
+        };
+        if expires_at <= Utc::now() || expires_at > maximum_expiry {
+            return Err(ApiError::bad_request(
+                "expiresAt must be in the future and within the approved context lifetime",
+            ));
+        }
+        let signal_id = Uuid::new_v4();
+        let collected_at = Utc::now();
+        sqlx::query(
+            r"INSERT INTO customer_signals
+            (id, workspace_id, product_id, customer_id, interaction_id,
+             source_item_key, signal_type, summary, attributes, provenance, confidence,
+             collection_basis, consent_grant_id, consent_scope, collected_at,
+             expires_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+              'user_consent',$12,'share_preferences',$13,$14)",
+        )
+        .bind(signal_id)
+        .bind(request.workspace_id)
+        .bind(request.product_id)
+        .bind(request.customer_id)
+        .bind(request.interaction_id)
+        .bind(format!("item:{}", index + 1))
+        .bind(definition.signal_type)
+        .bind(catalog_summary(definition, &item.value))
+        .bind(serde_json::json!({
+            "remembered": item.remember,
+            "purpose": request.purpose,
+            "enrichmentType": definition.signal_type,
+            "catalogVersion": "v1",
+        }))
+        .bind(&item.provenance)
+        .bind(item.confidence)
+        .bind(share_grant_id)
+        .bind(collected_at)
+        .bind(expires_at)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r"INSERT INTO enrichment_signal_items
+            (signal_id, workspace_id, product_id, environment_id,
+             enrichment_answer_id, customer_id, interaction_id, item_index,
+             signal_key, signal_value, purpose, provenance, remembered,
+             collected_at, expires_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+        )
+        .bind(signal_id)
+        .bind(request.workspace_id)
+        .bind(request.product_id)
+        .bind(request.environment_id)
+        .bind(answer_id)
+        .bind(request.customer_id)
+        .bind(request.interaction_id)
+        .bind(i16::try_from(index + 1).map_err(ApiError::internal)?)
+        .bind(definition.key)
+        .bind(&item.value)
+        .bind(&request.purpose)
+        .bind(&item.provenance)
+        .bind(item.remember)
+        .bind(collected_at)
+        .bind(expires_at)
+        .execute(&mut *tx)
+        .await?;
+    }
+    let request_state = if input.status == "answered" {
+        "answered"
+    } else if input.status == "no_relevant_context" {
+        "no_relevant_context"
+    } else {
+        "declined"
+    };
+    sqlx::query(
+        r"UPDATE enrichment_requests SET state = $2,
+          answered_at = CASE WHEN $2 IN ('answered','no_relevant_context') THEN NOW() END,
+          updated_at = NOW() WHERE id = $1",
+    )
+    .bind(request.id)
+    .bind(request_state)
+    .execute(&mut *tx)
+    .await?;
+    if input.status == "answered" {
+        sqlx::query(
+            r"INSERT INTO enrichment_interaction_confirmations
+              (id, workspace_id, interaction_id, enrichment_answer_id, method, confirmed_at)
+            VALUES ($1,$2,$3,$4,'enrichment_answer',NOW())
+            ON CONFLICT (interaction_id) DO UPDATE SET
+              confirmed_at = LEAST(
+                enrichment_interaction_confirmations.confirmed_at,
+                EXCLUDED.confirmed_at
+              )",
+        )
+        .bind(Uuid::new_v4())
+        .bind(request.workspace_id)
+        .bind(request.interaction_id)
+        .bind(answer_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE interactions_v2 SET updated_at = NOW() WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(request.interaction_id)
+        .bind(request.workspace_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    let signals = context_items_for_answer(&mut tx, answer_id, &request.purpose).await?;
+    tx.commit().await?;
+    Ok(EnrichmentAnswerResponse {
+        accepted: true,
+        request_id: request.id,
+        interaction_id: request.interaction_id,
+        customer_id: request.customer_id,
+        signals,
+    })
+}
+
+async fn customer_for_identifier_value(
+    tx: &mut Transaction<'_, Postgres>,
+    auth: &ProductAuth,
+    identity_hmac_secret: &[u8],
+    kind: &str,
+    value: Option<&str>,
+) -> Result<Option<ResolvedCustomerRow>, ApiError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let hash = customer_identifier_hash(
+        identity_hmac_secret,
+        auth.workspace.id,
+        auth.environment.product_id,
+        kind,
+        value,
+    )?;
+    existing_customer_for_identifier(
+        tx,
+        auth.workspace.id,
+        auth.environment.product_id,
+        kind,
+        &hash,
+    )
+    .await
+}
+
+async fn lookup_context_customer(
+    tx: &mut Transaction<'_, Postgres>,
+    auth: &ProductAuth,
+    identity_hmac_secret: &[u8],
+    refs: &ValidatedIdentityRefs,
+) -> Result<Option<(Uuid, String)>, ApiError> {
+    let user = customer_for_identifier_value(
+        tx,
+        auth,
+        identity_hmac_secret,
+        "user_ref",
+        refs.user_ref.as_deref(),
+    )
+    .await?;
+    let account = customer_for_identifier_value(
+        tx,
+        auth,
+        identity_hmac_secret,
+        "account_ref",
+        refs.account_ref.as_deref(),
+    )
+    .await?;
+    if let (Some(user), Some(account)) = (&user, &account)
+        && user.parent_customer_id != Some(account.merged_into_customer_id.unwrap_or(account.id))
+    {
+        return Err(ApiError::conflict(
+            "userRef is not linked to the supplied accountRef",
+        ));
+    }
+    let generic = customer_for_identifier_value(
+        tx,
+        auth,
+        identity_hmac_secret,
+        "customer_ref",
+        refs.customer_ref.as_deref(),
+    )
+    .await?;
+    let known = user.or(account).or(generic);
+    let anonymous = customer_for_identifier_value(
+        tx,
+        auth,
+        identity_hmac_secret,
+        "anonymous_ref",
+        refs.anonymous_ref.as_deref(),
+    )
+    .await?;
+    let canonical = |row: &ResolvedCustomerRow| row.merged_into_customer_id.unwrap_or(row.id);
+    if let (Some(known), Some(anonymous)) = (&known, &anonymous)
+        && canonical(known) != canonical(anonymous)
+    {
+        return Err(ApiError::conflict(
+            "anonymousRef has not been deterministically linked to this customer",
+        ));
+    }
+    let selected = known.or(anonymous);
+    Ok(selected.map(|row| (canonical(&row), row.identity_level)))
+}
+
+pub(crate) async fn retrieve_customer_context(
+    pool: &PgPool,
+    auth: &ProductAuth,
+    identity_hmac_secret: &[u8],
+    input: CustomerContextInput,
+) -> Result<CustomerContextResponse, ApiError> {
+    validate_enrichment_purpose(&input.purpose)?;
+    let refs = validated_identity_refs(
+        input.customer_ref.as_deref(),
+        input.account_ref.as_deref(),
+        input.user_ref.as_deref(),
+        input.anonymous_ref.as_deref(),
+    )?;
+    let has_refs = refs.customer_ref.is_some()
+        || refs.account_ref.is_some()
+        || refs.user_ref.is_some()
+        || refs.anonymous_ref.is_some();
+    if !has_refs && input.interaction_id.is_none() {
+        return Err(ApiError::bad_request(
+            "Provide a company identity reference or interactionId",
+        ));
+    }
+    let mut tx = pool.begin().await?;
+    let by_ref = lookup_context_customer(&mut tx, auth, identity_hmac_secret, &refs).await?;
+    if has_refs && by_ref.is_none() {
+        return Err(ApiError::not_found("Customer context not found"));
+    }
+    let by_interaction = if let Some(interaction_id) = input.interaction_id {
+        Some(
+            sqlx::query_as::<_, (Option<Uuid>, Option<String>)>(
+                r"SELECT interaction.customer_id, customer.identity_level
+                FROM interactions_v2 interaction
+                LEFT JOIN customers customer ON customer.id = interaction.customer_id
+                  AND customer.workspace_id = interaction.workspace_id
+                WHERE interaction.id = $1 AND interaction.workspace_id = $2
+                  AND interaction.environment_id = $3",
+            )
+            .bind(interaction_id)
+            .bind(auth.workspace.id)
+            .bind(auth.environment.id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| ApiError::not_found("Interaction not found"))?,
+        )
+    } else {
+        None
+    };
+    if let (Some((ref_customer, _)), Some((interaction_customer, _))) = (&by_ref, &by_interaction)
+        && *interaction_customer != Some(*ref_customer)
+    {
+        return Err(ApiError::conflict(
+            "interactionId belongs to a different customer context",
+        ));
+    }
+    let customer_id = by_ref
+        .as_ref()
+        .map(|value| value.0)
+        .or_else(|| by_interaction.as_ref().and_then(|value| value.0));
+    let identity_level = by_ref
+        .as_ref()
+        .map(|value| value.1.clone())
+        .or_else(|| by_interaction.as_ref().and_then(|value| value.1.clone()))
+        .unwrap_or_else(|| "ephemeral".to_owned());
+    let items = sqlx::query_as::<_, CustomerContextItem>(
+        r"SELECT DISTINCT ON (item.signal_key)
+          signal.id AS signal_id, item.signal_key AS key,
+          COALESCE(signal.attributes->>'enrichmentType', signal.signal_type) AS signal_type,
+          TO_JSONB(item.signal_value) AS value, signal.summary,
+          signal.provenance, signal.confidence, item.expires_at,
+          ARRAY[request.purpose] AS allowed_uses,
+          item.remembered
+        FROM enrichment_signal_items item
+        JOIN customer_signals signal ON signal.id = item.signal_id
+          AND signal.workspace_id = item.workspace_id
+        JOIN enrichment_answers answer ON answer.id = item.enrichment_answer_id
+          AND answer.workspace_id = item.workspace_id
+        JOIN enrichment_requests request ON request.id = answer.request_id
+          AND request.workspace_id = answer.workspace_id
+        JOIN LATERAL (
+          SELECT candidate.subject
+          FROM consent_grants candidate
+          WHERE candidate.environment_id = request.environment_id
+            AND candidate.workspace_id = request.workspace_id
+            AND candidate.enrichment_purpose = request.purpose
+            AND (candidate.subject = request.consent_subject
+              OR (item.customer_id IS NOT NULL AND candidate.customer_id = item.customer_id))
+          ORDER BY candidate.decided_at DESC, candidate.revision DESC,
+            CASE WHEN candidate.state IN ('declined', 'revoked') THEN 1 ELSE 0 END DESC,
+            candidate.subject, candidate.id
+          LIMIT 1
+        ) effective_consent ON TRUE
+        JOIN consent_grants original_share ON original_share.id = signal.consent_grant_id
+          AND original_share.workspace_id = signal.workspace_id
+          AND original_share.enrichment_purpose = request.purpose
+          AND original_share.state = 'approved'
+          AND (original_share.expires_at IS NULL OR original_share.expires_at > NOW())
+        JOIN consent_grants share_grant ON share_grant.environment_id = request.environment_id
+          AND share_grant.subject = effective_consent.subject
+          AND share_grant.scope = 'share_preferences'
+          AND share_grant.enrichment_purpose = request.purpose
+          AND share_grant.state = 'approved'
+          AND (share_grant.expires_at IS NULL OR share_grant.expires_at > NOW())
+        JOIN consent_grants purpose_grant ON purpose_grant.environment_id = request.environment_id
+          AND purpose_grant.subject = effective_consent.subject
+          AND purpose_grant.scope = 'personalize'
+          AND purpose_grant.enrichment_purpose = request.purpose
+          AND purpose_grant.state = 'approved'
+          AND (purpose_grant.expires_at IS NULL OR purpose_grant.expires_at > NOW())
+        LEFT JOIN consent_grants remember_grant
+          ON remember_grant.environment_id = request.environment_id
+          AND remember_grant.subject = effective_consent.subject
+          AND remember_grant.scope = 'remember_preferences'
+          AND remember_grant.enrichment_purpose = request.purpose
+          AND remember_grant.state = 'approved'
+          AND (remember_grant.expires_at IS NULL OR remember_grant.expires_at > NOW())
+        WHERE item.workspace_id = $1 AND item.product_id = $2
+          AND item.environment_id = $3 AND item.purpose = $4
+          AND item.provenance <> 'agent_inference' AND item.expires_at > NOW()
+          AND (($5::UUID IS NOT NULL AND item.interaction_id = $5)
+            OR ($6::UUID IS NOT NULL AND item.customer_id = $6
+              AND item.remembered
+              AND remember_grant.id IS NOT NULL))
+        ORDER BY item.signal_key, item.collected_at DESC, item.signal_id DESC
+        LIMIT 100",
+    )
+    .bind(auth.workspace.id)
+    .bind(auth.environment.product_id)
+    .bind(auth.environment.id)
+    .bind(&input.purpose)
+    .bind(input.interaction_id)
+    .bind(customer_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut version_material = input.purpose.as_bytes().to_vec();
+    for item in &items {
+        version_material.extend_from_slice(item.signal_id.as_bytes());
+    }
+    let context_version = format!(
+        "ctx1_{}",
+        URL_SAFE_NO_PAD.encode(sha256_bytes(&version_material))
+    );
+    let retrieval_id = Uuid::new_v4();
+    sqlx::query(
+        r"INSERT INTO customer_context_retrievals
+        (id, workspace_id, product_id, environment_id, customer_id, interaction_id,
+         purpose, identity_level, context_version, item_count)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+    )
+    .bind(retrieval_id)
+    .bind(auth.workspace.id)
+    .bind(auth.environment.product_id)
+    .bind(auth.environment.id)
+    .bind(customer_id)
+    .bind(input.interaction_id)
+    .bind(&input.purpose)
+    .bind(&identity_level)
+    .bind(&context_version)
+    .bind(i32::try_from(items.len()).map_err(ApiError::internal)?)
+    .execute(&mut *tx)
+    .await?;
+    for item in &items {
+        sqlx::query(
+            r"INSERT INTO customer_context_retrieval_signals
+            (workspace_id, retrieval_id, signal_id) VALUES ($1,$2,$3)",
+        )
+        .bind(auth.workspace.id)
+        .bind(retrieval_id)
+        .bind(item.signal_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(CustomerContextResponse {
+        retrieval_id,
+        identity_level,
+        customer_id,
+        interaction_id: input.interaction_id,
+        context_version,
+        items,
+    })
+}
+
+async fn decision_response(
+    tx: &mut Transaction<'_, Postgres>,
+    decision_id: Uuid,
+) -> Result<PersonalizationDecisionResponse, ApiError> {
+    let row = sqlx::query_as::<_, (String, String, Option<String>, DateTime<Utc>)>(
+        r"SELECT external_decision_id, purpose, variant, created_at
+        FROM personalization_decisions WHERE id = $1",
+    )
+    .bind(decision_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let signal_ids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT signal_id FROM personalization_decision_signals WHERE decision_id = $1 ORDER BY signal_id",
+    )
+    .bind(decision_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(PersonalizationDecisionResponse {
+        decision: PersonalizationDecision {
+            id: decision_id,
+            external_decision_id: row.0,
+            purpose: row.1,
+            signal_ids,
+            variant: row.2,
+            created_at: row.3,
+        },
+    })
+}
+
+pub(crate) async fn record_personalization_decision(
+    pool: &PgPool,
+    auth: &ProductAuth,
+    mut input: PersonalizationDecisionInput,
+) -> Result<PersonalizationDecisionResponse, ApiError> {
+    input.external_decision_id =
+        validate_opaque_event_id(&input.external_decision_id, "externalDecisionId")?;
+    input.variant = input
+        .variant
+        .map(|value| validate_opaque_event_id(&value, "variant"))
+        .transpose()?;
+    if input.signal_ids.is_empty() || input.signal_ids.len() > 50 {
+        return Err(ApiError::bad_request(
+            "signalIds must contain 1 to 50 items",
+        ));
+    }
+    input.signal_ids.sort_unstable();
+    input.signal_ids.dedup();
+    let payload_hash = sha256_bytes(&serde_json::to_vec(&input).map_err(ApiError::internal)?);
+    let mut tx = pool.begin().await?;
+    let retrieval = sqlx::query_as::<_, (Option<Uuid>, Option<Uuid>, String)>(
+        r"SELECT customer_id, interaction_id, purpose FROM customer_context_retrievals
+        WHERE id = $1 AND workspace_id = $2 AND product_id = $3 AND environment_id = $4",
+    )
+    .bind(input.context_retrieval_id)
+    .bind(auth.workspace.id)
+    .bind(auth.environment.product_id)
+    .bind(auth.environment.id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| ApiError::not_found("Customer context retrieval not found"))?;
+    // Serialize activation with consent changes. The following evidence query
+    // runs after these locks are acquired, so a revoke either wins first and
+    // rejects the decision or waits until this already-authorized decision
+    // commits; it cannot race between validation and storage.
+    sqlx::query_scalar::<_, Uuid>(
+        r"SELECT grant_row.id
+        FROM customer_context_retrieval_signals link
+        JOIN enrichment_signal_items item ON item.signal_id = link.signal_id
+          AND item.workspace_id = link.workspace_id
+        JOIN customer_signals signal ON signal.id = item.signal_id
+          AND signal.workspace_id = link.workspace_id
+        JOIN enrichment_answers answer ON answer.id = item.enrichment_answer_id
+          AND answer.workspace_id = signal.workspace_id
+        JOIN enrichment_requests request ON request.id = answer.request_id
+          AND request.workspace_id = answer.workspace_id
+        JOIN LATERAL (
+          SELECT candidate.subject
+          FROM consent_grants candidate
+          WHERE candidate.environment_id = request.environment_id
+            AND candidate.workspace_id = request.workspace_id
+            AND candidate.enrichment_purpose = request.purpose
+            AND (candidate.subject = request.consent_subject
+              OR (item.customer_id IS NOT NULL AND candidate.customer_id = item.customer_id))
+          ORDER BY candidate.decided_at DESC, candidate.revision DESC,
+            CASE WHEN candidate.state IN ('declined', 'revoked') THEN 1 ELSE 0 END DESC,
+            candidate.subject, candidate.id LIMIT 1
+        ) effective_consent ON TRUE
+        JOIN consent_grants grant_row ON grant_row.environment_id = request.environment_id
+          AND grant_row.workspace_id = request.workspace_id
+          AND grant_row.subject = effective_consent.subject
+          AND grant_row.scope IN ('share_preferences', 'personalize', 'remember_preferences')
+        WHERE link.workspace_id = $1 AND link.retrieval_id = $2
+          AND link.signal_id = ANY($3)
+        ORDER BY grant_row.id FOR UPDATE OF grant_row",
+    )
+    .bind(auth.workspace.id)
+    .bind(input.context_retrieval_id)
+    .bind(&input.signal_ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    let available = sqlx::query_scalar::<_, Uuid>(
+        r"SELECT link.signal_id FROM customer_context_retrieval_signals link
+        JOIN enrichment_signal_items item ON item.signal_id = link.signal_id
+          AND item.workspace_id = link.workspace_id
+        JOIN customer_signals signal ON signal.id = item.signal_id
+          AND signal.workspace_id = link.workspace_id
+        JOIN enrichment_answers answer ON answer.id = item.enrichment_answer_id
+          AND answer.workspace_id = signal.workspace_id
+        JOIN enrichment_requests request ON request.id = answer.request_id
+          AND request.workspace_id = answer.workspace_id
+        JOIN LATERAL (
+          SELECT candidate.subject
+          FROM consent_grants candidate
+          WHERE candidate.environment_id = request.environment_id
+            AND candidate.workspace_id = request.workspace_id
+            AND candidate.enrichment_purpose = request.purpose
+            AND (candidate.subject = request.consent_subject
+              OR (item.customer_id IS NOT NULL AND candidate.customer_id = item.customer_id))
+          ORDER BY candidate.decided_at DESC, candidate.revision DESC,
+            CASE WHEN candidate.state IN ('declined', 'revoked') THEN 1 ELSE 0 END DESC,
+            candidate.subject, candidate.id LIMIT 1
+        ) effective_consent ON TRUE
+        JOIN consent_grants original_share ON original_share.id = signal.consent_grant_id
+          AND original_share.workspace_id = signal.workspace_id
+          AND original_share.enrichment_purpose = request.purpose
+          AND original_share.state = 'approved'
+          AND (original_share.expires_at IS NULL OR original_share.expires_at > NOW())
+        JOIN consent_grants share_grant ON share_grant.environment_id = request.environment_id
+          AND share_grant.subject = effective_consent.subject
+          AND share_grant.scope = 'share_preferences'
+          AND share_grant.enrichment_purpose = request.purpose
+          AND share_grant.state = 'approved'
+          AND (share_grant.expires_at IS NULL OR share_grant.expires_at > NOW())
+        JOIN consent_grants purpose_grant ON purpose_grant.environment_id = request.environment_id
+          AND purpose_grant.subject = effective_consent.subject
+          AND purpose_grant.scope = 'personalize'
+          AND purpose_grant.enrichment_purpose = request.purpose
+          AND purpose_grant.state = 'approved'
+          AND (purpose_grant.expires_at IS NULL OR purpose_grant.expires_at > NOW())
+        LEFT JOIN consent_grants remember_grant
+          ON remember_grant.environment_id = request.environment_id
+          AND remember_grant.subject = effective_consent.subject
+          AND remember_grant.scope = 'remember_preferences'
+          AND remember_grant.enrichment_purpose = request.purpose
+          AND remember_grant.state = 'approved'
+          AND (remember_grant.expires_at IS NULL OR remember_grant.expires_at > NOW())
+        WHERE link.workspace_id = $1 AND link.retrieval_id = $2
+          AND link.signal_id = ANY($3)
+          AND item.provenance <> 'agent_inference'
+          AND (
+            NOT item.remembered
+            OR remember_grant.id IS NOT NULL
+          )
+          AND item.expires_at > NOW()",
+    )
+    .bind(auth.workspace.id)
+    .bind(input.context_retrieval_id)
+    .bind(&input.signal_ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    let available = available.into_iter().collect::<BTreeSet<_>>();
+    if input.signal_ids.iter().any(|id| !available.contains(id)) {
+        return Err(ApiError::bad_request(
+            "Every signalId must come from the specified context retrieval",
+        ));
+    }
+    let (decision_id, existing_hash) = sqlx::query_as::<_, (Uuid, Vec<u8>)>(
+        r"INSERT INTO personalization_decisions
+        (id, workspace_id, product_id, environment_id, retrieval_id, interaction_id,
+         customer_id, external_decision_id, purpose, variant, payload_hash)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        ON CONFLICT (workspace_id, product_id, external_decision_id) DO UPDATE SET
+          external_decision_id = personalization_decisions.external_decision_id
+        RETURNING id, payload_hash",
+    )
+    .bind(Uuid::new_v4())
+    .bind(auth.workspace.id)
+    .bind(auth.environment.product_id)
+    .bind(auth.environment.id)
+    .bind(input.context_retrieval_id)
+    .bind(retrieval.1)
+    .bind(retrieval.0)
+    .bind(&input.external_decision_id)
+    .bind(&retrieval.2)
+    .bind(&input.variant)
+    .bind(&payload_hash)
+    .fetch_one(&mut *tx)
+    .await?;
+    if existing_hash != payload_hash {
+        return Err(ApiError::conflict(
+            "externalDecisionId already has a different payload",
+        ));
+    }
+    for signal_id in &input.signal_ids {
+        sqlx::query(
+            r"INSERT INTO personalization_decision_signals
+            (workspace_id, decision_id, signal_id) VALUES ($1,$2,$3)
+            ON CONFLICT (decision_id, signal_id) DO NOTHING",
+        )
+        .bind(auth.workspace.id)
+        .bind(decision_id)
+        .bind(signal_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    let response = decision_response(&mut tx, decision_id).await?;
+    tx.commit().await?;
+    Ok(response)
+}
+
+pub(crate) async fn record_personalization_outcome(
+    pool: &PgPool,
+    auth: &ProductAuth,
+    mut input: PersonalizationOutcomeInput,
+) -> Result<PersonalizationOutcomeResponse, ApiError> {
+    input.external_outcome_id =
+        validate_opaque_event_id(&input.external_outcome_id, "externalOutcomeId")?;
+    if ![
+        "conversion",
+        "completion",
+        "engagement",
+        "dismissal",
+        "abandonment",
+    ]
+    .contains(&input.outcome.as_str())
+    {
+        return Err(ApiError::bad_request("Invalid personalization outcome"));
+    }
+    let occurred_at = input.occurred_at.unwrap_or_else(Utc::now);
+    if occurred_at > Utc::now() + Duration::minutes(5)
+        || occurred_at < Utc::now() - Duration::days(7)
+    {
+        return Err(ApiError::bad_request(
+            "occurredAt is outside the accepted window",
+        ));
+    }
+    let payload_hash = sha256_bytes(&serde_json::to_vec(&input).map_err(ApiError::internal)?);
+    let mut tx = pool.begin().await?;
+    let decision_exists = sqlx::query_scalar::<_, bool>(
+        r"SELECT EXISTS (SELECT 1 FROM personalization_decisions
+          WHERE id = $1 AND workspace_id = $2 AND product_id = $3 AND environment_id = $4)",
+    )
+    .bind(input.decision_id)
+    .bind(auth.workspace.id)
+    .bind(auth.environment.product_id)
+    .bind(auth.environment.id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !decision_exists {
+        return Err(ApiError::not_found("Personalization decision not found"));
+    }
+    let row = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            Uuid,
+            String,
+            DateTime<Utc>,
+            DateTime<Utc>,
+            Vec<u8>,
+        ),
+    >(
+        r"INSERT INTO personalization_outcomes
+        (id, workspace_id, product_id, decision_id, external_outcome_id,
+         outcome, payload_hash, occurred_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        ON CONFLICT (workspace_id, product_id, external_outcome_id) DO UPDATE SET
+          external_outcome_id = personalization_outcomes.external_outcome_id
+        RETURNING id, external_outcome_id, decision_id, outcome, occurred_at, created_at,
+          payload_hash",
+    )
+    .bind(Uuid::new_v4())
+    .bind(auth.workspace.id)
+    .bind(auth.environment.product_id)
+    .bind(input.decision_id)
+    .bind(input.external_outcome_id)
+    .bind(input.outcome)
+    .bind(&payload_hash)
+    .bind(occurred_at)
+    .fetch_one(&mut *tx)
+    .await?;
+    if row.6 != payload_hash {
+        return Err(ApiError::conflict(
+            "externalOutcomeId already has a different payload",
+        ));
+    }
+    let outcome = PersonalizationOutcome {
+        id: row.0,
+        external_outcome_id: row.1,
+        decision_id: row.2,
+        outcome: row.3,
+        occurred_at: row.4,
+        created_at: row.5,
+    };
+    tx.commit().await?;
+    Ok(PersonalizationOutcomeResponse { outcome })
+}
+
 #[cfg(test)]
 mod product_tests {
     #![allow(
@@ -8088,7 +10315,7 @@ mod product_tests {
         sqlx::migrate!().run(&pool).await?;
         let fixture = github_issue_group_fixture(&pool, "Issue idempotency test", 2).await?;
 
-        let result = async {
+        let result = Box::pin(async {
             let link = GithubIssueLink {
                 repo_full_name: "open-software/epode-test".to_owned(),
                 issue_number: 42,
@@ -8169,7 +10396,7 @@ mod product_tests {
                     .await?;
             anyhow::ensure!(count == 1);
             Ok::<(), anyhow::Error>(())
-        }
+        })
         .await;
 
         sqlx::query("DELETE FROM workspaces WHERE id = $1")
@@ -13208,6 +15435,1328 @@ mod product_tests {
                 .is_err()
         );
         Ok(())
+    }
+
+    #[test]
+    fn enrichment_contract_rejects_sensitive_or_unbounded_customer_context() -> anyhow::Result<()> {
+        let valid = crate::models::EnrichmentAnswerItemInput {
+            key: "shopping.budget_band".into(),
+            signal_type: "constraint".into(),
+            value: "50_150".into(),
+            _summary: None,
+            provenance: "agent_reports_user_statement".into(),
+            confidence: Some(0.95),
+            remember: true,
+            expires_at: Some(Utc::now() + Duration::days(30)),
+        };
+        let definition =
+            validate_enrichment_item(&valid, "product_personalization").map_err(test_error)?;
+        anyhow::ensure!(
+            catalog_summary(definition, &valid.value) == "shopping budget band: 50 150"
+        );
+        for (key, value) in [
+            ("community.affinity", "black"),
+            ("relationship.status", "married"),
+            ("medical_condition", "asthma"),
+            ("shopping.preference", "political affiliation"),
+            ("email", "person@example.com"),
+            ("precise_location", "home"),
+            ("date_of_birth", "1990-01-01"),
+            ("demographics.gender", "woman"),
+            ("household_income", "over 100000"),
+            ("creditworthiness", "excellent"),
+            ("shipping.zip", "10001"),
+            ("citizenship", "citizen"),
+            ("immigration_status", "temporary visa"),
+            ("veteran_status", "veteran"),
+            ("union_membership", "union member"),
+            ("legal_history", "prior arrest"),
+            ("genetic_profile", "dna marker"),
+            ("audience", "teenager"),
+            ("shopping.segment", "women"),
+            ("account.status", "US citizen"),
+            ("risk.label", "felony conviction"),
+            ("shopping.preference", "gay"),
+            ("shopping.preference", "Christian"),
+            ("shopping.preference", "Muslim"),
+            ("shopping.preference", "HIV positive"),
+            ("shopping.preference", "has cancer"),
+            ("shopping.preference", "Democrat"),
+            ("accessibility.preference", "uses a wheelchair"),
+            ("travel.constraint", "mobility impaired"),
+            ("shopping.preference", "identifies as B.l.a.c.k"),
+            ("shopping.preference", "expecting a baby"),
+            ("shopping.preference", "family planning"),
+            ("shopping.preference", "pr3gn4nt"),
+            ("shopping.preference", "wh33lch41r user"),
+            ("shopping.preference", "f4m1ly pl4nn1ng"),
+        ] {
+            let mut unsafe_item = valid.clone();
+            unsafe_item.key = key.into();
+            unsafe_item.value = value.into();
+            anyhow::ensure!(
+                validate_enrichment_item(&unsafe_item, "product_personalization").is_err()
+            );
+        }
+        let mut inference = valid.clone();
+        inference.provenance = "user_explicit".into();
+        anyhow::ensure!(validate_enrichment_item(&inference, "product_personalization").is_err());
+        anyhow::ensure!(validate_enrichment_item(&valid, "targeted_advertising").is_ok());
+        let mut b2b = valid;
+        b2b.key = "b2b.company_size".into();
+        b2b.signal_type = "constraint".into();
+        b2b.value = "enterprise".into();
+        anyhow::ensure!(validate_enrichment_item(&b2b, "product_personalization").is_ok());
+        anyhow::ensure!(validate_enrichment_item(&b2b, "targeted_advertising").is_err());
+        let default_surface: EnrichmentRequestInput = serde_json::from_value(serde_json::json!({
+            "interactionId": Uuid::new_v4(),
+            "operation": "/search",
+            "purpose": "product_personalization",
+            "remember": false
+        }))?;
+        anyhow::ensure!(default_surface.surface == "http_json");
+        anyhow::ensure!(validate_enrichment_purpose("product_personalization").is_ok());
+        anyhow::ensure!(validate_enrichment_purpose("targeted_advertising").is_ok());
+        anyhow::ensure!(validate_enrichment_purpose("generic_tracking").is_err());
+        anyhow::ensure!(validate_opaque_event_id("decision_123", "id").is_ok());
+        anyhow::ensure!(validate_opaque_event_id("person@example.com", "id").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn enrichment_contract_is_interaction_scoped_without_memory_and_has_exact_actions()
+    -> anyhow::Result<()> {
+        let workspace_id = Uuid::new_v4();
+        let product_id = Uuid::new_v4();
+        let interaction_id = Uuid::new_v4();
+        let customer_id = Uuid::new_v4();
+        let auth = ProductAuth {
+            workspace: Workspace {
+                id: workspace_id,
+                os_user_id: "test-user".into(),
+                name: "Workspace".into(),
+                slug: "workspace".into(),
+                feedback_mode: "ask_once".into(),
+                collect_event_summaries: true,
+                retention_days: 30,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+            environment: ProductEnvironment {
+                id: Uuid::new_v4(),
+                workspace_id,
+                product_id,
+                name: "Production".into(),
+                slug: "production".into(),
+                feedback_mode: "ask_once".into(),
+                collect_event_summaries: true,
+                retention_days: 30,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+            api_key_id: Uuid::new_v4(),
+        };
+        let transient = enrichment_subject(
+            TEST_IDENTITY_HMAC_SECRET,
+            &auth,
+            Some(customer_id),
+            interaction_id,
+            "product_personalization",
+            false,
+        )
+        .map_err(test_error)?;
+        let remembered = enrichment_subject(
+            TEST_IDENTITY_HMAC_SECRET,
+            &auth,
+            Some(customer_id),
+            interaction_id,
+            "product_personalization",
+            true,
+        )
+        .map_err(test_error)?;
+        anyhow::ensure!(transient.starts_with("afint1_"));
+        anyhow::ensure!(remembered.starts_with("afsub1_") && remembered != transient);
+
+        let mut row = EnrichmentRequestRow {
+            id: Uuid::new_v4(),
+            workspace_id,
+            product_id,
+            environment_id: auth.environment.id,
+            interaction_id,
+            customer_id: Some(customer_id),
+            surface: "http_json".into(),
+            purpose: "targeted_advertising".into(),
+            remember: false,
+            consent_subject: transient,
+            expected_consent_revision: 0,
+            identity_level: "verified".into(),
+            state: "consent_required".into(),
+            question: "May I share context?".into(),
+            request_hash: vec![0; 32],
+            capability_nonce_hash: vec![0; 32],
+            expires_at: Utc::now() + Duration::hours(2),
+            created_at: Utc::now(),
+        };
+        let response = enrichment_response("https://app.epode.ai", &row, "aqr1_test");
+        let json = serde_json::to_value(response)?;
+        anyhow::ensure!(
+            json["consent"]["bodySchema"]["decision"]
+                == serde_json::json!(["approved", "declined"])
+        );
+        anyhow::ensure!(
+            json["stageInstruction"]
+                .as_str()
+                .is_some_and(|value| value.contains("never infer approval"))
+        );
+        anyhow::ensure!(json["submit"].is_null());
+        row.state = "answer_ready".into();
+        let answer_json = serde_json::to_value(enrichment_response(
+            "https://app.epode.ai",
+            &row,
+            "aqr1_test",
+        ))?;
+        anyhow::ensure!(
+            answer_json["submit"]["bodySchema"]["status"]
+                == serde_json::json!(["answered", "declined", "no_relevant_context"])
+        );
+        anyhow::ensure!(answer_json["submit"]["bodySchema"]["items"]["maximum"] == 8);
+        anyhow::ensure!(
+            answer_json["stageInstruction"]
+                .as_str()
+                .is_some_and(|value| value.contains("submit at most one bounded answer"))
+        );
+        row.state = "declined".into();
+        let declined_json = serde_json::to_value(enrichment_response(
+            "https://app.epode.ai",
+            &row,
+            "aqr1_test",
+        ))?;
+        anyhow::ensure!(
+            declined_json["stageInstruction"]
+                .as_str()
+                .is_some_and(|value| value.contains("No enrichment action is permitted"))
+        );
+        anyhow::ensure!(declined_json["answerInstruction"].is_null());
+        anyhow::ensure!(declined_json["submit"].is_null());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn enrichment_context_personalization_is_permissioned_idempotent_and_tenant_safe()
+    -> anyhow::Result<()> {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace_a = telemetry_test_workspace(&pool, "Enrichment A").await?;
+        let workspace_b = telemetry_test_workspace(&pool, "Enrichment B").await?;
+        let (_product_a, auth_a) = telemetry_test_product(&pool, &workspace_a, "Retail A").await?;
+        let (_product_b, auth_b) = telemetry_test_product(&pool, &workspace_b, "Retail B").await?;
+        let result = Box::pin(async {
+            let interaction_id = Uuid::new_v4();
+            let request_input = EnrichmentRequestInput {
+                interaction_id,
+                operation: "/search".into(),
+                surface: "html".into(),
+                status_code: Some(200),
+                duration_ms: Some(24),
+                session_ref: Some("journey_retail_1".into()),
+                runtime_hint: Some("codex/1".into()),
+                purpose: "product_personalization".into(),
+                remember: true,
+                customer_ref: None,
+                account_ref: None,
+                user_ref: None,
+                anonymous_ref: Some("anon_retail_1".into()),
+            };
+            let (first_request, retry_request) = tokio::join!(
+                create_enrichment_request(
+                    &pool,
+                    &auth_a,
+                    TEST_IDENTITY_HMAC_SECRET,
+                    "https://app.epode.ai",
+                    request_input.clone(),
+                ),
+                create_enrichment_request(
+                    &pool,
+                    &auth_a,
+                    TEST_IDENTITY_HMAC_SECRET,
+                    "https://app.epode.ai",
+                    request_input,
+                )
+            );
+            let request = first_request.map_err(test_error)?;
+            let retry_request = retry_request.map_err(test_error)?;
+            anyhow::ensure!(request.request_id == retry_request.request_id);
+            anyhow::ensure!(
+                request.consent.as_ref().map(|action| &action.authorization)
+                    == retry_request
+                        .consent
+                        .as_ref()
+                        .map(|action| &action.authorization)
+            );
+            anyhow::ensure!(request.state == "consent_required");
+            anyhow::ensure!(request.identity_level == "pseudonymous");
+            anyhow::ensure!(request.surface == "html");
+            anyhow::ensure!(request.submit.is_none() && request.consent.is_some());
+            let first_interaction = sqlx::query_as::<
+                _,
+                (String, String, Option<String>, Option<i32>, Option<i64>, Option<String>, Option<Uuid>),
+            >(
+                r"SELECT surface, classification, confirmation_method, status_code,
+                  duration_ms, runtime_hint, session_id
+                FROM interactions_v2 WHERE id = $1",
+            )
+            .bind(interaction_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(first_interaction.0 == "http_html");
+            anyhow::ensure!(first_interaction.1 == "unclassified");
+            anyhow::ensure!(first_interaction.2.is_none());
+            anyhow::ensure!(first_interaction.3 == Some(200));
+            anyhow::ensure!(first_interaction.4 == Some(24));
+            anyhow::ensure!(first_interaction.5.as_deref() == Some("codex/1"));
+            anyhow::ensure!(first_interaction.6.is_some());
+            let capability = request
+                .consent
+                .as_ref()
+                .and_then(|action| action.authorization.strip_prefix("Bearer "))
+                .ok_or_else(|| anyhow::anyhow!("missing enrichment capability"))?;
+            let consent = decide_enrichment_consent(
+                &pool,
+                "https://app.epode.ai",
+                capability,
+                EnrichmentConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(consent.changed && consent.state == "answer_ready");
+            anyhow::ensure!(
+                consent
+                    .stage_instruction
+                    .contains("submit at most one bounded answer")
+            );
+            anyhow::ensure!(consent.answer_instruction.is_some() && consent.submit.is_some());
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, bool>(
+                    r"SELECT bool_and(enrichment_purpose = 'product_personalization')
+                    FROM consent_grants
+                    WHERE environment_id = $1 AND subject = (
+                      SELECT consent_subject FROM enrichment_requests WHERE id = $2
+                    )",
+                )
+                .bind(auth_a.environment.id)
+                .bind(request.request_id)
+                .fetch_one(&pool)
+                .await?
+            );
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, bool>(
+                    r"SELECT bool_and(enrichment_purpose = 'product_personalization')
+                    FROM enrichment_consent_events
+                    WHERE environment_id = $1 AND subject = (
+                      SELECT consent_subject FROM enrichment_requests WHERE id = $2
+                    )",
+                )
+                .bind(auth_a.environment.id)
+                .bind(request.request_id)
+                .fetch_one(&pool)
+                .await?
+            );
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, bool>(
+                    r"SELECT bool_and(source = 'enrichment')
+                    FROM enrichment_consent_events
+                    WHERE environment_id = $1 AND subject = (
+                      SELECT consent_subject FROM enrichment_requests WHERE id = $2
+                    )",
+                )
+                .bind(auth_a.environment.id)
+                .bind(request.request_id)
+                .fetch_one(&pool)
+                .await?
+            );
+            let feedback_subject = format!("afsub1_{}", "f".repeat(43));
+            let mut feedback_tx = pool.begin().await?;
+            dual_write_share_outcome_consent(
+                &mut feedback_tx,
+                auth_a.environment.id,
+                &feedback_subject,
+                "approved",
+                1,
+                Utc::now(),
+                None,
+                None,
+                "feedback_consent",
+            )
+            .await
+            .map_err(test_error)?;
+            feedback_tx.commit().await?;
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, bool>(
+                    r"SELECT enrichment_purpose IS NULL FROM consent_grants
+                    WHERE environment_id = $1 AND subject = $2",
+                )
+                .bind(auth_a.environment.id)
+                .bind(&feedback_subject)
+                .fetch_one(&pool)
+                .await?
+            );
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, bool>(
+                    r"SELECT enrichment_purpose IS NULL FROM consent_events
+                    WHERE environment_id = $1 AND subject = $2",
+                )
+                .bind(auth_a.environment.id)
+                .bind(&feedback_subject)
+                .fetch_one(&pool)
+                .await?
+            );
+            let answer_input = EnrichmentAnswerInput {
+                status: "answered".into(),
+                items: vec![crate::models::EnrichmentAnswerItemInput {
+                    key: "shopping.budget_band".into(),
+                    signal_type: "constraint".into(),
+                    value: "50_150".into(),
+                    _summary: Some("Customer belongs to the Black community".into()),
+                    provenance: "agent_reports_user_statement".into(),
+                    confidence: Some(0.98),
+                    remember: true,
+                    expires_at: None,
+                }, crate::models::EnrichmentAnswerItemInput {
+                    key: "content.format".into(),
+                    signal_type: "preference".into(),
+                    value: "short".into(),
+                    _summary: None,
+                    provenance: "agent_inference".into(),
+                    confidence: Some(0.55),
+                    remember: true,
+                    expires_at: None,
+                }],
+            };
+            let answer = submit_enrichment_answer(&pool, capability, answer_input.clone())
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(answer.customer_id.is_some() && answer.signals.len() == 2);
+            anyhow::ensure!(answer.signals[0].remembered);
+            anyhow::ensure!(answer.signals[0].summary == "shopping budget band: 50 150");
+            anyhow::ensure!(answer.signals[0].allowed_uses == ["product_personalization"]);
+            anyhow::ensure!(answer.signals[1].provenance == "agent_inference");
+            anyhow::ensure!(answer.signals[1].allowed_uses.is_empty());
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, String>(
+                    "SELECT method FROM enrichment_interaction_confirmations WHERE interaction_id = $1",
+                )
+                .bind(interaction_id)
+                .fetch_one(&pool)
+                .await?
+                    == "enrichment_answer"
+            );
+            let retry = submit_enrichment_answer(&pool, capability, answer_input)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(retry.signals[0].signal_id == answer.signals[0].signal_id);
+
+            let mcp_interaction_id = Uuid::new_v4();
+            let mcp_request = create_enrichment_request(
+                &pool,
+                &auth_a,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                EnrichmentRequestInput {
+                    interaction_id: mcp_interaction_id,
+                    operation: "catalog_search".into(),
+                    surface: "mcp".into(),
+                    status_code: Some(200),
+                    duration_ms: Some(11),
+                    session_ref: Some("journey_retail_1".into()),
+                    runtime_hint: Some("mcp-client/1".into()),
+                    purpose: "product_personalization".into(),
+                    remember: true,
+                    customer_ref: None,
+                    account_ref: None,
+                    user_ref: None,
+                    anonymous_ref: Some("anon_retail_1".into()),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(mcp_request.surface == "mcp");
+            anyhow::ensure!(mcp_request.state == "answer_ready");
+            let mcp_evidence = sqlx::query_as::<_, (String, String, Option<String>)>(
+                "SELECT surface, classification, confirmation_method FROM interactions_v2 WHERE id = $1",
+            )
+            .bind(mcp_interaction_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(mcp_evidence.0 == "mcp");
+            anyhow::ensure!(mcp_evidence.1 == "confirmed");
+            anyhow::ensure!(mcp_evidence.2.as_deref() == Some("mcp"));
+
+            let context_input = CustomerContextInput {
+                customer_ref: None,
+                account_ref: None,
+                user_ref: None,
+                anonymous_ref: Some("anon_retail_1".into()),
+                interaction_id: None,
+                purpose: "product_personalization".into(),
+            };
+            let context = retrieve_customer_context(
+                &pool,
+                &auth_a,
+                TEST_IDENTITY_HMAC_SECRET,
+                context_input.clone(),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(context.identity_level == "pseudonymous");
+            anyhow::ensure!(context.items.len() == 1);
+            anyhow::ensure!(
+                retrieve_customer_context(
+                    &pool,
+                    &auth_b,
+                    TEST_IDENTITY_HMAC_SECRET,
+                    context_input,
+                )
+                .await
+                .is_err()
+            );
+
+            let decision_input = PersonalizationDecisionInput {
+                external_decision_id: "decision_1".into(),
+                context_retrieval_id: context.retrieval_id,
+                signal_ids: vec![context.items[0].signal_id],
+                variant: Some("under_150_results".into()),
+            };
+            let (decision, decision_retry) = tokio::join!(
+                record_personalization_decision(&pool, &auth_a, decision_input.clone()),
+                record_personalization_decision(&pool, &auth_a, decision_input.clone())
+            );
+            let decision = decision.map_err(test_error)?;
+            let decision_retry = decision_retry.map_err(test_error)?;
+            anyhow::ensure!(decision.decision.id == decision_retry.decision.id);
+            let mut conflicting_decision_a = decision_input.clone();
+            conflicting_decision_a.external_decision_id = "decision_conflict".into();
+            conflicting_decision_a.variant = Some("variant_a".into());
+            let mut conflicting_decision_b = conflicting_decision_a.clone();
+            conflicting_decision_b.variant = Some("variant_b".into());
+            let (conflict_a, conflict_b) = tokio::join!(
+                record_personalization_decision(&pool, &auth_a, conflicting_decision_a),
+                record_personalization_decision(&pool, &auth_a, conflicting_decision_b)
+            );
+            anyhow::ensure!(conflict_a.is_ok() ^ conflict_b.is_ok());
+            let outcome_input = PersonalizationOutcomeInput {
+                external_outcome_id: "outcome_1".into(),
+                decision_id: decision.decision.id,
+                outcome: "conversion".into(),
+                occurred_at: Some(Utc::now()),
+            };
+            let (outcome, outcome_retry) = tokio::join!(
+                record_personalization_outcome(&pool, &auth_a, outcome_input.clone()),
+                record_personalization_outcome(&pool, &auth_a, outcome_input.clone())
+            );
+            let outcome = outcome.map_err(test_error)?;
+            let outcome_retry = outcome_retry.map_err(test_error)?;
+            anyhow::ensure!(outcome.outcome.id == outcome_retry.outcome.id);
+            let mut conflicting_outcome_a = outcome_input.clone();
+            conflicting_outcome_a.external_outcome_id = "outcome_conflict".into();
+            conflicting_outcome_a.outcome = "engagement".into();
+            let mut conflicting_outcome_b = conflicting_outcome_a.clone();
+            conflicting_outcome_b.outcome = "dismissal".into();
+            let (outcome_conflict_a, outcome_conflict_b) = tokio::join!(
+                record_personalization_outcome(&pool, &auth_a, conflicting_outcome_a),
+                record_personalization_outcome(&pool, &auth_a, conflicting_outcome_b)
+            );
+            anyhow::ensure!(outcome_conflict_a.is_ok() ^ outcome_conflict_b.is_ok());
+
+            let resolved_interaction_id = Uuid::new_v4();
+            let resolved = create_enrichment_request(
+                &pool,
+                &auth_a,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                EnrichmentRequestInput {
+                    interaction_id: resolved_interaction_id,
+                    operation: "/search".into(),
+                    surface: "http_json".into(),
+                    status_code: Some(200),
+                    duration_ms: Some(18),
+                    session_ref: Some("journey_retail_1".into()),
+                    runtime_hint: Some("claude-code/1".into()),
+                    purpose: "product_personalization".into(),
+                    remember: true,
+                    customer_ref: None,
+                    account_ref: None,
+                    user_ref: Some("user_retail_1".into()),
+                    anonymous_ref: Some("anon_retail_1".into()),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(resolved.identity_level == "verified");
+            anyhow::ensure!(resolved.state == "answer_ready");
+            let resolved_customer_id = sqlx::query_scalar::<_, Uuid>(
+                "SELECT customer_id FROM interactions_v2 WHERE id = $1",
+            )
+            .bind(resolved_interaction_id)
+            .fetch_one(&pool)
+            .await?;
+            let grouped_sessions = sqlx::query_as::<_, (Option<Uuid>, Option<Uuid>)>(
+                r"SELECT
+                  (SELECT session_id FROM interactions_v2 WHERE id = $1),
+                  (SELECT session_id FROM interactions_v2 WHERE id = $2)",
+            )
+            .bind(interaction_id)
+            .bind(resolved_interaction_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(grouped_sessions.0.is_some());
+            anyhow::ensure!(grouped_sessions.0 == grouped_sessions.1);
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, Uuid>(
+                    "SELECT customer_id FROM enrichment_answers WHERE id = (SELECT enrichment_answer_id FROM enrichment_signal_items WHERE signal_id = $1)",
+                )
+                .bind(answer.signals[0].signal_id)
+                .fetch_one(&pool)
+                .await?
+                    == resolved_customer_id
+            );
+            let known_context = retrieve_customer_context(
+                &pool,
+                &auth_a,
+                TEST_IDENTITY_HMAC_SECRET,
+                CustomerContextInput {
+                    customer_ref: None,
+                    account_ref: None,
+                    user_ref: Some("user_retail_1".into()),
+                    anonymous_ref: None,
+                    interaction_id: None,
+                    purpose: "product_personalization".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(known_context.items.len() == 1);
+            let customer_detail = dashboard_customer_by_id(
+                &pool,
+                auth_a.workspace.id,
+                auth_a.environment.product_id,
+                resolved_customer_id,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(customer_detail.consent.iter().any(|grant| {
+                grant.enrichment_purpose.as_deref() == Some("product_personalization")
+            }));
+            anyhow::ensure!(customer_detail.consent_history.iter().any(|event| {
+                event.enrichment_purpose.as_deref() == Some("product_personalization")
+            }));
+            sqlx::query(
+                r"UPDATE consent_grants SET state = 'revoked', revoked_at = NOW(), updated_at = NOW()
+                WHERE environment_id = $1
+                  AND subject = (SELECT consent_subject FROM enrichment_requests WHERE id = $2)
+                  AND scope = 'remember_preferences'",
+            )
+            .bind(auth_a.environment.id)
+            .bind(resolved.request_id)
+            .execute(&pool)
+            .await?;
+            anyhow::ensure!(
+                record_personalization_decision(
+                    &pool,
+                    &auth_a,
+                    PersonalizationDecisionInput {
+                        external_decision_id: "decision_after_memory_revoke".into(),
+                        context_retrieval_id: known_context.retrieval_id,
+                        signal_ids: vec![known_context.items[0].signal_id],
+                        variant: None,
+                    },
+                )
+                .await
+                .is_err()
+            );
+            let revoke_capability = resolved
+                .consent
+                .as_ref()
+                .and_then(|action| action.authorization.strip_prefix("Bearer "))
+                .ok_or_else(|| anyhow::anyhow!("missing manage capability"))?;
+            let revoked = decide_enrichment_consent(
+                &pool,
+                "https://app.epode.ai",
+                revoke_capability,
+                EnrichmentConsentDecisionInput {
+                    decision: "declined".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(revoked.changed && revoked.state == "declined");
+            anyhow::ensure!(
+                revoked
+                    .stage_instruction
+                    .contains("No enrichment action is permitted")
+            );
+            anyhow::ensure!(revoked.answer_instruction.is_none() && revoked.submit.is_none());
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, i64>(
+                    r"SELECT COUNT(*) FROM enrichment_consent_events
+                    WHERE environment_id = $1 AND subject = (
+                      SELECT consent_subject FROM enrichment_requests WHERE id = $2
+                    ) AND state = 'declined'
+                      AND enrichment_purpose = 'product_personalization'",
+                )
+                .bind(auth_a.environment.id)
+                .bind(resolved.request_id)
+                .fetch_one(&pool)
+                .await?
+                    >= 2
+            );
+            let after_revoke = retrieve_customer_context(
+                &pool,
+                &auth_a,
+                TEST_IDENTITY_HMAC_SECRET,
+                CustomerContextInput {
+                    customer_ref: None,
+                    account_ref: None,
+                    user_ref: None,
+                    anonymous_ref: Some("anon_retail_1".into()),
+                    interaction_id: None,
+                    purpose: "product_personalization".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(after_revoke.items.is_empty());
+
+            let transient_known_interaction = Uuid::new_v4();
+            let transient_known = create_enrichment_request(
+                &pool,
+                &auth_a,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                EnrichmentRequestInput {
+                    interaction_id: transient_known_interaction,
+                    operation: "/recommend".into(),
+                    surface: "http_json".into(),
+                    status_code: None,
+                    duration_ms: None,
+                    session_ref: None,
+                    runtime_hint: None,
+                    purpose: "product_personalization".into(),
+                    remember: false,
+                    customer_ref: None,
+                    account_ref: None,
+                    user_ref: Some("user_retail_1".into()),
+                    anonymous_ref: None,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(transient_known.state == "consent_required");
+            let transient_subject = sqlx::query_scalar::<_, String>(
+                "SELECT consent_subject FROM enrichment_requests WHERE id = $1",
+            )
+            .bind(transient_known.request_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(transient_subject.starts_with("afint1_"));
+            let transient_capability = transient_known
+                .consent
+                .as_ref()
+                .and_then(|action| action.authorization.strip_prefix("Bearer "))
+                .ok_or_else(|| anyhow::anyhow!("missing transient capability"))?;
+            decide_enrichment_consent(
+                &pool,
+                "https://app.epode.ai",
+                transient_capability,
+                EnrichmentConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, bool>(
+                    r"SELECT bool_and(expires_at IS NOT NULL) FROM consent_grants
+                    WHERE environment_id = $1 AND subject = $2",
+                )
+                .bind(auth_a.environment.id)
+                .bind(&transient_subject)
+                .fetch_one(&pool)
+                .await?
+            );
+            let second_transient_known = create_enrichment_request(
+                &pool,
+                &auth_a,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                EnrichmentRequestInput {
+                    interaction_id: Uuid::new_v4(),
+                    operation: "/recommend".into(),
+                    surface: "http_json".into(),
+                    status_code: None,
+                    duration_ms: None,
+                    session_ref: None,
+                    runtime_hint: None,
+                    purpose: "product_personalization".into(),
+                    remember: false,
+                    customer_ref: None,
+                    account_ref: None,
+                    user_ref: Some("user_retail_1".into()),
+                    anonymous_ref: None,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(second_transient_known.state == "consent_required");
+            sqlx::query(
+                r"UPDATE consent_grants SET state = 'revoked', revoked_at = NOW(), updated_at = NOW()
+                WHERE environment_id = $1 AND subject = $2 AND scope = $3",
+            )
+            .bind(auth_a.environment.id)
+            .bind(&transient_subject)
+            .bind("personalize")
+            .execute(&pool)
+            .await?;
+            anyhow::ensure!(
+                submit_enrichment_answer(
+                    &pool,
+                    transient_capability,
+                    EnrichmentAnswerInput {
+                        status: "answered".into(),
+                        items: vec![crate::models::EnrichmentAnswerItemInput {
+                            key: "shopping.priority".into(),
+                            signal_type: "preference".into(),
+                            value: "quality".into(),
+                            _summary: None,
+                            provenance: "agent_reports_user_statement".into(),
+                            confidence: Some(1.0),
+                            remember: false,
+                            expires_at: None,
+                        }],
+                    },
+                )
+                .await
+                .is_err()
+            );
+
+            let transient_anonymous_interaction = Uuid::new_v4();
+            let transient_anonymous = create_enrichment_request(
+                &pool,
+                &auth_a,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                EnrichmentRequestInput {
+                    interaction_id: transient_anonymous_interaction,
+                    operation: "/recommend".into(),
+                    surface: "http_json".into(),
+                    status_code: None,
+                    duration_ms: None,
+                    session_ref: None,
+                    runtime_hint: None,
+                    purpose: "product_personalization".into(),
+                    remember: false,
+                    customer_ref: None,
+                    account_ref: None,
+                    user_ref: None,
+                    anonymous_ref: Some("anon_transient".into()),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(transient_anonymous.identity_level == "pseudonymous");
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, String>(
+                    "SELECT consent_subject FROM enrichment_requests WHERE id = $1",
+                )
+                .bind(transient_anonymous.request_id)
+                .fetch_one(&pool)
+                .await?
+                    .starts_with("afint1_")
+            );
+
+            let preexisting_interaction_id = Uuid::new_v4();
+            let preexisting_session_hash = customer_identifier_hash(
+                TEST_IDENTITY_HMAC_SECRET,
+                auth_a.workspace.id,
+                auth_a.environment.product_id,
+                "session_ref",
+                "preexisting_session",
+            )
+            .map_err(test_error)?;
+            let mut preexisting_tx = pool.begin().await?;
+            let preexisting_session_id = resolve_v2_session(
+                &mut preexisting_tx,
+                auth_a.workspace.id,
+                auth_a.environment.id,
+                &customer_scope_hash(None, Some(resolved_customer_id)),
+                &preexisting_session_hash,
+                "customer",
+                Utc::now(),
+            )
+            .await
+            .map_err(test_error)?;
+            sqlx::query(
+                r"INSERT INTO interactions_v2
+                (id, workspace_id, environment_id, api_key_id, session_id,
+                 surface, operation, status_code, duration_ms, customer_id,
+                 classification, runtime_hint, runtime_hint_source, occurred_at)
+                VALUES ($1,$2,$3,$4,$5,'http_json','/preexisting',200,7,$6,
+                  'unclassified','codex/1','http',NOW())",
+            )
+            .bind(preexisting_interaction_id)
+            .bind(auth_a.workspace.id)
+            .bind(auth_a.environment.id)
+            .bind(auth_a.api_key_id)
+            .bind(preexisting_session_id)
+            .bind(resolved_customer_id)
+            .execute(&mut *preexisting_tx)
+            .await?;
+            preexisting_tx.commit().await?;
+            let preexisting_input = EnrichmentRequestInput {
+                interaction_id: preexisting_interaction_id,
+                operation: "/preexisting".into(),
+                surface: "http_json".into(),
+                status_code: Some(200),
+                duration_ms: Some(7),
+                session_ref: Some("preexisting_session".into()),
+                runtime_hint: Some("codex/1".into()),
+                purpose: "product_personalization".into(),
+                remember: true,
+                customer_ref: None,
+                account_ref: None,
+                user_ref: Some("user_retail_1".into()),
+                anonymous_ref: None,
+            };
+            create_enrichment_request(
+                &pool,
+                &auth_a,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                preexisting_input.clone(),
+            )
+            .await
+            .map_err(test_error)?;
+            let session_count_before = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sessions_v2 WHERE environment_id = $1",
+            )
+            .bind(auth_a.environment.id)
+            .fetch_one(&pool)
+            .await?;
+            let mut mismatched_preexisting = preexisting_input;
+            mismatched_preexisting.session_ref = Some("preexisting_other".into());
+            anyhow::ensure!(
+                create_enrichment_request(
+                    &pool,
+                    &auth_a,
+                    TEST_IDENTITY_HMAC_SECRET,
+                    "https://app.epode.ai",
+                    mismatched_preexisting,
+                )
+                .await
+                .is_err()
+            );
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM sessions_v2 WHERE environment_id = $1",
+                )
+                .bind(auth_a.environment.id)
+                .fetch_one(&pool)
+                .await?
+                    == session_count_before
+            );
+
+            let merge_anonymous = create_enrichment_request(
+                &pool,
+                &auth_a,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                EnrichmentRequestInput {
+                    interaction_id: Uuid::new_v4(),
+                    operation: "/consent-merge".into(),
+                    surface: "http_json".into(),
+                    status_code: Some(200),
+                    duration_ms: None,
+                    session_ref: None,
+                    runtime_hint: None,
+                    purpose: "product_personalization".into(),
+                    remember: true,
+                    customer_ref: None,
+                    account_ref: None,
+                    user_ref: None,
+                    anonymous_ref: Some("consent_merge_anon".into()),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let merge_anonymous_capability = merge_anonymous
+                .consent
+                .as_ref()
+                .and_then(|action| action.authorization.strip_prefix("Bearer "))
+                .ok_or_else(|| anyhow::anyhow!("missing anonymous merge capability"))?;
+            decide_enrichment_consent(
+                &pool,
+                "https://app.epode.ai",
+                merge_anonymous_capability,
+                EnrichmentConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let merge_answer = submit_enrichment_answer(
+                &pool,
+                merge_anonymous_capability,
+                EnrichmentAnswerInput {
+                    status: "answered".into(),
+                    items: vec![crate::models::EnrichmentAnswerItemInput {
+                        key: "shopping.priority".into(),
+                        signal_type: "preference".into(),
+                        value: "price".into(),
+                        _summary: None,
+                        provenance: "agent_reports_user_statement".into(),
+                        confidence: Some(1.0),
+                        remember: true,
+                        expires_at: None,
+                    }],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let merge_old_context = retrieve_customer_context(
+                &pool,
+                &auth_a,
+                TEST_IDENTITY_HMAC_SECRET,
+                CustomerContextInput {
+                    customer_ref: None,
+                    account_ref: None,
+                    user_ref: None,
+                    anonymous_ref: Some("consent_merge_anon".into()),
+                    interaction_id: None,
+                    purpose: "product_personalization".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(merge_old_context.items.len() == 1);
+            let ready_before_merge = dashboard_insights(
+                &pool,
+                Some(auth_a.environment.id),
+                None,
+            )
+            .await
+            .map_err(test_error)?
+            .personalization_ready_customers;
+            anyhow::ensure!(ready_before_merge >= 1);
+            let merge_known = create_enrichment_request(
+                &pool,
+                &auth_a,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                EnrichmentRequestInput {
+                    interaction_id: Uuid::new_v4(),
+                    operation: "/consent-merge".into(),
+                    surface: "http_json".into(),
+                    status_code: Some(200),
+                    duration_ms: None,
+                    session_ref: None,
+                    runtime_hint: None,
+                    purpose: "product_personalization".into(),
+                    remember: true,
+                    customer_ref: None,
+                    account_ref: None,
+                    user_ref: Some("consent_merge_user".into()),
+                    anonymous_ref: None,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let merge_known_capability = merge_known
+                .consent
+                .as_ref()
+                .and_then(|action| action.authorization.strip_prefix("Bearer "))
+                .ok_or_else(|| anyhow::anyhow!("missing known merge capability"))?;
+            decide_enrichment_consent(
+                &pool,
+                "https://app.epode.ai",
+                merge_known_capability,
+                EnrichmentConsentDecisionInput {
+                    decision: "declined".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let merged_consent = create_enrichment_request(
+                &pool,
+                &auth_a,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                EnrichmentRequestInput {
+                    interaction_id: Uuid::new_v4(),
+                    operation: "/consent-merge".into(),
+                    surface: "http_json".into(),
+                    status_code: Some(200),
+                    duration_ms: None,
+                    session_ref: None,
+                    runtime_hint: None,
+                    purpose: "product_personalization".into(),
+                    remember: true,
+                    customer_ref: None,
+                    account_ref: None,
+                    user_ref: Some("consent_merge_user".into()),
+                    anonymous_ref: Some("consent_merge_anon".into()),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(merged_consent.state == "declined");
+            let merged_customer_id = sqlx::query_scalar::<_, Uuid>(
+                "SELECT customer_id FROM interactions_v2 WHERE id = $1",
+            )
+            .bind(merged_consent.interaction_id)
+            .fetch_one(&pool)
+            .await?;
+            let merged_customer_detail = dashboard_customer_by_id(
+                &pool,
+                auth_a.workspace.id,
+                auth_a.environment.product_id,
+                merged_customer_id,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(merged_customer_detail.customer.consent_state == "declined");
+            let merged_signal = merged_customer_detail
+                .signals
+                .iter()
+                .find(|signal| signal.id == merge_answer.signals[0].signal_id)
+                .ok_or_else(|| anyhow::anyhow!("missing merged dashboard signal"))?;
+            anyhow::ensure!(merged_signal.consent_state.as_deref() == Some("declined"));
+            anyhow::ensure!(merged_signal.allowed_uses.is_empty());
+            let ready_after_merge = dashboard_insights(
+                &pool,
+                Some(auth_a.environment.id),
+                None,
+            )
+            .await
+            .map_err(test_error)?
+            .personalization_ready_customers;
+            anyhow::ensure!(ready_after_merge < ready_before_merge);
+            let blocked_merged_context = retrieve_customer_context(
+                &pool,
+                &auth_a,
+                TEST_IDENTITY_HMAC_SECRET,
+                CustomerContextInput {
+                    customer_ref: None,
+                    account_ref: None,
+                    user_ref: Some("consent_merge_user".into()),
+                    anonymous_ref: None,
+                    interaction_id: None,
+                    purpose: "product_personalization".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(blocked_merged_context.items.is_empty());
+            anyhow::ensure!(
+                record_personalization_decision(
+                    &pool,
+                    &auth_a,
+                    PersonalizationDecisionInput {
+                        external_decision_id: "blocked_after_identity_merge".into(),
+                        context_retrieval_id: merge_old_context.retrieval_id,
+                        signal_ids: vec![merge_answer.signals[0].signal_id],
+                        variant: None,
+                    },
+                )
+                .await
+                .is_err()
+            );
+            let stale_replay = decide_enrichment_consent(
+                &pool,
+                "https://app.epode.ai",
+                merge_anonymous_capability,
+                EnrichmentConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(!stale_replay.changed);
+
+            let conflicting_request_interaction = Uuid::new_v4();
+            let conflicting_request = EnrichmentRequestInput {
+                interaction_id: conflicting_request_interaction,
+                operation: "/recommend".into(),
+                surface: "http_json".into(),
+                status_code: None,
+                duration_ms: None,
+                session_ref: Some("conflict_session_a".into()),
+                runtime_hint: None,
+                purpose: "targeted_advertising".into(),
+                remember: false,
+                customer_ref: None,
+                account_ref: None,
+                user_ref: Some("user_retail_1".into()),
+                anonymous_ref: None,
+            };
+            let mut different_payload = conflicting_request.clone();
+            different_payload.operation = "/different-operation".into();
+            different_payload.session_ref = Some("conflict_session_b".into());
+            let conflict_session_a_hash = customer_identifier_hash(
+                TEST_IDENTITY_HMAC_SECRET,
+                auth_a.workspace.id,
+                auth_a.environment.product_id,
+                "session_ref",
+                "conflict_session_a",
+            )
+            .map_err(test_error)?;
+            let alternate_ref_hash = customer_identifier_hash(
+                TEST_IDENTITY_HMAC_SECRET,
+                auth_a.workspace.id,
+                auth_a.environment.product_id,
+                "session_ref",
+                "conflict_session_b",
+            )
+            .map_err(test_error)?;
+            let (request_conflict_a, request_conflict_b) = tokio::join!(
+                create_enrichment_request(
+                    &pool,
+                    &auth_a,
+                    TEST_IDENTITY_HMAC_SECRET,
+                    "https://app.epode.ai",
+                    conflicting_request.clone(),
+                ),
+                create_enrichment_request(
+                    &pool,
+                    &auth_a,
+                    TEST_IDENTITY_HMAC_SECRET,
+                    "https://app.epode.ai",
+                    different_payload.clone(),
+                )
+            );
+            anyhow::ensure!(request_conflict_a.is_ok() ^ request_conflict_b.is_ok());
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, i64>(
+                    r"SELECT COUNT(*) FROM sessions_v2
+                    WHERE environment_id = $1
+                      AND COALESCE(raw_ref_hash, ref_hash) IN ($2, $3)",
+                )
+                .bind(auth_a.environment.id)
+                .bind(conflict_session_a_hash)
+                .bind(alternate_ref_hash)
+                .fetch_one(&pool)
+                .await?
+                    == 1
+            );
+            let (retry_a, retry_b) = tokio::join!(
+                create_enrichment_request(
+                    &pool,
+                    &auth_a,
+                    TEST_IDENTITY_HMAC_SECRET,
+                    "https://app.epode.ai",
+                    conflicting_request,
+                ),
+                create_enrichment_request(
+                    &pool,
+                    &auth_a,
+                    TEST_IDENTITY_HMAC_SECRET,
+                    "https://app.epode.ai",
+                    different_payload,
+                )
+            );
+            anyhow::ensure!(retry_a.is_ok() ^ retry_b.is_ok());
+
+            let ephemeral_interaction_id = Uuid::new_v4();
+            let ephemeral = create_enrichment_request(
+                &pool,
+                &auth_a,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                EnrichmentRequestInput {
+                    interaction_id: ephemeral_interaction_id,
+                    operation: "/recommend".into(),
+                    surface: "http_json".into(),
+                    status_code: None,
+                    duration_ms: None,
+                    session_ref: None,
+                    runtime_hint: None,
+                    purpose: "product_personalization".into(),
+                    remember: true,
+                    customer_ref: None,
+                    account_ref: None,
+                    user_ref: None,
+                    anonymous_ref: None,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(ephemeral.identity_level == "ephemeral");
+            anyhow::ensure!(
+                ephemeral
+                    .question
+                    .as_deref()
+                    .is_some_and(|question| question.contains("for this interaction only"))
+            );
+            anyhow::ensure!(
+                sqlx::query_as::<_, (Option<Uuid>, bool)>(
+                    "SELECT customer_id, remember FROM enrichment_requests WHERE id = $1",
+                )
+                .bind(ephemeral.request_id)
+                .fetch_one(&pool)
+                .await?
+                    == (None, false)
+            );
+            let ephemeral_capability = ephemeral
+                .consent
+                .as_ref()
+                .and_then(|action| action.authorization.strip_prefix("Bearer "))
+                .ok_or_else(|| anyhow::anyhow!("missing ephemeral capability"))?;
+            decide_enrichment_consent(
+                &pool,
+                "https://app.epode.ai",
+                ephemeral_capability,
+                EnrichmentConsentDecisionInput {
+                    decision: "approved".into(),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let ephemeral_answer = submit_enrichment_answer(
+                &pool,
+                ephemeral_capability,
+                EnrichmentAnswerInput {
+                    status: "answered".into(),
+                    items: vec![crate::models::EnrichmentAnswerItemInput {
+                        key: "shopping.priority".into(),
+                        signal_type: "preference".into(),
+                        value: "quality".into(),
+                        _summary: None,
+                        provenance: "agent_reports_current_task".into(),
+                        confidence: Some(1.0),
+                        remember: false,
+                        expires_at: None,
+                    }],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(!ephemeral_answer.signals[0].remembered);
+            Ok::<(), anyhow::Error>(())
+        })
+        .await;
+        for workspace in [&workspace_a, &workspace_b] {
+            sqlx::query("DELETE FROM workspaces WHERE id = $1")
+                .bind(workspace.id)
+                .execute(&pool)
+                .await?;
+        }
+        result
     }
 
     #[tokio::test]

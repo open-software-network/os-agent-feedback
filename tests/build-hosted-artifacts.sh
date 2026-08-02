@@ -105,20 +105,26 @@ fi
 
 (
   cd "$repo_root/sdk/node"
-  pnpm --filter @agent-feedback/node install --ignore-scripts
+  pnpm install --frozen-lockfile --ignore-scripts
   pnpm pack --pack-destination "$stage"
 )
+packed_node="$(find "$stage" -maxdepth 1 -type f -name '*.tgz' -print -quit)"
+if [[ -z "$packed_node" ]]; then
+  echo "Node hosted build did not produce a package tarball" >&2
+  exit 1
+fi
+mv "$packed_node" "$stage/agent-feedback-node-$version.tgz"
 
 "$python_bin" -m pip wheel --no-deps "$repo_root/sdk/python" --wheel-dir "$stage"
 
 write_and_verify_source_archive \
   "$repo_root/sdk/go" \
   "$stage/agent-feedback-go-$version.tar.gz" \
-  go.mod agent.go agentfeedback.go README.md
+  go.mod agent.go agentfeedback.go customer.go README.md
 write_and_verify_source_archive \
   "$repo_root/sdk/rust" \
   "$stage/agent-feedback-rust-$version.tar.gz" \
-  Cargo.toml Cargo.lock README.md src/lib.rs
+  Cargo.toml Cargo.lock README.md src/lib.rs src/customer.rs
 legacy_protocol_artifact="$artifacts/agent-feedback-protocol-v1.zip"
 if [[ ! -f "$legacy_protocol_artifact" ]]; then
   echo "the immutable original protocol v1 artifact is missing" >&2

@@ -1,4 +1,60 @@
-# `agent-feedback` for Rust
+# Epode for Rust
+
+Version 0.4.0 preserves the existing Axum/Tower feedback middleware and adds a
+typed, framework-neutral company-side customer-enrichment client.
+
+```rust
+use agent_feedback::{
+    CustomerContextInput, CustomerIdentity, CustomerPurpose, EnrichmentRequestInput,
+    EnrichmentSurface, EpodeClient,
+    EpodeClientOptions,
+};
+
+let epode = EpodeClient::new(EpodeClientOptions::from_env()?)?;
+let request = epode.request_enrichment(&EnrichmentRequestInput {
+    identity: CustomerIdentity {
+        user_ref: Some(authenticated_user.id.clone()),
+        ..Default::default()
+    },
+    interaction_id: interaction_id.clone(),
+    operation: "/api/recommendations".into(),
+    surface: EnrichmentSurface::HttpJson,
+    status_code: Some(200),
+    duration_ms: Some(handler_duration.as_millis() as u64),
+    session_ref: Some(product_journey.id.clone()),
+    runtime_hint: Some(verified_runtime_label.clone()),
+    purpose: CustomerPurpose::ProductPersonalization,
+    remember: true,
+}).await;
+let context = epode.get_customer_context(&CustomerContextInput {
+    identity: CustomerIdentity {
+        user_ref: Some(authenticated_user.id.clone()),
+        ..Default::default()
+    },
+    interaction_id: None,
+    purpose: CustomerPurpose::ProductPersonalization,
+}).await;
+let result = if context.available {
+    personalize(normal_result, &context.items)
+} else {
+    normal_result
+};
+```
+
+`request_enrichment`, `get_customer_context`,
+`record_personalization_decision`, and `track_personalization_outcome` reject
+redirects, use strict time budgets, and fail open. Use `anonymous_ref` for a
+product-owned pre-login identifier, or `interaction_id` alone for
+interaction-only context. Mount `relay` at `CUSTOMER_CONTEXT_RELAY_PATHS`; it
+validates bounded agent answers before forwarding the short-lived handle and
+never exposes the company key.
+
+`EnrichmentSurface::HttpJson` is the default surface; use `Html` or `Mcp` when appropriate.
+The optional status, duration, session, and runtime fields describe this same product call.
+Session references must be product-issued and runtime hints bounded, non-sensitive server-observed
+labels—never prompts, tool arguments, raw customer content, or regulated traits.
+
+## Existing feedback middleware
 
 Axum/Tower middleware using the same protocol and conformance vectors as Node, Python, and Go.
 

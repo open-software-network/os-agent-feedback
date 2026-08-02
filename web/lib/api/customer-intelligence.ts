@@ -45,6 +45,9 @@ export type CustomerSummary = {
   sessionCount: number;
   activeNeedCount: number;
   consentState: string;
+  contextSummary?: string | null;
+  contextCount?: number;
+  personalizationReady?: boolean;
 };
 
 export type CustomerIdentifier = {
@@ -58,6 +61,7 @@ export type CustomerIdentifier = {
 
 export type ConsentGrant = {
   scope: string;
+  enrichmentPurpose: CustomerContextPurpose | null;
   state: string;
   basis: string;
   decidedAt: string;
@@ -69,6 +73,7 @@ export type ConsentGrant = {
 export type ConsentEvent = {
   id: string;
   scope: string;
+  enrichmentPurpose: CustomerContextPurpose | null;
   priorState: string | null;
   state: string;
   basis: string;
@@ -85,6 +90,8 @@ export type CustomerSignal = {
   interactionId: string | null;
   feedbackReportId: string | null;
   featureKey: string | null;
+  signalKey: string | null;
+  value: unknown | null;
   type: SignalType | string;
   summary: string;
   detail: string | null;
@@ -94,6 +101,38 @@ export type CustomerSignal = {
   expiresAt: string | null;
   consentScope: string | null;
   consentState: string | null;
+  allowedUses: string[];
+};
+
+export type CustomerContextPurpose = "product_personalization" | "targeted_advertising";
+
+export type CustomerContextTrait = {
+  signalId: string;
+  key: string;
+  type: SignalType | string;
+  value: unknown;
+  summary: string;
+  provenance: SignalProvenance | string;
+  confidence: number | null;
+  expiresAt: string | null;
+  allowedUses: string[];
+};
+
+export type CustomerContextInput = {
+  accountRef?: string;
+  userRef?: string;
+  anonymousRef?: string;
+  interactionId?: string;
+  purpose: CustomerContextPurpose;
+};
+
+export type CustomerContextResponse = {
+  retrievalId: string;
+  identityLevel: IdentityLevel | string;
+  customerId: string | null;
+  interactionId: string | null;
+  contextVersion: string;
+  items: CustomerContextTrait[];
 };
 
 export type CustomerRollup = {
@@ -104,6 +143,8 @@ export type CustomerRollup = {
   unclassified: number;
   active: number;
   atRisk: number;
+  withContext?: number;
+  personalizationReady?: number;
 };
 
 export type CustomerFacets = {

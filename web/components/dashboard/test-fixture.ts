@@ -187,6 +187,12 @@ export function dashboardFixture(overrides: Partial<DashboardData> = {}): Dashbo
     insights: {
       windowDays: 30,
       comparisonDays: 30,
+      customerContextItems: 3,
+      customersWithContext: 2,
+      contextRetrievals: 4,
+      personalizationReadyCustomers: 2,
+      personalizationDecisions: 2,
+      personalizationOutcomes: 1,
       reports: 1,
       opportunities: 1,
       confirmedInteractions: 1,
@@ -208,6 +214,13 @@ export function dashboardFixture(overrides: Partial<DashboardData> = {}): Dashbo
       blockingTopics: [],
       surfaces: [{ name: "http", count: 1 }],
       topOperations: [{ name: "search", count: 1 }],
+    } as DashboardData["insights"] & {
+      customerContextItems: number;
+      customersWithContext: number;
+      contextRetrievals: number;
+      personalizationReadyCustomers: number;
+      personalizationDecisions: number;
+      personalizationOutcomes: number;
     },
     listState: {
       interactionsLoaded: 1,
@@ -252,6 +265,8 @@ export function signalFixture(overrides: Partial<CustomerSignal> = {}): Customer
     interactionId: "44444444-4444-4444-8444-444444444444",
     feedbackReportId: "66666666-6666-4666-8666-666666666666",
     featureKey: "freshness-gap",
+    signalKey: null,
+    value: null,
     type: "feature_need",
     summary: "Results need to include newly indexed documents",
     detail: "The current search path omitted a document needed for the task.",
@@ -261,6 +276,7 @@ export function signalFixture(overrides: Partial<CustomerSignal> = {}): Customer
     expiresAt: null,
     consentScope: "share_outcome",
     consentState: "approved",
+    allowedUses: [],
     ...overrides,
   };
 }
@@ -350,8 +366,12 @@ export function customerDetailFixture(): CustomerDetail {
     signals: [
       signalFixture({
         id: "signal-intent",
+        signalKey: "search.goal",
+        value: "newest_policy",
         type: "intent",
         summary: "Find the newest indexed policy",
+        consentScope: "share_preferences",
+        allowedUses: ["product_personalization"],
       }),
       signalFixture(),
       signalFixture({
@@ -361,13 +381,15 @@ export function customerDetailFixture(): CustomerDetail {
         provenance: "agent_inference",
         confidence: 0.55,
         consentScope: "share_preferences",
-        consentState: "expired",
+        consentState: "approved",
+        allowedUses: ["product_personalization"],
       }),
     ],
     sessions: dashboard.sessions,
     consent: [
       {
         scope: "share_outcome",
+        enrichmentPurpose: null,
         state: "approved",
         basis: "user_decision",
         decidedAt: "2026-07-30T12:00:00Z",
@@ -377,6 +399,7 @@ export function customerDetailFixture(): CustomerDetail {
       },
       {
         scope: "share_preferences",
+        enrichmentPurpose: null,
         state: "expired",
         basis: "user_decision",
         decidedAt: "2026-07-01T12:00:00Z",
@@ -384,11 +407,22 @@ export function customerDetailFixture(): CustomerDetail {
         revokedAt: null,
         revision: 2,
       },
+      {
+        scope: "personalize",
+        enrichmentPurpose: "targeted_advertising",
+        state: "declined",
+        basis: "user_decision",
+        decidedAt: "2026-07-30T12:05:00Z",
+        expiresAt: null,
+        revokedAt: null,
+        revision: 1,
+      },
     ],
     consentHistory: [
       {
         id: "consent-event-1",
         scope: "share_outcome",
+        enrichmentPurpose: null,
         priorState: null,
         state: "approved",
         basis: "user_consent",
@@ -396,6 +430,18 @@ export function customerDetailFixture(): CustomerDetail {
         source: "feedback_consent",
         decidedAt: "2026-07-30T12:00:00Z",
         createdAt: "2026-07-30T12:00:01Z",
+      },
+      {
+        id: "consent-event-2",
+        scope: "personalize",
+        enrichmentPurpose: "targeted_advertising",
+        priorState: null,
+        state: "declined",
+        basis: "user_decision",
+        revision: 1,
+        source: "enrichment",
+        decidedAt: "2026-07-30T12:05:00Z",
+        createdAt: "2026-07-30T12:05:01Z",
       },
     ],
     counts: { signals: 3, sessions: 1, features: 1 },

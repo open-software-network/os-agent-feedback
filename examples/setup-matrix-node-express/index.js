@@ -1,6 +1,6 @@
 import express from "express";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { agentFeedback } from "@agent-feedback/node/express";
+import { agentFeedback } from "@epode/node/express";
 
 const app = express();
 function authenticate(request, response, next) {

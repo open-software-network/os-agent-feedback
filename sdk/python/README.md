@@ -1,6 +1,67 @@
-# `agent-feedback` for Python
+# Epode for Python
 
-Protocol-first middleware with no runtime dependencies.
+Version 0.4.0 includes the existing agent-feedback middleware and a typed,
+dependency-free company-side customer-enrichment client.
+
+## Customer enrichment and personalization
+
+```python
+from agent_feedback import (
+    CustomerContextInput,
+    EnrichmentRequestInput,
+    EpodeClient,
+    PersonalizationDecisionInput,
+    PersonalizationOutcomeInput,
+)
+
+epode = EpodeClient()  # reads EPODE_API_KEY on the server
+
+request = epode.request_enrichment(EnrichmentRequestInput(
+    interaction_id=interaction_id,
+    operation="recommendations",
+    surface="http_json",
+    status_code=200,
+    duration_ms=handler_duration_ms,
+    session_ref=product_journey.id,
+    runtime_hint=verified_runtime_label,
+    user_ref=authenticated_user.id,
+    purpose="product_personalization",
+    remember=True,
+))
+
+context = epode.get_customer_context(CustomerContextInput(
+    user_ref=authenticated_user.id,
+    purpose="product_personalization",
+))
+result = personalize(normal_result, context.items) if context.available else normal_result
+
+decision = epode.record_personalization_decision(PersonalizationDecisionInput(
+    external_decision_id=decision_id,
+    context_retrieval_id=context.retrieval_id,
+    signal_ids=tuple(item.signal_id for item in context.items),
+))
+if decision.recorded:
+    epode.track_personalization_outcome(PersonalizationOutcomeInput(
+        external_outcome_id=order_id,
+        decision_id=decision.decision.id,
+        outcome="conversion",
+    ))
+```
+
+Use `anonymous_ref` for a product-owned pre-login visitor ID, or
+`interaction_id` alone for interaction-only context. The client uses a 250 ms
+company-side budget, rejects redirects, and fails open: Epode downtime never
+changes the normal product result. Mount `EpodeClient.relay` at
+`/_epode/v1/enrichment/consent` and `/_epode/v1/enrichment/answers`; it validates
+the agent answer before forwarding the short-lived handle, and never exposes the
+company key.
+
+`surface` is `http_json` by default and may be `html` or `mcp`. The optional status, duration,
+session, and runtime fields describe this same product call. A `session_ref` must be issued by
+your product, and `runtime_hint` must be a bounded, non-sensitive server-observed label. Never
+copy prompts, tool arguments, user content, or regulated traits into either field.
+
+## Existing feedback middleware
 
 ## FastAPI, Starlette, Quart, or Django ASGI
 

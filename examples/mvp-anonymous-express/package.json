@@ -1,0 +1,11 @@
+{
+  "name": "epode-mvp-anonymous-express",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "@epode/node": "file:../../sdk/node",
+    "express": "^5.2.1"
+  },
+  "engines": { "node": ">=20" }
+}

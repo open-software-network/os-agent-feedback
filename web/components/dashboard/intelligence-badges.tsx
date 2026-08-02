@@ -3,18 +3,18 @@ import { titleCase } from "@/lib/dashboard/format";
 import { cn } from "@/lib/utils";
 
 const identityCopy: Record<string, string> = {
-  verified: "Verified",
-  pseudonymous: "Pseudonymous",
-  ephemeral: "Ephemeral",
-  unclassified: "Unresolved",
+  verified: "Known",
+  pseudonymous: "Anonymous",
+  ephemeral: "Interaction-only",
+  unclassified: "Unresolved interaction",
 };
 
 const provenanceCopy: Record<string, string> = {
-  agent_reports_user_statement: "Agent reports user statement",
-  agent_reports_current_task: "Agent reports current task",
-  agent_inference: "Agent inference",
-  product_activity: "Product activity",
-  company_assertion: "Company assertion",
+  agent_reports_user_statement: "Customer said",
+  agent_reports_current_task: "Shared for this task",
+  agent_inference: "Agent inferred",
+  product_activity: "Product observed",
+  company_assertion: "Company provided",
 };
 
 const healthCopy: Record<string, string> = {
