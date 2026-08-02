@@ -28,8 +28,8 @@ const DefaultEndpoint = "https://app.epode.ai"
 const (
 	defaultMaxResponseBodyBytes = 1 << 20
 	maxConcurrentConsentLookups = 8
-	telemetryAttemptTimeout     = 10 * time.Second
-	telemetryMaxAttempts        = 5
+	telemetryAttemptTimeout     = 30 * time.Second
+	telemetryMaxAttempts        = 6
 	telemetryRetryDelay         = 500 * time.Millisecond
 )
 
@@ -84,6 +84,9 @@ type Options struct {
 	// passed through unchanged and are not instrumented.
 	MaxResponseBodyBytes int
 	HTTPClient           *http.Client
+	TelemetryTimeout     time.Duration
+	MaxTelemetryAttempts int
+	ShutdownTimeout      time.Duration
 	ConsentTimeout       time.Duration
 	ConsentCacheTTL      time.Duration
 	Sender               func(context.Context, string, http.Header, []byte) error
@@ -235,6 +238,8 @@ type Runtime struct {
 	consentLookups   map[string]struct{}
 	consentSlots     chan struct{}
 	warnCustomerRef  sync.Once
+	warnTelemetry    sync.Once
+	shutdownDeadline atomic.Int64
 }
 
 type cachedConsent struct {
@@ -278,8 +283,17 @@ func New(options Options) (*Runtime, error) {
 	if options.MaxResponseBodyBytes <= 0 {
 		options.MaxResponseBodyBytes = defaultMaxResponseBodyBytes
 	}
+	if options.TelemetryTimeout <= 0 {
+		options.TelemetryTimeout = telemetryAttemptTimeout
+	}
+	if options.MaxTelemetryAttempts <= 0 {
+		options.MaxTelemetryAttempts = telemetryMaxAttempts
+	}
+	if options.ShutdownTimeout <= 0 {
+		options.ShutdownTimeout = 10 * time.Second
+	}
 	if options.HTTPClient == nil {
-		options.HTTPClient = &http.Client{Timeout: telemetryAttemptTimeout}
+		options.HTTPClient = &http.Client{Timeout: options.TelemetryTimeout}
 	}
 	if options.ConsentTimeout <= 0 {
 		if milliseconds, err := strconv.Atoi(os.Getenv("AGENT_FEEDBACK_CONSENT_TIMEOUT_MS")); err == nil && milliseconds > 0 {
@@ -480,7 +494,7 @@ func (r *Runtime) lookupConsentSubject(subject string) string {
 	}
 	request.Header.Set("Authorization", "Bearer "+r.options.APIKey)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", "agent-feedback-go/0.3.0")
+	request.Header.Set("User-Agent", "agent-feedback-go/0.3.1")
 	response, err := r.options.HTTPClient.Do(request)
 	if err != nil {
 		return "unavailable"
@@ -708,31 +722,52 @@ drain:
 	headers := http.Header{
 		"Authorization": []string{"Bearer " + r.options.APIKey},
 		"Content-Type":  []string{"application/json"},
-		"User-Agent":    []string{"agent-feedback-go/0.3.0"},
+		"User-Agent":    []string{"agent-feedback-go/0.3.1"},
 	}
 	url := r.options.Endpoint + "/api/v2/telemetry/batches"
 	var deliveryError error
-	for attempt := 0; attempt < telemetryMaxAttempts; attempt++ {
-		deliveryError = r.sendTelemetryAttempt(url, headers, body)
+	for attempt := 0; attempt < r.options.MaxTelemetryAttempts; attempt++ {
+		deliveryError = r.sendTelemetryAttempt(url, headers, body, len(events))
 		if deliveryError == nil {
 			return
 		}
 		if !isTransientTelemetryError(deliveryError) {
 			break
 		}
-		if attempt+1 < telemetryMaxAttempts {
-			time.Sleep(telemetryRetryDelay * time.Duration(1<<attempt))
+		if attempt+1 < r.options.MaxTelemetryAttempts {
+			delay := telemetryRetryDelay * time.Duration(1<<attempt)
+			if deadline := r.shutdownDeadline.Load(); deadline > 0 {
+				remaining := time.Until(time.Unix(0, deadline))
+				if remaining <= 0 || delay >= remaining {
+					deliveryError = context.DeadlineExceeded
+					break
+				}
+			}
+			time.Sleep(delay)
 		}
 	}
 	r.telemetryErrorMu.Lock()
 	r.telemetryError = deliveryError
 	r.telemetryErrorMu.Unlock()
+	r.warnTelemetry.Do(func() {
+		logger := r.options.Logger
+		if logger == nil {
+			logger = log.Default()
+		}
+		logger.Printf("[agent-feedback] Telemetry delivery failed after bounded retries; product responses were not affected.")
+	})
 }
 
 type telemetryHTTPError struct{ status int }
 
+type telemetryReceiptError struct{ reason string }
+
 func (err telemetryHTTPError) Error() string {
 	return fmt.Sprintf("telemetry endpoint returned HTTP %d", err.status)
+}
+
+func (err telemetryReceiptError) Error() string {
+	return "telemetry receipt was invalid: " + err.reason
 }
 
 func isTransientTelemetryError(err error) bool {
@@ -741,11 +776,25 @@ func isTransientTelemetryError(err error) bool {
 		return statusError.status == http.StatusRequestTimeout ||
 			statusError.status == http.StatusTooManyRequests || statusError.status >= 500
 	}
+	var receiptError telemetryReceiptError
+	if errors.As(err, &receiptError) {
+		return false
+	}
 	return true
 }
 
-func (r *Runtime) sendTelemetryAttempt(url string, headers http.Header, body []byte) error {
-	ctx, cancel := context.WithTimeout(context.Background(), telemetryAttemptTimeout)
+func (r *Runtime) sendTelemetryAttempt(url string, headers http.Header, body []byte, expected int) error {
+	timeout := r.options.TelemetryTimeout
+	if deadline := r.shutdownDeadline.Load(); deadline > 0 {
+		remaining := time.Until(time.Unix(0, deadline))
+		if remaining <= 0 {
+			return context.DeadlineExceeded
+		}
+		if remaining < timeout {
+			timeout = remaining
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if r.options.Sender != nil {
 		return r.options.Sender(ctx, url, headers.Clone(), body)
@@ -759,23 +808,44 @@ func (r *Runtime) sendTelemetryAttempt(url string, headers http.Header, body []b
 	if err != nil {
 		return err
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
+	receiptBody, readError := io.ReadAll(io.LimitReader(response.Body, 4<<10))
 	_ = response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
+	if response.StatusCode != http.StatusAccepted {
 		return telemetryHTTPError{status: response.StatusCode}
+	}
+	if readError != nil {
+		return readError
+	}
+	var receipt struct {
+		Accepted int `json:"accepted"`
+		Dropped  int `json:"dropped"`
+	}
+	if len(bytes.TrimSpace(receiptBody)) == 0 {
+		return telemetryReceiptError{reason: "empty body"}
+	}
+	if err := json.Unmarshal(receiptBody, &receipt); err != nil {
+		return telemetryReceiptError{reason: "malformed JSON"}
+	}
+	if receipt.Accepted != expected || receipt.Dropped != 0 {
+		return telemetryReceiptError{reason: "batch was not fully accepted"}
 	}
 	return nil
 }
 
 func (r *Runtime) Shutdown(ctx context.Context) error {
+	shutdownCtx, cancel := context.WithTimeout(ctx, r.options.ShutdownTimeout)
+	defer cancel()
+	if deadline, ok := shutdownCtx.Deadline(); ok {
+		r.shutdownDeadline.CompareAndSwap(0, deadline.UnixNano())
+	}
 	r.once.Do(func() { close(r.stop) })
 	select {
 	case <-r.done:
 		r.telemetryErrorMu.Lock()
 		defer r.telemetryErrorMu.Unlock()
 		return r.telemetryError
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-shutdownCtx.Done():
+		return shutdownCtx.Err()
 	}
 }
 

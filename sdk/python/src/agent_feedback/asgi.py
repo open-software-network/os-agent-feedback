@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any, Awaitable, Callable
@@ -103,6 +104,18 @@ class AgentFeedbackASGI:
         self.runtime = AgentFeedback(AgentFeedbackOptions(**options))
 
     async def __call__(self, scope: dict[str, Any], receive: Callable[..., Any], send: Callable[..., Any]) -> None:
+        if scope.get("type") == "lifespan":
+            drained = False
+
+            async def send_with_shutdown_drain(message: dict[str, Any]) -> None:
+                nonlocal drained
+                if message.get("type") == "lifespan.shutdown.complete" and not drained:
+                    drained = True
+                    await asyncio.to_thread(self.shutdown)
+                await send(message)
+
+            await self.app(scope, receive, send_with_shutdown_drain)
+            return
         if scope.get("type") != "http" or not self.runtime.matches(scope.get("path", "/")):
             await self.app(scope, receive, send)
             return

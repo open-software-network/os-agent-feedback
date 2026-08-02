@@ -19,12 +19,12 @@ use the machine-readable envelope in whichever one of those two locations is pre
 
 ```bash
 mkdir -p .epode/artifacts &&
-curl -fsSL https://app.epode.ai/static/agent-feedback-node-0.3.0.tgz \
-  -o .epode/artifacts/agent-feedback-node-0.3.0.tgz &&
+curl -fsSL https://app.epode.ai/static/agent-feedback-node-0.3.1.tgz \
+  -o .epode/artifacts/agent-feedback-node-0.3.1.tgz &&
 printf '%s  %s\n' \
-  '0c2ed9e474de55e72b964732ec24b741f3424078c71f4e19f4678cfe88e65a07' \
-  '.epode/artifacts/agent-feedback-node-0.3.0.tgz' | shasum -a 256 -c - &&
-npm install ./.epode/artifacts/agent-feedback-node-0.3.0.tgz &&
+  'f5f88617367855adcf10eb11c2e26b197f8a46a99140c1ca170c4d5e9047acb9' \
+  '.epode/artifacts/agent-feedback-node-0.3.1.tgz' | shasum -a 256 -c - &&
+npm install ./.epode/artifacts/agent-feedback-node-0.3.1.tgz &&
 npm install @modelcontextprotocol/server @modelcontextprotocol/node @modelcontextprotocol/express zod
 ```
 

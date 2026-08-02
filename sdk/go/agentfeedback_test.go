@@ -38,7 +38,14 @@ type blockingConsentTransport struct {
 
 func (transport *blockingConsentTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	if !strings.HasSuffix(request.URL.Path, "/api/v2/consent/state") {
-		return &http.Response{StatusCode: http.StatusAccepted, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+		var payload struct {
+			Events []json.RawMessage `json:"events"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			return nil, err
+		}
+		receipt := fmt.Sprintf(`{"accepted":%d,"dropped":0}`, len(payload.Events))
+		return &http.Response{StatusCode: http.StatusAccepted, Body: io.NopCloser(strings.NewReader(receipt)), Header: make(http.Header)}, nil
 	}
 	transport.calls.Add(1)
 	active := transport.active.Add(1)
@@ -1267,7 +1274,9 @@ func TestTelemetryRetriesTransientHTTPStatus(t *testing.T) {
 			response.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
+		response.Header().Set("Content-Type", "application/json")
 		response.WriteHeader(http.StatusAccepted)
+		_, _ = response.Write([]byte(`{"accepted":1,"dropped":0}`))
 	}))
 	defer server.Close()
 	runtime, err := New(Options{
@@ -1282,6 +1291,66 @@ func TestTelemetryRetriesTransientHTTPStatus(t *testing.T) {
 	}
 	if attempts.Load() != 3 {
 		t.Fatalf("telemetry attempts = %d, want 3", attempts.Load())
+	}
+}
+
+func TestTelemetryDeliveryDefaults(t *testing.T) {
+	runtime, err := New(Options{APIKey: conformanceKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.options.TelemetryTimeout != 30*time.Second || runtime.options.MaxTelemetryAttempts != 6 || runtime.options.ShutdownTimeout != 10*time.Second {
+		t.Fatalf("unexpected telemetry defaults: timeout=%s attempts=%d shutdown=%s", runtime.options.TelemetryTimeout, runtime.options.MaxTelemetryAttempts, runtime.options.ShutdownTimeout)
+	}
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTelemetryRejectsPartialReceiptWithoutRetry(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		response.Header().Set("Content-Type", "application/json")
+		response.WriteHeader(http.StatusAccepted)
+		_, _ = response.Write([]byte(`{"accepted":0,"dropped":1}`))
+	}))
+	defer server.Close()
+	runtime, err := New(Options{
+		APIKey: conformanceKey, Endpoint: server.URL, FlushInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.record(TelemetryEvent{InteractionID: "partial-receipt", Surface: "http_json"})
+	if err := runtime.Shutdown(context.Background()); err == nil || !strings.Contains(err.Error(), "not fully accepted") {
+		t.Fatalf("partial telemetry receipt was not reported: %v", err)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("partial receipt attempts = %d, want 1", attempts.Load())
+	}
+}
+
+func TestTelemetryShutdownBoundsAnInflightAttempt(t *testing.T) {
+	runtime, err := New(Options{
+		APIKey: conformanceKey, FlushInterval: time.Hour,
+		ShutdownTimeout: 100 * time.Millisecond,
+		Sender: func(ctx context.Context, _ string, _ http.Header, _ []byte) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.record(TelemetryEvent{InteractionID: "blocked-attempt", Surface: "http_json"})
+	started := time.Now()
+	err = runtime.Shutdown(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("shutdown exceeded its configured bound: %s", elapsed)
 	}
 }
 
@@ -1328,7 +1397,7 @@ func TestTelemetrySenderReceivesBoundedContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	deadline := <-deadlineSeen
-	if deadline <= 0 || deadline > telemetryAttemptTimeout {
+	if deadline <= 0 || deadline > runtime.options.ShutdownTimeout {
 		t.Fatalf("unexpected telemetry deadline: %s", deadline)
 	}
 }

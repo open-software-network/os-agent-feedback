@@ -39,9 +39,10 @@ app.wsgi_app = AgentFeedbackWSGI(
 ASGI JSON and HTML responses are decorated directly. The conservative WSGI adapter uses the response header contract only for finite responses so it never buffers or mutates the application body.
 
 Telemetry is queued off the response path, carries a monotonic process-local sequence, and retries transient
-delivery failures with bounded exponential backoff. Configure `telemetry_timeout` and
-`max_telemetry_attempts` only when a private Epode deployment requires different bounds. Call `shutdown()`
-during graceful server shutdown so the last queued batch gets a final delivery attempt.
+delivery failures with bounded exponential backoff. The default request timeout is 30 seconds and graceful
+shutdown drain is bounded to 10 seconds. Configure `telemetry_timeout`, `max_telemetry_attempts`, or
+`shutdown_timeout` only when a private Epode deployment requires different bounds. ASGI middleware drains
+automatically through the server lifespan protocol; call `shutdown()` during graceful WSGI server shutdown.
 
 HTTP feedback is best-effort for generic agents. `feedback_from_response`, `inspect_product_feedback`, `submit_feedback_consent`, and `submit_product_feedback` provide the deterministic, allow-listed agent-runtime path. Inspection is authoritative and redirect-free; decision and report helpers inspect first so stale Ask-once envelopes cannot cause duplicate prompts or overwrite a remembered decision.
 

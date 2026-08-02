@@ -15,7 +15,7 @@ There are two reliability levels:
 Until the npm registry release is connected, install the signed build directly from the production service:
 
 ```sh
-npm install https://app.epode.ai/static/agent-feedback-node-0.3.0.tgz
+npm install https://app.epode.ai/static/agent-feedback-node-0.3.1.tgz
 ```
 
 ```ts

@@ -6,14 +6,14 @@ description: "Use standard-library middleware with net/http or a compatible rout
 ## Install
 
 ```bash
-epode_artifact="$(mktemp -d)/agent-feedback-go-0.3.0.tar.gz" &&
-curl -fsSL https://app.epode.ai/static/agent-feedback-go-0.3.0.tar.gz -o "$epode_artifact" &&
-printf '%s  %s\n' '65ca44b7a44f22eb5f0b9a28c9a2b6076f8e2aada0126fc9d9eabb08dfba811a' "$epode_artifact" \
+epode_artifact="$(mktemp -d)/agent-feedback-go-0.3.1.tar.gz" &&
+curl -fsSL https://app.epode.ai/static/agent-feedback-go-0.3.1.tar.gz -o "$epode_artifact" &&
+printf '%s  %s\n' 'aa39c1fd9b64cf602942520711a6feac1d5c75cfef4dad35d590e2b76d83538e' "$epode_artifact" \
   | shasum -a 256 -c - &&
-mkdir -p .epode/agent-feedback-go-0.3.0 &&
-tar -xzf "$epode_artifact" -C .epode/agent-feedback-go-0.3.0 &&
-go mod edit -replace=github.com/open-software-network/os-epode/sdk/go=./.epode/agent-feedback-go-0.3.0 &&
-go mod edit -require=github.com/open-software-network/os-epode/sdk/go@v0.3.0
+mkdir -p .epode/agent-feedback-go-0.3.1 &&
+tar -xzf "$epode_artifact" -C .epode/agent-feedback-go-0.3.1 &&
+go mod edit -replace=github.com/open-software-network/os-epode/sdk/go=./.epode/agent-feedback-go-0.3.1 &&
+go mod edit -require=github.com/open-software-network/os-epode/sdk/go@v0.3.1
 ```
 
 This immutable hosted archive is the bootstrap path until the public Go module tag is available. The local

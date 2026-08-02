@@ -64,7 +64,6 @@ SHARED_CACHE_HEADER_NAMES = frozenset(
     }
 )
 MAX_CONCURRENT_CONSENT_WARMS = 8
-TELEMETRY_SHUTDOWN_TIMEOUT = 1.0
 
 logger = logging.getLogger("agent_feedback")
 
@@ -136,10 +135,11 @@ class AgentFeedbackOptions:
     operation: Callable[[Any], str | None] | None = None
     flush_interval: float = 0.5
     max_queue_size: int = 1_000
-    telemetry_timeout: float = 10.0
+    telemetry_timeout: float = 30.0
     consent_timeout: float = float(os.getenv("AGENT_FEEDBACK_CONSENT_TIMEOUT_MS", "750")) / 1_000
     consent_cache_ttl: float = 300.0
-    max_telemetry_attempts: int = 5
+    max_telemetry_attempts: int = 6
+    shutdown_timeout: float = 10.0
     sender: Callable[[str, dict[str, str], bytes], None] | None = None
 
 
@@ -153,6 +153,7 @@ class _TelemetryQueue:
         self._flush_lock = threading.Lock()
         self._in_flight = 0
         self._delivery_failed = False
+        self._warned_delivery_failure = False
         self._shutdown_deadline: float | None = None
         self._worker_done = False
 
@@ -215,21 +216,33 @@ class _TelemetryQueue:
                 headers = {
                     "authorization": f"Bearer {self.options.api_key}",
                     "content-type": "application/json",
-                    "user-agent": "agent-feedback-python/0.3.0",
+                    "user-agent": "agent-feedback-python/0.3.1",
                 }
                 body = json.dumps({"events": batch}, separators=(",", ":")).encode()
                 for attempt in range(self.options.max_telemetry_attempts):
                     try:
+                        with self._condition:
+                            deadline = self._shutdown_deadline
+                        timeout = self.options.telemetry_timeout
+                        if deadline is not None:
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                return False
+                            timeout = max(0.001, min(timeout, remaining))
                         if self.options.sender:
                             self.options.sender(url, headers, body)
                         else:
                             request = urllib.request.Request(
                                 url, data=body, headers=headers, method="POST"
                             )
-                            with urllib.request.urlopen(
-                                request, timeout=self.options.telemetry_timeout
+                            with urllib.request.urlopen(request, timeout=timeout) as response:
+                                receipt = json.loads(response.read())
+                            if (
+                                not isinstance(receipt, dict)
+                                or receipt.get("accepted") != len(batch)
+                                or receipt.get("dropped") != 0
                             ):
-                                pass
+                                raise RuntimeError("telemetry batch was not fully accepted")
                         delivered = True
                         return True
                     except urllib.error.HTTPError as error:
@@ -254,13 +267,19 @@ class _TelemetryQueue:
                     self._in_flight -= 1
                     if not delivered:
                         self._delivery_failed = True
+                        if not self._warned_delivery_failure:
+                            logger.warning(
+                                "[agent-feedback] Telemetry delivery failed after bounded "
+                                "retries; product responses were not affected."
+                            )
+                            self._warned_delivery_failure = True
                     self._condition.notify_all()
 
     def shutdown(self) -> bool:
         """Flush remaining telemetry. Returns False if any batch was lost."""
         with self._condition:
             if self._shutdown_deadline is None:
-                self._shutdown_deadline = time.monotonic() + TELEMETRY_SHUTDOWN_TIMEOUT
+                self._shutdown_deadline = time.monotonic() + self.options.shutdown_timeout
             self.stop.set()
             self._condition.notify_all()
             while True:
@@ -518,7 +537,7 @@ class AgentFeedback:
             request = urllib.request.Request(
                 f"{self.options.endpoint}/api/v2/consent/state",
                 data=json.dumps({"subject": subject}).encode(),
-                headers={"authorization": f"Bearer {self.options.api_key}", "content-type": "application/json", "user-agent": "agent-feedback-python/0.3.0"},
+                headers={"authorization": f"Bearer {self.options.api_key}", "content-type": "application/json", "user-agent": "agent-feedback-python/0.3.1"},
                 method="POST",
             )
             with urllib.request.urlopen(request, timeout=self.options.consent_timeout) as response:

@@ -7,7 +7,7 @@
     "start": "node src/index.js"
   },
   "dependencies": {
-    "@agent-feedback/node": "file:../../backend/public/agent-feedback-node-0.3.0.tgz",
+    "@agent-feedback/node": "file:../../backend/public/agent-feedback-node-0.3.1.tgz",
     "@modelcontextprotocol/express": "^2.0.0",
     "@modelcontextprotocol/node": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",

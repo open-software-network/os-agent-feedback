@@ -24,14 +24,17 @@ use http_body::Body as HttpBody;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
+use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 use tower::{Layer, Service};
 use uuid::Uuid;
 
 pub const DEFAULT_ENDPOINT: &str = "https://app.epode.ai";
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const MAX_CONCURRENT_CONSENT_LOOKUPS: usize = 8;
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const TELEMETRY_TIMEOUT: Duration = Duration::from_secs(30);
+const TELEMETRY_MAX_ATTEMPTS: usize = 6;
+const TELEMETRY_RETRY_DELAY: Duration = Duration::from_millis(500);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 type Extractor = Arc<dyn Fn(&Request<Body>) -> Option<String> + Send + Sync>;
 type CachedConsentEntry = (String, u64, Instant);
@@ -74,6 +77,9 @@ pub struct Options {
     pub operation: Option<Extractor>,
     pub flush_interval: Duration,
     pub max_queue_size: usize,
+    pub telemetry_timeout: Duration,
+    pub max_telemetry_attempts: usize,
+    pub shutdown_timeout: Duration,
     pub consent_timeout: Duration,
     pub consent_cache_ttl: Duration,
 }
@@ -114,6 +120,9 @@ impl Options {
             operation: None,
             flush_interval: Duration::from_millis(500),
             max_queue_size: 1_000,
+            telemetry_timeout: TELEMETRY_TIMEOUT,
+            max_telemetry_attempts: TELEMETRY_MAX_ATTEMPTS,
+            shutdown_timeout: SHUTDOWN_TIMEOUT,
             consent_timeout,
             consent_cache_ttl: Duration::from_secs(300),
         }
@@ -126,6 +135,21 @@ impl Options {
 
     pub fn include(mut self, patterns: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.include = patterns.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn telemetry_timeout(mut self, timeout: Duration) -> Self {
+        self.telemetry_timeout = timeout;
+        self
+    }
+
+    pub fn max_telemetry_attempts(mut self, attempts: usize) -> Self {
+        self.max_telemetry_attempts = attempts;
+        self
+    }
+
+    pub fn shutdown_timeout(mut self, timeout: Duration) -> Self {
+        self.shutdown_timeout = timeout;
         self
     }
 
@@ -348,7 +372,11 @@ struct TelemetryEvent {
 struct Runtime {
     options: Arc<Options>,
     sender: mpsc::Sender<Box<TelemetryEvent>>,
-    shutdown_sender: mpsc::Sender<oneshot::Sender<Result<(), ShutdownError>>>,
+    shutdown_sender: mpsc::Sender<(
+        tokio::time::Instant,
+        oneshot::Sender<Result<(), ShutdownError>>,
+    )>,
+    shutdown_signal: watch::Sender<Option<tokio::time::Instant>>,
     stopping: Arc<AtomicBool>,
     warned_missing_customer_ref: Arc<AtomicBool>,
     sequence: Arc<AtomicU64>,
@@ -369,9 +397,19 @@ impl Runtime {
         if options.flush_interval.is_zero() {
             options.flush_interval = Duration::from_millis(500);
         }
+        if options.telemetry_timeout.is_zero() {
+            options.telemetry_timeout = TELEMETRY_TIMEOUT;
+        }
+        if options.max_telemetry_attempts == 0 {
+            options.max_telemetry_attempts = TELEMETRY_MAX_ATTEMPTS;
+        }
+        if options.shutdown_timeout.is_zero() {
+            options.shutdown_timeout = SHUTDOWN_TIMEOUT;
+        }
         let capacity = options.max_queue_size.max(1);
         let (sender, receiver) = mpsc::channel(capacity);
         let (shutdown_sender, shutdown_receiver) = mpsc::channel(1);
+        let (shutdown_signal, shutdown_watch) = watch::channel(None);
         let options = Arc::new(options);
         let handle =
             tokio::runtime::Handle::try_current().map_err(|_| Error::MissingTokioRuntime)?;
@@ -379,11 +417,13 @@ impl Runtime {
             options.clone(),
             receiver,
             shutdown_receiver,
+            shutdown_watch,
         ));
         Ok(Self {
             options,
             sender,
             shutdown_sender,
+            shutdown_signal,
             stopping: Arc::new(AtomicBool::new(false)),
             warned_missing_customer_ref: Arc::new(AtomicBool::new(false)),
             sequence: Arc::new(AtomicU64::new(0)),
@@ -555,7 +595,7 @@ impl Runtime {
         let response = client
             .post(format!("{}/api/v2/consent/state", self.options.endpoint))
             .bearer_auth(&self.options.api_key)
-            .header("user-agent", "agent-feedback-rust/0.3.0")
+            .header("user-agent", "agent-feedback-rust/0.3.1")
             .json(&json!({ "subject": subject }))
             .send()
             .await;
@@ -814,14 +854,16 @@ impl Runtime {
         if self.stopping.swap(true, Ordering::AcqRel) {
             return Err(ShutdownError::AlreadyStarted);
         }
+        let deadline = tokio::time::Instant::now() + self.options.shutdown_timeout;
+        self.shutdown_signal.send_replace(Some(deadline));
         let (sender, receiver) = oneshot::channel();
         self.shutdown_sender
-            .try_send(sender)
+            .try_send((deadline, sender))
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => ShutdownError::AlreadyStarted,
                 mpsc::error::TrySendError::Closed(_) => ShutdownError::WorkerStopped,
             })?;
-        tokio::time::timeout(SHUTDOWN_TIMEOUT, receiver)
+        tokio::time::timeout_at(deadline, receiver)
             .await
             .map_err(|_| ShutdownError::TimedOut)?
             .map_err(|_| ShutdownError::WorkerStopped)?
@@ -831,37 +873,63 @@ impl Runtime {
 async fn telemetry_worker(
     options: Arc<Options>,
     mut receiver: mpsc::Receiver<Box<TelemetryEvent>>,
-    mut shutdown_receiver: mpsc::Receiver<oneshot::Sender<Result<(), ShutdownError>>>,
+    mut shutdown_receiver: mpsc::Receiver<(
+        tokio::time::Instant,
+        oneshot::Sender<Result<(), ShutdownError>>,
+    )>,
+    mut shutdown_watch: watch::Receiver<Option<tokio::time::Instant>>,
 ) {
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(options.telemetry_timeout)
         .build()
         .unwrap_or_default();
     let mut pending = VecDeque::new();
     let mut interval = tokio::time::interval(options.flush_interval);
+    let mut warned_delivery_failure = false;
     loop {
         tokio::select! {
+            biased;
             message = receiver.recv() => match message {
                 Some(event) => {
                     if pending.len() >= options.max_queue_size { pending.pop_front(); }
                     pending.push_back(*event);
-                    if pending.len() >= 50 { let _ = flush_events(&client, &options, &mut pending).await; }
+                    if pending.len() >= 50 {
+                        let delivered = flush_events(&client, &options, &mut pending, &mut shutdown_watch).await;
+                        report_telemetry_delivery(delivered, &mut warned_delivery_failure);
+                    }
                 }
                 None => return,
             },
             done = shutdown_receiver.recv() => {
-                let Some(done) = done else { return; };
+                let Some((deadline, done)) = done else { return; };
                 receiver.close();
                 while let Some(event) = receiver.recv().await {
                     if pending.len() >= options.max_queue_size { pending.pop_front(); }
                     pending.push_back(*event);
                 }
-                let result = flush_all_events(&client, &options, &mut pending).await;
+                let result = flush_all_events(&client, &options, &mut pending, deadline).await;
+                if result.is_err() {
+                    report_telemetry_delivery(false, &mut warned_delivery_failure);
+                }
                 let _ = done.send(result);
                 return;
             },
-            _ = interval.tick() => { let _ = flush_events(&client, &options, &mut pending).await; },
+            _ = interval.tick() => {
+                let delivered = flush_events(&client, &options, &mut pending, &mut shutdown_watch).await;
+                report_telemetry_delivery(delivered, &mut warned_delivery_failure);
+            },
         }
+    }
+}
+
+fn report_telemetry_delivery(delivered: bool, warned: &mut bool) {
+    if delivered {
+        *warned = false;
+    } else if !*warned {
+        eprintln!(
+            "[agent-feedback] Telemetry delivery failed after bounded retries; product responses were not affected."
+        );
+        *warned = true;
     }
 }
 
@@ -869,9 +937,10 @@ async fn flush_all_events(
     client: &reqwest::Client,
     options: &Options,
     pending: &mut VecDeque<TelemetryEvent>,
+    deadline: tokio::time::Instant,
 ) -> Result<(), ShutdownError> {
     while !pending.is_empty() {
-        if !flush_events(client, options, pending).await {
+        if !flush_events_before_deadline(client, options, pending, deadline).await {
             return Err(ShutdownError::DeliveryFailed);
         }
     }
@@ -882,6 +951,7 @@ async fn flush_events(
     client: &reqwest::Client,
     options: &Options,
     pending: &mut VecDeque<TelemetryEvent>,
+    shutdown_watch: &mut watch::Receiver<Option<tokio::time::Instant>>,
 ) -> bool {
     if pending.is_empty() {
         return true;
@@ -889,21 +959,154 @@ async fn flush_events(
     let events: Vec<_> = (0..pending.len().min(50))
         .filter_map(|_| pending.pop_front())
         .collect();
-    let delivered = client
-        .post(format!("{}/api/v2/telemetry/batches", options.endpoint))
-        .bearer_auth(&options.api_key)
-        .header("user-agent", "agent-feedback-rust/0.3.0")
-        .json(&json!({ "events": &events }))
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .is_ok();
+    let delivered = deliver_batch(client, options, &events, shutdown_watch).await;
     if !delivered {
         for event in events.into_iter().rev() {
             pending.push_front(event);
         }
     }
     delivered
+}
+
+async fn flush_events_before_deadline(
+    client: &reqwest::Client,
+    options: &Options,
+    pending: &mut VecDeque<TelemetryEvent>,
+    deadline: tokio::time::Instant,
+) -> bool {
+    if pending.is_empty() {
+        return true;
+    }
+    let events: Vec<_> = (0..pending.len().min(50))
+        .filter_map(|_| pending.pop_front())
+        .collect();
+    let delivered = deliver_batch_before_deadline(client, options, &events, deadline).await;
+    if !delivered {
+        for event in events.into_iter().rev() {
+            pending.push_front(event);
+        }
+    }
+    delivered
+}
+
+#[derive(Debug, Deserialize)]
+struct TelemetryReceipt {
+    accepted: usize,
+    dropped: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TelemetryAttempt {
+    Delivered,
+    Retryable,
+    Terminal,
+}
+
+async fn send_telemetry_batch(
+    client: &reqwest::Client,
+    options: &Options,
+    events: &[TelemetryEvent],
+) -> TelemetryAttempt {
+    let response = match client
+        .post(format!("{}/api/v2/telemetry/batches", options.endpoint))
+        .bearer_auth(&options.api_key)
+        .header("user-agent", "agent-feedback-rust/0.3.1")
+        .json(&json!({ "events": events }))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return TelemetryAttempt::Retryable,
+    };
+    let status = response.status();
+    if status != reqwest::StatusCode::ACCEPTED {
+        return if status == reqwest::StatusCode::REQUEST_TIMEOUT
+            || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || status.is_server_error()
+        {
+            TelemetryAttempt::Retryable
+        } else {
+            TelemetryAttempt::Terminal
+        };
+    }
+    match response.json::<TelemetryReceipt>().await {
+        Ok(receipt) if receipt.accepted == events.len() && receipt.dropped == 0 => {
+            TelemetryAttempt::Delivered
+        }
+        Ok(_) | Err(_) => TelemetryAttempt::Terminal,
+    }
+}
+
+async fn deliver_batch(
+    client: &reqwest::Client,
+    options: &Options,
+    events: &[TelemetryEvent],
+    shutdown_watch: &mut watch::Receiver<Option<tokio::time::Instant>>,
+) -> bool {
+    for attempt in 0..options.max_telemetry_attempts {
+        let result = tokio::select! {
+            biased;
+            changed = shutdown_watch.changed() => {
+                if changed.is_ok() && shutdown_watch.borrow().is_some() {
+                    return false;
+                }
+                TelemetryAttempt::Retryable
+            }
+            result = send_telemetry_batch(client, options, events) => result,
+        };
+        match result {
+            TelemetryAttempt::Delivered => return true,
+            TelemetryAttempt::Terminal => return false,
+            TelemetryAttempt::Retryable if attempt + 1 < options.max_telemetry_attempts => {
+                let factor = 1_u32 << u32::try_from(attempt.min(4)).unwrap_or(4);
+                let delay = TELEMETRY_RETRY_DELAY * factor;
+                tokio::select! {
+                    biased;
+                    changed = shutdown_watch.changed() => {
+                        if changed.is_ok() && shutdown_watch.borrow().is_some() {
+                            return false;
+                        }
+                    }
+                    () = tokio::time::sleep(delay) => {}
+                }
+            }
+            TelemetryAttempt::Retryable => return false,
+        }
+    }
+    false
+}
+
+async fn deliver_batch_before_deadline(
+    client: &reqwest::Client,
+    options: &Options,
+    events: &[TelemetryEvent],
+    deadline: tokio::time::Instant,
+) -> bool {
+    for attempt in 0..options.max_telemetry_attempts {
+        let result =
+            match tokio::time::timeout_at(deadline, send_telemetry_batch(client, options, events))
+                .await
+            {
+                Ok(result) => result,
+                Err(_) => return false,
+            };
+        match result {
+            TelemetryAttempt::Delivered => return true,
+            TelemetryAttempt::Terminal => return false,
+            TelemetryAttempt::Retryable if attempt + 1 < options.max_telemetry_attempts => {
+                let factor = 1_u32 << u32::try_from(attempt.min(4)).unwrap_or(4);
+                let delay = TELEMETRY_RETRY_DELAY * factor;
+                if tokio::time::timeout_at(deadline, tokio::time::sleep(delay))
+                    .await
+                    .is_err()
+                {
+                    return false;
+                }
+            }
+            TelemetryAttempt::Retryable => return false,
+        }
+    }
+    false
 }
 
 #[derive(Clone)]
@@ -1923,7 +2126,7 @@ pub async fn submit_feedback_consent(
     Ok(client
         .post(destination)
         .header("authorization", &action.submit_decision.authorization)
-        .header("user-agent", "agent-feedback-rust-agent/0.3.0")
+        .header("user-agent", "agent-feedback-rust-agent/0.3.1")
         .json(&json!({ "decision": decision }))
         .send()
         .await?
@@ -2022,7 +2225,7 @@ pub async fn submit_product_feedback(
     Ok(client
         .post(submit)
         .header("authorization", &submit_contract.authorization)
-        .header("user-agent", "agent-feedback-rust-agent/0.3.0")
+        .header("user-agent", "agent-feedback-rust-agent/0.3.1")
         .json(&submission)
         .send()
         .await?
@@ -3035,9 +3238,13 @@ mod tests {
                             let mut request = [0_u8; 4096];
                             let size = stream.read(&mut request).unwrap_or_default();
                             if !request[..size].starts_with(b"POST /api/v2/consent/state ") {
-                                let _ = stream.write_all(
-                                    b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                                let body = r#"{"accepted":1,"dropped":0}"#;
+                                let response = format!(
+                                    "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                    body.len(),
+                                    body
                                 );
+                                let _ = stream.write_all(response.as_bytes());
                                 return;
                             }
                             worker_count.fetch_add(1, Ordering::SeqCst);
@@ -3585,6 +3792,124 @@ mod tests {
         }
     }
 
+    #[test]
+    fn telemetry_delivery_defaults_are_bounded() {
+        let options = Options::new(KEY);
+        assert_eq!(options.telemetry_timeout, Duration::from_secs(30));
+        assert_eq!(options.max_telemetry_attempts, 6);
+        assert_eq!(options.shutdown_timeout, Duration::from_secs(10));
+    }
+
+    fn scripted_telemetry_server(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (String, std_mpsc::Receiver<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = std_mpsc::channel();
+        thread::spawn(move || {
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                let (header_end, content_length) = loop {
+                    let count = stream.read(&mut buffer).unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&buffer[..count]);
+                    if let Some(index) = request.windows(4).position(|value| value == b"\r\n\r\n") {
+                        let header_end = index + 4;
+                        let headers = String::from_utf8_lossy(&request[..index]);
+                        let content_length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        break (header_end, content_length);
+                    }
+                };
+                while request.len() < header_end + content_length {
+                    let count = stream.read(&mut buffer).unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                let payload: Value =
+                    serde_json::from_slice(&request[header_end..header_end + content_length])
+                        .unwrap();
+                sender
+                    .send(payload["events"].as_array().unwrap().len())
+                    .unwrap();
+                let reason = if status == 202 {
+                    "Accepted"
+                } else {
+                    "Service Unavailable"
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        (format!("http://{address}"), receiver)
+    }
+
+    #[tokio::test]
+    async fn telemetry_retries_transient_failures_and_validates_receipts() {
+        let (endpoint, requests) = scripted_telemetry_server(vec![
+            (503, ""),
+            (503, ""),
+            (202, r#"{"accepted":1,"dropped":0}"#),
+        ]);
+        let mut options = Options::new(KEY).endpoint(endpoint);
+        options.flush_interval = Duration::from_secs(3600);
+        let runtime = Runtime::new(options).unwrap();
+        runtime.record(telemetry_event(1));
+        runtime.shutdown().await.unwrap();
+        assert_eq!(
+            (0..3)
+                .map(|_| requests.recv_timeout(Duration::from_secs(1)).unwrap())
+                .sum::<usize>(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn telemetry_rejects_a_partial_receipt() {
+        let (endpoint, requests) =
+            scripted_telemetry_server(vec![(202, r#"{"accepted":0,"dropped":1}"#)]);
+        let mut options = Options::new(KEY).endpoint(endpoint);
+        options.flush_interval = Duration::from_secs(3600);
+        let runtime = Runtime::new(options).unwrap();
+        runtime.record(telemetry_event(1));
+        assert_eq!(runtime.shutdown().await, Err(ShutdownError::DeliveryFailed));
+        assert_eq!(requests.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_an_inflight_telemetry_request_at_its_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_secs(2));
+        });
+        let mut options = Options::new(KEY).endpoint(endpoint);
+        options.flush_interval = Duration::from_secs(3600);
+        options.telemetry_timeout = Duration::from_secs(30);
+        options.max_telemetry_attempts = 1;
+        options.shutdown_timeout = Duration::from_millis(100);
+        let runtime = Runtime::new(options).unwrap();
+        runtime.record(telemetry_event(1));
+        let started = tokio::time::Instant::now();
+        assert!(matches!(
+            runtime.shutdown().await,
+            Err(ShutdownError::TimedOut | ShutdownError::DeliveryFailed)
+        ));
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
     fn telemetry_server(expected_requests: usize) -> (String, std_mpsc::Receiver<usize>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -3620,14 +3945,15 @@ mod tests {
                 let payload: Value =
                     serde_json::from_slice(&request[header_end..header_end + content_length])
                         .unwrap();
-                sender
-                    .send(payload["events"].as_array().unwrap().len())
-                    .unwrap();
-                stream
-                    .write_all(
-                        b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                    )
-                    .unwrap();
+                let accepted = payload["events"].as_array().unwrap().len();
+                sender.send(accepted).unwrap();
+                let body = format!(r#"{{"accepted":{accepted},"dropped":0}}"#);
+                let response = format!(
+                    "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
             }
         });
         (format!("http://{address}"), receiver)

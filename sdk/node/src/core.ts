@@ -363,7 +363,7 @@ class TelemetryQueue {
         headers: {
           authorization: `Bearer ${this.#apiKey}`,
           "content-type": "application/json",
-          "user-agent": "@agent-feedback/node/0.3.0",
+          "user-agent": "@agent-feedback/node/0.3.1",
         },
         body: JSON.stringify({ events: batch.map(({ event }) => event) }),
         signal: AbortSignal.timeout(
@@ -560,7 +560,7 @@ export class AgentFeedbackRuntime<Request = unknown> {
           headers: {
             authorization: `Bearer ${this.options.apiKey}`,
             "content-type": "application/json",
-            "user-agent": "@agent-feedback/node/0.3.0",
+            "user-agent": "@agent-feedback/node/0.3.1",
           },
           body: JSON.stringify({ subject }),
           signal: AbortSignal.timeout(

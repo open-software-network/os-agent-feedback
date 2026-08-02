@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 from io import BytesIO
+from unittest.mock import patch
 
 from agent_feedback import (
     AgentFeedbackASGI,
@@ -519,6 +520,12 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         default = AgentFeedback(AgentFeedbackOptions(api_key=KEY))
         self.assertEqual(default.options.endpoint, "https://app.epode.ai")
 
+    def test_telemetry_delivery_defaults_match_the_node_sdk(self) -> None:
+        options = AgentFeedbackOptions(api_key=KEY)
+        self.assertEqual(options.telemetry_timeout, 30.0)
+        self.assertEqual(options.max_telemetry_attempts, 6)
+        self.assertEqual(options.shutdown_timeout, 10.0)
+
     def test_ask_once_without_customer_ref_warns_once(self) -> None:
         runtime = AgentFeedback(
             AgentFeedbackOptions(api_key=KEY, feedback_mode="ask_once", sender=lambda *_: None)
@@ -609,6 +616,7 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
                 endpoint="https://feedback.test",
                 flush_interval=0.001,
                 max_telemetry_attempts=1,
+                shutdown_timeout=1.0,
                 sender=blocked_sender,
             )
         )
@@ -628,6 +636,49 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         release_delivery.set()
         if runtime.telemetry.thread:
             runtime.telemetry.thread.join(0.5)
+
+    def test_partial_telemetry_receipt_is_a_delivery_failure(self) -> None:
+        captured_timeouts: list[float] = []
+
+        class PartialReceipt:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return b'{"accepted":0,"dropped":1}'
+
+        def partial_urlopen(_request, *, timeout):
+            captured_timeouts.append(timeout)
+            return PartialReceipt()
+
+        runtime = AgentFeedback(
+            AgentFeedbackOptions(
+                api_key=KEY,
+                endpoint="https://feedback.test",
+                flush_interval=3600,
+                max_telemetry_attempts=1,
+                shutdown_timeout=0.25,
+            )
+        )
+        runtime.record(
+            runtime.prepare(),
+            surface="http_json",
+            operation="/search",
+            status_code=200,
+            duration_ms=1,
+        )
+        with (
+            patch("urllib.request.urlopen", side_effect=partial_urlopen),
+            self.assertLogs("agent_feedback", level="WARNING") as captured,
+        ):
+            self.assertFalse(runtime.shutdown())
+        self.assertEqual(len(captured_timeouts), 1)
+        self.assertGreater(captured_timeouts[0], 0)
+        self.assertLessEqual(captured_timeouts[0], 0.25)
+        self.assertIn("product responses were not affected", captured.output[0])
 
     def test_wildcards_match_one_segment_and_double_wildcards_match_any_depth(self) -> None:
         self.assertTrue(match_pattern("/docs/page", "/docs/*"))
@@ -685,6 +736,60 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         middleware.shutdown()
         self.assertEqual(telemetry[0]["events"][0]["classification"], "unclassified")
         self.assertEqual(telemetry[0]["events"][0]["sequence"], 1)
+
+    async def test_asgi_lifespan_drains_telemetry_before_shutdown_complete(self) -> None:
+        telemetry: list[dict] = []
+        lifecycle = iter(
+            [
+                {"type": "lifespan.startup"},
+                {"type": "lifespan.shutdown"},
+            ]
+        )
+
+        def sender(_url: str, _headers: dict[str, str], body: bytes) -> None:
+            telemetry.append(json.loads(body))
+
+        async def app(_scope, receive, send):
+            while True:
+                message = await receive()
+                if message["type"] == "lifespan.startup":
+                    await send({"type": "lifespan.startup.complete"})
+                elif message["type"] == "lifespan.shutdown":
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
+
+        middleware = AgentFeedbackASGI(
+            app,
+            api_key=KEY,
+            endpoint="https://feedback.test",
+            flush_interval=3600,
+            sender=sender,
+        )
+        middleware.runtime.record(
+            middleware.runtime.prepare(),
+            surface="http_json",
+            operation="/search",
+            status_code=200,
+            duration_ms=1,
+        )
+        sent: list[dict] = []
+
+        async def receive():
+            return next(lifecycle)
+
+        async def send(message):
+            if message["type"] == "lifespan.shutdown.complete":
+                self.assertEqual(len(telemetry), 1)
+            sent.append(message)
+
+        await middleware({"type": "lifespan"}, receive, send)
+        self.assertEqual(
+            sent,
+            [
+                {"type": "lifespan.startup.complete"},
+                {"type": "lifespan.shutdown.complete"},
+            ],
+        )
 
     async def test_asgi_resolves_identity_established_by_wrapped_authentication(self) -> None:
         telemetry: list[dict] = []

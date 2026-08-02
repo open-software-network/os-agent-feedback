@@ -23,6 +23,10 @@ const immutableArtifacts = new Map([
     "6620ccc7126c54bfc5bae8c893e62d726bb1351dbaca1b4194f122fd6b657de3",
   ],
   [
+    "agent-feedback-integrations-0.3.1.json",
+    "b802632b17760d1bbf8df3a96be080bf1468c708e4b3a85bb8ce0d70e267857a",
+  ],
+  [
     "agent-feedback-go-0.1.0.tar.gz",
     "4d2eaf5172283ce6b26c280135d2798df0771f8919d116775977dd76dd73ef78",
   ],
@@ -45,6 +49,10 @@ const immutableArtifacts = new Map([
   [
     "agent-feedback-node-0.3.0.tgz",
     "0c2ed9e474de55e72b964732ec24b741f3424078c71f4e19f4678cfe88e65a07",
+  ],
+  [
+    "agent-feedback-node-0.3.1.tgz",
+    "f5f88617367855adcf10eb11c2e26b197f8a46a99140c1ca170c4d5e9047acb9",
   ],
   [
     "agent-feedback-rust-0.1.0.tar.gz",
@@ -71,6 +79,10 @@ const immutableArtifacts = new Map([
     "e3481b97914c644d041d773866061a9469501e85e77c5448c41e0fde8a6ef730",
   ],
   [
+    "agent_feedback-0.3.1-py3-none-any.whl",
+    "bc1bdc56eb086d81734ff5dcbd21066a8a17c9bfc5b3dacc961ab3a96305303c",
+  ],
+  [
     "agent-feedback-go-0.2.0.tar.gz",
     "5bab7a77474111c0650b514511f1adf1b247b1913c8af605d5fa52e9a7bbd13e",
   ],
@@ -85,6 +97,10 @@ const immutableArtifacts = new Map([
   [
     "agent-feedback-go-0.3.0.tar.gz",
     "65ca44b7a44f22eb5f0b9a28c9a2b6076f8e2aada0126fc9d9eabb08dfba811a",
+  ],
+  [
+    "agent-feedback-go-0.3.1.tar.gz",
+    "aa39c1fd9b64cf602942520711a6feac1d5c75cfef4dad35d590e2b76d83538e",
   ],
   [
     "agent-feedback-rust-0.2.0.tar.gz",
@@ -103,6 +119,10 @@ const immutableArtifacts = new Map([
     "27f43efad763e6b0a221146d23fb18bac80e675c58c00995b6112e1277bc31ed",
   ],
   [
+    "agent-feedback-rust-0.3.1.tar.gz",
+    "0d26e766d1e12ced3919a33d06575ba2dc4aaa8a285f8e7e3b9b069a4144b77b",
+  ],
+  [
     "agent-feedback-protocol-v1.zip",
     "84c74beccabdbf771070cad001223df9335aa19894f9305b30afd224266188a6",
   ],
@@ -114,9 +134,13 @@ const immutableArtifacts = new Map([
     "agent-feedback-protocol-v1-0.3.0.zip",
     "ae3a670fcaf903c781155ec5002874cbe079996b2c6d28221414100e5d86735b",
   ],
+  [
+    "agent-feedback-protocol-v1-0.3.1.zip",
+    "ae3a670fcaf903c781155ec5002874cbe079996b2c6d28221414100e5d86735b",
+  ],
 ]);
 
-const releaseVersion = "0.3.0";
+const releaseVersion = "0.3.1";
 
 test("SDK metadata and user agents share the current release version", async () => {
   const nodeManifest = JSON.parse(
@@ -271,7 +295,7 @@ esac
 test("public integration manifest pins every current hosted artifact", async () => {
   const manifest = JSON.parse(
     await readFile(
-      new URL("../backend/public/agent-feedback-integrations-0.3.0.json", import.meta.url),
+      new URL("../backend/public/agent-feedback-integrations-0.3.1.json", import.meta.url),
       "utf8",
     ),
   );

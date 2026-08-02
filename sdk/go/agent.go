@@ -211,7 +211,7 @@ func InspectFeedbackConsent(ctx context.Context, envelope *Envelope, allowedOrig
 	}
 	request.Header.Set("Authorization", authorization)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", "agent-feedback-go-agent/0.3.0")
+	request.Header.Set("User-Agent", "agent-feedback-go-agent/0.3.1")
 	response, err := boundedNoRedirectClient(client).Do(request)
 	if err != nil {
 		return nil, err
@@ -288,7 +288,7 @@ func SubmitFeedbackConsent(ctx context.Context, envelope *Envelope, decision str
 	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, decisionURL.String(), bytes.NewReader(body))
 	request.Header.Set("Authorization", action.Authorization)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", "agent-feedback-go-agent/0.3.0")
+	request.Header.Set("User-Agent", "agent-feedback-go-agent/0.3.1")
 	response, err := boundedNoRedirectClient(client).Do(request)
 	if err != nil {
 		return nil, err
@@ -389,7 +389,7 @@ func SubmitProductFeedback(ctx context.Context, envelope *Envelope, report Feedb
 	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, inspection.SubmitURL, bytes.NewReader(body))
 	request.Header.Set("Authorization", inspection.Authorization)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", "agent-feedback-go-agent/0.3.0")
+	request.Header.Set("User-Agent", "agent-feedback-go-agent/0.3.1")
 	response, err := boundedNoRedirectClient(client).Do(request)
 	if err != nil {
 		return nil, err

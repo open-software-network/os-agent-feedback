@@ -1013,7 +1013,7 @@ async function prepareNode(fixtureName) {
   const manifestPath = join(target, "package.json");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   manifest.dependencies["@agent-feedback/node"] =
-    process.env.SETUP_MATRIX_NODE_SDK_SPEC || `${backendUrl}/static/agent-feedback-node-0.3.0.tgz`;
+    process.env.SETUP_MATRIX_NODE_SDK_SPEC || `${backendUrl}/static/agent-feedback-node-0.3.1.tgz`;
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   run("npm", ["install", "--ignore-scripts"], { cwd: target });
   return target;
@@ -1053,7 +1053,7 @@ async function prepareGo() {
     ],
     { cwd: target },
   );
-  run("go", ["mod", "edit", "-require=github.com/open-software-network/os-epode/sdk/go@v0.3.0"], {
+  run("go", ["mod", "edit", "-require=github.com/open-software-network/os-epode/sdk/go@v0.3.1"], {
     cwd: target,
   });
   run("go", ["mod", "tidy"], { cwd: target });
@@ -1079,7 +1079,7 @@ async function prepareManual(fixtureName) {
   await cp(join(repo, "examples", fixtureName), target, { recursive: true });
   run(
     "curl",
-    ["-fsS", "-o", "protocol.zip", `${backendUrl}/static/agent-feedback-protocol-v1-0.3.0.zip`],
+    ["-fsS", "-o", "protocol.zip", `${backendUrl}/static/agent-feedback-protocol-v1-0.3.1.zip`],
     { cwd: target },
   );
   run("unzip", ["-q", "protocol.zip"], { cwd: target });
@@ -1116,7 +1116,11 @@ async function runHttpApp(label, command, args, cwd, port, mode = "never_ask") {
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.stack : error}${childLogTail()}`);
   }
-  await waitForPersistedExpected();
+  try {
+    await waitForPersistedExpected();
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.stack : error}${childLogTail()}`);
+  }
   if (observationsBefore !== undefined)
     await assertOffCreatedNoObservation(observationsBefore, label);
   await stop(child);

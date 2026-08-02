@@ -54,13 +54,13 @@ const httpIntegrations = [
   {
     id: "rust",
     page: "docs/integrations/rust-axum.mdx",
-    required: ["agent-feedback-rust-0.3.0.tar.gz", "AgentFeedbackLayer::new", ".include", "Tokio"],
+    required: ["agent-feedback-rust-0.3.1.tar.gz", "AgentFeedbackLayer::new", ".include", "Tokio"],
   },
   {
     id: "manual-http",
     page: "docs/integrations/manual-http.mdx",
     required: [
-      "agent-feedback-protocol-v1-0.3.0.zip",
+      "agent-feedback-protocol-v1-0.3.1.zip",
       "HMAC-SHA256",
       "_agentFeedback",
       "Cache-Control",
@@ -261,7 +261,7 @@ test("Node MCP setup authenticates before dispatch and keeps hosted installs rep
     'sessionRef: (_args, context) => verifiedField(context, "journeyId")',
     "standalone JSON text block",
     "outputSchema",
-    ".epode/artifacts/agent-feedback-node-0.3.0.tgz",
+    ".epode/artifacts/agent-feedback-node-0.3.1.tgz",
     "shasum -a 256 -c -",
   ]) {
     assert.ok(content.includes(expected), `Node MCP docs omit ${expected}`);
@@ -401,10 +401,10 @@ test("docs and dashboard publish the same install artifacts and feedback modes",
   ]);
   const joined = pages.join("\n");
   for (const artifact of [
-    "agent-feedback-node-0.3.0.tgz",
-    "agent_feedback-0.3.0-py3-none-any.whl",
-    "agent-feedback-rust-0.3.0.tar.gz",
-    "agent-feedback-protocol-v1-0.3.0.zip",
+    "agent-feedback-node-0.3.1.tgz",
+    "agent_feedback-0.3.1-py3-none-any.whl",
+    "agent-feedback-rust-0.3.1.tar.gz",
+    "agent-feedback-protocol-v1-0.3.1.zip",
   ]) {
     assert.ok(joined.includes(artifact), `docs omit ${artifact}`);
     assert.ok(dashboard.includes(artifact), `dashboard omits ${artifact}`);
@@ -504,7 +504,7 @@ test("every public docs page has a title and actionable description", async () =
 });
 
 test("the downloadable protocol bundle preserves the immutable v1 schema contract", async () => {
-  const bundle = new URL("../backend/public/agent-feedback-protocol-v1-0.3.0.zip", import.meta.url)
+  const bundle = new URL("../backend/public/agent-feedback-protocol-v1-0.3.1.zip", import.meta.url)
     .pathname;
   const schemaFiles = [
     "consent-decision.schema.json",

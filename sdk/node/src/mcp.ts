@@ -476,7 +476,7 @@ function instrumentServer(
             headers: {
               authorization: `Bearer ${feedbackHandle}`,
               "content-type": "application/json",
-              "user-agent": "@agent-feedback/node/0.3.0",
+              "user-agent": "@agent-feedback/node/0.3.1",
             },
             body: JSON.stringify({ decision }),
             signal: AbortSignal.timeout(options.reportTimeoutMs ?? 10_000),
@@ -608,7 +608,7 @@ function instrumentServer(
             headers: {
               authorization: `Bearer ${feedbackHandle}`,
               "content-type": "application/json",
-              "user-agent": "@agent-feedback/node/0.3.0",
+              "user-agent": "@agent-feedback/node/0.3.1",
             },
             body: JSON.stringify({
               summary,

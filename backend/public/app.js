@@ -561,11 +561,11 @@ function setupInstructions() {
   const artifacts = `${location.origin}/static`;
   const route = setupSurface === "static" ? "/docs/**" : setupSurface === "website" ? "/docs/*" : "/search";
   const verifiedDownload = (filename, sha256) => `epode_artifact="$(mktemp -d)/${filename}" &&\ncurl -fsSL ${artifacts}/${filename} -o "$epode_artifact" &&\nprintf '%s  %s\\n' '${sha256}' "$epode_artifact" | shasum -a 256 -c -`;
-  const nodeDownload = `mkdir -p .epode/artifacts &&\nepode_artifact=".epode/artifacts/agent-feedback-node-0.3.0.tgz" &&\ncurl -fsSL ${artifacts}/agent-feedback-node-0.3.0.tgz -o "$epode_artifact" &&\nprintf '%s  %s\\n' '0c2ed9e474de55e72b964732ec24b741f3424078c71f4e19f4678cfe88e65a07' "$epode_artifact" | shasum -a 256 -c -`;
-  const pythonDownload = verifiedDownload("agent_feedback-0.3.0-py3-none-any.whl", "e3481b97914c644d041d773866061a9469501e85e77c5448c41e0fde8a6ef730");
-  const goDownload = verifiedDownload("agent-feedback-go-0.3.0.tar.gz", "65ca44b7a44f22eb5f0b9a28c9a2b6076f8e2aada0126fc9d9eabb08dfba811a");
-  const rustDownload = verifiedDownload("agent-feedback-rust-0.3.0.tar.gz", "27f43efad763e6b0a221146d23fb18bac80e675c58c00995b6112e1277bc31ed");
-  const protocolDownload = verifiedDownload("agent-feedback-protocol-v1-0.3.0.zip", "ae3a670fcaf903c781155ec5002874cbe079996b2c6d28221414100e5d86735b");
+  const nodeDownload = `mkdir -p .epode/artifacts &&\nepode_artifact=".epode/artifacts/agent-feedback-node-0.3.1.tgz" &&\ncurl -fsSL ${artifacts}/agent-feedback-node-0.3.1.tgz -o "$epode_artifact" &&\nprintf '%s  %s\\n' 'f5f88617367855adcf10eb11c2e26b197f8a46a99140c1ca170c4d5e9047acb9' "$epode_artifact" | shasum -a 256 -c -`;
+  const pythonDownload = verifiedDownload("agent_feedback-0.3.1-py3-none-any.whl", "bc1bdc56eb086d81734ff5dcbd21066a8a17c9bfc5b3dacc961ab3a96305303c");
+  const goDownload = verifiedDownload("agent-feedback-go-0.3.1.tar.gz", "aa39c1fd9b64cf602942520711a6feac1d5c75cfef4dad35d590e2b76d83538e");
+  const rustDownload = verifiedDownload("agent-feedback-rust-0.3.1.tar.gz", "0d26e766d1e12ced3919a33d06575ba2dc4aaa8a285f8e7e3b9b069a4144b77b");
+  const protocolDownload = verifiedDownload("agent-feedback-protocol-v1-0.3.1.zip", "ae3a670fcaf903c781155ec5002874cbe079996b2c6d28221414100e5d86735b");
   const nodeInstall = `${nodeDownload} &&\nnpm install "$epode_artifact"`;
   const environment = `AGENT_FEEDBACK_KEY=${apiSecret || "paste_product_key_here"}\nAGENT_FEEDBACK_MODE=${dashboard.currentEnvironment?.feedbackMode || "never_ask"}`;
   const instructions = {
@@ -611,15 +611,15 @@ function setupInstructions() {
     },
     go: {
       name: "Go · net/http",
-      install: `${goDownload} &&\nmkdir -p .epode/agent-feedback-go-0.3.0 &&\ntar -xzf "$epode_artifact" -C .epode/agent-feedback-go-0.3.0 &&\ngo mod edit -replace=github.com/open-software-network/os-epode/sdk/go=./.epode/agent-feedback-go-0.3.0 &&\ngo mod edit -require=github.com/open-software-network/os-epode/sdk/go@v0.3.0`,
+      install: `${goDownload} &&\nmkdir -p .epode/agent-feedback-go-0.3.1 &&\ntar -xzf "$epode_artifact" -C .epode/agent-feedback-go-0.3.1 &&\ngo mod edit -replace=github.com/open-software-network/os-epode/sdk/go=./.epode/agent-feedback-go-0.3.1 &&\ngo mod edit -require=github.com/open-software-network/os-epode/sdk/go@v0.3.1`,
       code: `feedback, err := agentfeedback.New(agentfeedback.Options{\n    APIKey: os.Getenv("AGENT_FEEDBACK_KEY"),\n    Include: []string{"${route}"},\n    AccountRef: func(r *http.Request) string { return authenticatedAccountID(r.Context()) },\n    UserRef: func(r *http.Request) string { return authenticatedUserID(r.Context()) },\n    AnonymousRef: func(r *http.Request) string { return firstPartyVisitorID(r.Context()) },\n    CustomerRef: func(r *http.Request) string { return authenticatedAccountID(r.Context()) }, // durable Ask once compatibility\n    SessionRef: func(r *http.Request) string { return productJourneyID(r.Context()) }, // optional server-issued journey\n})\nif err != nil { log.Fatal(err) }\ndefer feedback.Shutdown(context.Background())\n\n// The outer authentication middleware populates verified/product-owned context first.\nhandler := productAuthentication(feedback.Middleware(router))`,
       advanced: `Omit any identity or journey reference your product cannot prove.`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },
     rust: {
       name: "Rust · Axum/Tower",
-      install: `${rustDownload} &&\nmkdir -p vendor/agent-feedback-rust-0.3.0 &&\ntar -xzf "$epode_artifact" -C vendor/agent-feedback-rust-0.3.0`,
-      code: `// Cargo.toml: agent-feedback = { path = "vendor/agent-feedback-rust-0.3.0" }\nlet feedback = AgentFeedbackLayer::new(\n    Options::new(std::env::var("AGENT_FEEDBACK_KEY")?)\n        .include(["${route}"])\n        .account_ref(|request| authenticated_account_id(request))\n        .user_ref(|request| authenticated_user_id(request))\n        .anonymous_ref(|request| first_party_visitor_id(request))\n        .customer_ref(|request| authenticated_account_id(request)) // durable Ask once compatibility\n        .session_ref(|request| product_journey_id(request)), // optional server-issued journey\n)?;\n\n// Tower executes the last layer first, so authentication establishes verified/product-owned extensions first.\nlet app = router.layer(feedback).layer(product_auth_layer());`,
+      install: `${rustDownload} &&\nmkdir -p vendor/agent-feedback-rust-0.3.1 &&\ntar -xzf "$epode_artifact" -C vendor/agent-feedback-rust-0.3.1`,
+      code: `// Cargo.toml: agent-feedback = { path = "vendor/agent-feedback-rust-0.3.1" }\nlet feedback = AgentFeedbackLayer::new(\n    Options::new(std::env::var("AGENT_FEEDBACK_KEY")?)\n        .include(["${route}"])\n        .account_ref(|request| authenticated_account_id(request))\n        .user_ref(|request| authenticated_user_id(request))\n        .anonymous_ref(|request| first_party_visitor_id(request))\n        .customer_ref(|request| authenticated_account_id(request)) // durable Ask once compatibility\n        .session_ref(|request| product_journey_id(request)), // optional server-issued journey\n)?;\n\n// Tower executes the last layer first, so authentication establishes verified/product-owned extensions first.\nlet app = router.layer(feedback).layer(product_auth_layer());`,
       advanced: `Omit any identity or journey reference your product cannot prove.`,
       verify: `Send one request to https://your-product.example${route.replaceAll("*", "test")}`,
     },

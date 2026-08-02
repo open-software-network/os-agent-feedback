@@ -4913,17 +4913,16 @@ fn scoped_session_ref_hash(customer_scope_hash: &[u8], session_ref_hash: &[u8]) 
 }
 
 fn customer_scope_hash(customer_ref: Option<&str>, customer_id: Option<Uuid>) -> Vec<u8> {
-    customer_ref.map_or_else(
+    customer_id.map_or_else(
         || {
-            customer_id.map_or_else(
+            customer_ref.map_or_else(
                 || sha256("scope:anonymous"),
-                |customer_id| sha256(&format!("scope:resolved-customer:{customer_id}")),
+                |customer_ref| sha256(&format!("scope:customer:{customer_ref}")),
             )
         },
-        // Preserve the pre-customer-intelligence session hash for existing
-        // customerRef integrations so a rolling deployment cannot fork their
-        // session continuity.
-        |customer_ref| sha256(&format!("scope:customer:{customer_ref}")),
+        // Once Epode has a resolved customer, verified and first-party-
+        // anonymous evidence must converge on one canonical session scope.
+        |customer_id| sha256(&format!("scope:resolved-customer:{customer_id}")),
     )
 }
 
@@ -5244,6 +5243,9 @@ async fn merge_anonymous_customer(
     .bind(anonymous_customer_id)
     .execute(&mut **tx)
     .await?;
+    let anonymous_scope = customer_scope_hash(None, Some(anonymous_customer_id));
+    let known_scope = customer_scope_hash(None, Some(known_customer_id));
+    rekey_customer_sessions(tx, auth, &anonymous_scope, &known_scope).await?;
     sqlx::query(
         r"UPDATE consent_grants SET customer_id = $2, updated_at = NOW()
         WHERE workspace_id = $1 AND product_id = $3 AND customer_id = $4",
@@ -5278,6 +5280,85 @@ async fn merge_anonymous_customer(
     .bind(auth.api_key_id)
     .execute(&mut **tx)
     .await?;
+    Ok(())
+}
+
+async fn rekey_customer_sessions(
+    tx: &mut Transaction<'_, Postgres>,
+    auth: &ProductAuth,
+    source_scope: &[u8],
+    target_scope: &[u8],
+) -> Result<(), ApiError> {
+    let sessions =
+        sqlx::query_as::<_, (Uuid, Uuid, String, Vec<u8>, DateTime<Utc>, DateTime<Utc>)>(
+            r"SELECT session.id, session.environment_id, session.source,
+          COALESCE(session.raw_ref_hash, session.ref_hash),
+          session.started_at, session.last_seen_at
+        FROM sessions_v2 session
+        WHERE session.workspace_id = $1
+          AND session.customer_scope_hash = $2
+          AND session.environment_id IN (
+            SELECT id FROM product_environments
+            WHERE workspace_id = $1 AND product_id = $3
+          )
+        ORDER BY session.environment_id, session.source, session.ref_hash, session.id
+        FOR UPDATE",
+        )
+        .bind(auth.workspace.id)
+        .bind(source_scope)
+        .bind(auth.environment.product_id)
+        .fetch_all(&mut **tx)
+        .await?;
+
+    for (old_session_id, environment_id, source, raw_ref_hash, started_at, last_seen_at) in sessions
+    {
+        let target_session_id = resolve_v2_session(
+            tx,
+            auth.workspace.id,
+            environment_id,
+            target_scope,
+            &raw_ref_hash,
+            &source,
+            started_at,
+        )
+        .await?;
+        sqlx::query(
+            r"UPDATE interactions_v2 SET session_id = $2, updated_at = NOW()
+            WHERE session_id = $1 AND workspace_id = $3",
+        )
+        .bind(old_session_id)
+        .bind(target_session_id)
+        .bind(auth.workspace.id)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            r"UPDATE customer_signals SET session_id = $2
+            WHERE session_id = $1 AND workspace_id = $3 AND product_id = $4",
+        )
+        .bind(old_session_id)
+        .bind(target_session_id)
+        .bind(auth.workspace.id)
+        .bind(auth.environment.product_id)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            r"UPDATE sessions_v2 SET
+              started_at = LEAST(started_at, $2),
+              last_seen_at = GREATEST(last_seen_at, $3)
+            WHERE id = $1 AND workspace_id = $4",
+        )
+        .bind(target_session_id)
+        .bind(started_at)
+        .bind(last_seen_at)
+        .bind(auth.workspace.id)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query("DELETE FROM sessions_v2 WHERE id = $1 AND workspace_id = $2")
+            .bind(old_session_id)
+            .bind(auth.workspace.id)
+            .execute(&mut **tx)
+            .await?;
+    }
     Ok(())
 }
 
@@ -6959,13 +7040,14 @@ pub(crate) async fn backfill_customer_intelligence(
             user_ref: None,
             anonymous_ref: None,
         };
+        let auth = ProductAuth {
+            workspace,
+            environment,
+            api_key_id: interaction.api_key_id.unwrap_or_else(Uuid::nil),
+        };
         let customer_id = resolve_telemetry_customer(
             &mut tx,
-            &ProductAuth {
-                workspace,
-                environment,
-                api_key_id: interaction.api_key_id.unwrap_or_else(Uuid::nil),
-            },
+            &auth,
             identity_hmac_secret,
             &refs,
             interaction.occurred_at,
@@ -6983,6 +7065,9 @@ pub(crate) async fn backfill_customer_intelligence(
         .await?
         .rows_affected();
         summary.interactions_linked += linked;
+        let legacy_scope = customer_scope_hash(interaction.customer_ref.as_deref(), None);
+        let resolved_scope = customer_scope_hash(None, Some(customer_id));
+        rekey_customer_sessions(&mut tx, &auth, &legacy_scope, &resolved_scope).await?;
     }
 
     let report_ids = sqlx::query_scalar::<_, Uuid>(
@@ -13146,6 +13231,8 @@ mod product_tests {
             let mut anonymous =
                 http_telemetry_event(anonymous_interaction_id, Utc::now() - Duration::seconds(2));
             anonymous.anonymous_ref = Some("browser_installation_1".into());
+            anonymous.session_ref = Some("journey_1".into());
+            anonymous.session_source = Some("customer".into());
             let accepted = ingest_telemetry_batch(
                 &pool,
                 &auth_a,
@@ -13169,6 +13256,8 @@ mod product_tests {
             verified.account_ref = Some("account_7".into());
             verified.customer_ref = Some("account_7".into());
             verified.anonymous_ref = Some("browser_installation_1".into());
+            verified.session_ref = Some("journey_1".into());
+            verified.session_source = Some("customer".into());
             ingest_telemetry_batch(
                 &pool,
                 &auth_a,
@@ -13192,6 +13281,44 @@ mod product_tests {
             .fetch_one(&pool)
             .await?;
             anyhow::ensure!(prior_customer_id == verified_customer_id);
+
+            let later_anonymous_interaction_id = Uuid::new_v4();
+            let mut later_anonymous =
+                http_telemetry_event(later_anonymous_interaction_id, Utc::now());
+            later_anonymous.anonymous_ref = Some("browser_installation_1".into());
+            later_anonymous.session_ref = Some("journey_1".into());
+            later_anonymous.session_source = Some("customer".into());
+            ingest_telemetry_batch(
+                &pool,
+                &auth_a,
+                TelemetryBatchInput {
+                    events: vec![later_anonymous],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let resolved_session_ids = sqlx::query_scalar::<_, Uuid>(
+                "SELECT session_id FROM interactions_v2 WHERE id = ANY($1) ORDER BY id",
+            )
+            .bind([
+                anonymous_interaction_id,
+                verified_interaction_id,
+                later_anonymous_interaction_id,
+            ])
+            .fetch_all(&pool)
+            .await?;
+            anyhow::ensure!(resolved_session_ids.len() == 3);
+            anyhow::ensure!(resolved_session_ids.iter().all(|id| *id == resolved_session_ids[0]));
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM sessions_v2 WHERE workspace_id = $1 AND environment_id = $2",
+                )
+                .bind(workspace_a.id)
+                .bind(auth_a.environment.id)
+                .fetch_one(&pool)
+                .await?
+                    == 1
+            );
             let (level, parent_customer_id) = sqlx::query_as::<_, (String, Option<Uuid>)>(
                 "SELECT identity_level, parent_customer_id FROM customers WHERE id = $1",
             )

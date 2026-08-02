@@ -9,7 +9,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	agentfeedback "github.com/open-software-network/os-epode/sdk/go"
@@ -61,10 +63,22 @@ func main() {
 	})
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
 	server := &http.Server{Addr: "127.0.0.1:" + env("PORT", "4105"), Handler: authenticate(feedback.Middleware(mux)), ReadHeaderTimeout: 5 * time.Second}
+	shutdownSignal := make(chan os.Signal, 1)
+	signal.Notify(shutdownSignal, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-shutdownSignal
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = server.Shutdown(ctx)
+	}()
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
-	_ = feedback.Shutdown(context.Background())
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := feedback.Shutdown(shutdownContext); err != nil {
+		log.Printf("agent feedback shutdown: %v", err)
+	}
 }
 
 func authenticate(next http.Handler) http.Handler {
