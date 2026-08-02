@@ -1250,11 +1250,12 @@ export interface components {
             key: string;
             provenance: string;
             remember: boolean;
-            summary: string;
             type: string;
             value: string;
         };
         EnrichmentAnswerItemsSchema: {
+            catalog: components["schemas"]["EnrichmentCatalogEntry"][];
+            catalogVersion: string;
             /** Format: int32 */
             maximum: number;
             provenance: string[];
@@ -1270,6 +1271,12 @@ export interface components {
             /** Format: uuid */
             requestId: string;
             signals: components["schemas"]["CustomerContextItem"][];
+        };
+        EnrichmentCatalogEntry: {
+            allowedValues: string[];
+            key: string;
+            targetedAdvertisingSafe: boolean;
+            type: string;
         };
         EnrichmentConsentAction: {
             authorization: string;
@@ -1297,11 +1304,19 @@ export interface components {
             accountRef?: string | null;
             anonymousRef?: string | null;
             customerRef?: string | null;
+            /** Format: int64 */
+            durationMs?: number | null;
             /** Format: uuid */
             interactionId: string;
             operation: string;
             purpose: string;
             remember: boolean;
+            runtimeHint?: string | null;
+            sessionRef?: string | null;
+            /** Format: int32 */
+            statusCode?: number | null;
+            /** @default http_json */
+            surface: string;
             userRef?: string | null;
         };
         EnrichmentRequestResponse: {
@@ -1319,6 +1334,7 @@ export interface components {
             stageInstruction: string;
             state: string;
             submit: null | components["schemas"]["EnrichmentAnswerAction"];
+            surface: string;
         };
         EnvironmentResponse: {
             environment: components["schemas"]["ProductEnvironment"];
