@@ -815,11 +815,12 @@ describe("dashboard view behavior", () => {
       />,
     );
 
+    fireEvent.click(screen.getByText("Advanced integration details"));
     expect(screen.getByRole("button", { name: "Rotate" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
   });
 
-  it("explains the customer-agent step for HTTP without burdening MCP customers", () => {
+  it("makes setup entirely company-side for every customer identity state", () => {
     renderWithQuery(
       <SetupView
         data={dashboardFixture()}
@@ -830,13 +831,13 @@ describe("dashboard view behavior", () => {
       />,
     );
 
-    expect(screen.getByText(/Customer-agent step: none/)).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "HTTP API" }));
-    expect(screen.getByText(/generic HTTP and website agents are best effort/)).toBeVisible();
-    expect(screen.getByRole("link", { name: "customer-agent setup" })).toHaveAttribute(
-      "href",
-      "https://docs.epode.ai/quickstart#customer-agent-step",
-    );
+    expect(
+      screen.getByText(/customers do not need an Epode account, app, plugin, or SDK/i),
+    ).toBeVisible();
+    for (const identity of ["Known", "Anonymous", "No stable ID"]) {
+      expect(screen.getByRole("tab", { name: identity })).toBeVisible();
+    }
+    expect(screen.queryByText(/Companion/)).not.toBeInTheDocument();
   });
 
   it("keeps setup status authoritative when key activity is outside the dashboard slice", () => {
@@ -851,11 +852,9 @@ describe("dashboard view behavior", () => {
       />,
     );
 
-    expect(screen.getByText("End-to-end feedback loop proven")).toBeVisible();
-    expect(screen.getByText(/1 product interaction\(s\) in the last 30 days/)).toBeVisible();
-    expect(screen.getByText(/1 structured report\(s\) in the last 30 days/)).toBeVisible();
-    expect(screen.getByText(/Feedback received/)).toBeVisible();
-    expect(screen.queryByText("Never seen")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Customer context learned").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("SDK connected").length).toBeGreaterThan(0);
+    expect(screen.getByText(/3 context items are available/)).toBeVisible();
   });
 
   it("keeps product setup connected while a rotated key overlaps its unused successor", () => {
@@ -886,44 +885,56 @@ describe("dashboard view behavior", () => {
       />,
     );
 
-    expect(screen.getByText("End-to-end feedback loop proven")).toBeVisible();
-    expect(screen.getByText(/1 product interaction\(s\) in the last 30 days/)).toBeVisible();
-    expect(screen.getByText(/1 structured report\(s\) in the last 30 days/)).toBeVisible();
+    expect(screen.getAllByText("Customer context learned").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("SDK connected").length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByText("Advanced integration details"));
     expect(screen.getAllByText(/af_live_5678efab/).length).toBeGreaterThan(0);
     expect(screen.getByText(/af_live_1234abcd/)).toBeVisible();
-    expect(screen.getByText(/Never seen/)).toBeVisible();
-    expect(screen.getByText(/Feedback received/)).toBeVisible();
   });
 
   it.each([
-    [0, 0, 0, "Not connected", /Next: deploy the current write key/],
-    [1, 0, 0, "Product route connected", /company-side connection works/],
-    [1, 1, 0, "Agent use confirmed", /Agent use is confirmed/],
-    [1, 1, 1, "End-to-end feedback loop proven", /Activation complete/],
-  ] as const)("separates opportunity, confirmation, and report activation at %i/%i/%i", (opportunities, confirmedInteractions, reports, description, nextAction) => {
+    [0, 0, 0, "Not connected", /Next: deploy the product key/],
+    [1, 0, 0, "SDK connected", /company-side connection works/],
+    [1, 1, 0, "Customer context learned", /Context is ready/],
+    [1, 1, 1, "Customer context is ready for personalization", /Setup complete/],
+  ] as const)("separates SDK, learning, and retrieval activation at %i/%i/%i", (connected, learned, retrieved, description, nextAction) => {
     const base = dashboardFixture();
     const activationMilestones = base.activationMilestones;
     if (!activationMilestones) throw new Error("fixture requires activation milestones");
     const writeKey = base.apiKeys[0];
+    const insights = {
+      ...base.insights,
+      opportunities: connected,
+      confirmedInteractions: connected,
+      reports: learned,
+      customerContextItems: learned,
+      customersWithContext: learned ? 1 : 0,
+      contextRetrievals: retrieved,
+      personalizationReadyCustomers: learned ? 1 : 0,
+      personalizationDecisions: 0,
+      personalizationOutcomes: 0,
+    } as typeof base.insights & {
+      customerContextItems: number;
+      customersWithContext: number;
+      contextRetrievals: number;
+      personalizationReadyCustomers: number;
+      personalizationDecisions: number;
+      personalizationOutcomes: number;
+    };
     const data = dashboardFixture({
       apiKeys: [
         {
           ...writeKey,
-          interactionCount: opportunities,
-          reportCount: reports,
+          interactionCount: connected,
+          reportCount: learned,
         },
       ],
-      insights: {
-        ...base.insights,
-        opportunities,
-        confirmedInteractions,
-        reports,
-      },
+      insights,
       activationMilestones: {
         ...activationMilestones,
-        firstOpportunityAt: opportunities ? "2026-07-01T12:00:00Z" : null,
-        firstConfirmedInteractionAt: confirmedInteractions ? "2026-07-02T12:00:00Z" : null,
-        firstReportAt: reports ? "2026-07-03T12:00:00Z" : null,
+        firstOpportunityAt: connected ? "2026-07-01T12:00:00Z" : null,
+        firstConfirmedInteractionAt: connected ? "2026-07-02T12:00:00Z" : null,
+        firstReportAt: learned ? "2026-07-03T12:00:00Z" : null,
       },
     });
 
@@ -937,10 +948,10 @@ describe("dashboard view behavior", () => {
       />,
     );
 
-    expect(screen.getByText(description)).toBeVisible();
-    expect(screen.getAllByText("First opportunity")).toHaveLength(2);
-    expect(screen.getByText("First confirmed interaction")).toBeVisible();
-    expect(screen.getByText("First feedback report")).toBeVisible();
+    expect(screen.getAllByText(description).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("SDK connected").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Customer context learned").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Customer context retrieved").length).toBeGreaterThan(0);
     expect(screen.getByText(nextAction)).toBeVisible();
   });
 
@@ -976,15 +987,9 @@ describe("dashboard view behavior", () => {
       />,
     );
 
-    expect(screen.getByText("End-to-end feedback loop proven")).toBeVisible();
-    expect(
-      screen.getByText(/no product interactions in the current 30-day insight window/i),
-    ).toBeVisible();
-    expect(
-      screen.getByText(/no proven interactions in the current 30-day insight window/i),
-    ).toBeVisible();
-    expect(screen.getByText(/no reports in the current 30-day insight window/i)).toBeVisible();
-    expect(screen.getByText(/Activation complete/)).toBeVisible();
+    expect(screen.getAllByText("Customer context learned").length).toBeGreaterThan(0);
+    expect(screen.getByText(/3 context items are available/i)).toBeVisible();
+    expect(screen.getByText(/Context is ready/i)).toBeVisible();
   });
 
   it("does not auto-recreate a removed write key and offers manual recovery", async () => {
@@ -1053,6 +1058,7 @@ describe("dashboard view behavior", () => {
         setNotice={vi.fn()}
       />,
     );
+    fireEvent.click(screen.getByText("Advanced integration details"));
     fireEvent.click(screen.getByRole("button", { name: "Rotate" }));
 
     await waitFor(() =>
@@ -1089,6 +1095,7 @@ describe("dashboard view behavior", () => {
       </QueryClientProvider>,
     );
     expect(screen.queryByText("af_live_full_secret")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("Advanced integration details"));
     expect(screen.getAllByText(/af_live_1234abcd/).length).toBeGreaterThan(0);
   });
 
@@ -1263,8 +1270,11 @@ describe("dashboard view behavior", () => {
     fireEvent.click(screen.getByRole("button", { name: "30 days" }));
     expect(retentionInput).toHaveValue(30);
     fireEvent.change(retentionInput, { target: { value: "47" } });
-    fireEvent.change(screen.getByLabelText("Feedback mode"), { target: { value: "ask_once" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    fireEvent.click(screen.getByText("Advanced: legacy outcome feedback"));
+    fireEvent.change(screen.getByLabelText("Outcome feedback mode"), {
+      target: { value: "ask_once" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save retention and outcome settings" }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
@@ -1287,7 +1297,9 @@ describe("dashboard view behavior", () => {
       <PolicyView data={data} refresh={vi.fn().mockResolvedValue(undefined)} setNotice={vi.fn()} />,
     );
     fireEvent.change(screen.getByLabelText("Retention days"), { target: { value: "366" } });
-    const policyForm = screen.getByRole("button", { name: "Save changes" }).closest("form");
+    const policyForm = screen
+      .getByRole("button", { name: "Save retention and outcome settings" })
+      .closest("form");
     if (!policyForm) throw new Error("Policy form is missing");
     fireEvent.submit(policyForm);
 

@@ -15,15 +15,19 @@ describe("CustomersView", () => {
     window.history.replaceState({}, "", "/?view=customers");
   });
 
-  it("renders server-backed identity, health, consent, and complete rollups", async () => {
+  it("renders durable customer profiles separately from unresolved interactions", async () => {
     const fetchMock = mockCustomers();
     renderCustomers(fetchMock);
 
     const row = await screen.findByRole("row", { name: "Open customer Acme workspace" });
-    expect(within(row).getByText("Verified")).toBeVisible();
-    expect(within(row).getByText("Blocked")).toBeVisible();
+    expect(within(row).getByText("Known")).toBeVisible();
+    expect(within(row).getByText("4")).toBeVisible();
     expect(within(row).getByText("Allowed")).toBeVisible();
-    expect(screen.getByText("At risk").parentElement).toHaveTextContent("1");
+    expect(screen.getAllByText("Anonymous")[0].parentElement).toHaveTextContent("1");
+    expect(screen.getByText("Unresolved interactions").parentElement).toHaveTextContent("0");
+    expect(
+      screen.getByText(/Interaction-only context is not a durable customer profile/i),
+    ).toBeVisible();
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining("/api/dashboard/customers?productId="),
       expect.objectContaining({ headers: expect.any(Headers) }),
@@ -35,7 +39,7 @@ describe("CustomersView", () => {
     const fetchMock = mockCustomers();
     renderCustomers(fetchMock, { selectCustomer });
 
-    await screen.findByRole("option", { name: "Verified (1)" });
+    await screen.findByRole("option", { name: "Known (1)" });
     fireEvent.change(await screen.findByLabelText("Identity filter"), {
       target: { value: "verified" },
     });
@@ -48,12 +52,23 @@ describe("CustomersView", () => {
       selectedCustomerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     });
     expect(await screen.findByRole("heading", { name: "Acme workspace" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "Current goals" })).toBeVisible();
+    const personalizationHeading = screen.getByRole("heading", {
+      name: "Personalization context",
+    });
+    expect(personalizationHeading).toBeVisible();
+    expect(screen.getByText("Intent and task context")).toBeVisible();
     expect(screen.getByText("Find the newest indexed policy")).toBeVisible();
-    expect(screen.getByText("Agent inference")).toBeVisible();
-    expect(screen.getByText(/not a confirmed user statement/i)).toBeVisible();
+    expect(
+      within(personalizationHeading.closest("section") as HTMLElement).queryByText(
+        "May prefer shorter answers",
+      ),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("search.goal = newest_policy")).toBeVisible();
+    expect(screen.getAllByText(/Allowed for Product personalization/i)[0]).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "Context API preview" })).not.toBeInTheDocument();
     expect(screen.getAllByText("Expired").length).toBeGreaterThan(0);
-    expect(screen.getByText("Permission history (1)")).toBeVisible();
+    expect(screen.getAllByText("Targeted Advertising")[0]).toBeVisible();
+    expect(screen.getByText("Permission history (2)")).toBeVisible();
   });
 
   it("links customer evidence to the exact product records", async () => {
@@ -69,13 +84,14 @@ describe("CustomersView", () => {
       openSession,
     });
 
-    expect(
-      await screen.findByText("Results need to include newly indexed documents"),
-    ).toBeVisible();
-    fireEvent.click(screen.getAllByRole("button", { name: "Open feature" })[0]);
-    fireEvent.click(screen.getAllByRole("button", { name: "Open report" })[0]);
-    fireEvent.click(screen.getAllByRole("button", { name: "Open interaction" })[0]);
-    fireEvent.click(screen.getAllByRole("button", { name: "Open session" })[0]);
+    await screen.findByRole("heading", { name: "Acme workspace" });
+    fireEvent.click(screen.getByText("Why Epode knows this"));
+    expect(screen.getByText("Results need to include newly indexed documents")).toBeVisible();
+    expect(screen.getByText("May prefer shorter answers")).toBeVisible();
+    fireEvent.click(screen.getAllByRole("button", { name: "Related need" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Report evidence" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Interaction evidence" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Evidence" })[0]);
 
     expect(openFeature).toHaveBeenCalledWith("freshness-gap");
     expect(openFeedback).toHaveBeenCalled();

@@ -1,0 +1,64 @@
+---
+title: "Customer enrichment"
+description: "How Epode learns useful customer context without inventing identity or permission."
+---
+
+Epode's thin MVP does one job:
+
+> Learn a useful, permissioned fact about a customer through their agent, return it to the company, and measure
+> whether using it improved the experience.
+
+## What can be learned
+
+Each answer item is one of four types:
+
+- **Intent:** what the customer is trying to accomplish now.
+- **Preference:** what the customer tends to prefer.
+- **Constraint:** a non-sensitive product limit such as budget, delivery window, or company size.
+- **Interest:** a non-sensitive subject the customer is interested in.
+
+Epode accepts at most eight items from one request. Every key, type, and value must match the versioned catalog
+returned in the action schema. Epode writes a canonical summary itself; agent-written prose never becomes
+customer context. Each catalog entry also says whether it is approved for advertising. Raw prompts, transcripts,
+product responses, credentials, names, emails, sensitive traits, and unknown fields are rejected.
+
+## Provenance is not optional
+
+| Provenance | Meaning |
+| --- | --- |
+| `agent_reports_user_statement` | The customer explicitly stated it |
+| `agent_reports_current_task` | It is directly present in the current delegated task |
+| `agent_inference` | The agent inferred it; never display it as confirmed fact |
+
+An agent inference may help within the current interaction, but must not silently become a durable customer fact.
+
+## Permission has a purpose
+
+Epode supports two initial uses:
+
+- `product_personalization`
+- `targeted_advertising`
+
+Approval for one never grants the other. Remembering context is also explicit. Revoked, declined, expired, or
+out-of-purpose signals never appear in `context.get`.
+
+## Known, anonymous, and ephemeral
+
+- Verified company authentication supplies `accountRef` and `userRef`.
+- A signed, product-owned first-party visitor ID supplies `anonymousRef`.
+- No stable reference creates an ephemeral customer for only that interaction.
+- Supplying the earlier anonymous reference after authentication authorizes deterministic resolution.
+
+Epode never resolves identities probabilistically or across customer companies.
+
+## What Epode asks
+
+The company does not design a survey. It chooses the product surface and permitted purpose. Epode asks for a
+small amount of relevant, missing context that could improve the experience. The agent can:
+
+1. share explicitly known/current context after permission;
+2. ask the customer the exact returned question;
+3. report that it has no relevant context; or
+4. decline.
+
+Silence and ambiguity are never approval.

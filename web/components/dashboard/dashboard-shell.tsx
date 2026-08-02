@@ -1,10 +1,9 @@
 "use client";
 
-import { IconBubbleText } from "central-icons/IconBubbleText";
 import { IconChevronGrabberVertical } from "central-icons/IconChevronGrabberVertical";
-import { IconListBulletsSquare } from "central-icons/IconListBulletsSquare";
 import { IconPeople } from "central-icons/IconPeople";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
+import { IconShieldCheck } from "central-icons/IconShieldCheck";
 import { IconSparkle } from "central-icons/IconSparkle";
 import type { ComponentType, CSSProperties, ReactNode } from "react";
 import { PageHeader } from "@/components/dashboard/page-header";
@@ -30,7 +29,6 @@ import {
   SidebarHeader,
   SidebarInset,
   SidebarMenu,
-  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
@@ -49,38 +47,27 @@ type NavigationIcon = ComponentType<{
   "data-icon"?: string;
 }>;
 
-const configurationViews = new Set<DashboardView>([
-  "configuration",
-  "setup",
-  "policy",
-  "connectors",
-  "team",
-]);
-
 const navigation: Array<{
   view: DashboardView;
   label: string;
   icon: NavigationIcon;
-  count?: (data: DashboardData) => number;
 }> = [
-  { view: "home", label: "Home", icon: IconSparkle },
   {
     view: "customers",
     label: "Customers",
     icon: IconPeople,
   },
   {
-    view: "features",
-    label: "Features",
-    icon: IconBubbleText,
+    view: "insights",
+    label: "Insights",
+    icon: IconSparkle,
   },
   {
-    view: "sessions",
-    label: "Sessions",
-    icon: IconListBulletsSquare,
-    count: (data) => data.listState.sessionsTotal,
+    view: "setup",
+    label: "Setup",
+    icon: IconSettingsGear4,
   },
-  { view: "configuration", label: "Configuration", icon: IconSettingsGear4 },
+  { view: "policy", label: "Data controls", icon: IconShieldCheck },
 ];
 
 function initials(value: string) {
@@ -224,31 +211,35 @@ function AppSidebar({
         <SidebarGroup>
           <SidebarGroupContent>
             <SidebarMenu>
-              {navigation.map((item) => {
-                const active =
-                  item.view === "configuration"
-                    ? configurationViews.has(view)
-                    : view === item.view ||
-                      (item.view === "features" &&
-                        (view === "feedback" || view === "interactions"));
-                const count = item.count?.(data);
-                return (
-                  <SidebarMenuItem key={item.view}>
-                    <SidebarMenuButton
-                      type="button"
-                      isActive={active}
-                      tooltip={item.label}
-                      aria-current={active ? "page" : undefined}
-                      onClick={() => onNavigate(item.view)}
-                      className="data-active:shadow-[inset_2px_0_0_var(--attention)]"
-                    >
-                      <item.icon />
-                      <span>{item.label}</span>
-                    </SidebarMenuButton>
-                    {count !== undefined ? <SidebarMenuBadge>{count}</SidebarMenuBadge> : null}
-                  </SidebarMenuItem>
-                );
-              })}
+              {navigation
+                .filter(
+                  (item) => canCreateProduct || (item.view !== "setup" && item.view !== "policy"),
+                )
+                .map((item) => {
+                  const active =
+                    view === item.view ||
+                    (item.view === "insights" && view === "home") ||
+                    (item.view === "customers" &&
+                      (view === "features" ||
+                        view === "sessions" ||
+                        view === "feedback" ||
+                        view === "interactions"));
+                  return (
+                    <SidebarMenuItem key={item.view}>
+                      <SidebarMenuButton
+                        type="button"
+                        isActive={active}
+                        tooltip={item.label}
+                        aria-current={active ? "page" : undefined}
+                        onClick={() => onNavigate(item.view)}
+                        className="data-active:shadow-[inset_2px_0_0_var(--attention)]"
+                      >
+                        <item.icon />
+                        <span>{item.label}</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  );
+                })}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
@@ -314,7 +305,8 @@ export function DashboardShell({
   children: ReactNode;
 }) {
   const shellTitle: Record<DashboardView, string> = {
-    home: "Home",
+    home: "Insights",
+    insights: "Insights",
     customers: "Customers",
     features: "Features",
     feedback: "Evidence",

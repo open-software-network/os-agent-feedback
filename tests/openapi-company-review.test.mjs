@@ -151,10 +151,10 @@ test("the current Epode OpenAPI compiles reproducibly to a review-only manifest"
 
   assert.deepEqual(first, second);
   assert.equal(first.source.sha256, expectedDigest);
-  assert.equal(first.summary.totalOperations, 49);
+  assert.equal(first.summary.totalOperations, 55);
   assert.equal(first.summary.readOnlyGetOrHead, 23);
   assert.equal(first.summary.eligibleForCompanyReview, 1);
-  assert.equal(first.summary.excludedByPolicy, 48);
+  assert.equal(first.summary.excludedByPolicy, 54);
   assert.equal(first.summary.approvedForIr, 0);
   assert.equal(first.upstream.status, "company_input_required");
   assert.deepEqual(first.upstream.usablePinnedBaseUrls, []);
@@ -167,6 +167,29 @@ test("the current Epode OpenAPI compiles reproducibly to a review-only manifest"
     "/api/dashboard/signals",
   ]) {
     assert.ok(first.operations.some((operation) => operation.path === path));
+  }
+  const companyWrites = [
+    "/api/v2/enrichment/requests",
+    "/api/v2/customer-context",
+    "/api/v2/personalization/decisions",
+    "/api/v2/personalization/outcomes",
+  ];
+  const agentWrites = ["/api/v2/enrichment/consent/decisions", "/api/v2/enrichment/answers"];
+  for (const path of [...companyWrites, ...agentWrites]) {
+    const operation = first.operations.find((candidate) => candidate.path === path);
+    assert.ok(operation, `missing ${path}`);
+    assert.equal(operation.method, "POST");
+    assert.equal(operation.defaultDecision, "exclude");
+    assert.ok(operation.exclusionReasons.includes("method_not_read_only"));
+    assert.ok(operation.exclusionReasons.includes("request_body_present"));
+  }
+  for (const path of companyWrites) {
+    const operation = first.operations.find((candidate) => candidate.path === path);
+    assert.deepEqual(operation.securityAlternatives, [[{ scheme: "bearer_auth", scopes: [] }]]);
+  }
+  for (const path of agentWrites) {
+    const operation = first.operations.find((candidate) => candidate.path === path);
+    assert.deepEqual(operation.securityAlternatives, [[{ scheme: "bearer_auth", scopes: [] }]]);
   }
   assert.ok(first.operations.every((operation) => operation.defaultDecision === "exclude"));
 });

@@ -494,7 +494,7 @@ func (r *Runtime) lookupConsentSubject(subject string) string {
 	}
 	request.Header.Set("Authorization", "Bearer "+r.options.APIKey)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", "agent-feedback-go/0.3.1")
+	request.Header.Set("User-Agent", "agent-feedback-go/0.4.0")
 	response, err := r.options.HTTPClient.Do(request)
 	if err != nil {
 		return "unavailable"
@@ -722,7 +722,7 @@ drain:
 	headers := http.Header{
 		"Authorization": []string{"Bearer " + r.options.APIKey},
 		"Content-Type":  []string{"application/json"},
-		"User-Agent":    []string{"agent-feedback-go/0.3.1"},
+		"User-Agent":    []string{"agent-feedback-go/0.4.0"},
 	}
 	url := r.options.Endpoint + "/api/v2/telemetry/batches"
 	var deliveryError error

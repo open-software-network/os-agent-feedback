@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "release": "0.4.0",
+  "artifacts": {
+    "node": {
+      "filename": "agent-feedback-node-0.4.0.tgz",
+      "sha256": "ecad0dc8b17c5d973e1f97b4f691b7076af223aaa1a9ac697daa499b59c585e3",
+      "mediaType": "application/gzip"
+    },
+    "python": {
+      "filename": "agent_feedback-0.4.0-py3-none-any.whl",
+      "sha256": "a3d79b6d5eb5fe101f2cd7a6c1ca4ae2415358b81276fde06d30bbf3aef2b685",
+      "mediaType": "application/zip"
+    },
+    "go": {
+      "filename": "agent-feedback-go-0.4.0.tar.gz",
+      "sha256": "5d4ee89ad47d61a7d3f38dbd6320585b4e1c4de40beae12d526c3858683ad85e",
+      "mediaType": "application/gzip"
+    },
+    "rust": {
+      "filename": "agent-feedback-rust-0.4.0.tar.gz",
+      "sha256": "cd6eb2361095a37efeebcc92ba029bfca696cab67e0b0815d90b1432f104bd9e",
+      "mediaType": "application/gzip"
+    },
+    "protocol": {
+      "filename": "agent-feedback-protocol-v1-0.4.0.zip",
+      "sha256": "ae3a670fcaf903c781155ec5002874cbe079996b2c6d28221414100e5d86735b",
+      "mediaType": "application/zip",
+      "protocolVersion": 1,
+      "bundleRelease": "0.4.0"
+    }
+  }
+}

@@ -10,7 +10,13 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
   return (
     <main className="min-h-screen p-8">
       <h1 className="text-2xl font-semibold">Sign in to Epode</h1>
-      <a href={startPath}>Continue with OS Accounts</a>
+      <p className="mt-2 max-w-md text-sm text-muted-foreground">
+        Understand known, anonymous, and ephemeral customers, then retrieve permissioned context to
+        personalize your product.
+      </p>
+      <a className="mt-5 inline-block underline" href={startPath}>
+        Continue
+      </a>
     </main>
   );
 }

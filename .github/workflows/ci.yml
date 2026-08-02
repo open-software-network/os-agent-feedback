@@ -67,6 +67,7 @@ jobs:
               - ".github/workflows/ci.yml"
               - ".github/workflows/sdk-release.yml"
             examples:
+              - "examples/**"
               - "backend/public/agent-feedback-node-*.tgz"
               - "sdk/node/**"
               - "examples/node-express/**"
@@ -106,6 +107,22 @@ jobs:
     needs: changes
     if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: agent_feedback
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agent_feedback"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/agent_feedback
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Rust 1.95
@@ -128,6 +145,52 @@ jobs:
         run: make backend-clippy
       - name: Run backend tests
         run: make backend-test
+      - name: Run live PostgreSQL isolation and migration tests
+        run: cd backend && cargo test --locked -- --ignored --test-threads=1
+
+  customer-enrichment-e2e:
+    name: Customer enrichment journey
+    needs: changes
+    if: >-
+      needs.changes.outputs.backend == 'true' ||
+      needs.changes.outputs.sdk-node == 'true' ||
+      needs.changes.outputs.examples == 'true'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: agent_feedback
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agent_feedback"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/agent_feedback
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Install Rust 1.95
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: "1.95"
+      - name: Install locked SDK dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install the disposable retail example
+        run: npm install --ignore-scripts --no-audit --no-fund
+        working-directory: examples/mvp-retail-express
+      - name: Run anonymous-to-known personalization journey
+        run: pnpm test:customer-enrichment-e2e
 
   node:
     name: Node and Biome
@@ -226,7 +289,7 @@ jobs:
             --no-save \
             --package-lock=false \
             wrangler@4.118.0 \
-            "$GITHUB_WORKSPACE/backend/public/agent-feedback-node-0.3.1.tgz"
+            "$GITHUB_WORKSPACE/backend/public/agent-feedback-node-0.4.0.tgz"
       - name: Check entry points
         run: |
           node --check examples/node-express/src/index.js
@@ -283,10 +346,10 @@ jobs:
         run: make web-typecheck
       - name: Test web
         run: make web-test
-      - name: Run dashboard release browser check
-        run: make web-release-e2e
       - name: Build web
         run: make web-build
+      - name: Run dashboard release browser check
+        run: make web-release-e2e
 
   docs:
     name: Documentation

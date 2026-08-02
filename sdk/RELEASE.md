@@ -61,7 +61,7 @@ Before the first release, configure the following trusted publishers, with the
 repository `open-software-network/os-epode`, workflow file
 `sdk-release.yml`, and environment `sdk-release`:
 
-- npm: `@agent-feedback/node`, allowed action `npm publish`. npm configures
+- npm: `@epode/node`, allowed action `npm publish`. npm configures
   trusted publishing from an existing package's settings, so bootstrap the
   package once with a short-lived granular token and the exact reviewed
   release-candidate tarball, then remove the token. See

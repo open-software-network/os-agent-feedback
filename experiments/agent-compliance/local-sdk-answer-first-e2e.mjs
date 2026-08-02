@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Disposable localhost E2E for the CURRENT local @agent-feedback/node build.
+ * Disposable localhost E2E for the CURRENT local @epode/node build.
  *
  * This is intentionally an experiment harness, not SDK/backend production code.
  * It builds and imports sdk/node/dist, runs an Express customer product against
@@ -628,7 +628,7 @@ const [coreBytes, expressBytes, packageBytes] = await Promise.all([
 const packageJson = JSON.parse(packageBytes);
 const report = {
   schemaVersion: 1,
-  purpose: "current local @agent-feedback/node answer-first ask_once E2E",
+  purpose: "current local @epode/node answer-first ask_once E2E",
   startedAt,
   completedAt: new Date().toISOString(),
   localhostOnly: true,

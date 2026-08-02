@@ -1,11 +1,12 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { dashboardFixture } from "@/components/dashboard/test-fixture";
+
 import { PolicyView } from "./policy-view";
 
 describe("PolicyView", () => {
-  it("explains durable Ask once consent and its safe no-reference fallback", () => {
+  it("separates customer context, product personalization, and advertising permission", () => {
     render(
       <PolicyView
         data={dashboardFixture()}
@@ -15,20 +16,23 @@ describe("PolicyView", () => {
       />,
     );
 
-    expect(screen.getByText(/remembered under an HMAC-derived subject/i)).toBeVisible();
-    expect(screen.getByText(/stores .* separately with interaction telemetry/i)).toBeVisible();
-    expect(screen.getByText(/survive new agent sessions/i)).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Allowed customer context" })).toBeVisible();
+    for (const label of ["Current intent", "Preferences", "Constraints"]) {
+      expect(screen.getByRole("heading", { name: label })).toBeVisible();
+    }
+    expect(screen.getByRole("heading", { name: "Product personalization" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Targeted advertising" })).toBeVisible();
+    expect(screen.getByText("Off by default")).toBeVisible();
+    expect(screen.getByText(/returns no items.*explicitly approved/i)).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Enrichment permission" })).toBeVisible();
+    expect(screen.getByText(/silence or ambiguity never becomes approval/i)).toBeVisible();
     expect(
-      screen.getByText(
-        /without a customer reference, permission is safely requested for each use/i,
-      ),
+      screen.getByText(/available only through its interaction handle and evidence/i),
     ).toBeVisible();
+    expect(screen.getByText("Advanced: legacy outcome feedback")).toBeVisible();
+    fireEvent.click(screen.getByText("Advanced: legacy outcome feedback"));
     expect(
-      screen.getByText(/For MCP, Never ask is currently the most reliable choice/i),
+      screen.getByText(/does not approve, disable, or configure customer enrichment/i),
     ).toBeVisible();
-    expect(
-      screen.getByText(/verify the exact client versions before enabling them/i),
-    ).toBeVisible();
-    expect(screen.queryByText(/one agent runtime/i)).not.toBeInTheDocument();
   });
 });

@@ -7,7 +7,7 @@ describe("SignInPage", () => {
   it("forwards a validated dashboard deep link to auth start", async () => {
     const returnTo = "/?view=feedback&report=report-1";
     render(await SignInPage({ searchParams: Promise.resolve({ return_to: returnTo }) }));
-    expect(screen.getByRole("link", { name: "Continue with OS Accounts" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Continue" })).toHaveAttribute(
       "href",
       `/auth/start?return_to=${encodeURIComponent(returnTo)}`,
     );
@@ -19,9 +19,6 @@ describe("SignInPage", () => {
         searchParams: Promise.resolve({ return_to: "https://evil.example/steal" }),
       }),
     );
-    expect(screen.getByRole("link", { name: "Continue with OS Accounts" })).toHaveAttribute(
-      "href",
-      "/auth/start",
-    );
+    expect(screen.getByRole("link", { name: "Continue" })).toHaveAttribute("href", "/auth/start");
   });
 });

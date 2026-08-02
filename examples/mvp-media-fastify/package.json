@@ -1,0 +1,11 @@
+{
+  "name": "epode-mvp-media-fastify",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "@epode/node": "file:../../sdk/node",
+    "fastify": "^5.10.0"
+  },
+  "engines": { "node": ">=20" }
+}

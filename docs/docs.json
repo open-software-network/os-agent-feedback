@@ -2,7 +2,7 @@
   "$schema": "https://mintlify.com/docs.json",
   "theme": "maple",
   "name": "Epode",
-  "description": "Collect structured product feedback from the independent agents using your API, website, or MCP server.",
+  "description": "Learn permissioned customer context through customer agents, then personalize and measure the experience.",
   "colors": {
     "primary": "#1D4ED8",
     "light": "#68C4FF",
@@ -33,6 +33,7 @@
             "group": "Understand Epode",
             "pages": [
               "concepts/how-it-works",
+              "concepts/customer-enrichment",
               "concepts/reliability",
               "concepts/feedback-modes",
               "concepts/customers-and-sessions"
@@ -41,7 +42,6 @@
           {
             "group": "HTTP and websites",
             "pages": [
-              "integrations/companion",
               "integrations/node-express",
               "integrations/node-fastify",
               "integrations/python-asgi",
@@ -81,6 +81,7 @@
               "reference/feedback-report",
               "reference/mcp-2026-07-28",
               "reference/configuration",
+              "reference/customer-context",
               "reference/privacy-security"
             ]
           }

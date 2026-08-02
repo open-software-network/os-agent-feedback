@@ -178,7 +178,7 @@ def inspect_product_feedback(
     headers = {
         "authorization": authorization,
         "content-type": "application/json",
-        "user-agent": "agent-feedback-python-agent/0.3.1",
+        "user-agent": "agent-feedback-python-agent/0.4.0",
     }
     data = b"{}"
     if sender:
@@ -241,7 +241,7 @@ def submit_feedback_consent(
     headers = {
         "authorization": str(action["authorization"]),
         "content-type": "application/json",
-        "user-agent": "agent-feedback-python-agent/0.3.1",
+        "user-agent": "agent-feedback-python-agent/0.4.0",
     }
     data = json.dumps({"decision": decision}, separators=(",", ":")).encode()
     if sender:
@@ -303,7 +303,7 @@ def submit_product_feedback(
     headers = {
         "authorization": str(inspection["submit"]["authorization"]),
         "content-type": "application/json",
-        "user-agent": "agent-feedback-python-agent/0.3.1",
+        "user-agent": "agent-feedback-python-agent/0.4.0",
     }
     body = {
         "summary": summary,

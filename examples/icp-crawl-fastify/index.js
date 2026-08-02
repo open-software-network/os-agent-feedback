@@ -1,5 +1,5 @@
 import Fastify from "fastify";
-import { agentFeedback } from "@agent-feedback/node/fastify";
+import { agentFeedback } from "@epode/node/fastify";
 
 const app = Fastify({ logger: false });
 const jobs = new Map();

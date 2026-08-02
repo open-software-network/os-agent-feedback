@@ -1,5 +1,6 @@
 export * from "./agent.js";
 export * from "./core.js";
+export * from "./customer.js";
 export type {
   EdgeExecutionContext,
   StaticDocsProxy,

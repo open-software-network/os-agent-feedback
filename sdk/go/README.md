@@ -1,4 +1,53 @@
-# Agent Feedback for Go
+# Epode for Go
+
+Version 0.4.0 preserves the existing agent-feedback middleware and adds a
+typed company-side customer-enrichment client using only the standard library.
+
+```go
+epode, err := agentfeedback.NewCustomerClient(agentfeedback.CustomerClientOptions{
+    APIKey: os.Getenv("EPODE_API_KEY"),
+})
+if err != nil { log.Fatal(err) }
+
+statusCode := 200
+durationMS := int64(handlerDuration / time.Millisecond)
+request := epode.RequestEnrichment(ctx, agentfeedback.EnrichmentRequestInput{
+    CustomerIdentity: agentfeedback.CustomerIdentity{UserRef: authenticatedUser.ID},
+    InteractionID: interactionID,
+    Operation: "/api/recommendations",
+    Surface: agentfeedback.SurfaceHTTPJSON,
+    StatusCode: &statusCode,
+    DurationMS: &durationMS,
+    SessionRef: productJourney.ID,
+    RuntimeHint: verifiedRuntimeLabel,
+    Purpose: agentfeedback.ProductPersonalization,
+    Remember: true,
+})
+
+customerContext := epode.GetCustomerContext(ctx, agentfeedback.CustomerContextInput{
+    CustomerIdentity: agentfeedback.CustomerIdentity{UserRef: authenticatedUser.ID},
+    Purpose: agentfeedback.ProductPersonalization,
+})
+result := normalResult
+if customerContext.Available {
+    result = personalize(normalResult, customerContext.Items)
+}
+```
+
+`RequestEnrichment`, `GetCustomerContext`, `RecordPersonalizationDecision`,
+and `TrackPersonalizationOutcome` use strict time budgets, reject redirects,
+and fail open. Use `AnonymousRef` for a product-owned pre-login identifier, or
+`InteractionID` alone for interaction-only context. Mount `Relay` at the two
+paths in `CustomerContextRelayPaths`; it validates bounded agent answers before
+forwarding the short-lived handle and never exposes the company key.
+
+`Surface` defaults to `SurfaceHTTPJSON`; use `SurfaceHTML` or `SurfaceMCP` for those product
+surfaces. Optional status, duration, session, and runtime fields describe the same call.
+`SessionRef` must be product-issued and `RuntimeHint` must be a bounded, non-sensitive
+server-observed label. Never copy prompts, tool arguments, raw customer content, or regulated
+traits into these fields.
+
+## Existing feedback middleware
 
 The Go SDK uses only the standard library.
 

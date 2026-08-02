@@ -7,7 +7,7 @@
     "start": "node src/index.js"
   },
   "dependencies": {
-    "@agent-feedback/node": "file:../../sdk/node",
+    "@epode/node": "file:../../sdk/node",
     "fastify": "^5.10.0"
   },
   "engines": { "node": ">=20" }

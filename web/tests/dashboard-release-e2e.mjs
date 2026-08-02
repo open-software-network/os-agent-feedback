@@ -215,6 +215,9 @@ const firstCustomer = {
   sessionCount: 1,
   activeNeedCount: 1,
   consentState: "approved",
+  contextSummary: "Find the newest indexed policy",
+  contextCount: 1,
+  personalizationReady: true,
 };
 const firstSignal = {
   id: ids.signalOne,
@@ -222,16 +225,19 @@ const firstSignal = {
   sessionId: ids.sessionOne,
   interactionId: ids.interactionOne,
   feedbackReportId: ids.reportOne,
-  featureKey: "freshness-gap",
-  type: "feature_need",
-  summary: "Results need to include newly indexed documents",
-  detail: "The current search path omitted a document needed for the task.",
-  provenance: "agent_reports_current_task",
+  featureKey: null,
+  signalKey: "b2b.primary_goal",
+  value: "improve_operations",
+  type: "intent",
+  summary: "Find the newest indexed policy",
+  detail: "The customer needs current policy context before making a decision.",
+  provenance: "agent_reports_user_statement",
   confidence: 0.9,
   collectedAt: now,
   expiresAt: null,
-  consentScope: "share_outcome",
+  consentScope: "share_preferences",
   consentState: "approved",
+  allowedUses: ["product_personalization"],
 };
 const firstFeature = {
   key: "freshness-gap",
@@ -253,6 +259,7 @@ function createFixture() {
     authStarts: 0,
     createdProducts: [],
     feedbackMode: "never_ask",
+    retentionDays: 90,
     invitations: [],
     requests: [],
   };
@@ -276,7 +283,11 @@ function createFixture() {
         : item.id === ids.billing
           ? ids.billingEnvironment
           : item.environmentId;
-    return { ...environment(item.id, id), feedbackMode: state.feedbackMode };
+    return {
+      ...environment(item.id, id),
+      feedbackMode: state.feedbackMode,
+      retentionDays: state.retentionDays,
+    };
   }
 
   function dashboard(productId) {
@@ -318,6 +329,15 @@ function createFixture() {
       currentProduct,
       environments: allEnvironments,
       currentEnvironment,
+      activationMilestones: selectedSearchProduct
+        ? {
+            workspaceId: ids.workspace,
+            productId: currentProduct.id,
+            firstOpportunityAt: now,
+            firstConfirmedInteractionAt: now,
+            firstReportAt: now,
+          }
+        : null,
       apiKeys: [
         {
           id: "77777777-7777-4777-8777-777777777777",
@@ -337,6 +357,12 @@ function createFixture() {
       insights: {
         windowDays: 30,
         comparisonDays: 30,
+        customerContextItems: selectedSearchProduct ? 1 : 0,
+        customersWithContext: selectedSearchProduct ? 1 : 0,
+        contextRetrievals: selectedSearchProduct ? 2 : 0,
+        personalizationReadyCustomers: selectedSearchProduct ? 1 : 0,
+        personalizationDecisions: selectedSearchProduct ? 1 : 0,
+        personalizationOutcomes: selectedSearchProduct ? 1 : 0,
         reports: reports.length,
         opportunities: selectedSearchProduct ? 3 : 0,
         confirmedInteractions: selectedSearchProduct ? 2 : 0,
@@ -475,7 +501,8 @@ function createFixture() {
         sessions: [firstSession],
         consent: [
           {
-            scope: "share_outcome",
+            scope: "share_preferences",
+            enrichmentPurpose: "product_personalization",
             state: "approved",
             basis: "user_decision",
             decidedAt: now,
@@ -486,6 +513,17 @@ function createFixture() {
         ],
         consentHistory: [],
         counts: { signals: 1, sessions: 1, features: 1 },
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/dashboard/signals") {
+      const selectedSearchProduct = url.searchParams.get("productId") === ids.search;
+      json(response, 200, {
+        signals: selectedSearchProduct ? [firstSignal] : [],
+        total: selectedSearchProduct ? 1 : 0,
+        limit: Number(url.searchParams.get("limit") ?? 100),
+        nextCursor: null,
       });
       return;
     }
@@ -610,7 +648,9 @@ function createFixture() {
     }
 
     if (url.pathname === "/api/settings/policy" && request.method === "POST") {
-      state.feedbackMode = JSON.parse(body || "{}").feedbackMode ?? "never_ask";
+      const input = JSON.parse(body || "{}");
+      state.feedbackMode = input.feedbackMode ?? "never_ask";
+      state.retentionDays = input.retentionDays ?? state.retentionDays;
       json(response, 200, { environment: dashboard().currentEnvironment });
       return;
     }
@@ -710,7 +750,7 @@ function startNext({ port, apiUrl }) {
   const output = [];
   const child = spawn(
     "pnpm",
-    ["exec", "next", "dev", "--hostname", "127.0.0.1", "--port", String(port)],
+    ["exec", "next", "start", "--hostname", "127.0.0.1", "--port", String(port)],
     {
       cwd: repositoryRoot,
       env: {
@@ -736,7 +776,7 @@ async function waitForServer(url, child, output) {
       const response = await fetch(`${url}/auth/signin`, { redirect: "manual" });
       if (response.status === 200) return;
     } catch {
-      // Compilation is still in progress.
+      // The production server is still starting.
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
@@ -786,12 +826,6 @@ async function metricVisible(page, label, value) {
   );
 }
 
-async function input(page, selector, value) {
-  await page.waitForSelector(selector, { visible: true, timeout: 15_000 });
-  await page.click(selector, { clickCount: 3 });
-  await page.type(selector, value);
-}
-
 async function fixtureRequest(state, predicate, description) {
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
@@ -816,7 +850,7 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   assert.match(page.url(), /\/auth\/signin/);
   await textVisible(page, "Sign in to Epode");
 
-  await clickText(page, "Continue with OS Accounts");
+  await clickText(page, "Continue");
   await textVisible(page, "Sign in to Epode");
   assert.equal(
     state.authStarts,
@@ -824,137 +858,114 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
     "first OS Accounts handoff should fail in the disposable fixture",
   );
 
-  await clickText(page, "Continue with OS Accounts");
-  await textVisible(page, "Fresh results after indexing is the leading customer need.");
+  await clickText(page, "Continue");
+  await textVisible(page, "Epode learned 1 useful context item.");
   assert.equal(new URL(page.url()).pathname, "/", "the dashboard must live at the root, not /app");
   assert.equal(state.authStarts, 2, "retry should reach the same OS Accounts handoff route");
   await fixtureRequest(state, requestPath("/api/dashboard"), "initial dashboard data");
 
-  await textVisible(page, "Needs and opportunities");
-  await textVisible(page, "Customers requiring attention");
+  await textVisible(page, "Customer understanding");
+  await textVisible(page, "What customers care about");
+  await textVisible(page, "Find the newest indexed policy");
+  await metricVisible(page, "Customers with context", "1");
+  await metricVisible(page, "Context learned", "1");
+  await metricVisible(page, "Personalization-ready", "1");
+  await metricVisible(page, "Context retrievals", "2");
+  const signals = await fixtureRequest(
+    state,
+    (request) =>
+      request.path.startsWith("/api/dashboard/signals?") &&
+      request.path.includes(`productId=${ids.search}`) &&
+      new URL(request.path, "http://fixture.invalid").searchParams.get("type") ===
+        "intent,preference,constraint",
+    "permissioned customer context for Insights",
+  );
+  assert.equal(signals.headers["x-workspace-id"], ids.workspace);
+  assert.equal(
+    signals.headers.host,
+    upstreamHost,
+    "the browser must reach customer signals only through the root-host BFF",
+  );
+  assert.ok(
+    String(signals.headers.cookie).includes(TEST_COOKIE),
+    "the signals BFF must forward the real browser session cookie",
+  );
 
   await page.click("button[aria-label*='open context menu']");
   await clickText(page, "Billing API");
-  await textVisible(page, "No customer intelligence has been collected yet.");
-  await page.click("button[aria-label*='open context menu']");
-  await clickText(page, "New product");
-  await textVisible(page, "Product management");
-  await clickText(page, "New product");
-  await input(page, "#create-product-name", "Analytics API");
-  await clickText(page, "Create");
-  await page.waitForFunction(
-    () => new URL(window.location.href).searchParams.get("view") === "setup",
-    { timeout: 15_000 },
-  );
-  await metricVisible(page, "First opportunity", "Waiting");
-  await metricVisible(page, "First confirmed", "Waiting");
-  await metricVisible(page, "First report", "Waiting");
-  await textVisible(page, "Save this server-side key now");
-  await textVisible(page, "Coding-agent setup prompt");
-
-  await clickText(page, "Home");
+  await textVisible(page, "Connect your product to start learning what customers want.");
+  await textVisible(page, "No customers understood yet.");
   await page.click("button[aria-label*='open context menu']");
   await clickText(page, "Search API");
-  await textVisible(page, "Fresh results after indexing is the leading customer need.");
+  await textVisible(page, "Epode learned 1 useful context item.");
 
   await clickText(page, "Customers");
+  await textVisible(page, "Interaction-only context is not a durable customer profile.");
+  await metricVisible(page, "Customers", "1");
+  await metricVisible(page, "Known", "1");
   await clickText(page, "Acme workspace");
-  await textVisible(page, "Identity and provenance");
+  await textVisible(page, "Personalization context");
+  await textVisible(page, "Find the newest indexed policy");
+  await textVisible(page, "Permission");
+  await textVisible(page, "Why Epode knows this");
   const customerDetail = await fixtureRequest(
     state,
     requestPath(`/api/dashboard/customers/${ids.customerOne}`),
     "customer detail BFF route",
   );
   assert.equal(customerDetail.headers["x-workspace-id"], ids.workspace);
-
-  await clickText(page, "Features");
-  await clickText(page, "Fresh results after indexing");
-  await textVisible(page, "Underlying evidence");
-  await clickText(page, "Open report");
-  await textVisible(page, "Search results omitted the newest document");
-  const featureDetail = await fixtureRequest(
-    state,
-    requestPath("/api/dashboard/features/freshness-gap"),
-    "feature evidence BFF route",
-  );
-  assert.equal(featureDetail.headers["x-workspace-id"], ids.workspace);
   assert.equal(
-    featureDetail.headers.host,
+    customerDetail.headers.host,
     upstreamHost,
-    "the browser must reach the API only through the root-host BFF",
+    "the browser must reach customer detail only through the root-host BFF",
   );
   assert.ok(
-    String(featureDetail.headers.cookie).includes(TEST_COOKIE),
+    String(customerDetail.headers.cookie).includes(TEST_COOKIE),
     "BFF must forward the real browser session cookie to its API origin",
   );
 
-  await page.goto(
-    `${baseUrl}/?view=feedback&team=${ids.workspace}&product=${ids.search}&report=${ids.remoteReport}`,
-    { waitUntil: "networkidle0" },
-  );
-  await textVisible(page, "Remote feedback detail reached through the BFF");
-  await fixtureRequest(
-    state,
-    requestPath(`/api/dashboard/reports/${ids.remoteReport}`),
-    "feedback detail BFF route",
-  );
-
-  await clickText(page, "Sessions");
-  await textVisible(page, "Load 50 more");
-  await clickText(page, "Load 50 more");
-  await textVisible(page, "session-99");
-  await input(page, "input[aria-label='Search sessions']", "checkout");
-  await clickText(page, "Multi-step");
-  const filteredSessions = await fixtureRequest(
-    state,
-    (request) =>
-      request.path.includes("/api/dashboard/sessions") && request.path.includes("kind=multi"),
-    "server session filter",
-  );
-  assert.equal(filteredSessions.headers["x-workspace-id"], ids.workspace);
-  await clickText(page, "session-99");
-  await textVisible(page, "Observed journey");
-  await fixtureRequest(
-    state,
-    requestPath(`/api/dashboard/sessions/${ids.sessionTwo}`),
-    "session detail BFF route",
+  await clickText(page, "Setup");
+  await textVisible(page, "Connect Search API");
+  await textVisible(page, "Install Epode once in your company's product.");
+  await metricVisible(page, "Product key", "Ready");
+  await metricVisible(page, "SDK connected", "Complete");
+  await metricVisible(page, "Context items", "1");
+  await metricVisible(page, "Customers with context", "1");
+  await metricVisible(page, "Ready customers", "1");
+  await metricVisible(page, "Context retrievals", "2");
+  await textVisible(page, "1. Install Epode");
+  await textVisible(page, "2. Identify customers when possible");
+  await textVisible(page, "3. Retrieve context and personalize");
+  await textVisible(
+    page,
+    "Setup complete: Epode learned customer context and your product retrieved it.",
   );
 
-  await clickText(page, "Configuration");
-  await clickText(page, "Collection");
-  await textVisible(page, "Ask once is remembered under an HMAC-derived subject");
+  await clickText(page, "Data controls");
+  await textVisible(page, "Allowed customer context");
+  await textVisible(page, "Product personalization");
+  await textVisible(page, "Targeted advertising");
+  await textVisible(page, "Data retention");
+  await clickText(page, "30 days");
+  await page.click("summary");
   await page.select("#feedback-mode", "ask_once");
-  await clickText(page, "Save changes");
-  await textVisible(page, "Collection policy saved.");
-  await fixtureRequest(
+  await clickText(page, "Save retention and outcome settings");
+  await textVisible(
+    page,
+    "Retention saved. Legacy outcome feedback is ask_once; customer enrichment permission is unchanged.",
+  );
+  const policySave = await fixtureRequest(
     state,
     (request) =>
       request.method === "POST" &&
       request.path === "/api/settings/policy" &&
-      request.body.includes("ask_once"),
+      request.body.includes('"feedbackMode":"ask_once"') &&
+      request.body.includes('"retentionDays":30'),
     "collection policy save",
   );
-
-  await clickText(page, "Team");
-  await textVisible(page, "Invite teammates");
-  await input(page, "#invite-email", "release.e2e@example.com");
-  await page.select("#invite-role", "admin");
-  await clickText(page, "Open email draft");
-  await fixtureRequest(
-    state,
-    (request) =>
-      request.method === "POST" &&
-      request.path === "/api/team/invitations" &&
-      request.body.includes("release.e2e%40example.com") === false &&
-      request.body.includes("release.e2e@example.com") &&
-      request.body.includes("admin"),
-    "email invitation creation",
-  );
-  assert.equal(
-    state.invitations.length,
-    1,
-    "the Team invite UX must create an invitation before mailto",
-  );
+  assert.equal(policySave.headers["x-workspace-id"], ids.workspace);
+  assert.equal(state.feedbackMode, "ask_once");
+  assert.equal(state.retentionDays, 30);
 }
 
 async function writeFailureArtifacts(page, error, state, nextOutput) {

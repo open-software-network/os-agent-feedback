@@ -1,6 +1,6 @@
 import Fastify from "fastify";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { agentFeedback } from "@agent-feedback/node/fastify";
+import { agentFeedback } from "@epode/node/fastify";
 
 const app = Fastify();
 app.addHook("preHandler", async (request, reply) => {

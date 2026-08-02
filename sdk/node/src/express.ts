@@ -13,6 +13,9 @@ import {
   requestDiscoveryLink,
 } from "./core.js";
 
+export type { EpodeExpress, EpodeExpressOptions } from "./customer-express.js";
+export { epode } from "./customer-express.js";
+
 const operationOverride = Symbol("agent-feedback-operation");
 
 type InstrumentedRequest = Request & { [operationOverride]?: string };

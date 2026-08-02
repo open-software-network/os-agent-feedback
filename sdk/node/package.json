@@ -1,7 +1,7 @@
 {
-  "name": "@agent-feedback/node",
-  "version": "0.3.1",
-  "description": "Collect structured product feedback from the customer agents using your Node product.",
+  "name": "@epode/node",
+  "version": "0.4.0",
+  "description": "Learn permissioned customer context through customer agents, then personalize and measure the product experience.",
   "repository": {
     "type": "git",
     "url": "https://github.com/open-software-network/os-epode.git",
@@ -29,6 +29,22 @@
       "types": "./dist/mcp.d.ts",
       "import": "./dist/mcp.js"
     },
+    "./customer": {
+      "types": "./dist/customer.d.ts",
+      "import": "./dist/customer.js"
+    },
+    "./customer/express": {
+      "types": "./dist/customer-express.d.ts",
+      "import": "./dist/customer-express.js"
+    },
+    "./customer/fastify": {
+      "types": "./dist/customer-fastify.d.ts",
+      "import": "./dist/customer-fastify.js"
+    },
+    "./customer/mcp": {
+      "types": "./dist/customer-mcp.d.ts",
+      "import": "./dist/customer-mcp.js"
+    },
     "./agent": {
       "types": "./dist/agent.d.ts",
       "import": "./dist/agent.js"
@@ -43,7 +59,8 @@
     "README.md"
   ],
   "bin": {
-    "agent-feedback-doctor": "./dist/doctor.js"
+    "agent-feedback-doctor": "./dist/doctor.js",
+    "epode-doctor": "./dist/doctor.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -81,6 +98,12 @@
   "engines": {
     "node": ">=20"
   },
+  "keywords": [
+    "customer-intelligence",
+    "personalization",
+    "ai-agents",
+    "mcp"
+  ],
   "license": "MIT",
   "publishConfig": {
     "access": "public",

@@ -3,17 +3,18 @@ title: "Choose an integration"
 description: "Select a product surface first, then the server framework that already owns the response."
 ---
 
-Choose the **surface your customer's agent uses**, not the framework the agent itself was built with.
+Choose the **company surface your customer's agent uses**, not the framework the agent itself was built with.
+The customer does not install Epode on any path.
 
 <CardGroup cols={2}>
   <Card title="HTTP API" icon="brackets-curly" href="/integrations/node-express">
-    Instrument selected successful JSON responses. They begin as opportunities.
+    Add relevant context requests and a same-origin answer relay to selected JSON responses.
   </Card>
   <Card title="Server-rendered website" icon="browser" href="/integrations/node-fastify">
-    Instrument HTML returned by your server without changing what people see.
+    Use the server or edge that owns the response; never put the product key in browser JavaScript.
   </Card>
   <Card title="MCP server" icon="plug" href="/integrations/node-mcp">
-    Register an explicit feedback tool. Product-tool calls are confirmed immediately.
+    Register company-owned permission and customer-context tools alongside product tools.
   </Card>
   <Card title="Static site or hosted docs" icon="cloud" href="/integrations/static-edge">
     Use the advanced trusted-edge proxy when your team controls the public response route.

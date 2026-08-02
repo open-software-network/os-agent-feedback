@@ -38,6 +38,25 @@ pub(crate) struct ParsedCapability {
     pub signature: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EnrichmentCapabilityClaims {
+    pub v: u8,
+    pub q: Uuid,
+    pub i: Uuid,
+    pub iat: i64,
+    pub exp: i64,
+    pub n: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedEnrichmentCapability {
+    pub key_id: Uuid,
+    pub claims: EnrichmentCapabilityClaims,
+    pub signing_input: String,
+    pub signature: Vec<u8>,
+}
+
 pub(crate) fn random_token(prefix: &str) -> String {
     let mut bytes = [0_u8; 32];
     rand::rng().fill_bytes(&mut bytes);
@@ -78,6 +97,137 @@ pub(crate) fn parse_capability(token: &str) -> Result<ParsedCapability, ApiError
         signing_input: format!("afr2_{key_id_text}.{payload}"),
         signature,
     })
+}
+
+#[cfg(test)]
+pub(crate) fn sign_enrichment_capability(
+    key_id: Uuid,
+    key_hash: &[u8],
+    request_id: Uuid,
+    interaction_id: Uuid,
+    now: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+) -> Result<(String, Vec<u8>), ApiError> {
+    let nonce = random_token("");
+    sign_enrichment_capability_with_nonce(
+        key_id,
+        key_hash,
+        request_id,
+        interaction_id,
+        now,
+        expires_at,
+        &nonce,
+    )
+}
+
+fn sign_enrichment_capability_with_nonce(
+    key_id: Uuid,
+    key_hash: &[u8],
+    request_id: Uuid,
+    interaction_id: Uuid,
+    now: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    nonce: &str,
+) -> Result<(String, Vec<u8>), ApiError> {
+    let claims = EnrichmentCapabilityClaims {
+        v: 1,
+        q: request_id,
+        i: interaction_id,
+        iat: now.timestamp(),
+        exp: expires_at.timestamp(),
+        n: nonce.to_owned(),
+    };
+    let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).map_err(ApiError::internal)?);
+    let signing_input = format!("aqr1_{}.{payload}", key_id.simple());
+    let mut mac = HmacSha256::new_from_slice(key_hash).map_err(ApiError::internal)?;
+    mac.update(signing_input.as_bytes());
+    let signature = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    Ok((format!("{signing_input}.{signature}"), sha256(nonce)))
+}
+
+/// Creates an idempotent, request-bound capability. The nonce remains secret because
+/// it is derived with the product key hash, while identical request retries can
+/// reconstruct the same winning token without storing bearer credentials.
+pub(crate) fn sign_deterministic_enrichment_capability(
+    key_id: Uuid,
+    key_hash: &[u8],
+    request_id: Uuid,
+    interaction_id: Uuid,
+    issued_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+) -> Result<(String, Vec<u8>), ApiError> {
+    let mut mac = HmacSha256::new_from_slice(key_hash).map_err(ApiError::internal)?;
+    mac.update(b"epode-enrichment-capability-nonce-v1\0");
+    mac.update(request_id.as_bytes());
+    mac.update(interaction_id.as_bytes());
+    mac.update(&issued_at.timestamp().to_be_bytes());
+    mac.update(&expires_at.timestamp().to_be_bytes());
+    let nonce = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    sign_enrichment_capability_with_nonce(
+        key_id,
+        key_hash,
+        request_id,
+        interaction_id,
+        issued_at,
+        expires_at,
+        &nonce,
+    )
+}
+
+pub(crate) fn parse_enrichment_capability(
+    token: &str,
+) -> Result<ParsedEnrichmentCapability, ApiError> {
+    let encoded = token
+        .strip_prefix("aqr1_")
+        .ok_or_else(ApiError::unauthorized)?;
+    let mut parts = encoded.split('.');
+    let key_id_text = parts.next().ok_or_else(ApiError::unauthorized)?;
+    let payload = parts.next().ok_or_else(ApiError::unauthorized)?;
+    let signature_text = parts.next().ok_or_else(ApiError::unauthorized)?;
+    if parts.next().is_some() {
+        return Err(ApiError::unauthorized());
+    }
+    let key_id = Uuid::parse_str(key_id_text).map_err(|_| ApiError::unauthorized())?;
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(payload)
+        .map_err(|_| ApiError::unauthorized())?;
+    let claims: EnrichmentCapabilityClaims =
+        serde_json::from_slice(&payload_bytes).map_err(|_| ApiError::unauthorized())?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(signature_text)
+        .map_err(|_| ApiError::unauthorized())?;
+    Ok(ParsedEnrichmentCapability {
+        key_id,
+        claims,
+        signing_input: format!("aqr1_{key_id_text}.{payload}"),
+        signature,
+    })
+}
+
+pub(crate) fn verify_enrichment_capability(
+    parsed: ParsedEnrichmentCapability,
+    key_hash: &[u8],
+    now: DateTime<Utc>,
+) -> Result<EnrichmentCapabilityClaims, ApiError> {
+    let mut mac = HmacSha256::new_from_slice(key_hash).map_err(ApiError::internal)?;
+    mac.update(parsed.signing_input.as_bytes());
+    mac.verify_slice(&parsed.signature)
+        .map_err(|_| ApiError::unauthorized())?;
+    let issued_at =
+        DateTime::from_timestamp(parsed.claims.iat, 0).ok_or_else(ApiError::unauthorized)?;
+    let expires_at =
+        DateTime::from_timestamp(parsed.claims.exp, 0).ok_or_else(ApiError::unauthorized)?;
+    if parsed.claims.v != 1
+        || parsed.claims.n.len() < 16
+        || parsed.claims.n.len() > 128
+        || issued_at > now + Duration::minutes(5)
+        || expires_at <= now
+        || expires_at - issued_at > Duration::hours(2)
+        || expires_at <= issued_at
+    {
+        return Err(ApiError::unauthorized());
+    }
+    Ok(parsed.claims)
 }
 
 pub(crate) fn verify_capability(
@@ -298,5 +448,78 @@ mod tests {
         claims.r = Some(0);
         let unscoped = signed_capability(key_id, &key_hash, &claims);
         assert!(verify_capability(parse_capability(&unscoped).unwrap(), &key_hash, now).is_err());
+    }
+
+    #[test]
+    fn enrichment_capabilities_are_request_bound_and_domain_separated() {
+        let key_id = Uuid::new_v4();
+        let key_hash = sha256("af_live_enrichment_test");
+        let now = Utc::now();
+        let request_id = Uuid::new_v4();
+        let interaction_id = Uuid::new_v4();
+        let (token, nonce_hash) = sign_enrichment_capability(
+            key_id,
+            &key_hash,
+            request_id,
+            interaction_id,
+            now,
+            now + Duration::hours(1),
+        )
+        .unwrap();
+        assert!(token.starts_with("aqr1_"));
+        assert!(parse_capability(&token).is_err());
+        let parsed = parse_enrichment_capability(&token).unwrap();
+        let claims = verify_enrichment_capability(parsed, &key_hash, now).unwrap();
+        assert_eq!(claims.q, request_id);
+        assert_eq!(claims.i, interaction_id);
+        assert_eq!(nonce_hash, sha256(&claims.n));
+
+        let expires_at = now + Duration::hours(1);
+        let deterministic = sign_deterministic_enrichment_capability(
+            key_id,
+            &key_hash,
+            request_id,
+            interaction_id,
+            now,
+            expires_at,
+        )
+        .unwrap();
+        let retry = sign_deterministic_enrichment_capability(
+            key_id,
+            &key_hash,
+            request_id,
+            interaction_id,
+            now,
+            expires_at,
+        )
+        .unwrap();
+        let other = sign_deterministic_enrichment_capability(
+            key_id,
+            &key_hash,
+            Uuid::new_v4(),
+            interaction_id,
+            now,
+            expires_at,
+        )
+        .unwrap();
+        assert_eq!(deterministic, retry);
+        assert_ne!(deterministic.0, other.0);
+
+        let mut tampered = token.into_bytes();
+        let signature_start = tampered.iter().rposition(|value| *value == b'.').unwrap() + 1;
+        tampered[signature_start] = if tampered[signature_start] == b'A' {
+            b'B'
+        } else {
+            b'A'
+        };
+        let tampered = String::from_utf8(tampered).unwrap();
+        assert!(
+            verify_enrichment_capability(
+                parse_enrichment_capability(&tampered).unwrap(),
+                &key_hash,
+                now,
+            )
+            .is_err()
+        );
     }
 }

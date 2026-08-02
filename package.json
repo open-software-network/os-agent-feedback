@@ -20,6 +20,7 @@
     "gen:types": "mkdir -p web/lib/api && pnpm exec openapi-typescript backend/openapi.json -o web/lib/api/types.ts",
     "test:setup-matrix": "node tests/setup-matrix-e2e.mjs",
     "test:icp-loop": "node tests/icp-onboarding-e2e.mjs",
+    "test:customer-enrichment-e2e": "node tests/customer-enrichment-e2e.mjs",
     "test:agent-compliance": "node experiments/agent-compliance/run.mjs --runtime codex --suite placement-pilot --repetitions 3 --output .artifacts/agent-compliance/codex-placement.json",
     "test:agent-compliance:codex-ask-once": "node experiments/agent-compliance/codex-ask-once-matrix.mjs --cases smoke",
     "test:agent-compliance:codex-ask-once:all": "node experiments/agent-compliance/codex-ask-once-matrix.mjs --cases all",
@@ -46,7 +47,7 @@
   },
   "name": "os-epode",
   "version": "1.0.0",
-  "description": "Epode tells companies whether their product actually worked for the independent customer agents using it.",
+  "description": "Epode learns permissioned customer context through customer agents, then helps companies personalize and measure the experience.",
   "main": "index.js",
   "directories": {
     "doc": "docs",

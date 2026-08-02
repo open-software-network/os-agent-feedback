@@ -1,4 +1,4 @@
-import { createMcpInstrumentation } from "@agent-feedback/node/mcp";
+import { createMcpInstrumentation } from "@epode/node/mcp";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
 import { toNodeHandler } from "@modelcontextprotocol/node";

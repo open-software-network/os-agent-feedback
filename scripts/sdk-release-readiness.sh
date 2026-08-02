@@ -80,9 +80,10 @@ npm --prefix "$node_consumer" install --ignore-scripts --no-package-lock "$node_
 (
   cd "$node_consumer"
   node --input-type=module -e '
-    import { AgentFeedbackRuntime } from "@agent-feedback/node";
-    import { createStaticDocsProxy } from "@agent-feedback/node/edge";
-    if (typeof AgentFeedbackRuntime !== "function" || typeof createStaticDocsProxy !== "function") {
+    import { AgentFeedbackRuntime } from "@epode/node";
+    import { createEpode } from "@epode/node/customer";
+    import { createStaticDocsProxy } from "@epode/node/edge";
+    if (typeof AgentFeedbackRuntime !== "function" || typeof createEpode !== "function" || typeof createStaticDocsProxy !== "function") {
       process.exit(1);
     }
   '
@@ -103,7 +104,7 @@ python_consumer="$(mktemp -d "${TMPDIR:-/tmp}/agent-feedback-python.XXXXXX")"
 cleanup_paths+=("$python_consumer")
 "$python_bin" -m venv "$python_consumer/venv"
 "$python_consumer/venv/bin/python" -m pip install --disable-pip-version-check --no-index --no-deps "$python_wheel" >/dev/null
-"$python_consumer/venv/bin/python" -c 'from agent_feedback import AgentFeedback, AgentFeedbackASGI, AgentFeedbackWSGI; assert AgentFeedback and AgentFeedbackASGI and AgentFeedbackWSGI'
+"$python_consumer/venv/bin/python" -c 'from agent_feedback import AgentFeedback, AgentFeedbackASGI, AgentFeedbackWSGI, EpodeClient; assert AgentFeedback and AgentFeedbackASGI and AgentFeedbackWSGI and EpodeClient'
 
 # Go modules are distributed by semantic VCS tags, not uploaded registry blobs.
 # A deterministic source archive is still produced for release inspection, and
@@ -116,6 +117,7 @@ cp \
   "$repo_root/sdk/go/go.mod" \
   "$repo_root/sdk/go/agent.go" \
   "$repo_root/sdk/go/agentfeedback.go" \
+  "$repo_root/sdk/go/customer.go" \
   "$repo_root/sdk/go/README.md" \
   "$go_stage/agent-feedback-go-$version/"
 chmod 0644 "$go_stage/agent-feedback-go-$version/"*
@@ -129,7 +131,7 @@ COPYFILE_DISABLE=1 tar \
   --format ustar \
   "${tar_owner_args[@]}" \
   -cf - -C "$go_stage/agent-feedback-go-$version" \
-  go.mod agent.go agentfeedback.go README.md \
+  go.mod agent.go agentfeedback.go customer.go README.md \
   | gzip -n > "$go_tarball"
 go_extract="$(mktemp -d "${TMPDIR:-/tmp}/agent-feedback-go-package.XXXXXX")"
 cleanup_paths+=("$go_extract")
@@ -149,7 +151,7 @@ cleanup_paths+=("$go_consumer")
   go mod init example.com/agent-feedback-smoke >/dev/null
   go mod edit -require="github.com/open-software-network/os-epode/sdk/go@v$version"
   go mod edit -replace="github.com/open-software-network/os-epode/sdk/go=$go_extract"
-  printf '%s\n' 'package main' 'import agentfeedback "github.com/open-software-network/os-epode/sdk/go"' 'func main() { _ = agentfeedback.Options{} }' > main.go
+  printf '%s\n' 'package main' 'import agentfeedback "github.com/open-software-network/os-epode/sdk/go"' 'func main() { _, _ = agentfeedback.NewCustomerClient(agentfeedback.CustomerClientOptions{APIKey: "af_live_test"}); _ = agentfeedback.Options{} }' > main.go
   go mod tidy
   go build ./...
 )
@@ -172,7 +174,7 @@ rust_consumer="$(mktemp -d "${TMPDIR:-/tmp}/agent-feedback-rust.XXXXXX")"
 cleanup_paths+=("$rust_consumer")
 mkdir -p "$rust_consumer/src"
 printf '%s\n' '[package]' 'name = "agent-feedback-smoke"' 'version = "0.0.0"' 'edition = "2024"' '' '[dependencies]' "agent-feedback = { path = \"$rust_extract/agent-feedback-$version\" }" > "$rust_consumer/Cargo.toml"
-printf '%s\n' 'fn main() { let _ = agent_feedback::Options::new("test"); }' > "$rust_consumer/src/main.rs"
+printf '%s\n' 'fn main() { let _ = agent_feedback::Options::new("test"); let _ = agent_feedback::EpodeClientOptions::new("af_live_test"); }' > "$rust_consumer/src/main.rs"
 (
   cd "$rust_consumer"
   cargo generate-lockfile >/dev/null

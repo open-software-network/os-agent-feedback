@@ -11,7 +11,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Epode",
-  description: "Structured feedback from customer agents",
+  description: "Permissioned customer context from the AI agents acting for them",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {

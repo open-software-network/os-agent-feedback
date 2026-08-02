@@ -1,61 +1,61 @@
 ---
 title: "Epode documentation"
-description: "The customer-intelligence layer for the agent-mediated internet."
+description: "Learn permissioned customer context through customer agents, then personalize and measure the experience."
 ---
 
-Epode gives companies a permissioned communication channel with the **independent agents used by
-their customers**. Learn what customers wanted, whether the product worked, where they struggled, and
-which evidence-backed change matters next. You instrument your product; customers do not install an SDK,
-create an Epode account, or identify their agent.
+Epode helps companies understand every customer—known, anonymous, or present for only one interaction—through
+the AI agent acting for them. The company installs Epode once. Customers do not create an Epode account, install
+a plugin, or send product keys anywhere.
 
 <CardGroup cols={2}>
   <Card title="Connect a product" icon="plug" href="/quickstart">
-    Add one server-side integration to selected API, HTML, or MCP surfaces.
+    Add one company-side integration and keep every normal product response fail-open.
   </Card>
-  <Card title="Choose an integration" icon="code" href="/integrations/choose">
-    Find the supported adapter for your language and product surface.
+  <Card title="Understand customer context" icon="users" href="/concepts/customer-enrichment">
+    See how permission, provenance, expiry, and known or anonymous identity fit together.
   </Card>
-  <Card title="Understand reliability" icon="signal" href="/concepts/reliability">
-    Learn why HTTP begins as an opportunity while MCP is confirmed immediately.
+  <Card title="Choose a surface" icon="code" href="/integrations/choose">
+    Use Express, Fastify, MCP, or the language-neutral company contract.
   </Card>
-  <Card title="Understand customers" icon="chart-line" href="/concepts/customers-and-sessions">
-    Connect outcomes, needs, evidence, identity provenance, permission, and sessions.
+  <Card title="Protect customer trust" icon="shield" href="/reference/privacy-security">
+    Keep product personalization and targeted advertising separately permissioned.
   </Card>
 </CardGroup>
 
-## The mental model
+## The four-screen mental model
+
+| Screen | The question it answers |
+| --- | --- |
+| **Customers** | What does this customer care about, and how do we know? |
+| **Insights** | What are we learning across customers? |
+| **Setup** | Is the company integration collecting and returning context correctly? |
+| **Data controls** | What may be shared, remembered, personalized, or used for advertising? |
+
+Questions, capabilities, relays, signals, and sessions support those four jobs. They are not the product's
+organizing model.
+
+## The loop
 
 <Steps>
-  <Step title="Your product responds">
-    Epode's server-side SDK adds a short-lived, write-only feedback contract to selected successful responses.
-    Telemetry never delays the response, and HTTP Ask once never waits on Epode. The SDK emits a subject-bound receipt locally; Epode Companion verifies it and resolves the remembered decision before asking or reporting.
+  <Step title="Ask">
+    On an eligible product response, Epode returns one relevant, company-branded request for missing customer
+    context. The customer agent can answer from the current task, ask the customer, report no relevant context,
+    or decline.
   </Step>
-  <Step title="Your customer's agent uses the result">
-    The agent performs the customer's real task using your API, page, or MCP tool.
+  <Step title="Learn">
+    The agent sends only bounded context through the company's own same-origin endpoint. Epode records its
+    permission, provenance, confidence, allowed use, and expiry.
   </Step>
-  <Step title="The agent reports what happened">
-    A feedback-aware HTTP runtime or MCP client can send one bounded report containing a summary,
-    impact, findings, confidence, and any workaround.
+  <Step title="Personalize">
+    The company's server retrieves only active context allowed for this exact purpose and adapts the product.
+  </Step>
+  <Step title="Measure">
+    The company links a conversion, completion, engagement, dismissal, or abandonment to the exact context used.
   </Step>
 </Steps>
 
 <Note>
-Epode does not identify agents or invent customer identity. Optional customer and session references come
-from verified identifiers, product-owned anonymous references, and server-proven journeys—not names, emails,
-prompts, task content, caller fields, or agent claims. `customerRef` remains only the compatible Ask-once
-subject and must equal `accountRef` when both are present; new integrations add `accountRef`, `userRef`, and
-`anonymousRef` as private, nonblocking telemetry.
+Epode is identity-aware, never identity-inventing. The company supplies verified `accountRef` or `userRef`, a
+product-owned `anonymousRef`, or no stable identity at all. Epode never discovers a person's identity from an IP,
+fingerprint, prompt, or agent claim.
 </Note>
-
-## Pick the right starting point
-
-| Your product surface | Start here | Evidence model |
-| --- | --- | --- |
-| Express JSON API | [Node + Express](/integrations/node-express) | Opportunity until feedback returns |
-| Fastify JSON or server-rendered HTML | [Node + Fastify](/integrations/node-fastify) | Opportunity until feedback returns |
-| FastAPI, Starlette, Django ASGI | [Python ASGI](/integrations/python-asgi) | Opportunity until feedback returns |
-| Flask, Django WSGI, Bottle | [Python WSGI](/integrations/python-wsgi) | Opportunity until feedback returns |
-| Go `net/http` | [Go](/integrations/go-http) | Opportunity until feedback returns |
-| Rust Axum or Tower | [Rust](/integrations/rust-axum) | Opportunity until feedback returns |
-| Node MCP server | [Node MCP](/integrations/node-mcp) | Confirmed on product-tool use |
-| Any other backend | [Language-neutral HTTP](/integrations/manual-http) or [MCP](/integrations/manual-mcp) | Depends on surface |

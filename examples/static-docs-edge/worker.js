@@ -1,4 +1,4 @@
-import { createStaticDocsProxy } from "@agent-feedback/node/edge";
+import { createStaticDocsProxy } from "@epode/node/edge";
 
 let proxy;
 

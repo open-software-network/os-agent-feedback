@@ -5726,6 +5726,486 @@
         ]
       }
     },
+    "/api/v2/enrichment/requests": {
+      "post": {
+        "tags": [
+          "enrichment"
+        ],
+        "operationId": "enrichment_request_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrichmentRequestInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Question and permission action selected for the interaction",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrichmentRequestResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid purpose, operation, or identity context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid product API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Interaction or identity context conflicts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Enrichment request could not be created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v2/enrichment/consent/decisions": {
+      "post": {
+        "tags": [
+          "enrichment"
+        ],
+        "operationId": "enrichment_consent_decision_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrichmentConsentDecisionInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Enrichment permission decision recorded idempotently",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrichmentConsentDecisionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid decision",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or expired enrichment capability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Decision could not be stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v2/enrichment/answers": {
+      "post": {
+        "tags": [
+          "enrichment"
+        ],
+        "operationId": "enrichment_answer_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrichmentAnswerInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Permissioned customer context accepted idempotently",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrichmentAnswerResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid, sensitive, or unbounded customer context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or expired enrichment capability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Customer context sharing is not approved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request already has a different answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Answer could not be stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v2/customer-context": {
+      "post": {
+        "tags": [
+          "personalization"
+        ],
+        "operationId": "customer_context_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomerContextInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Active permissioned context for a known, anonymous, or ephemeral customer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomerContextResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identity or purpose",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid product API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer or interaction context not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Identity references conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Customer context could not be retrieved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v2/personalization/decisions": {
+      "post": {
+        "tags": [
+          "personalization"
+        ],
+        "operationId": "personalization_decision_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonalizationDecisionInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Personalization decision linked to exact retrieved signal evidence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalizationDecisionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid decision or evidence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid product API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Context retrieval not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Idempotency key has a different payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Decision could not be stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v2/personalization/outcomes": {
+      "post": {
+        "tags": [
+          "personalization"
+        ],
+        "operationId": "personalization_outcome_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonalizationOutcomeInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Business outcome linked to an exact personalization decision",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalizationOutcomeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid outcome",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid product API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Personalization decision not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Idempotency key has a different payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Outcome could not be stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/mcp": {
       "get": {
         "tags": [
@@ -6140,6 +6620,7 @@
         "required": [
           "id",
           "scope",
+          "enrichmentPurpose",
           "priorState",
           "state",
           "basis",
@@ -6159,6 +6640,12 @@
           "decidedAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "enrichmentPurpose": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "id": {
             "type": "string",
@@ -6190,6 +6677,7 @@
         "required": [
           "id",
           "scope",
+          "enrichmentPurpose",
           "state",
           "basis",
           "decidedAt",
@@ -6204,6 +6692,12 @@
           "decidedAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "enrichmentPurpose": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "expiresAt": {
             "type": [
@@ -6347,6 +6841,149 @@
           },
           "id": {
             "type": "string"
+          }
+        }
+      },
+      "CustomerContextInput": {
+        "type": "object",
+        "required": [
+          "purpose"
+        ],
+        "properties": {
+          "accountRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "anonymousRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "customerRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "interactionId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "userRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "CustomerContextItem": {
+        "type": "object",
+        "required": [
+          "signalId",
+          "key",
+          "type",
+          "value",
+          "summary",
+          "provenance",
+          "confidence",
+          "expiresAt",
+          "allowedUses",
+          "remembered"
+        ],
+        "properties": {
+          "allowedUses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "confidence": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "key": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "string"
+          },
+          "remembered": {
+            "type": "boolean"
+          },
+          "signalId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "value": {}
+        }
+      },
+      "CustomerContextResponse": {
+        "type": "object",
+        "required": [
+          "retrievalId",
+          "identityLevel",
+          "customerId",
+          "interactionId",
+          "contextVersion",
+          "items"
+        ],
+        "properties": {
+          "contextVersion": {
+            "type": "string"
+          },
+          "customerId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "identityLevel": {
+            "type": "string"
+          },
+          "interactionId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CustomerContextItem"
+            }
+          },
+          "retrievalId": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
@@ -6501,6 +7138,8 @@
           "interactionId",
           "feedbackReportId",
           "featureKey",
+          "signalKey",
+          "value",
           "type",
           "summary",
           "detail",
@@ -6509,9 +7148,16 @@
           "collectedAt",
           "expiresAt",
           "consentScope",
-          "consentState"
+          "consentState",
+          "allowedUses"
         ],
         "properties": {
+          "allowedUses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "collectedAt": {
             "type": "string",
             "format": "date-time"
@@ -6589,12 +7235,19 @@
             ],
             "format": "uuid"
           },
+          "signalKey": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "summary": {
             "type": "string"
           },
           "type": {
             "type": "string"
-          }
+          },
+          "value": {}
         }
       },
       "CustomerSummary": {
@@ -7340,6 +7993,470 @@
         },
         "additionalProperties": false
       },
+      "EnrichmentAnswerAction": {
+        "type": "object",
+        "required": [
+          "url",
+          "method",
+          "authorization",
+          "contentType",
+          "bodySchema"
+        ],
+        "properties": {
+          "authorization": {
+            "type": "string"
+          },
+          "bodySchema": {
+            "$ref": "#/components/schemas/EnrichmentAnswerBodySchema"
+          },
+          "contentType": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "EnrichmentAnswerBodySchema": {
+        "type": "object",
+        "required": [
+          "status",
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "$ref": "#/components/schemas/EnrichmentAnswerItemsSchema"
+          },
+          "status": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "EnrichmentAnswerInput": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EnrichmentAnswerItemInput"
+            }
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "EnrichmentAnswerItemInput": {
+        "type": "object",
+        "required": [
+          "key",
+          "type",
+          "value",
+          "provenance",
+          "remember"
+        ],
+        "properties": {
+          "confidence": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "key": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "string"
+          },
+          "remember": {
+            "type": "boolean"
+          },
+          "type": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "EnrichmentAnswerItemsSchema": {
+        "type": "object",
+        "required": [
+          "maximum",
+          "required",
+          "type",
+          "provenance",
+          "catalogVersion",
+          "catalog"
+        ],
+        "properties": {
+          "catalog": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EnrichmentCatalogEntry"
+            }
+          },
+          "catalogVersion": {
+            "type": "string"
+          },
+          "maximum": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "provenance": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "required": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "type": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "EnrichmentAnswerResponse": {
+        "type": "object",
+        "required": [
+          "accepted",
+          "requestId",
+          "interactionId",
+          "customerId",
+          "signals"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "boolean"
+          },
+          "customerId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "interactionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "signals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CustomerContextItem"
+            }
+          }
+        }
+      },
+      "EnrichmentCatalogEntry": {
+        "type": "object",
+        "required": [
+          "key",
+          "type",
+          "allowedValues",
+          "targetedAdvertisingSafe"
+        ],
+        "properties": {
+          "allowedValues": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "key": {
+            "type": "string"
+          },
+          "targetedAdvertisingSafe": {
+            "type": "boolean"
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "EnrichmentConsentAction": {
+        "type": "object",
+        "required": [
+          "url",
+          "method",
+          "authorization",
+          "contentType",
+          "bodySchema"
+        ],
+        "properties": {
+          "authorization": {
+            "type": "string"
+          },
+          "bodySchema": {
+            "$ref": "#/components/schemas/EnrichmentConsentBodySchema"
+          },
+          "contentType": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "EnrichmentConsentBodySchema": {
+        "type": "object",
+        "required": [
+          "decision"
+        ],
+        "properties": {
+          "decision": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "EnrichmentConsentDecisionInput": {
+        "type": "object",
+        "required": [
+          "decision"
+        ],
+        "properties": {
+          "decision": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "EnrichmentConsentDecisionResponse": {
+        "type": "object",
+        "required": [
+          "requestId",
+          "state",
+          "changed",
+          "stageInstruction",
+          "answerInstruction",
+          "submit"
+        ],
+        "properties": {
+          "answerInstruction": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "changed": {
+            "type": "boolean"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "stageInstruction": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "submit": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EnrichmentAnswerAction"
+              }
+            ]
+          }
+        }
+      },
+      "EnrichmentRequestInput": {
+        "type": "object",
+        "required": [
+          "interactionId",
+          "operation",
+          "purpose",
+          "remember"
+        ],
+        "properties": {
+          "accountRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "anonymousRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "customerRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "durationMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "interactionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "operation": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "remember": {
+            "type": "boolean"
+          },
+          "runtimeHint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "statusCode": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "surface": {
+            "type": "string",
+            "default": "http_json"
+          },
+          "userRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "EnrichmentRequestResponse": {
+        "type": "object",
+        "required": [
+          "requestId",
+          "interactionId",
+          "state",
+          "purpose",
+          "surface",
+          "identityLevel",
+          "stageInstruction",
+          "question",
+          "answerInstruction",
+          "expiresAt",
+          "consent",
+          "submit"
+        ],
+        "properties": {
+          "answerInstruction": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "consent": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EnrichmentConsentAction"
+              }
+            ]
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "identityLevel": {
+            "type": "string"
+          },
+          "interactionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "question": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "stageInstruction": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "submit": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EnrichmentAnswerAction"
+              }
+            ]
+          },
+          "surface": {
+            "type": "string"
+          }
+        }
+      },
       "EnvironmentResponse": {
         "type": "object",
         "required": [
@@ -7996,6 +9113,12 @@
         "required": [
           "windowDays",
           "comparisonDays",
+          "customerContextItems",
+          "customersWithContext",
+          "contextRetrievals",
+          "personalizationReadyCustomers",
+          "personalizationDecisions",
+          "personalizationOutcomes",
           "opportunities",
           "confirmedInteractions",
           "reports",
@@ -8037,6 +9160,18 @@
             "type": "integer",
             "format": "int64"
           },
+          "contextRetrievals": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "customerContextItems": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "customersWithContext": {
+            "type": "integer",
+            "format": "int64"
+          },
           "findingKinds": {
             "type": "array",
             "items": {
@@ -8065,6 +9200,18 @@
               "integer",
               "null"
             ],
+            "format": "int64"
+          },
+          "personalizationDecisions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "personalizationOutcomes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "personalizationReadyCustomers": {
+            "type": "integer",
             "format": "int64"
           },
           "previousConfirmedInteractions": {
@@ -8362,6 +9509,162 @@
       "OpaqueJsonObject": {
         "type": "object",
         "description": "Opaque JSON object whose fields depend on the MCP JSON-RPC method."
+      },
+      "PersonalizationDecision": {
+        "type": "object",
+        "required": [
+          "id",
+          "externalDecisionId",
+          "purpose",
+          "signalIds",
+          "variant",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "externalDecisionId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "signalIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "variant": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PersonalizationDecisionInput": {
+        "type": "object",
+        "required": [
+          "externalDecisionId",
+          "contextRetrievalId",
+          "signalIds"
+        ],
+        "properties": {
+          "contextRetrievalId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "externalDecisionId": {
+            "type": "string"
+          },
+          "signalIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "variant": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "PersonalizationDecisionResponse": {
+        "type": "object",
+        "required": [
+          "decision"
+        ],
+        "properties": {
+          "decision": {
+            "$ref": "#/components/schemas/PersonalizationDecision"
+          }
+        }
+      },
+      "PersonalizationOutcome": {
+        "type": "object",
+        "required": [
+          "id",
+          "externalOutcomeId",
+          "decisionId",
+          "outcome",
+          "occurredAt",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "decisionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "externalOutcomeId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "outcome": {
+            "type": "string"
+          }
+        }
+      },
+      "PersonalizationOutcomeInput": {
+        "type": "object",
+        "required": [
+          "externalOutcomeId",
+          "decisionId",
+          "outcome"
+        ],
+        "properties": {
+          "decisionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "externalOutcomeId": {
+            "type": "string"
+          },
+          "occurredAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "outcome": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PersonalizationOutcomeResponse": {
+        "type": "object",
+        "required": [
+          "outcome"
+        ],
+        "properties": {
+          "outcome": {
+            "$ref": "#/components/schemas/PersonalizationOutcome"
+          }
+        }
       },
       "PolicyInput": {
         "type": "object",

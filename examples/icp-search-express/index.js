@@ -1,5 +1,5 @@
 import express from "express";
-import { agentFeedback } from "@agent-feedback/node/express";
+import { agentFeedback } from "@epode/node/express";
 
 const app = express();
 app.use((request, _response, next) => {

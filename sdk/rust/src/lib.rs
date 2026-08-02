@@ -1,3 +1,14 @@
+pub mod customer;
+pub use customer::{
+    AgentAction, CUSTOMER_CONTEXT_RELAY_PATHS, CustomerAnswerInput, CustomerAnswerItem,
+    CustomerAnswerStatus, CustomerClientError, CustomerContext, CustomerContextInput,
+    CustomerContextItem, CustomerIdentity, CustomerPurpose, EnrichmentRequest,
+    EnrichmentRequestInput, EnrichmentSurface, EpodeClient, EpodeClientOptions,
+    PersonalizationDecision, PersonalizationDecisionInput, PersonalizationDecisionResult,
+    PersonalizationOutcome, PersonalizationOutcomeInput, PersonalizationOutcomeKind,
+    PersonalizationOutcomeResult, RelayRequest, RelayResponse, same_origin_enrichment_request,
+};
+
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::Future,
@@ -595,7 +606,7 @@ impl Runtime {
         let response = client
             .post(format!("{}/api/v2/consent/state", self.options.endpoint))
             .bearer_auth(&self.options.api_key)
-            .header("user-agent", "agent-feedback-rust/0.3.1")
+            .header("user-agent", "agent-feedback-rust/0.4.0")
             .json(&json!({ "subject": subject }))
             .send()
             .await;
@@ -1010,7 +1021,7 @@ async fn send_telemetry_batch(
     let response = match client
         .post(format!("{}/api/v2/telemetry/batches", options.endpoint))
         .bearer_auth(&options.api_key)
-        .header("user-agent", "agent-feedback-rust/0.3.1")
+        .header("user-agent", "agent-feedback-rust/0.4.0")
         .json(&json!({ "events": events }))
         .send()
         .await
@@ -2126,7 +2137,7 @@ pub async fn submit_feedback_consent(
     Ok(client
         .post(destination)
         .header("authorization", &action.submit_decision.authorization)
-        .header("user-agent", "agent-feedback-rust-agent/0.3.1")
+        .header("user-agent", "agent-feedback-rust-agent/0.4.0")
         .json(&json!({ "decision": decision }))
         .send()
         .await?
@@ -2225,7 +2236,7 @@ pub async fn submit_product_feedback(
     Ok(client
         .post(submit)
         .header("authorization", &submit_contract.authorization)
-        .header("user-agent", "agent-feedback-rust-agent/0.3.1")
+        .header("user-agent", "agent-feedback-rust-agent/0.4.0")
         .json(&submission)
         .send()
         .await?

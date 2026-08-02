@@ -3,14 +3,58 @@ title: "Language-neutral HTTP"
 description: "Implement the small Epode HTTP contract in any server language."
 ---
 
+## Customer enrichment (recommended)
+
+Every backend can implement the customer-enrichment contract with HTTPS JSON:
+
+1. `POST /api/v2/enrichment/requests` with the server-only `EPODE_API_KEY`, operation, purpose, and optional
+   verified/product-owned identity references.
+2. Rewrite the returned consent and answer actions to fixed company-owned same-origin routes.
+3. At those routes, forward only the `aqr1_` authorization and allowlisted request body to Epode. Never forward
+   cookies, product authentication, arbitrary headers, or the company key.
+4. `POST /api/v2/customer-context` before personalization.
+5. Record the exact signal IDs with `/api/v2/personalization/decisions`, then link the business result with
+   `/api/v2/personalization/outcomes`.
+
+See the exact [Customer context API](/reference/customer-context) and the runnable
+[dependency-free Python company example](https://github.com/open-software-network/os-epode/tree/main/examples/mvp-b2b-python).
+
+If Epode is unavailable, omit `_epode` and return the normal JSON or server-rendered HTML response.
+
+The initial company request is one typed same-call event:
+
+```json
+{
+  "interactionId": "018f1f2e-7b4a-7c12-9c8d-123456789abc",
+  "operation": "/api/recommendations",
+  "surface": "http_json",
+  "statusCode": 200,
+  "durationMs": 18,
+  "sessionRef": "journey_42",
+  "runtimeHint": "shopping-agent/1.2",
+  "purpose": "product_personalization",
+  "remember": true,
+  "userRef": "user_7"
+}
+```
+
+`surface` defaults to `http_json` and is exactly `http_json`, `html`, or `mcp`. Status, duration,
+session, and runtime are optional. A session reference must come from a product-issued journey, and a
+runtime hint must be a bounded, non-sensitive label observed by the company's server. Never use a prompt,
+transcript, model/tool argument, raw customer content, or regulated trait. Disable automatic redirect following
+on every request carrying the product key and treat any `3xx` as a failed enrichment call; return the unchanged
+product response.
+
+## Legacy structured outcome feedback
+
 Use the manual protocol only when a first-party SDK is unavailable. Your implementation needs standard
 HTTP, JSON, UUIDs, SHA-256, HMAC-SHA256, and base64url encoding.
 
 ## Download the contract
 
 ```bash
-curl -fsSLO https://app.epode.ai/static/agent-feedback-protocol-v1-0.3.1.zip
-unzip agent-feedback-protocol-v1-0.3.1.zip
+curl -fsSLO https://app.epode.ai/static/agent-feedback-protocol-v1-0.4.0.zip
+unzip agent-feedback-protocol-v1-0.4.0.zip
 ```
 
 The archive contains the protocol guide, JSON Schemas, and a deterministic signing vector.

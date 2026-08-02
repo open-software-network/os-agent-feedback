@@ -293,6 +293,143 @@ async fn main() -> anyhow::Result<()> {
             .await?;
             println!("{}", serde_json::to_string(&output)?);
         }
+        "read-enrichment" => {
+            let product_id = uuid("SETUP_MATRIX_PRODUCT_ID")?;
+            let output = sqlx::query_scalar::<_, serde_json::Value>(
+                r"SELECT jsonb_build_object(
+                  'requests', COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id', request.id,
+                      'interactionId', request.interaction_id,
+                      'customerId', request.customer_id,
+                      'purpose', request.purpose,
+                      'remember', request.remember,
+                      'identityLevel', request.identity_level,
+                      'state', request.state
+                    ) ORDER BY request.created_at, request.id)
+                    FROM enrichment_requests request
+                    WHERE request.workspace_id = $1 AND request.product_id = $2
+                  ), '[]'::JSONB),
+                  'interactions', COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id', interaction.id,
+                      'surface', interaction.surface,
+                      'operation', interaction.operation,
+                      'statusCode', interaction.status_code,
+                      'durationMs', interaction.duration_ms,
+                      'sessionId', interaction.session_id,
+                      'runtimeHint', interaction.runtime_hint,
+                      'classification', CASE WHEN confirmation.interaction_id IS NOT NULL
+                        THEN 'confirmed' ELSE interaction.classification END,
+                      'confirmationMethod', COALESCE(
+                        confirmation.method, interaction.confirmation_method
+                      )
+                    ) ORDER BY interaction.occurred_at, interaction.id)
+                    FROM interactions_v2 interaction
+                    JOIN enrichment_requests request
+                      ON request.interaction_id = interaction.id
+                      AND request.workspace_id = interaction.workspace_id
+                    LEFT JOIN enrichment_interaction_confirmations confirmation
+                      ON confirmation.interaction_id = interaction.id
+                      AND confirmation.workspace_id = interaction.workspace_id
+                    WHERE request.workspace_id = $1 AND request.product_id = $2
+                  ), '[]'::JSONB),
+                  'sessions', COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id', session.id,
+                      'source', session.source,
+                      'interactionCount', grouped.interaction_count
+                    ) ORDER BY session.started_at, session.id)
+                    FROM sessions_v2 session
+                    JOIN (
+                      SELECT interaction.session_id, COUNT(*)::BIGINT AS interaction_count
+                      FROM interactions_v2 interaction
+                      JOIN enrichment_requests request
+                        ON request.interaction_id = interaction.id
+                        AND request.workspace_id = interaction.workspace_id
+                      WHERE request.workspace_id = $1 AND request.product_id = $2
+                        AND interaction.session_id IS NOT NULL
+                      GROUP BY interaction.session_id
+                    ) grouped ON grouped.session_id = session.id
+                    WHERE session.workspace_id = $1
+                  ), '[]'::JSONB),
+                  'answers', COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id', answer.id,
+                      'requestId', answer.request_id,
+                      'customerId', answer.customer_id,
+                      'status', answer.status
+                    ) ORDER BY answer.created_at, answer.id)
+                    FROM enrichment_answers answer
+                    WHERE answer.workspace_id = $1 AND answer.product_id = $2
+                  ), '[]'::JSONB),
+                  'signals', COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id', signal.id,
+                      'customerId', item.customer_id,
+                      'interactionId', item.interaction_id,
+                      'key', item.signal_key,
+                      'type', signal.signal_type,
+                      'value', item.signal_value,
+                      'provenance', signal.provenance,
+                      'consentScope', signal.consent_scope,
+                      'expiresAt', item.expires_at
+                    ) ORDER BY signal.collected_at, signal.id)
+                    FROM enrichment_signal_items item
+                    JOIN customer_signals signal
+                      ON signal.id = item.signal_id
+                      AND signal.workspace_id = item.workspace_id
+                    WHERE item.workspace_id = $1 AND item.product_id = $2
+                  ), '[]'::JSONB),
+                  'contextRetrievals', COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id', retrieval.id,
+                      'customerId', retrieval.customer_id,
+                      'interactionId', retrieval.interaction_id,
+                      'purpose', retrieval.purpose,
+                      'identityLevel', retrieval.identity_level,
+                      'itemCount', retrieval.item_count
+                    ) ORDER BY retrieval.created_at, retrieval.id)
+                    FROM customer_context_retrievals retrieval
+                    WHERE retrieval.workspace_id = $1 AND retrieval.product_id = $2
+                  ), '[]'::JSONB),
+                  'decisions', COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id', decision.id,
+                      'customerId', decision.customer_id,
+                      'purpose', decision.purpose,
+                      'variant', decision.variant
+                    ) ORDER BY decision.created_at, decision.id)
+                    FROM personalization_decisions decision
+                    WHERE decision.workspace_id = $1 AND decision.product_id = $2
+                  ), '[]'::JSONB),
+                  'outcomes', COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id', outcome.id,
+                      'decisionId', outcome.decision_id,
+                      'outcome', outcome.outcome
+                    ) ORDER BY outcome.created_at, outcome.id)
+                    FROM personalization_outcomes outcome
+                    WHERE outcome.workspace_id = $1 AND outcome.product_id = $2
+                  ), '[]'::JSONB),
+                  'resolutions', COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'fromCustomerId', resolution.from_customer_id,
+                      'toCustomerId', resolution.to_customer_id,
+                      'method', resolution.method,
+                      'provenance', resolution.provenance
+                    ) ORDER BY resolution.created_at, resolution.id)
+                    FROM customer_resolution_events resolution
+                    WHERE resolution.workspace_id = $1 AND resolution.product_id = $2
+                  ), '[]'::JSONB)
+                )",
+            )
+            .bind(workspace_id)
+            .bind(product_id)
+            .fetch_one(&pool)
+            .await?;
+            println!("{}", serde_json::to_string(&output)?);
+        }
         "delete" => {
             sqlx::query("DELETE FROM workspaces WHERE id = $1")
                 .bind(workspace_id)

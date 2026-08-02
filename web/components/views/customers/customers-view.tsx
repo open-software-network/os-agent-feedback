@@ -9,10 +9,9 @@ import {
   ConsentBadge,
   IdentityBadge,
   identityLabel,
-  OutcomeHealth,
+  ProvenanceBadge,
 } from "@/components/dashboard/intelligence-badges";
 import { MetricStrip } from "@/components/dashboard/metric-strip";
-import { SignalEvidenceList } from "@/components/dashboard/signal-evidence-list";
 import { EmptyState, ErrorState, NativeSelect } from "@/components/dashboard/view-primitives";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -30,6 +29,7 @@ import {
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import {
   type CustomerDetail,
+  type CustomerSignal,
   type CustomerSummary,
   fetchCustomerDetail,
   fetchCustomersPage,
@@ -39,19 +39,15 @@ import { formatDate, relativeDate, titleCase } from "@/lib/dashboard/format";
 
 type CustomerFilters = {
   identityLevel: string;
-  outcomeHealth: string;
   consentState: string;
   signalType: string;
-  segment: string;
   range: "all" | "7d" | "30d";
 };
 
 const emptyFilters: CustomerFilters = {
   identityLevel: "",
-  outcomeHealth: "",
   consentState: "",
   signalType: "",
-  segment: "",
   range: "30d",
 };
 
@@ -63,10 +59,8 @@ function readCustomerLocation() {
     query: params.get("customerQ") ?? "",
     filters: {
       identityLevel: params.get("customerIdentity") ?? "",
-      outcomeHealth: params.get("customerHealth") ?? "",
       consentState: params.get("customerConsent") ?? "",
       signalType: params.get("customerSignal") ?? "",
-      segment: params.get("customerSegment") ?? "",
       range: range === "all" || range === "7d" ? range : "30d",
     } satisfies CustomerFilters,
   };
@@ -77,10 +71,8 @@ function writeCustomerLocation(query: string, filters: CustomerFilters) {
   const url = new URL(window.location.href);
   setParam(url, "customerQ", query);
   setParam(url, "customerIdentity", filters.identityLevel);
-  setParam(url, "customerHealth", filters.outcomeHealth);
   setParam(url, "customerConsent", filters.consentState);
   setParam(url, "customerSignal", filters.signalType);
-  setParam(url, "customerSegment", filters.segment);
   setParam(url, "customerRange", filters.range === "30d" ? "" : filters.range);
   window.history.replaceState(window.history.state, "", url);
 }
@@ -99,10 +91,8 @@ function rangeStart(range: CustomerFilters["range"]) {
 function customerFilterCount(filters: CustomerFilters) {
   return [
     filters.identityLevel,
-    filters.outcomeHealth,
     filters.consentState,
     filters.signalType,
-    filters.segment,
     filters.range === "30d" ? "" : filters.range,
   ].filter(Boolean).length;
 }
@@ -139,10 +129,8 @@ export function CustomersView({
         productId: productId ?? "",
         q: debouncedQuery.trim() || undefined,
         identityLevel: filters.identityLevel ? [filters.identityLevel] : undefined,
-        outcomeHealth: filters.outcomeHealth ? [filters.outcomeHealth] : undefined,
         consentState: filters.consentState ? [filters.consentState] : undefined,
         signalType: filters.signalType ? [filters.signalType] : undefined,
-        segment: filters.segment ? [filters.segment] : undefined,
         since: rangeStart(filters.range),
         cursor: pageParam,
         limit: 50,
@@ -209,11 +197,15 @@ export function CustomersView({
       <MetricStrip
         items={[
           { label: "Customers", value: rollup.customers.toLocaleString(), signal: true },
-          { label: "Verified", value: rollup.verified.toLocaleString() },
-          { label: "Active", value: rollup.active.toLocaleString() },
-          { label: "At risk", value: rollup.atRisk.toLocaleString() },
+          { label: "Known", value: rollup.verified.toLocaleString() },
+          { label: "Anonymous", value: rollup.pseudonymous.toLocaleString() },
+          { label: "Unresolved interactions", value: rollup.unclassified.toLocaleString() },
         ]}
       />
+      <div className="border-b bg-muted/20 px-4 py-2 text-xs text-muted-foreground">
+        Interaction-only context is not a durable customer profile. It remains attached to its
+        short-lived interaction handle and evidence until retention removes it.
+      </div>
       <div className="flex shrink-0 flex-col gap-2 border-b px-4 py-3 xl:flex-row xl:items-center xl:justify-between">
         <InputGroup className="max-w-xl bg-background">
           <InputGroupAddon>
@@ -223,7 +215,7 @@ export function CustomersView({
             aria-label="Search customers"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search customer, account, segment, or need"
+            placeholder="Search customer or context"
           />
         </InputGroup>
         <div className="flex min-w-0 items-center gap-2 overflow-x-auto">
@@ -234,13 +226,7 @@ export function CustomersView({
             onChange={(identityLevel) => applyFilters({ ...filters, identityLevel })}
           />
           <CustomerSelect
-            label="Health"
-            value={filters.outcomeHealth}
-            options={facets?.outcomeHealth ?? []}
-            onChange={(outcomeHealth) => applyFilters({ ...filters, outcomeHealth })}
-          />
-          <CustomerSelect
-            label="Signal"
+            label="Context"
             value={filters.signalType}
             options={facets?.signalType ?? []}
             onChange={(signalType) => applyFilters({ ...filters, signalType })}
@@ -250,12 +236,6 @@ export function CustomersView({
             value={filters.consentState}
             options={facets?.consentState ?? []}
             onChange={(consentState) => applyFilters({ ...filters, consentState })}
-          />
-          <CustomerSelect
-            label="Segment"
-            value={filters.segment}
-            options={facets?.segment ?? []}
-            onChange={(segment) => applyFilters({ ...filters, segment })}
           />
           <NativeSelect
             aria-label="Customer activity range"
@@ -296,16 +276,15 @@ export function CustomersView({
             Loading customers…
           </p>
         ) : customers.length ? (
-          <Table className="min-w-[900px] table-fixed">
+          <Table className="min-w-[820px] table-fixed">
             <TableHeader className="sticky top-0 z-[1] bg-background">
               <TableRow className="hover:bg-background">
-                <TableHead className="h-9 w-[24%] pl-5 text-xs">Customer</TableHead>
-                <TableHead className="h-9 w-[13%] text-xs">Identity</TableHead>
-                <TableHead className="h-9 w-[15%] text-xs">Outcome</TableHead>
-                <TableHead className="h-9 w-[12%] text-xs">Needs</TableHead>
-                <TableHead className="h-9 w-[12%] text-xs">Sessions</TableHead>
-                <TableHead className="h-9 w-[12%] text-xs">Sharing</TableHead>
-                <TableHead className="h-9 w-[12%] pr-5 text-right text-xs">Last active</TableHead>
+                <TableHead className="h-9 w-[25%] pl-5 text-xs">Customer</TableHead>
+                <TableHead className="h-9 w-[14%] text-xs">Type</TableHead>
+                <TableHead className="h-9 w-[29%] text-xs">Recent evidence</TableHead>
+                <TableHead className="h-9 w-[12%] text-xs">Signals</TableHead>
+                <TableHead className="h-9 w-[10%] text-xs">Permission</TableHead>
+                <TableHead className="h-9 w-[10%] pr-5 text-right text-xs">Updated</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -326,7 +305,7 @@ export function CustomersView({
               description={
                 rollup.customers
                   ? "Clear filters or broaden the activity window."
-                  : "Customers appear when Epode can safely associate product evidence with a known, pseudonymous, or ephemeral actor."
+                  : "Known and anonymous profiles appear after your product supplies a stable company-owned reference. Interaction-only context stays with its evidence instead."
               }
             />
           </div>
@@ -430,11 +409,15 @@ function CustomerRow({
       <TableCell>
         <IdentityBadge level={customer.identityLevel} />
       </TableCell>
-      <TableCell>
-        <OutcomeHealth value={customer.outcomeHealth} />
+      <TableCell className="overflow-hidden text-xs">
+        <p className="line-clamp-2 text-foreground">
+          {customer.contextSummary ??
+            (customer.signalCount
+              ? `${customer.signalCount} retained evidence ${customer.signalCount === 1 ? "signal" : "signals"}`
+              : "No retained evidence yet")}
+        </p>
       </TableCell>
-      <TableCell className="text-xs">{customer.activeNeedCount}</TableCell>
-      <TableCell className="text-xs">{customer.sessionCount}</TableCell>
+      <TableCell className="text-xs">{customer.signalCount.toLocaleString()}</TableCell>
       <TableCell>
         <ConsentBadge state={customer.consentState} />
       </TableCell>
@@ -516,16 +499,25 @@ function CustomerDetailContent({
   openSession: (sessionId: string) => void;
 }) {
   const customer = detail.customer;
-  const goals = detail.signals.filter((signal) => signal.type === "intent");
-  const currentSignals = detail.signals.filter((signal) => signal.type !== "intent");
+  const availableSignals = detail.signals.filter((signal) => isAvailableContext(signal));
+  const taskSignals = availableSignals.filter(
+    (signal) => signal.type === "intent" || signal.provenance === "agent_reports_current_task",
+  );
+  const otherAllowedSignals = availableSignals.filter(
+    (signal) => !taskSignals.includes(signal) && contextSignalTypes.has(signal.type),
+  );
+  const supportingSignals = detail.signals.filter(
+    (signal) => !taskSignals.includes(signal) && !otherAllowedSignals.includes(signal),
+  );
 
   return (
     <>
-      <p className="text-xs text-muted-foreground">Customer</p>
+      <p className="text-xs text-muted-foreground">
+        {identityLabel(customer.identityLevel)} customer
+      </p>
       <h2 className="mt-2 text-balance text-lg font-medium leading-6">{customer.displayName}</h2>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <IdentityBadge level={customer.identityLevel} />
-        <OutcomeHealth value={customer.outcomeHealth} />
         <ConsentBadge state={customer.consentState} />
       </div>
       <p className="mt-3 text-xs text-muted-foreground">
@@ -547,108 +539,55 @@ function CustomerDetailContent({
       ) : null}
 
       <Separator className="my-5" />
-      <section aria-labelledby="customer-goals-heading">
-        <h3 id="customer-goals-heading" className="text-xs font-medium">
-          Current goals
-        </h3>
-        <div className="mt-3">
-          <SignalEvidenceList
-            signals={goals}
-            empty="No current-task intent has been shared."
-            openFeature={openFeature}
-            openFeedback={openFeedback}
-            openInteraction={openInteraction}
-            openSession={openSession}
-          />
-        </div>
-      </section>
-
-      <Separator className="my-5" />
-      <section aria-labelledby="customer-signals-heading">
+      <section aria-labelledby="personalization-context-heading">
         <div className="flex items-center justify-between gap-3">
-          <h3 id="customer-signals-heading" className="text-xs font-medium">
-            Customer signals
+          <h3 id="personalization-context-heading" className="text-xs font-medium">
+            Personalization context
           </h3>
-          <span className="text-[11px] text-muted-foreground">{detail.counts.signals} total</span>
+          <span className="text-[11px] text-muted-foreground">
+            {availableSignals.length} available
+          </span>
         </div>
-        <div className="mt-3">
-          <SignalEvidenceList
-            signals={currentSignals}
-            openFeature={openFeature}
-            openFeedback={openFeedback}
-            openInteraction={openInteraction}
-            openSession={openSession}
-          />
-        </div>
-      </section>
-
-      <Separator className="my-5" />
-      <section aria-labelledby="customer-sessions-heading">
-        <div className="flex items-center justify-between gap-3">
-          <h3 id="customer-sessions-heading" className="text-xs font-medium">
-            Proven sessions
-          </h3>
-          <span className="text-[11px] text-muted-foreground">{detail.counts.sessions} total</span>
-        </div>
-        {detail.sessions.length ? (
-          <ol className="mt-3 divide-y">
-            {detail.sessions.map((session) => (
-              <li key={session.id} className="flex items-center justify-between gap-3 py-2">
-                <div className="min-w-0">
-                  <p className="truncate font-mono text-xs">{session.refHint}</p>
-                  <p className="mt-1 text-[11px] text-muted-foreground">
-                    {session.interactionCount} interactions · {relativeDate(session.lastSeenAt)}
-                  </p>
-                </div>
-                <Button variant="outline" size="xs" onClick={() => openSession(session.id)}>
-                  Open
-                </Button>
-              </li>
-            ))}
-          </ol>
-        ) : (
-          <p className="mt-2 text-sm text-muted-foreground">No proven sessions linked.</p>
-        )}
-      </section>
-
-      <Separator className="my-5" />
-      <section aria-labelledby="customer-identity-heading">
-        <h3 id="customer-identity-heading" className="text-xs font-medium">
-          Identity and provenance
-        </h3>
         <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-          Epode resolves only company-authorized identifiers and always preserves their source.
+          Only relevant, permissioned, and unexpired context is returned to the product.
         </p>
-        {detail.identifiers.length ? (
-          <dl className="mt-3 grid grid-cols-[100px_1fr] gap-x-3 gap-y-3 text-xs">
-            {detail.identifiers.map((identifier) => (
-              <div key={identifier.id} className="contents">
-                <dt className="text-muted-foreground">{titleCase(identifier.kind)}</dt>
-                <dd>
-                  <p className="font-mono">{identifier.displayHint}</p>
-                  <p className="mt-1 text-[11px] text-muted-foreground">
-                    {titleCase(identifier.provenance)} · {identityLabel(identifier.identityLevel)}
-                  </p>
-                </dd>
-              </div>
-            ))}
-          </dl>
-        ) : (
-          <p className="mt-2 text-sm text-muted-foreground">No durable identifier is linked.</p>
-        )}
+        <div className="mt-4">
+          <h4 className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            Intent and task context
+          </h4>
+          <div className="mt-2">
+            <ContextList signals={taskSignals} empty="No intent or task constraint is available." />
+          </div>
+        </div>
+        <div className="mt-5">
+          <h4 className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            Other allowed context
+          </h4>
+          <div className="mt-2">
+            <ContextList
+              signals={otherAllowedSignals}
+              empty="No additional context is currently allowed for a product use."
+            />
+          </div>
+        </div>
       </section>
 
       <Separator className="my-5" />
       <section aria-labelledby="customer-consent-heading">
         <h3 id="customer-consent-heading" className="text-xs font-medium">
-          Sharing permissions
+          Permission
         </h3>
         {detail.consent.length ? (
           <ol className="mt-3 divide-y">
             {detail.consent.map((grant) => (
-              <li key={`${grant.scope}-${grant.revision}`} className="py-2">
+              <li
+                key={`${grant.scope}-${grant.enrichmentPurpose ?? "legacy"}-${grant.revision}`}
+                className="py-2"
+              >
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs font-medium">{titleCase(grant.scope)}</span>
+                  <span className="text-xs font-medium">
+                    {titleCase(grant.enrichmentPurpose ?? grant.scope)}
+                  </span>
                   <ConsentBadge state={grant.state} />
                 </div>
                 <p className="mt-1 text-[11px] text-muted-foreground">
@@ -672,7 +611,9 @@ function CustomerDetailContent({
             <ol className="mt-2 divide-y">
               {detail.consentHistory.map((event) => (
                 <li key={event.id} className="py-2 text-[11px] text-muted-foreground">
-                  <span className="font-medium text-foreground">{titleCase(event.scope)}</span>
+                  <span className="font-medium text-foreground">
+                    {titleCase(event.enrichmentPurpose ?? event.scope)}
+                  </span>
                   {` · ${titleCase(event.priorState ?? "not set")} → ${titleCase(event.state)}`}
                   {` · ${titleCase(event.source)} · revision ${event.revision}`}
                   <br />
@@ -683,6 +624,141 @@ function CustomerDetailContent({
           </details>
         ) : null}
       </section>
+
+      <Separator className="my-5" />
+      <details>
+        <summary className="cursor-pointer text-xs font-medium">Why Epode knows this</summary>
+        <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
+          Source records are supporting evidence, not additional customer facts.
+        </p>
+        {supportingSignals.length ? (
+          <div className="mt-3">
+            <ContextList signals={supportingSignals} />
+          </div>
+        ) : null}
+        {detail.identifiers.length ? (
+          <dl className="mt-4 grid grid-cols-[100px_1fr] gap-x-3 gap-y-3 text-xs">
+            {detail.identifiers.map((identifier) => (
+              <div key={identifier.id} className="contents">
+                <dt className="text-muted-foreground">{titleCase(identifier.kind)}</dt>
+                <dd>
+                  <p className="font-mono">{identifier.displayHint}</p>
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    {titleCase(identifier.provenance)} · {identityLabel(identifier.identityLevel)}
+                  </p>
+                </dd>
+              </div>
+            ))}
+          </dl>
+        ) : null}
+        {detail.sessions.length ? (
+          <ol className="mt-4 divide-y border-t">
+            {detail.sessions.map((session) => (
+              <li key={session.id} className="flex items-center justify-between gap-3 py-2">
+                <div className="min-w-0">
+                  <p className="truncate font-mono text-xs">{session.refHint}</p>
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    {session.interactionCount} interactions · {relativeDate(session.lastSeenAt)}
+                  </p>
+                </div>
+                <Button variant="outline" size="xs" onClick={() => openSession(session.id)}>
+                  Evidence
+                </Button>
+              </li>
+            ))}
+          </ol>
+        ) : null}
+        <div className="mt-3 flex flex-wrap gap-1">
+          {supportingSignals.flatMap((signal) => [
+            signal.feedbackReportId ? (
+              <Button
+                key={`report-${signal.id}`}
+                variant="link"
+                size="xs"
+                onClick={() => openFeedback(signal.feedbackReportId as string)}
+              >
+                Report evidence
+              </Button>
+            ) : null,
+            signal.interactionId ? (
+              <Button
+                key={`interaction-${signal.id}`}
+                variant="link"
+                size="xs"
+                onClick={() => openInteraction(signal.interactionId as string)}
+              >
+                Interaction evidence
+              </Button>
+            ) : null,
+            signal.featureKey ? (
+              <Button
+                key={`feature-${signal.id}`}
+                variant="link"
+                size="xs"
+                onClick={() => openFeature(signal.featureKey as string)}
+              >
+                Related need
+              </Button>
+            ) : null,
+          ])}
+        </div>
+      </details>
     </>
   );
+}
+
+const contextSignalTypes = new Set(["intent", "preference", "constraint"]);
+
+function isAvailableContext(signal: CustomerSignal) {
+  if (!contextSignalTypes.has(signal.type) || signal.allowedUses.length === 0) return false;
+  if (signal.provenance === "agent_inference") return false;
+  if (signal.consentState !== "approved") return false;
+  return signal.expiresAt === null || new Date(signal.expiresAt).getTime() > Date.now();
+}
+
+function ContextList({
+  signals,
+  empty = "No additional context is available.",
+}: {
+  signals: CustomerSignal[];
+  empty?: string;
+}) {
+  if (!signals.length) return <p className="text-sm text-muted-foreground">{empty}</p>;
+
+  return (
+    <ol className="divide-y rounded-lg border px-3">
+      {signals.map((signal) => (
+        <li key={signal.id} className="py-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="outline">{titleCase(signal.type)}</Badge>
+            <ProvenanceBadge provenance={signal.provenance} />
+          </div>
+          <p className="mt-2 text-sm font-medium leading-5">{signal.summary}</p>
+          {signal.signalKey && signal.value !== null ? (
+            <p className="mt-1 break-words font-mono text-[11px] text-muted-foreground">
+              {signal.signalKey} = {formatSignalValue(signal.value)}
+            </p>
+          ) : null}
+          {signal.detail ? (
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">{signal.detail}</p>
+          ) : null}
+          <p className="mt-2 text-[11px] text-muted-foreground">
+            {signal.confidence === null
+              ? "Confidence not supplied"
+              : `${Math.round(signal.confidence * 100)}% confidence`}
+            {signal.expiresAt ? ` · expires ${formatDate(signal.expiresAt)}` : " · no expiry"}
+          </p>
+          {signal.allowedUses.length ? (
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              Allowed for {signal.allowedUses.map(titleCase).join(", ")}
+            </p>
+          ) : null}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function formatSignalValue(value: unknown) {
+  return typeof value === "string" ? value : JSON.stringify(value);
 }

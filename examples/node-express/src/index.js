@@ -1,6 +1,6 @@
 import express from "express";
 
-import { agentFeedback } from "@agent-feedback/node/express";
+import { agentFeedback } from "@epode/node/express";
 
 const apiKey = process.env.AGENT_FEEDBACK_KEY;
 if (!apiKey) throw new Error("AGENT_FEEDBACK_KEY is required");
