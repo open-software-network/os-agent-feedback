@@ -171,13 +171,23 @@
           {
             "name": "x-workspace-id",
             "in": "header",
-            "description": "Team to configure; defaults to the caller's personal team",
+            "description": "Team to configure; wins over workspaceId when both are present",
             "required": false,
             "schema": {
               "type": [
                 "string",
                 "null"
               ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "description": "Team to configure when the x-workspace-id header cannot be sent, as on a plain link. Ignored when the header is present; must appear at most once.",
+            "required": false,
+            "schema": {
+              "type": "string",
               "format": "uuid"
             }
           }
@@ -208,7 +218,7 @@
             }
           },
           "400": {
-            "description": "Invalid team header",
+            "description": "Invalid team header, or an unusable workspaceId with no team header",
             "content": {
               "application/json": {
                 "schema": {

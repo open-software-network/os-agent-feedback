@@ -2124,9 +2124,12 @@ export interface operations {
     };
     github_install_handler: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Team to configure when the x-workspace-id header cannot be sent, as on a plain link. Ignored when the header is present; must appear at most once. */
+                workspaceId?: string;
+            };
             header?: {
-                /** @description Team to configure; defaults to the caller's personal team */
+                /** @description Team to configure; wins over workspaceId when both are present */
                 "x-workspace-id"?: string | null;
             };
             path?: never;
@@ -2147,7 +2150,7 @@ export interface operations {
                     "text/plain": string;
                 };
             };
-            /** @description Invalid team header */
+            /** @description Invalid team header, or an unusable workspaceId with no team header */
             400: {
                 headers: {
                     [name: string]: unknown;
