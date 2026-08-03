@@ -79,8 +79,8 @@ pub(crate) struct CodeSearchQuery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodeSearchCandidate {
     pub(crate) file: String,
-    pub(crate) line_start: u32,
-    pub(crate) line_end: u32,
+    pub(crate) line_start: Option<u32>,
+    pub(crate) line_end: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,8 +92,8 @@ pub(crate) struct CodeSearchMatches {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodeHintCandidate {
     pub(crate) file: String,
-    pub(crate) line_start: u32,
-    pub(crate) line_end: u32,
+    pub(crate) line_start: Option<u32>,
+    pub(crate) line_end: Option<u32>,
     pub(crate) match_reason: String,
 }
 
@@ -167,8 +167,13 @@ pub(crate) fn rank_matches(matches: Vec<CodeSearchMatches>) -> Vec<CodeHintCandi
     ranked
         .into_iter()
         .filter_map(|(_, _, _, candidate, match_reason)| {
-            let line_start = candidate.line_start.max(1);
-            let line_end = candidate.line_end.max(line_start);
+            let (line_start, line_end) = match (candidate.line_start, candidate.line_end) {
+                (Some(line_start), Some(line_end)) => {
+                    let line_start = line_start.max(1);
+                    (Some(line_start), Some(line_end.max(line_start)))
+                }
+                _ => (None, None),
+            };
             seen.insert((candidate.file.clone(), line_start, line_end))
                 .then_some(CodeHintCandidate {
                     file: candidate.file,
@@ -422,8 +427,8 @@ mod tests {
     fn candidate(file: &str, line_start: u32, line_end: u32) -> CodeSearchCandidate {
         CodeSearchCandidate {
             file: file.to_owned(),
-            line_start,
-            line_end,
+            line_start: Some(line_start),
+            line_end: Some(line_end),
         }
     }
 
@@ -465,10 +470,25 @@ mod tests {
         }]);
 
         assert_eq!(hints.len(), MAX_CODE_HINTS_PER_REPORT);
-        assert_eq!((hints[0].line_start, hints[0].line_end), (1, 1));
+        assert_eq!((hints[0].line_start, hints[0].line_end), (Some(1), Some(1)));
         assert_eq!(
             hints.iter().filter(|hint| hint.file == "src/0.rs").count(),
             1
         );
+    }
+
+    #[test]
+    fn ranking_preserves_an_honest_missing_line_range() {
+        let hints = rank_matches(vec![CodeSearchMatches {
+            query: query("operation token", 10),
+            candidates: vec![CodeSearchCandidate {
+                file: "src/unresolved.rs".to_owned(),
+                line_start: None,
+                line_end: None,
+            }],
+        }]);
+
+        assert_eq!(hints[0].line_start, None);
+        assert_eq!(hints[0].line_end, None);
     }
 }

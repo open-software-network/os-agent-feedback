@@ -866,9 +866,9 @@ export interface components {
         CodeHintResponse: {
             file: string;
             /** Format: int32 */
-            line_end: number;
+            line_end?: number | null;
             /** Format: int32 */
-            line_start: number;
+            line_start?: number | null;
             match_reason: string;
         };
         ConsentDecisionInput: {

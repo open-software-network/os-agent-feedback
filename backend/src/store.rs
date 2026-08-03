@@ -442,7 +442,7 @@ pub(crate) async fn claim_code_match_batch(
     // indexed claim predicate pick them up again.
     sqlx::query(
         r"UPDATE code_match_queue SET claimed_at = NULL, claim_token = NULL
-        WHERE claimed_at < $1",
+        WHERE dead_lettered_at IS NULL AND claimed_at < $1",
     )
     .bind(stale_before)
     .execute(&mut *tx)
@@ -451,7 +451,7 @@ pub(crate) async fn claim_code_match_batch(
         r"WITH claimable AS (
           SELECT report_id
           FROM code_match_queue
-          WHERE claimed_at IS NULL AND available_at <= NOW()
+          WHERE claimed_at IS NULL AND dead_lettered_at IS NULL AND available_at <= NOW()
           ORDER BY available_at, enqueued_at, report_id
           FOR UPDATE SKIP LOCKED
           LIMIT $1
@@ -542,17 +542,23 @@ pub(crate) async fn complete_code_match_job(
     Ok(completed.is_some())
 }
 
-pub(crate) async fn discard_code_match_job(
+pub(crate) async fn dead_letter_code_match_job(
     pool: &PgPool,
     report_id: Uuid,
     claim_token: Uuid,
-) -> Result<(), ApiError> {
-    sqlx::query("DELETE FROM code_match_queue WHERE report_id = $1 AND claim_token = $2")
-        .bind(report_id)
-        .bind(claim_token)
-        .execute(pool)
-        .await?;
-    Ok(())
+    reason: &str,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE code_match_queue SET claimed_at = NULL, claim_token = NULL,
+          dead_lettered_at = NOW(), last_error = LEFT($3, 500)
+        WHERE report_id = $1 AND claim_token = $2",
+    )
+    .bind(report_id)
+    .bind(claim_token)
+    .bind(reason)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
 }
 
 pub(crate) async fn release_code_match_job(
@@ -10866,6 +10872,58 @@ mod product_tests {
         anyhow::ensure!(
             reclaimed.attempts == 2 && reclaimed.claim_token != first_claim.claim_token
         );
+
+        let dead_lettered = dead_letter_code_match_job(
+            &pool,
+            report.id,
+            reclaimed.claim_token,
+            "permanent test failure",
+        )
+        .await
+        .map_err(test_error)?;
+        anyhow::ensure!(dead_lettered, "owned job should enter the dead letter");
+        let dead_letter_state = sqlx::query_as::<
+            _,
+            (
+                Option<DateTime<Utc>>,
+                Option<String>,
+                Option<DateTime<Utc>>,
+                Option<Uuid>,
+            ),
+        >(
+            r"SELECT dead_lettered_at, last_error, claimed_at, claim_token
+            FROM code_match_queue WHERE report_id = $1",
+        )
+        .bind(report.id)
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(
+            dead_letter_state.0.is_some()
+                && dead_letter_state.1.as_deref() == Some("permanent test failure")
+                && dead_letter_state.2.is_none()
+                && dead_letter_state.3.is_none()
+        );
+        let parked = claim_code_match_batch(&pool, 100, Utc::now() - Duration::minutes(5))
+            .await
+            .map_err(test_error)?;
+        anyhow::ensure!(parked.iter().all(|job| job.report_id != report.id));
+
+        // Dead letters remain observable and can be explicitly re-driven
+        // without recreating the report or its ingest event.
+        sqlx::query(
+            r"UPDATE code_match_queue SET dead_lettered_at = NULL, last_error = NULL,
+              available_at = NOW() WHERE report_id = $1",
+        )
+        .bind(report.id)
+        .execute(&pool)
+        .await?;
+        let redriven = claim_code_match_batch(&pool, 100, Utc::now() - Duration::minutes(5))
+            .await
+            .map_err(test_error)?
+            .into_iter()
+            .find(|job| job.report_id == report.id)
+            .context("cleared dead letter should be claimable again")?;
+        anyhow::ensure!(redriven.attempts == 3);
 
         // Retention deletes interactions, which cascades through reports. All
         // code-intelligence state must disappear with that report.

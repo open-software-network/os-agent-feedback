@@ -26,10 +26,12 @@ CREATE TABLE code_match_queue (
   claimed_at TIMESTAMPTZ,
   claim_token UUID,
   attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  dead_lettered_at TIMESTAMPTZ,
   last_error TEXT,
-  CHECK ((claimed_at IS NULL) = (claim_token IS NULL))
+  CHECK ((claimed_at IS NULL) = (claim_token IS NULL)),
+  CHECK (dead_lettered_at IS NULL OR claimed_at IS NULL)
 );
 
 CREATE INDEX code_match_queue_claimable_idx
   ON code_match_queue (available_at, enqueued_at, report_id)
-  WHERE claimed_at IS NULL;
+  WHERE claimed_at IS NULL AND dead_lettered_at IS NULL;

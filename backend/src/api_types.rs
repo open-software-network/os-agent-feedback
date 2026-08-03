@@ -15,8 +15,8 @@ use crate::models::{
 #[derive(Debug, Serialize, ToSchema)]
 pub(crate) struct CodeHintResponse {
     pub file: String,
-    pub line_start: u32,
-    pub line_end: u32,
+    pub line_start: Option<u32>,
+    pub line_end: Option<u32>,
     pub match_reason: String,
 }
 

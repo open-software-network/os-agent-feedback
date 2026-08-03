@@ -22,8 +22,10 @@ const GITHUB_API_URL: &str = "https://api.github.com";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_CODE_SEARCH_ACCEPT: &str = "application/vnd.github.text-match+json";
+const GITHUB_RAW_CONTENT_ACCEPT: &str = "application/vnd.github.raw+json";
 const GITHUB_USER_AGENT: &str = "epode-agent-feedback";
 const CODE_SEARCH_RESULTS_PER_QUERY: usize = 10;
+const MAX_CODE_FILE_BYTES: usize = 1_048_576;
 const REPOSITORIES_PER_PAGE: usize = 100;
 const MAX_REPOSITORY_PAGES: usize = 10;
 const ISSUES_PER_PAGE: usize = 100;
@@ -136,13 +138,43 @@ pub(crate) struct GithubRateLimit {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GithubCodeSearchResult {
-    pub(crate) candidates: Vec<CodeSearchCandidate>,
+    pub(crate) candidates: Vec<GithubCodeSearchCandidate>,
     pub(crate) rate_limit: GithubRateLimit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GithubCodeSearchCandidate {
+    file: String,
+    text_match: Option<CodeSearchTextMatch>,
+}
+
+impl GithubCodeSearchCandidate {
+    pub(crate) fn file(&self) -> &str {
+        &self.file
+    }
+
+    pub(crate) const fn needs_content(&self) -> bool {
+        self.text_match.is_some()
+    }
+
+    pub(crate) fn into_resolved(self, content: Option<&str>) -> CodeSearchCandidate {
+        let range = content.and_then(|content| {
+            self.text_match
+                .as_ref()
+                .and_then(|text_match| locate_text_match(content, text_match))
+        });
+        CodeSearchCandidate {
+            file: self.file,
+            line_start: range.map(|range| range.0),
+            line_end: range.map(|range| range.1),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GithubCodeSearchFailureKind {
     RateLimit,
+    Unauthorized,
     Forbidden,
     NotFound,
     InvalidRequest,
@@ -412,7 +444,19 @@ struct CodeSearchResponse {
 struct CodeSearchItem {
     path: String,
     #[serde(default)]
-    line_numbers: Vec<String>,
+    text_matches: Vec<CodeSearchTextMatch>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct CodeSearchTextMatch {
+    fragment: String,
+    #[serde(default)]
+    matches: Vec<CodeSearchTextMatchOccurrence>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct CodeSearchTextMatchOccurrence {
+    indices: [usize; 2],
 }
 
 #[derive(Debug, Deserialize)]
@@ -793,6 +837,55 @@ impl GithubAppClient {
         Ok(sha.to_ascii_lowercase())
     }
 
+    pub(crate) async fn repository_file_content(
+        &self,
+        token: &GithubInstallationToken,
+        repo_full_name: &str,
+        path: &str,
+        sha: &str,
+    ) -> anyhow::Result<String> {
+        validate_repo_full_name(repo_full_name)?;
+        anyhow::ensure!(valid_git_sha(sha), "GitHub repository file SHA was invalid");
+        let path_segments = path.split('/').collect::<Vec<_>>();
+        anyhow::ensure!(
+            !path_segments.is_empty()
+                && path_segments
+                    .iter()
+                    .all(|segment| !segment.is_empty() && *segment != "." && *segment != ".."),
+            "GitHub repository file path was invalid"
+        );
+        let mut url = reqwest::Url::parse(&format!(
+            "{GITHUB_API_URL}/repos/{repo_full_name}/contents/"
+        ))
+        .context("GitHub repository file URL was invalid")?;
+        url.path_segments_mut()
+            .map_err(|()| {
+                anyhow::anyhow!("GitHub repository file URL cannot contain path segments")
+            })?
+            .extend(path_segments);
+        let mut response = Self::request(self.http.get(url).query(&[("ref", sha)]))
+            .header(reqwest::header::ACCEPT, GITHUB_RAW_CONTENT_ACCEPT)
+            .bearer_auth(token.as_str())
+            .send()
+            .await
+            .context("GitHub repository file request failed")?
+            .error_for_status()
+            .context("GitHub repository file request was rejected")?;
+        let mut content = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .context("GitHub repository file response was invalid")?
+        {
+            anyhow::ensure!(
+                content.len().saturating_add(chunk.len()) <= MAX_CODE_FILE_BYTES,
+                "GitHub repository file exceeded the code-hint size limit"
+            );
+            content.extend_from_slice(&chunk);
+        }
+        String::from_utf8(content).context("GitHub repository file was not UTF-8")
+    }
+
     pub(crate) async fn search_code(
         &self,
         token: &GithubInstallationToken,
@@ -876,6 +969,8 @@ fn code_search_failure_kind(
         GithubCodeSearchFailureKind::RateLimit
     } else if status == reqwest::StatusCode::FORBIDDEN {
         GithubCodeSearchFailureKind::Forbidden
+    } else if status == reqwest::StatusCode::UNAUTHORIZED {
+        GithubCodeSearchFailureKind::Unauthorized
     } else if status == reqwest::StatusCode::NOT_FOUND {
         GithubCodeSearchFailureKind::NotFound
     } else if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
@@ -885,7 +980,7 @@ fn code_search_failure_kind(
     } else if status.is_server_error() {
         GithubCodeSearchFailureKind::Server
     } else {
-        GithubCodeSearchFailureKind::Forbidden
+        GithubCodeSearchFailureKind::Transport
     }
 }
 
@@ -918,34 +1013,72 @@ fn parse_retry_after(value: &str, now: DateTime<Utc>) -> Option<StdDuration> {
         .and_then(|retry_at| (retry_at.with_timezone(&Utc) - now).to_std().ok())
 }
 
-fn code_search_candidates(item: CodeSearchItem) -> Vec<CodeSearchCandidate> {
-    let ranges = item
-        .line_numbers
-        .iter()
-        .filter_map(|range| parse_line_range(range))
-        .collect::<Vec<_>>();
-    if ranges.is_empty() {
-        return vec![CodeSearchCandidate {
+fn code_search_candidates(item: CodeSearchItem) -> Vec<GithubCodeSearchCandidate> {
+    if item.text_matches.is_empty() {
+        return vec![GithubCodeSearchCandidate {
             file: item.path,
-            line_start: 1,
-            line_end: 1,
+            text_match: None,
         }];
     }
-    ranges
+    item.text_matches
         .into_iter()
-        .map(|(line_start, line_end)| CodeSearchCandidate {
+        .map(|text_match| GithubCodeSearchCandidate {
             file: item.path.clone(),
-            line_start,
-            line_end,
+            text_match: Some(text_match),
         })
         .collect()
 }
 
-fn parse_line_range(value: &str) -> Option<(u32, u32)> {
-    let (start, end) = value.split_once("..").unwrap_or((value, value));
-    let start = start.parse::<u32>().ok()?.max(1);
-    let end = end.parse::<u32>().ok()?.max(start);
-    Some((start, end))
+fn locate_text_match(content: &str, text_match: &CodeSearchTextMatch) -> Option<(u32, u32)> {
+    if text_match.fragment.is_empty() || text_match.matches.is_empty() {
+        return None;
+    }
+    let mut fragment_offsets = content.match_indices(&text_match.fragment);
+    let (fragment_offset, _) = fragment_offsets.next()?;
+    if fragment_offsets.next().is_some() {
+        return None;
+    }
+    let start_character = text_match
+        .matches
+        .iter()
+        .map(|matched| matched.indices[0])
+        .min()?;
+    let end_character = text_match
+        .matches
+        .iter()
+        .map(|matched| matched.indices[1])
+        .max()?;
+    if start_character >= end_character {
+        return None;
+    }
+    let start_offset = fragment_offset + character_offset(&text_match.fragment, start_character)?;
+    let end_offset = fragment_offset + character_offset(&text_match.fragment, end_character)?;
+    let line_start = line_number_at(content, start_offset)?;
+    let final_character_offset = content[..end_offset].char_indices().next_back()?.0;
+    let line_end = line_number_at(content, final_character_offset)?;
+    Some((line_start, line_end.max(line_start)))
+}
+
+fn character_offset(value: &str, character: usize) -> Option<usize> {
+    if character == value.chars().count() {
+        return Some(value.len());
+    }
+    value
+        .char_indices()
+        .nth(character)
+        .map(|(offset, _)| offset)
+}
+
+fn line_number_at(content: &str, byte_offset: usize) -> Option<u32> {
+    content.is_char_boundary(byte_offset).then_some(())?;
+    u32::try_from(
+        content[..byte_offset]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            + 1,
+    )
+    .ok()
 }
 
 fn valid_git_sha(value: &str) -> bool {
@@ -1285,39 +1418,116 @@ mod tests {
             code_search_failure_kind(StatusCode::TOO_MANY_REQUESTS, &available, ""),
             GithubCodeSearchFailureKind::RateLimit
         );
+        assert_eq!(
+            code_search_failure_kind(StatusCode::UNAUTHORIZED, &available, ""),
+            GithubCodeSearchFailureKind::Unauthorized
+        );
+        assert_eq!(
+            code_search_failure_kind(StatusCode::CONFLICT, &available, ""),
+            GithubCodeSearchFailureKind::Transport
+        );
+        assert_eq!(
+            code_search_failure_kind(StatusCode::UNPROCESSABLE_ENTITY, &available, ""),
+            GithubCodeSearchFailureKind::InvalidRequest
+        );
     }
 
     #[test]
-    fn code_search_line_ranges_are_bounded_and_file_fallback_is_explicit() {
-        let candidates = code_search_candidates(CodeSearchItem {
-            path: "src/search.rs".to_owned(),
-            line_numbers: vec!["73..77".to_owned(), "90".to_owned(), "invalid".to_owned()],
-        });
+    fn captured_code_search_text_match_resolves_against_pinned_file_content() -> anyhow::Result<()>
+    {
+        // Shape captured from GitHub's text-match response contract. The
+        // indices are character offsets inside the fragment, not file lines.
+        let response = serde_json::from_value::<CodeSearchResponse>(serde_json::json!({
+            "total_count": 1,
+            "incomplete_results": false,
+            "items": [{
+                "name": "store.rs",
+                "path": "backend/src/store.rs",
+                "sha": "0123456789abcdef0123456789abcdef01234567",
+                "url": "https://api.github.com/repositories/1/contents/backend/src/store.rs",
+                "git_url": "https://api.github.com/repositories/1/git/blobs/abc",
+                "html_url": "https://github.com/open-software/epode/blob/main/backend/src/store.rs",
+                "repository": { "id": 1, "name": "epode", "full_name": "open-software/epode" },
+                "score": 1.0,
+                "text_matches": [{
+                    "object_url": "https://api.github.com/repositories/1/contents/backend/src/store.rs",
+                    "object_type": "FileContent",
+                    "property": "content",
+                    "fragment": "pub async fn submit_product_feedback(\n    pool: &PgPool,\n)",
+                    "matches": [{
+                        "text": "submit_product_feedback",
+                        "indices": [13, 36]
+                    }]
+                }]
+            }]
+        }))?;
+        let candidates = response
+            .items
+            .into_iter()
+            .flat_map(code_search_candidates)
+            .collect::<Vec<_>>();
+        let content = "use sqlx::PgPool;\n\npub async fn submit_product_feedback(\n    pool: &PgPool,\n) {}\n";
+
         assert_eq!(
-            candidates,
-            vec![
-                CodeSearchCandidate {
-                    file: "src/search.rs".to_owned(),
-                    line_start: 73,
-                    line_end: 77,
-                },
-                CodeSearchCandidate {
-                    file: "src/search.rs".to_owned(),
-                    line_start: 90,
-                    line_end: 90,
-                }
-            ]
+            candidates[0].clone().into_resolved(Some(content)),
+            CodeSearchCandidate {
+                file: "backend/src/store.rs".to_owned(),
+                line_start: Some(3),
+                line_end: Some(3),
+            }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn unresolved_or_ambiguous_text_matches_have_no_fabricated_range() {
         assert_eq!(
             code_search_candidates(CodeSearchItem {
                 path: "src/fallback.rs".to_owned(),
-                line_numbers: Vec::new(),
-            }),
-            vec![CodeSearchCandidate {
+                text_matches: Vec::new(),
+            })[0]
+                .clone()
+                .into_resolved(None),
+            CodeSearchCandidate {
                 file: "src/fallback.rs".to_owned(),
-                line_start: 1,
-                line_end: 1,
-            }]
+                line_start: None,
+                line_end: None,
+            }
+        );
+        let duplicate = GithubCodeSearchCandidate {
+            file: "src/duplicate.rs".to_owned(),
+            text_match: Some(CodeSearchTextMatch {
+                fragment: "needle".to_owned(),
+                matches: vec![CodeSearchTextMatchOccurrence { indices: [0, 6] }],
+            }),
+        };
+        assert_eq!(
+            duplicate.into_resolved(Some("needle\nneedle\n")),
+            CodeSearchCandidate {
+                file: "src/duplicate.rs".to_owned(),
+                line_start: None,
+                line_end: None,
+            }
+        );
+    }
+
+    #[test]
+    fn text_match_indices_are_character_offsets() {
+        let candidate = GithubCodeSearchCandidate {
+            file: "src/unicode.rs".to_owned(),
+            text_match: Some(CodeSearchTextMatch {
+                fragment: "fn café_lookup()".to_owned(),
+                matches: vec![CodeSearchTextMatchOccurrence { indices: [3, 7] }],
+            }),
+        };
+
+        assert_eq!(
+            candidate.into_resolved(Some("// unicode\nfn café_lookup() {}\n")),
+            CodeSearchCandidate {
+                file: "src/unicode.rs".to_owned(),
+                line_start: Some(2),
+                line_end: Some(2),
+            }
         );
     }
 
