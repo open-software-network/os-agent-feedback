@@ -868,6 +868,16 @@ struct IncompleteCodeMatchContent {
     error: String,
 }
 
+impl IncompleteCodeMatchContent {
+    fn counts_toward_ceiling(&self) -> bool {
+        // A content-budget release with no pending candidates happened before
+        // both search and contents work. It is pure installation capacity, not
+        // a failed verification attempt. Every mid-flight budget release has a
+        // durable candidate payload, and every fetch failure still counts.
+        self.reason != "content_budget" || self.pending_verification.is_some()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct PendingGithubCodeSearchMatches {
     query: crate::code_match::CodeSearchQuery,
@@ -1125,18 +1135,14 @@ async fn process_code_match_job(
                     }
                 }
             };
-            // A fresh search can return ten distinct files. Require a complete
-            // per-attempt verification slice before spending the scarcer
-            // search quota. If later queries discover more than ten files,
-            // their durable pending payload continues without another search.
-            if content_budget.remaining() < CODE_MATCH_CONTENT_FETCHES_PER_INSTALLATION_BATCH {
+            // The exact per-report need is unknowable before search. Require
+            // only a minimal viable slice; mid-flight exhaustion persists the
+            // candidate set and resumes contents work without another search.
+            if content_budget.remaining() == 0 {
                 let incomplete = IncompleteCodeMatchContent {
                     reason: "content_budget".to_owned(),
                     file: None,
-                    required_content: i32::try_from(
-                        CODE_MATCH_CONTENT_FETCHES_PER_INSTALLATION_BATCH,
-                    )
-                    .unwrap_or(i32::MAX),
+                    required_content: 1,
                     pending_verification: None,
                     error: "installation lacks a complete content-verification slice before search"
                         .to_owned(),
@@ -1713,9 +1719,11 @@ async fn release_code_match_after_incomplete_content(
     verification_retry_count: i32,
     incomplete: &IncompleteCodeMatchContent,
 ) -> anyhow::Result<CodeMatchJobOutcome> {
-    let next_verification_retry = verification_retry_count.saturating_add(1);
+    let counts_toward_ceiling = incomplete.counts_toward_ceiling();
+    let next_verification_retry =
+        verification_retry_count.saturating_add(i32::from(counts_toward_ceiling));
     let until = generic_code_match_retry_at(next_verification_retry);
-    if next_verification_retry >= CODE_MATCH_MAX_VERIFICATION_RETRIES {
+    if counts_toward_ceiling && next_verification_retry >= CODE_MATCH_MAX_VERIFICATION_RETRIES {
         let reason = format!(
             "content verification retry ceiling {CODE_MATCH_MAX_VERIFICATION_RETRIES} reached: {}",
             incomplete.error
@@ -1757,7 +1765,7 @@ async fn release_code_match_after_incomplete_content(
                 required_content: incomplete.required_content,
                 candidates: incomplete.pending_verification.as_ref(),
             },
-            counts_toward_ceiling: true,
+            counts_toward_ceiling,
             available_at: until,
             error: &incomplete.error,
         },

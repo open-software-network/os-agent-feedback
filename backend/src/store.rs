@@ -12139,9 +12139,10 @@ mod product_tests {
             "all-fragmentless results must settle empty without retry or dead letter"
         );
 
-        // Class 2: known capacity shortfall requeues through the shared
-        // counter. Its next claim preflights capacity before any search and
-        // can settle normally once the FIFO-prioritized job has enough budget.
+        // Class 2: a pure pre-search capacity shortfall requeues without
+        // consuming the verification ceiling. Its next claim preflights
+        // capacity before any search and can settle normally once the
+        // FIFO-prioritized job has a minimal viable slice.
         let (_, budget_report) = submit_mapped_code_match_report(
             &pool,
             &write_secret,
@@ -12181,8 +12182,8 @@ mod product_tests {
         .fetch_one(&pool)
         .await?;
         anyhow::ensure!(
-            budget_retry_state == (Some("content_budget".into()), 1, 0, 0),
-            "capacity retry must count once without storing a hint or spending search quota"
+            budget_retry_state == (Some("content_budget".into()), 0, 0, 0),
+            "pure pre-search capacity must not consume the ceiling, store a hint, or spend search quota"
         );
         sqlx::query("UPDATE code_match_queue SET available_at = NOW() WHERE report_id = $1")
             .bind(budget_report.id)
@@ -12214,7 +12215,7 @@ mod product_tests {
         else {
             anyhow::bail!("capacity retry should proceed once its budget is available");
         };
-        anyhow::ensure!(budget_verifier.file_calls() == 0 && budget_retry_count == 1);
+        anyhow::ensure!(budget_verifier.file_calls() == 0 && budget_retry_count == 0);
         let mut budget_verification = CodeMatchVerificationTracker::default();
         budget_verification.observe_candidates(1);
         crate::settle_and_complete_code_match_job(
@@ -12240,6 +12241,53 @@ mod product_tests {
             budget_stored.1.as_deref() == Some("matched") && budget_stored.0[0]["verified"] == true,
             "recovered capacity must store only a verified-at-SHA hint"
         );
+
+        // A mid-flight capacity release is different: search candidates were
+        // already preserved, so it represents an attempted verification and
+        // must advance the same bounded counter as transport failures.
+        let (_, midflight_report) = submit_mapped_code_match_report(
+            &pool,
+            &write_secret,
+            write_key.id,
+            "Mid-flight content exhaustion retains candidates and counts.",
+        )
+        .await?;
+        let midflight_job = claim_code_match_batch(&pool, 100, Utc::now() - Duration::minutes(5))
+            .await
+            .map_err(test_error)?
+            .into_iter()
+            .find(|job| job.report_id == midflight_report.id)
+            .context("mid-flight capacity report should be claimable")?;
+        let midflight_incomplete = crate::IncompleteCodeMatchContent {
+            reason: "content_budget".to_owned(),
+            file: None,
+            required_content: 1,
+            pending_verification: Some(pending_code_verification("src/midflight.rs")),
+            error: "test mid-flight content budget exhausted".to_owned(),
+        };
+        crate::release_code_match_after_incomplete_content(
+            &pool,
+            &midflight_job,
+            remapped_sha,
+            "open-software/remapped-code-match-test",
+            0,
+            &midflight_incomplete,
+        )
+        .await?;
+        let midflight_count = sqlx::query_scalar::<_, i32>(
+            "SELECT verification_retry_count FROM code_match_queue WHERE report_id = $1",
+        )
+        .bind(midflight_report.id)
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(
+            midflight_count == 1,
+            "mid-flight capacity must advance the verification ceiling"
+        );
+        sqlx::query("DELETE FROM code_match_queue WHERE report_id = $1")
+            .bind(midflight_report.id)
+            .execute(&pool)
+            .await?;
 
         // Class 3: an actual contents failure preflights the failed file ahead
         // of search on every retry. Every release counts, then the Nth writes
@@ -12415,6 +12463,125 @@ mod product_tests {
             .bind(vec![oldest_report.id, newer_report.id])
             .execute(&pool)
             .await?;
+
+        // Ordinary installation pressure must never turn "not attempted" into
+        // terminal_unverifiable. More than eight queued reports can each lose
+        // capacity for more than eight batches, remain at counter zero, then
+        // progress once FIFO gives them a viable slice.
+        let mut capacity_report_ids = Vec::new();
+        for index in 0..9 {
+            let description = format!("Busy-installation capacity report {index}.");
+            let (_, capacity_report) =
+                submit_mapped_code_match_report(&pool, &write_secret, write_key.id, &description)
+                    .await?;
+            capacity_report_ids.push(capacity_report.id);
+        }
+        for _ in 0..=crate::CODE_MATCH_MAX_VERIFICATION_RETRIES {
+            sqlx::query(
+                "UPDATE code_match_queue SET available_at = NOW() WHERE report_id = ANY($1)",
+            )
+            .bind(&capacity_report_ids)
+            .execute(&pool)
+            .await?;
+            let capacity_jobs =
+                claim_code_match_batch(&pool, 100, Utc::now() - Duration::minutes(5))
+                    .await
+                    .map_err(test_error)?
+                    .into_iter()
+                    .filter(|job| capacity_report_ids.contains(&job.report_id))
+                    .collect::<Vec<_>>();
+            anyhow::ensure!(capacity_jobs.len() == capacity_report_ids.len());
+            for job in capacity_jobs {
+                let no_capacity = crate::IncompleteCodeMatchContent {
+                    reason: "content_budget".to_owned(),
+                    file: None,
+                    required_content: 1,
+                    pending_verification: None,
+                    error: "test installation content budget fully drained before search"
+                        .to_owned(),
+                };
+                crate::release_code_match_after_incomplete_content(
+                    &pool,
+                    &job,
+                    remapped_sha,
+                    "open-software/remapped-code-match-test",
+                    job.verification_retry_count,
+                    &no_capacity,
+                )
+                .await?;
+            }
+        }
+        let capacity_state = sqlx::query_as::<_, (i64, Option<i32>, i64)>(
+            r"SELECT COUNT(*) FILTER (WHERE dead_lettered_at IS NOT NULL),
+              MAX(verification_retry_count),
+              (SELECT COUNT(*) FROM report_code_hints hints
+                WHERE hints.report_id = ANY($1))
+            FROM code_match_queue WHERE report_id = ANY($1)",
+        )
+        .bind(&capacity_report_ids)
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(
+            capacity_state == (0, Some(0), 0),
+            "pure capacity must never consume the ceiling or write a terminal hints row"
+        );
+
+        sqlx::query("UPDATE code_match_queue SET available_at = NOW() WHERE report_id = ANY($1)")
+            .bind(&capacity_report_ids)
+            .execute(&pool)
+            .await?;
+        let capacity_jobs = claim_code_match_batch(&pool, 100, Utc::now() - Duration::minutes(5))
+            .await
+            .map_err(test_error)?
+            .into_iter()
+            .filter(|job| capacity_report_ids.contains(&job.report_id))
+            .collect::<Vec<_>>();
+        anyhow::ensure!(capacity_jobs.len() == capacity_report_ids.len());
+        for job in capacity_jobs {
+            let verifier = TestPinnedCommitVerifier::new(true);
+            let mut available_budget = crate::InstallationContentBudget::new();
+            let mut available_cache = BTreeMap::new();
+            let preflight = crate::preflight_code_match_content_retry(
+                &pool,
+                &verifier,
+                &job,
+                "open-software/remapped-code-match-test",
+                job.verification_retry_count,
+                &mut available_budget,
+                &mut available_cache,
+            )
+            .await?;
+            let crate::CodeMatchContentPreflight::RetrySha {
+                computed_at_sha,
+                retry_count,
+            } = preflight
+            else {
+                anyhow::bail!("capacity-only report should eventually receive a viable slice");
+            };
+            let mut verification = CodeMatchVerificationTracker::default();
+            verification.observe_candidates(1);
+            crate::settle_and_complete_code_match_job(
+                &pool,
+                &verifier,
+                &job,
+                "open-software/remapped-code-match-test",
+                crate::CodeMatchSettlement {
+                    computed_at_sha: &computed_at_sha,
+                    matches: verified_code_matches("src/capacity-recovered.rs"),
+                    verification,
+                    verification_retry_count: retry_count,
+                },
+            )
+            .await?;
+        }
+        let progressed_capacity_reports = sqlx::query_scalar::<_, i64>(
+            r"SELECT COUNT(*) FROM report_code_hints
+            WHERE report_id = ANY($1) AND outcome = 'matched'",
+        )
+        .bind(&capacity_report_ids)
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(progressed_capacity_reports == 9);
 
         // Retention deletes interactions, which cascades through reports. All
         // code-intelligence state must disappear with that report.
