@@ -5,6 +5,8 @@
 
 use std::{cmp::Reverse, collections::BTreeSet};
 
+use serde::{Deserialize, Serialize};
+
 /// GitHub's code-search quota is small. This cap bounds the maximum work one
 /// report can contribute before the worker applies its per-installation batch
 /// budget.
@@ -69,7 +71,7 @@ pub(crate) struct CodeMatchInput<'a> {
     pub(crate) findings: &'a [CodeMatchFinding<'a>],
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CodeSearchQuery {
     pub(crate) expression: String,
     pub(crate) match_reason: String,
@@ -87,7 +89,7 @@ impl CodeSearchQuery {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CodeSearchCandidate {
     pub(crate) file: String,
     pub(crate) line_start: Option<u32>,
@@ -101,20 +103,13 @@ impl CodeSearchCandidate {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum CodeSearchVerification {
     Verified,
-    Unverified,
     FileNotFound,
 }
 
-impl CodeSearchVerification {
-    const fn is_verified(self) -> bool {
-        matches!(self, Self::Verified)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CodeSearchMatches {
     pub(crate) query: CodeSearchQuery,
     pub(crate) candidates: Vec<CodeSearchCandidate>,
@@ -137,10 +132,11 @@ pub(crate) struct CodeMatchVerificationOutcome {
     pub(crate) kept_unverified: i64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct CodeMatchVerificationTracker {
     candidates_seen: usize,
     dropped_as_absent: usize,
+    unverified_dropped: usize,
 }
 
 impl CodeMatchVerificationTracker {
@@ -152,13 +148,20 @@ impl CodeMatchVerificationTracker {
         self.dropped_as_absent = self.dropped_as_absent.saturating_add(count);
     }
 
+    pub(crate) const fn observe_unverified_drop(&mut self, count: usize) {
+        self.unverified_dropped = self.unverified_dropped.saturating_add(count);
+    }
+
+    pub(crate) const fn unverified_dropped(&self) -> usize {
+        self.unverified_dropped
+    }
+
     pub(crate) fn finish(self, matches: &[CodeSearchMatches]) -> CodeMatchVerificationOutcome {
         let mut kept_verified = 0_usize;
-        let mut kept_unverified = 0_usize;
+        let kept_unverified = 0_usize;
         for candidate in matches.iter().flat_map(|matches| &matches.candidates) {
             match candidate.verification {
                 CodeSearchVerification::Verified => kept_verified += 1,
-                CodeSearchVerification::Unverified => kept_unverified += 1,
                 CodeSearchVerification::FileNotFound => {
                     debug_assert!(false, "file-not-found candidates must be settled first");
                 }
@@ -170,6 +173,10 @@ impl CodeMatchVerificationTracker {
             kept_verified: bounded_count(kept_verified),
             kept_unverified: bounded_count(kept_unverified),
         };
+        debug_assert_eq!(
+            outcome.kept_unverified, 0,
+            "unverified candidates must never reach settlement"
+        );
         debug_assert_eq!(
             outcome.candidates_seen,
             outcome
@@ -242,28 +249,28 @@ pub(crate) fn rank_matches(matches: Vec<CodeSearchMatches>) -> Vec<CodeHintCandi
                 })
         })
         .collect::<Vec<_>>();
-    ranked.sort_by(|left, right| {
+    // Unverified candidates no longer exist. Preserve the prior ordering among
+    // verified candidates: specificity, query order, GitHub result order, then
+    // deterministic file/range tiebreakers. The removed verification key was
+    // constant for every candidate allowed through this boundary.
+    ranked.sort_by_key(|entry| {
         (
-            Reverse(left.3.verification.is_verified()),
-            &left.0,
-            left.1,
-            left.2,
-            &left.3.file,
-            left.3.line_start,
+            entry.0,
+            entry.1,
+            entry.2,
+            entry.3.file.clone(),
+            entry.3.line_start,
         )
-            .cmp(&(
-                Reverse(right.3.verification.is_verified()),
-                &right.0,
-                right.1,
-                right.2,
-                &right.3.file,
-                right.3.line_start,
-            ))
     });
 
     let mut seen = BTreeSet::new();
     ranked
         .into_iter()
+        // STORED implies VERIFIED-AT-SHA. Keep this boundary defensive even
+        // though the resolver now requeues every incomplete verification.
+        .filter(|(_, _, _, candidate, _)| {
+            candidate.verification == CodeSearchVerification::Verified
+        })
         .filter_map(|(_, _, _, candidate, match_reason)| {
             let (line_start, line_end) = match (candidate.line_start, candidate.line_end) {
                 (Some(line_start), Some(line_end)) => {
@@ -278,7 +285,10 @@ pub(crate) fn rank_matches(matches: Vec<CodeSearchMatches>) -> Vec<CodeHintCandi
                     line_start,
                     line_end,
                     match_reason,
-                    verified: candidate.verification.is_verified(),
+                    // Chunk 3 filters persisted JSON on this key. It is now an
+                    // invariant, not a variable; C3 may drop that filter only
+                    // after the branches merge.
+                    verified: true,
                 })
         })
         .take(MAX_CODE_HINTS_PER_REPORT)
@@ -602,44 +612,36 @@ mod tests {
     }
 
     #[test]
-    fn ranking_keeps_an_unverifiable_candidate_and_flags_it() {
+    fn ranking_rejects_every_candidate_not_verified_at_the_sha() {
         let hints = rank_matches(vec![CodeSearchMatches {
             query: query("operation token", 10),
             candidates: vec![CodeSearchCandidate {
                 file: "src/unresolved.rs".to_owned(),
                 line_start: None,
                 line_end: None,
-                verification: CodeSearchVerification::Unverified,
+                verification: CodeSearchVerification::FileNotFound,
             }],
         }]);
 
-        assert_eq!(hints[0].line_start, None);
-        assert_eq!(hints[0].line_end, None);
-        assert!(!hints[0].verified);
+        assert!(hints.is_empty());
     }
 
     #[test]
-    fn verified_duplicate_outranks_unverified_duplicate() {
-        let duplicate = |verification| CodeSearchCandidate {
-            file: "src/search.rs".to_owned(),
-            line_start: None,
-            line_end: None,
-            verification,
-        };
+    fn verified_candidate_order_no_longer_has_a_verification_sort_dimension() {
         let hints = rank_matches(vec![
             CodeSearchMatches {
-                query: query("specific unverified", 100),
-                candidates: vec![duplicate(CodeSearchVerification::Unverified)],
+                query: query("specific verified", 100),
+                candidates: vec![candidate("src/specific.rs", 5, 5)],
             },
             CodeSearchMatches {
                 query: query("broad verified", 10),
-                candidates: vec![duplicate(CodeSearchVerification::Verified)],
+                candidates: vec![candidate("src/broad.rs", 1, 1)],
             },
         ]);
 
-        assert_eq!(hints.len(), 1);
-        assert!(hints[0].verified);
-        assert_eq!(hints[0].match_reason, "broad verified");
+        assert_eq!(hints.len(), 2);
+        assert_eq!(hints[0].match_reason, "specific verified");
+        assert!(hints.iter().all(|hint| hint.verified));
     }
 
     #[test]
@@ -693,30 +695,22 @@ mod tests {
     #[test]
     fn verification_outcomes_partition_candidates_before_ranking() {
         let mut tracker = CodeMatchVerificationTracker::default();
-        tracker.observe_candidates(4);
+        tracker.observe_candidates(3);
         tracker.observe_absent(2);
         let outcome = tracker.finish(&[CodeSearchMatches {
             query: query("operation token", 10),
-            candidates: vec![
-                CodeSearchCandidate {
-                    file: "src/verified.rs".to_owned(),
-                    line_start: Some(1),
-                    line_end: Some(1),
-                    verification: CodeSearchVerification::Verified,
-                },
-                CodeSearchCandidate {
-                    file: "src/unverified.rs".to_owned(),
-                    line_start: None,
-                    line_end: None,
-                    verification: CodeSearchVerification::Unverified,
-                },
-            ],
+            candidates: vec![CodeSearchCandidate {
+                file: "src/verified.rs".to_owned(),
+                line_start: Some(1),
+                line_end: Some(1),
+                verification: CodeSearchVerification::Verified,
+            }],
         }]);
 
-        assert_eq!(outcome.candidates_seen, 4);
+        assert_eq!(outcome.candidates_seen, 3);
         assert_eq!(outcome.dropped_as_absent, 2);
         assert_eq!(outcome.kept_verified, 1);
-        assert_eq!(outcome.kept_unverified, 1);
+        assert_eq!(outcome.kept_unverified, 0);
     }
 
     #[test]

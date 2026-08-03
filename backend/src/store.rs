@@ -87,6 +87,12 @@ pub(crate) struct CodeMatchJob {
     pub(crate) verification_retry_sha: Option<String>,
     pub(crate) verification_retry_repo: Option<String>,
     pub(crate) verification_retry_count: i32,
+    pub(crate) verification_retry_reason: Option<String>,
+    pub(crate) verification_retry_content_sha: Option<String>,
+    pub(crate) verification_retry_content_repo: Option<String>,
+    pub(crate) verification_retry_file: Option<String>,
+    pub(crate) verification_retry_required_content: Option<i32>,
+    pub(crate) verification_retry_candidates: Option<serde_json::Value>,
 }
 
 pub(crate) struct CodeMatchCompletion<'a> {
@@ -98,11 +104,34 @@ pub(crate) struct CodeMatchCompletion<'a> {
 }
 
 pub(crate) struct CodeMatchVerificationRetry<'a> {
-    pub(crate) computed_at_sha: &'a str,
-    pub(crate) repo_full_name: &'a str,
+    pub(crate) target: CodeMatchVerificationRetryTarget<'a>,
     pub(crate) counts_toward_ceiling: bool,
     pub(crate) available_at: DateTime<Utc>,
     pub(crate) error: &'a str,
+}
+
+pub(crate) enum CodeMatchVerificationRetryTarget<'a> {
+    PinnedCommit {
+        computed_at_sha: &'a str,
+        repo_full_name: &'a str,
+    },
+    Content {
+        reason: &'a str,
+        computed_at_sha: &'a str,
+        repo_full_name: &'a str,
+        file: Option<&'a str>,
+        required_content: i32,
+        candidates: Option<&'a serde_json::Value>,
+    },
+}
+
+pub(crate) struct CodeMatchContentRetry<'a> {
+    pub(crate) reason: &'a str,
+    pub(crate) computed_at_sha: &'a str,
+    pub(crate) repo_full_name: &'a str,
+    pub(crate) file: Option<&'a str>,
+    pub(crate) required_content: i32,
+    pub(crate) candidates: Option<&'a serde_json::Value>,
 }
 
 impl CodeMatchJob {
@@ -110,6 +139,17 @@ impl CodeMatchJob {
         self.verification_retry_sha
             .as_deref()
             .zip(self.verification_retry_repo.as_deref())
+    }
+
+    pub(crate) fn content_retry(&self) -> Option<CodeMatchContentRetry<'_>> {
+        Some(CodeMatchContentRetry {
+            reason: self.verification_retry_reason.as_deref()?,
+            computed_at_sha: self.verification_retry_content_sha.as_deref()?,
+            repo_full_name: self.verification_retry_content_repo.as_deref()?,
+            file: self.verification_retry_file.as_deref(),
+            required_content: self.verification_retry_required_content?,
+            candidates: self.verification_retry_candidates.as_ref(),
+        })
     }
 }
 
@@ -480,7 +520,7 @@ pub(crate) async fn claim_code_match_batch(
           SELECT report_id
           FROM code_match_queue
           WHERE claimed_at IS NULL AND dead_lettered_at IS NULL AND available_at <= NOW()
-          ORDER BY available_at, enqueued_at, report_id
+          ORDER BY enqueued_at, available_at, report_id
           FOR UPDATE SKIP LOCKED
           LIMIT $1
         )
@@ -497,6 +537,9 @@ pub(crate) async fn claim_code_match_batch(
         r"SELECT queue.report_id, queue.product_id, queue.claim_token, queue.attempts,
           queue.verification_retry_sha, queue.verification_retry_repo,
           queue.verification_retry_count,
+          queue.verification_retry_reason, queue.verification_retry_content_sha,
+          queue.verification_retry_content_repo, queue.verification_retry_file,
+          queue.verification_retry_required_content, queue.verification_retry_candidates,
           mapping.installation_id,
           (installation.installation_id IS NOT NULL) AS installation_active,
           mapping.repo_full_name, mapping.default_branch, mapping.path_prefix,
@@ -587,31 +630,83 @@ pub(crate) async fn complete_code_match_job(
     Ok(completed.is_some())
 }
 
-/// Releases an unsettled verification attempt without consuming its attempt
-/// slot. Later claims must pass the pinned-commit preflight before searching,
-/// and keeping the slot open prevents an attempts cap from parking a report
-/// that intentionally has no hints row yet. Only definitive pinned-commit
-/// absence advances the separate terminal counter; transient failures retain
-/// the current count while still using it to widen backoff.
+/// Releases unsettled verification without consuming its ordinary attempt
+/// slot. Pinned-commit and content retries retain distinct state while sharing
+/// the bounded verification counter. Content retries also retain their noisy
+/// search candidates so later claims resume core-quota checks without spending
+/// search quota again.
 pub(crate) async fn release_code_match_for_verification_retry(
     pool: &PgPool,
     report_id: Uuid,
     claim_token: Uuid,
     retry: CodeMatchVerificationRetry<'_>,
 ) -> Result<bool, ApiError> {
+    let (
+        pinned_sha,
+        pinned_repo,
+        reason,
+        content_sha,
+        content_repo,
+        file,
+        required_content,
+        candidates,
+    ) = match retry.target {
+        CodeMatchVerificationRetryTarget::PinnedCommit {
+            computed_at_sha,
+            repo_full_name,
+        } => (
+            Some(computed_at_sha),
+            Some(repo_full_name),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+        CodeMatchVerificationRetryTarget::Content {
+            reason,
+            computed_at_sha,
+            repo_full_name,
+            file,
+            required_content,
+            candidates,
+        } => (
+            None,
+            None,
+            Some(reason),
+            Some(computed_at_sha),
+            Some(repo_full_name),
+            file,
+            Some(required_content),
+            candidates,
+        ),
+    };
     let result = sqlx::query(
         r"UPDATE code_match_queue SET claimed_at = NULL, claim_token = NULL,
           verification_retry_sha = $3, verification_retry_repo = $4,
+          verification_retry_reason = $5,
+          verification_retry_content_sha = $6,
+          verification_retry_content_repo = $7,
+          verification_retry_file = $8,
+          verification_retry_required_content = $9,
+          verification_retry_candidates = $10,
           verification_retry_count = verification_retry_count
-            + CASE WHEN $5 THEN 1 ELSE 0 END,
-          available_at = $6, last_error = LEFT($7, 500),
+            + CASE WHEN $11 THEN 1 ELSE 0 END,
+          available_at = $12, last_error = LEFT($13, 500),
           attempts = GREATEST(attempts - 1, 0)
         WHERE report_id = $1 AND claim_token = $2",
     )
     .bind(report_id)
     .bind(claim_token)
-    .bind(retry.computed_at_sha)
-    .bind(retry.repo_full_name)
+    .bind(pinned_sha)
+    .bind(pinned_repo)
+    .bind(reason)
+    .bind(content_sha)
+    .bind(content_repo)
+    .bind(file)
+    .bind(required_content)
+    .bind(candidates)
     .bind(retry.counts_toward_ceiling)
     .bind(retry.available_at)
     .bind(retry.error)
@@ -645,6 +740,9 @@ pub(crate) async fn reset_code_match_verification_retry(
     let result = sqlx::query(
         r"UPDATE code_match_queue SET verification_retry_sha = NULL,
           verification_retry_repo = NULL, verification_retry_count = 0,
+          verification_retry_reason = NULL, verification_retry_content_sha = NULL,
+          verification_retry_content_repo = NULL, verification_retry_file = NULL,
+          verification_retry_required_content = NULL, verification_retry_candidates = NULL,
           last_error = NULL
         WHERE report_id = $1 AND claim_token = $2",
     )
@@ -673,7 +771,10 @@ pub(crate) async fn terminally_dead_letter_code_match_verification(
           UPDATE code_match_queue SET claimed_at = NULL, claim_token = NULL,
             dead_lettered_at = NOW(), last_error = LEFT($4, 500),
             verification_retry_sha = NULL, verification_retry_repo = NULL,
-            verification_retry_count = 0
+            verification_retry_count = 0, verification_retry_reason = NULL,
+            verification_retry_content_sha = NULL,
+            verification_retry_content_repo = NULL, verification_retry_file = NULL,
+            verification_retry_required_content = NULL, verification_retry_candidates = NULL
           WHERE report_id = $1 AND claim_token = $2
           RETURNING report_id
         ), hints_written AS (
@@ -10398,7 +10499,10 @@ mod product_tests {
             CodeMatchVerificationTracker, CodeSearchCandidate, CodeSearchMatches, CodeSearchQuery,
             CodeSearchVerification,
         },
-        github::{GithubPinnedCommitError, GithubPinnedCommitFailureKind},
+        github::{
+            GithubFileContentError, GithubFileContentFailureKind, GithubPinnedCommitError,
+            GithubPinnedCommitFailureKind,
+        },
         models::{ConsentDecisionInput, CurrentUser},
     };
 
@@ -10424,6 +10528,9 @@ mod product_tests {
         available: AtomicBool,
         failure_kind: Mutex<GithubPinnedCommitFailureKind>,
         calls: Mutex<Vec<(String, String)>>,
+        file_available: AtomicBool,
+        file_failure_kind: Mutex<GithubFileContentFailureKind>,
+        file_calls: Mutex<Vec<(String, String, String)>>,
     }
 
     impl TestPinnedCommitVerifier {
@@ -10432,6 +10539,9 @@ mod product_tests {
                 available: AtomicBool::new(available),
                 failure_kind: Mutex::new(GithubPinnedCommitFailureKind::NotFound),
                 calls: Mutex::new(Vec::new()),
+                file_available: AtomicBool::new(true),
+                file_failure_kind: Mutex::new(GithubFileContentFailureKind::Server),
+                file_calls: Mutex::new(Vec::new()),
             }
         }
 
@@ -10461,6 +10571,17 @@ mod product_tests {
                 .map(|(repo, _)| repo.clone())
                 .collect()
         }
+
+        fn set_file_available(&self, available: bool) {
+            self.file_available.store(available, Ordering::SeqCst);
+        }
+
+        fn file_calls(&self) -> usize {
+            self.file_calls
+                .lock()
+                .expect("file call log lock should be live")
+                .len()
+        }
     }
 
     impl PinnedCommitVerifier for TestPinnedCommitVerifier {
@@ -10483,6 +10604,31 @@ mod product_tests {
                     .expect("failure-kind lock should be live"),
             ))
         }
+
+        async fn pinned_file_content(
+            &self,
+            repo_full_name: &str,
+            file: &str,
+            computed_at_sha: &str,
+        ) -> Result<String, GithubFileContentError> {
+            self.file_calls
+                .lock()
+                .expect("file call log lock should be live")
+                .push((
+                    repo_full_name.to_owned(),
+                    file.to_owned(),
+                    computed_at_sha.to_owned(),
+                ));
+            if self.file_available.load(Ordering::SeqCst) {
+                return Ok("verified fragment".to_owned());
+            }
+            Err(GithubFileContentError::for_test(
+                *self
+                    .file_failure_kind
+                    .lock()
+                    .expect("file failure-kind lock should be live"),
+            ))
+        }
     }
 
     fn provisional_file_404_matches(count: usize) -> Vec<CodeSearchMatches> {
@@ -10497,6 +10643,39 @@ mod product_tests {
                 })
                 .collect(),
         }]
+    }
+
+    fn verified_code_matches(file: &str) -> Vec<CodeSearchMatches> {
+        vec![CodeSearchMatches {
+            query: CodeSearchQuery::for_test("operation token"),
+            candidates: vec![CodeSearchCandidate {
+                file: file.to_owned(),
+                line_start: Some(1),
+                line_end: Some(1),
+                verification: CodeSearchVerification::Verified,
+            }],
+        }]
+    }
+
+    fn pending_code_verification(file: &str) -> serde_json::Value {
+        let query = CodeSearchQuery::for_test("operation token");
+        serde_json::to_value(crate::PendingCodeMatchVerification {
+            pending: vec![crate::PendingGithubCodeSearchMatches {
+                query: query.clone(),
+                candidates: vec![
+                    crate::github::GithubCodeSearchCandidate::with_fragment_for_test(
+                        file,
+                        "verified fragment",
+                    ),
+                ],
+            }],
+            resolved: vec![CodeSearchMatches {
+                query,
+                candidates: Vec::new(),
+            }],
+            verification: CodeMatchVerificationTracker::default(),
+        })
+        .expect("pending code verification should serialize")
     }
 
     async fn submit_mapped_code_match_report(
@@ -11900,6 +12079,343 @@ mod product_tests {
             "retryable, proven-absent, and terminal-unverifiable states must remain distinguishable from stored state alone"
         );
 
+        // Class 1: fragmentless candidates never enter verification. An
+        // all-fragmentless result settles empty without retrying and records
+        // why it differs from both no-hit and proven absence.
+        let (_, fragmentless_report) = submit_mapped_code_match_report(
+            &pool,
+            &write_secret,
+            write_key.id,
+            "Fragmentless search candidates are dropped without storage.",
+        )
+        .await?;
+        let fragmentless_job =
+            claim_code_match_batch(&pool, 100, Utc::now() - Duration::minutes(5))
+                .await
+                .map_err(test_error)?
+                .into_iter()
+                .find(|job| job.report_id == fragmentless_report.id)
+                .context("fragmentless report should be claimable")?;
+        let mut fragmentless_verification = CodeMatchVerificationTracker::default();
+        fragmentless_verification.observe_unverified_drop(2);
+        crate::settle_and_complete_code_match_job(
+            &pool,
+            &TestPinnedCommitVerifier::new(true),
+            &fragmentless_job,
+            "open-software/remapped-code-match-test",
+            crate::CodeMatchSettlement {
+                computed_at_sha: remapped_sha,
+                matches: vec![CodeSearchMatches {
+                    query: CodeSearchQuery::for_test("fragmentless search hit"),
+                    candidates: Vec::new(),
+                }],
+                verification: fragmentless_verification,
+                verification_retry_count: 0,
+            },
+        )
+        .await?;
+        let fragmentless_state = sqlx::query_as::<
+            _,
+            (serde_json::Value, Option<String>, i64, i64),
+        >(
+            r"SELECT hints.hints, hints.outcome,
+              (SELECT COUNT(*) FROM code_match_queue queue
+                WHERE queue.report_id = hints.report_id),
+              (SELECT kept_unverified FROM code_match_verification_analytics analytics
+                WHERE analytics.report_id = hints.report_id ORDER BY created_at DESC, id DESC LIMIT 1)
+            FROM report_code_hints hints WHERE hints.report_id = $1",
+        )
+        .bind(fragmentless_report.id)
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(
+            fragmentless_state
+                == (
+                    serde_json::json!([]),
+                    Some("unverified_dropped".into()),
+                    0,
+                    0,
+                ),
+            "all-fragmentless results must settle empty without retry or dead letter"
+        );
+
+        // Class 2: known capacity shortfall requeues through the shared
+        // counter. Its next claim preflights capacity before any search and
+        // can settle normally once the FIFO-prioritized job has enough budget.
+        let (_, budget_report) = submit_mapped_code_match_report(
+            &pool,
+            &write_secret,
+            write_key.id,
+            "Content capacity must recover without storing an unverified hint.",
+        )
+        .await?;
+        let budget_job = claim_code_match_batch(&pool, 100, Utc::now() - Duration::minutes(5))
+            .await
+            .map_err(test_error)?
+            .into_iter()
+            .find(|job| job.report_id == budget_report.id)
+            .context("content-budget report should be claimable")?;
+        let budget_incomplete = crate::IncompleteCodeMatchContent {
+            reason: "content_budget".to_owned(),
+            file: None,
+            required_content: 2,
+            pending_verification: None,
+            error: "test content budget exhausted".to_owned(),
+        };
+        crate::release_code_match_after_incomplete_content(
+            &pool,
+            &budget_job,
+            remapped_sha,
+            "open-software/remapped-code-match-test",
+            0,
+            &budget_incomplete,
+        )
+        .await?;
+        let budget_retry_state = sqlx::query_as::<_, (Option<String>, i32, i64, i64)>(
+            r"SELECT verification_retry_reason, verification_retry_count,
+              (SELECT COUNT(*) FROM report_code_hints hints WHERE hints.report_id = queue.report_id),
+              (SELECT COUNT(*) FROM match_analytics calls WHERE calls.report_id = queue.report_id)
+            FROM code_match_queue queue WHERE report_id = $1",
+        )
+        .bind(budget_report.id)
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(
+            budget_retry_state == (Some("content_budget".into()), 1, 0, 0),
+            "capacity retry must count once without storing a hint or spending search quota"
+        );
+        sqlx::query("UPDATE code_match_queue SET available_at = NOW() WHERE report_id = $1")
+            .bind(budget_report.id)
+            .execute(&pool)
+            .await?;
+        let budget_retry = claim_code_match_batch(&pool, 100, Utc::now() - Duration::minutes(5))
+            .await
+            .map_err(test_error)?
+            .into_iter()
+            .find(|job| job.report_id == budget_report.id)
+            .context("content-budget retry should be claimable")?;
+        let budget_verifier = TestPinnedCommitVerifier::new(true);
+        let mut recovered_budget = crate::InstallationContentBudget::new();
+        let mut recovered_cache = BTreeMap::new();
+        let budget_preflight = crate::preflight_code_match_content_retry(
+            &pool,
+            &budget_verifier,
+            &budget_retry,
+            "open-software/remapped-code-match-test",
+            budget_retry.verification_retry_count,
+            &mut recovered_budget,
+            &mut recovered_cache,
+        )
+        .await?;
+        let crate::CodeMatchContentPreflight::RetrySha {
+            computed_at_sha: budget_sha,
+            retry_count: budget_retry_count,
+        } = budget_preflight
+        else {
+            anyhow::bail!("capacity retry should proceed once its budget is available");
+        };
+        anyhow::ensure!(budget_verifier.file_calls() == 0 && budget_retry_count == 1);
+        let mut budget_verification = CodeMatchVerificationTracker::default();
+        budget_verification.observe_candidates(1);
+        crate::settle_and_complete_code_match_job(
+            &pool,
+            &budget_verifier,
+            &budget_retry,
+            "open-software/remapped-code-match-test",
+            crate::CodeMatchSettlement {
+                computed_at_sha: &budget_sha,
+                matches: verified_code_matches("src/recovered.rs"),
+                verification: budget_verification,
+                verification_retry_count: budget_retry_count,
+            },
+        )
+        .await?;
+        let budget_stored = sqlx::query_as::<_, (serde_json::Value, Option<String>)>(
+            "SELECT hints, outcome FROM report_code_hints WHERE report_id = $1",
+        )
+        .bind(budget_report.id)
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(
+            budget_stored.1.as_deref() == Some("matched") && budget_stored.0[0]["verified"] == true,
+            "recovered capacity must store only a verified-at-SHA hint"
+        );
+
+        // Class 3: an actual contents failure preflights the failed file ahead
+        // of search on every retry. Every release counts, then the Nth writes
+        // the existing atomic terminal state with no unverified hint.
+        let (_, fetch_report) = submit_mapped_code_match_report(
+            &pool,
+            &write_secret,
+            write_key.id,
+            "A persistently incomplete content fetch terminates visibly.",
+        )
+        .await?;
+        let fetch_job = claim_code_match_batch(&pool, 100, Utc::now() - Duration::minutes(5))
+            .await
+            .map_err(test_error)?
+            .into_iter()
+            .find(|job| job.report_id == fetch_report.id)
+            .context("content-fetch report should be claimable")?;
+        let fetch_pending = pending_code_verification("src/flaky.rs");
+        let fetch_incomplete = crate::IncompleteCodeMatchContent {
+            reason: "content_fetch".to_owned(),
+            file: Some("src/flaky.rs".to_owned()),
+            required_content: 1,
+            pending_verification: Some(fetch_pending),
+            error: "test pinned contents transport failure".to_owned(),
+        };
+        crate::release_code_match_after_incomplete_content(
+            &pool,
+            &fetch_job,
+            remapped_sha,
+            "open-software/remapped-code-match-test",
+            0,
+            &fetch_incomplete,
+        )
+        .await?;
+        let fetch_verifier = TestPinnedCommitVerifier::new(true);
+        fetch_verifier.set_file_available(false);
+        for expected_count in 2..=crate::CODE_MATCH_MAX_VERIFICATION_RETRIES {
+            sqlx::query("UPDATE code_match_queue SET available_at = NOW() WHERE report_id = $1")
+                .bind(fetch_report.id)
+                .execute(&pool)
+                .await?;
+            let retry = claim_code_match_batch(&pool, 100, Utc::now() - Duration::minutes(5))
+                .await
+                .map_err(test_error)?
+                .into_iter()
+                .find(|job| job.report_id == fetch_report.id)
+                .context("content-fetch retry should remain claimable until its ceiling")?;
+            let mut retry_budget = crate::InstallationContentBudget::new();
+            let mut retry_cache = BTreeMap::new();
+            let preflight = crate::preflight_code_match_content_retry(
+                &pool,
+                &fetch_verifier,
+                &retry,
+                "open-software/remapped-code-match-test",
+                retry.verification_retry_count,
+                &mut retry_budget,
+                &mut retry_cache,
+            )
+            .await?;
+            anyhow::ensure!(matches!(
+                preflight,
+                crate::CodeMatchContentPreflight::Stop(
+                    crate::CodeMatchJobOutcome::BackoffInstallation { .. }
+                )
+            ));
+            if expected_count < crate::CODE_MATCH_MAX_VERIFICATION_RETRIES {
+                let count = sqlx::query_scalar::<_, i32>(
+                    "SELECT verification_retry_count FROM code_match_queue WHERE report_id = $1",
+                )
+                .bind(fetch_report.id)
+                .fetch_one(&pool)
+                .await?;
+                anyhow::ensure!(count == expected_count);
+            }
+        }
+        let fetch_terminal = sqlx::query_as::<
+            _,
+            (
+                Option<DateTime<Utc>>,
+                serde_json::Value,
+                Option<String>,
+                i64,
+                i64,
+            ),
+        >(
+            r"SELECT queue.dead_lettered_at, hints.hints, hints.outcome,
+              analytics.kept_unverified,
+              (SELECT COUNT(*) FROM match_analytics calls WHERE calls.report_id = queue.report_id)
+            FROM code_match_queue queue
+            JOIN report_code_hints hints ON hints.report_id = queue.report_id
+            JOIN code_match_verification_analytics analytics
+              ON analytics.report_id = queue.report_id
+            WHERE queue.report_id = $1",
+        )
+        .bind(fetch_report.id)
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(
+            fetch_terminal.0.is_some()
+                && fetch_terminal.1 == serde_json::json!([])
+                && fetch_terminal.2.as_deref() == Some("terminal_unverifiable")
+                && fetch_terminal.3 == 0
+                && fetch_terminal.4 == 0
+                && fetch_verifier.file_calls()
+                    == usize::try_from(crate::CODE_MATCH_MAX_VERIFICATION_RETRIES - 1)?,
+            "content fetch retries must stop at the shared ceiling without re-spending search"
+        );
+
+        // The database makes the invariant structural: neither an explicit
+        // false value nor a missing verified key can be written by any path.
+        for invalid_hints in [
+            serde_json::json!([{"file": "src/false.rs", "verified": false}]),
+            serde_json::json!([{"file": "src/missing.rs"}]),
+        ] {
+            let rejected =
+                sqlx::query("UPDATE report_code_hints SET hints = $2 WHERE report_id = $1")
+                    .bind(budget_report.id)
+                    .bind(invalid_hints)
+                    .execute(&pool)
+                    .await;
+            anyhow::ensure!(
+                rejected.is_err(),
+                "unverified stored hints must be rejected"
+            );
+        }
+        let nonzero_unverified = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM code_match_verification_analytics WHERE kept_unverified <> 0",
+        )
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(nonzero_unverified == 0);
+
+        // FIFO is the starvation control: release never changes enqueued_at,
+        // and claim order chooses the older available row first.
+        let (_, oldest_report) = submit_mapped_code_match_report(
+            &pool,
+            &write_secret,
+            write_key.id,
+            "The oldest starved report must win content capacity.",
+        )
+        .await?;
+        let (_, newer_report) = submit_mapped_code_match_report(
+            &pool,
+            &write_secret,
+            write_key.id,
+            "A newer report must wait behind the starved report.",
+        )
+        .await?;
+        sqlx::query(
+            r"UPDATE code_match_queue SET available_at = NOW() + INTERVAL '1 hour'
+            WHERE dead_lettered_at IS NULL AND report_id <> ALL($1)",
+        )
+        .bind(vec![oldest_report.id, newer_report.id])
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            r"UPDATE code_match_queue SET
+              available_at = CASE WHEN report_id = $1
+                THEN NOW() - INTERVAL '1 minute' ELSE NOW() - INTERVAL '2 minutes' END,
+              enqueued_at = CASE WHEN report_id = $1
+                THEN NOW() - INTERVAL '2 hours' ELSE NOW() - INTERVAL '1 hour' END
+            WHERE report_id = ANY($2)",
+        )
+        .bind(oldest_report.id)
+        .bind(vec![oldest_report.id, newer_report.id])
+        .execute(&pool)
+        .await?;
+        let fifo_claim = claim_code_match_batch(&pool, 1, Utc::now() - Duration::minutes(5))
+            .await
+            .map_err(test_error)?;
+        anyhow::ensure!(fifo_claim[0].report_id == oldest_report.id);
+        sqlx::query("DELETE FROM code_match_queue WHERE report_id = ANY($1)")
+            .bind(vec![oldest_report.id, newer_report.id])
+            .execute(&pool)
+            .await?;
+
         // Retention deletes interactions, which cascades through reports. All
         // code-intelligence state must disappear with that report.
         sqlx::query(r"UPDATE report_code_hints SET hints = $2 WHERE report_id = $1")
@@ -11908,7 +12424,8 @@ mod product_tests {
                 "file": "backend/src/store.rs",
                 "line_start": 7988,
                 "line_end": 7992,
-                "match_reason": "exact operation identifier `search_reports`"
+                "match_reason": "exact operation identifier `search_reports`",
+                "verified": true
             }]))
             .execute(&pool)
             .await?;
@@ -11921,7 +12438,7 @@ mod product_tests {
         anyhow::ensure!(
             dashboard_report.code_hints[0]["file"] == "backend/src/store.rs"
                 && dashboard_report.code_hints[0]["line_start"] == 7988
-                && dashboard_report.code_hints[0]["verified"] == false
+                && dashboard_report.code_hints[0]["verified"] == true
         );
         sqlx::query("DELETE FROM interactions_v2 WHERE id = $1")
             .bind(interaction_id)

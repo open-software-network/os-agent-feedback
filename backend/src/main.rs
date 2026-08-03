@@ -13,12 +13,13 @@ mod security;
 mod store;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env,
     net::{IpAddr, SocketAddr},
     sync::Arc,
 };
 
+use anyhow::Context as _;
 use axum::{
     Json, Router,
     body::{Body, Bytes},
@@ -33,7 +34,7 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use chrono::{DateTime, Duration, Utc};
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tower_http::{
@@ -74,9 +75,9 @@ use crate::{
     error::{ApiError, ApiErrorEnvelope},
     github::{
         GithubAppClient, GithubAppConfig, GithubCodeSearchCandidate, GithubCodeSearchFailureKind,
-        GithubFileContentFailureKind, GithubIssue, GithubIssueCreationOutcome,
-        GithubIssueListError, GithubIssueListFailureKind, GithubPinnedCommitError, GithubRateLimit,
-        validate_repo_full_name,
+        GithubFileContentError, GithubFileContentFailureKind, GithubIssue,
+        GithubIssueCreationOutcome, GithubIssueListError, GithubIssueListFailureKind,
+        GithubPinnedCommitError, GithubRateLimit, validate_repo_full_name,
     },
     grouping::FingerprintGrouper,
     issue_template::{
@@ -111,11 +112,11 @@ use crate::{
         bearer_token, clear_cookie, cookie, http_only_cookie, random_token, reject_sensitive_fields,
     },
     store::{
-        CodeMatchCompletion, CodeMatchJob, CodeMatchVerificationRetry, GithubInstallationUpsert,
-        GroupIssueFilingClaim, GroupIssueFilingRequest, GroupIssueSyncContext,
-        accept_team_invitation, agent_product_auth, backfill_customer_intelligence,
-        backfill_report_groups, bump_last_commented_report_count, claim_code_match_batch,
-        claim_group_issue_filing, claim_group_issue_reconciliation,
+        CodeMatchCompletion, CodeMatchJob, CodeMatchVerificationRetry,
+        CodeMatchVerificationRetryTarget, GithubInstallationUpsert, GroupIssueFilingClaim,
+        GroupIssueFilingRequest, GroupIssueSyncContext, accept_team_invitation, agent_product_auth,
+        backfill_customer_intelligence, backfill_report_groups, bump_last_commented_report_count,
+        claim_code_match_batch, claim_group_issue_filing, claim_group_issue_reconciliation,
         claim_group_issue_state_refresh, clear_code_match_verification_retry_marker,
         clear_product_github_repo, complete_code_match_job, complete_group_issue_filing,
         complete_group_issue_reconciliation, create_api_key, create_enrichment_request,
@@ -732,7 +733,7 @@ struct InstallationContentBudget {
 enum PinnedFileContent {
     Content(String),
     FileNotFound,
-    Unverified,
+    Incomplete(GithubFileContentFailureKind),
 }
 
 const fn pinned_file_content_for_failure(kind: GithubFileContentFailureKind) -> PinnedFileContent {
@@ -743,7 +744,7 @@ const fn pinned_file_content_for_failure(kind: GithubFileContentFailureKind) -> 
         | GithubFileContentFailureKind::Server
         | GithubFileContentFailureKind::Timeout
         | GithubFileContentFailureKind::InvalidResponse
-        | GithubFileContentFailureKind::Transport => PinnedFileContent::Unverified,
+        | GithubFileContentFailureKind::Transport => PinnedFileContent::Incomplete(kind),
     }
 }
 
@@ -761,6 +762,13 @@ trait PinnedCommitVerifier: Sync {
         repo_full_name: &str,
         computed_at_sha: &str,
     ) -> impl std::future::Future<Output = Result<(), GithubPinnedCommitError>> + Send;
+
+    fn pinned_file_content(
+        &self,
+        repo_full_name: &str,
+        file: &str,
+        computed_at_sha: &str,
+    ) -> impl std::future::Future<Output = Result<String, GithubFileContentError>> + Send;
 }
 
 struct GithubPinnedCommitVerifier<'a> {
@@ -778,6 +786,17 @@ impl PinnedCommitVerifier for GithubPinnedCommitVerifier<'_> {
             .repository_commit_is_fetchable(self.token, repo_full_name, computed_at_sha)
             .await
     }
+
+    async fn pinned_file_content(
+        &self,
+        repo_full_name: &str,
+        file: &str,
+        computed_at_sha: &str,
+    ) -> Result<String, GithubFileContentError> {
+        self.github
+            .repository_file_content(self.token, repo_full_name, file, computed_at_sha)
+            .await
+    }
 }
 
 impl InstallationContentBudget {
@@ -793,6 +812,10 @@ impl InstallationContentBudget {
         }
         self.remaining -= 1;
         true
+    }
+
+    const fn remaining(&self) -> usize {
+        self.remaining
     }
 }
 
@@ -813,11 +836,57 @@ enum CodeMatchVerificationPreflight {
     Stop(CodeMatchJobOutcome),
 }
 
+enum CodeMatchContentPreflight {
+    Fresh {
+        retry_count: i32,
+    },
+    RetrySha {
+        computed_at_sha: String,
+        retry_count: i32,
+    },
+    Resume {
+        computed_at_sha: String,
+        retry_count: i32,
+        verification: PendingCodeMatchVerification,
+    },
+    Stop(CodeMatchJobOutcome),
+}
+
 struct CodeMatchSettlement<'a> {
     computed_at_sha: &'a str,
     matches: Vec<CodeSearchMatches>,
     verification: CodeMatchVerificationTracker,
     verification_retry_count: i32,
+}
+
+#[derive(Debug)]
+struct IncompleteCodeMatchContent {
+    reason: String,
+    file: Option<String>,
+    required_content: i32,
+    pending_verification: Option<serde_json::Value>,
+    error: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PendingGithubCodeSearchMatches {
+    query: crate::code_match::CodeSearchQuery,
+    candidates: Vec<GithubCodeSearchCandidate>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PendingCodeMatchVerification {
+    pending: Vec<PendingGithubCodeSearchMatches>,
+    resolved: Vec<CodeSearchMatches>,
+    verification: CodeMatchVerificationTracker,
+}
+
+enum PendingCodeMatchResolution {
+    Complete {
+        matches: Vec<CodeSearchMatches>,
+        verification: CodeMatchVerificationTracker,
+    },
+    Incomplete(IncompleteCodeMatchContent),
 }
 
 async fn drain_code_match_batch(
@@ -876,6 +945,40 @@ async fn drain_code_match_batch(
                             job.verification_retry_count,
                             false,
                             &message,
+                        )
+                        .await?;
+                    } else if let Some(retry) = job.content_retry() {
+                        let mapping_changed = job
+                            .repo_full_name
+                            .as_deref()
+                            .is_some_and(|repo| !same_code_match_repo(repo, retry.repo_full_name));
+                        if mapping_changed {
+                            let cleared = reset_code_match_verification_retry(
+                                pool,
+                                job.report_id,
+                                job.claim_token,
+                            )
+                            .await
+                            .map_err(|error| anyhow::anyhow!(error.message))?;
+                            if cleared {
+                                retry_or_dead_letter_code_match_job(pool, job, &message).await?;
+                            }
+                            continue;
+                        }
+                        let incomplete = IncompleteCodeMatchContent {
+                            reason: retry.reason.to_owned(),
+                            file: retry.file.map(str::to_owned),
+                            required_content: retry.required_content,
+                            pending_verification: retry.candidates.cloned(),
+                            error: message.clone(),
+                        };
+                        release_code_match_after_incomplete_content(
+                            pool,
+                            job,
+                            retry.computed_at_sha,
+                            retry.repo_full_name,
+                            job.verification_retry_count,
+                            &incomplete,
                         )
                         .await?;
                     } else {
@@ -973,141 +1076,43 @@ async fn process_code_match_job(
         CodeMatchVerificationPreflight::Proceed { retry_count } => retry_count,
         CodeMatchVerificationPreflight::Stop(outcome) => return Ok(outcome),
     };
-    let repo_key = (repo_full_name.to_owned(), default_branch.to_owned());
-    let computed_at_sha = if let Some(sha) = head_sha_by_repo.get(&repo_key) {
-        sha.clone()
-    } else {
-        match github
-            .repository_head_sha(token, repo_full_name, default_branch)
-            .await
-        {
-            Ok(sha) => {
-                head_sha_by_repo.insert(repo_key, sha.clone());
-                sha
-            }
-            Err(error) => {
-                let message = format!("GitHub repository HEAD failed: {error}");
-                let until = retry_or_dead_letter_code_match_job(pool, job, &message).await?;
-                let Some(until) = until else {
-                    return Ok(CodeMatchJobOutcome::Continue);
-                };
-                return Ok(CodeMatchJobOutcome::BackoffInstallation {
-                    until,
-                    error: message,
-                });
-            }
-        }
-    };
-
-    let stored_findings =
-        serde_json::from_value::<Vec<StoredCodeMatchFinding>>(job.findings.clone())
-            .unwrap_or_default();
-    let match_findings = stored_findings
-        .iter()
-        .map(|finding| CodeMatchFinding {
-            kind: &finding.kind,
-            topic: &finding.topic,
-        })
-        .collect::<Vec<_>>();
-    let queries = derive_queries(CodeMatchInput {
+    let content_preflight = preflight_code_match_content_retry(
+        pool,
+        &pinned_commit_verifier,
+        job,
         repo_full_name,
-        path_prefix: job.path_prefix.as_deref(),
-        operation: &job.operation,
-        surface: &job.surface,
-        runtime_hint: job.runtime_hint.as_deref(),
-        findings: &match_findings,
-    });
-    let query_count = queries.len();
-    let mut calls_attempted = 0;
-    let mut successful_queries = 0;
-    let mut invalid_request_errors = Vec::new();
-    let mut matches = Vec::new();
-    let mut verification = CodeMatchVerificationTracker::default();
-    for query in queries {
-        if !budget.take() {
-            break;
-        }
-        tokio::time::sleep_until(*next_search_at).await;
-        let started_at = std::time::Instant::now();
-        match github.search_code(token, &query.expression).await {
-            Ok(result) => {
-                calls_attempted += 1;
-                let hit = !result.candidates.is_empty();
-                record_code_match_call(
-                    pool,
-                    job.report_id,
-                    result.rate_limit.remaining,
-                    hit,
-                    elapsed_millis(started_at),
-                )
-                .await
-                .map_err(|error| anyhow::anyhow!(error.message))?;
-                successful_queries += 1;
-                budget.observe_headroom(result.rate_limit.remaining);
-                let delay = code_search_pacing_delay(&result.rate_limit, Utc::now());
-                *next_search_at = tokio::time::Instant::now() + delay;
-                if result.rate_limit.remaining == Some(0) {
-                    *quota_retry_at = Some(code_search_retry_at(&result.rate_limit, Utc::now()));
-                }
-                let candidates = resolve_code_search_candidates(
-                    github,
-                    token,
-                    job.report_id,
-                    repo_full_name,
-                    &computed_at_sha,
-                    result.candidates,
-                    content_budget,
-                    content_by_file,
-                    &mut verification,
-                )
-                .await;
-                matches.push(CodeSearchMatches { query, candidates });
-            }
-            Err(error) => {
-                calls_attempted += 1;
-                let rate_limit = error.rate_limit().clone();
-                record_code_match_call(
-                    pool,
-                    job.report_id,
-                    rate_limit.remaining,
-                    false,
-                    elapsed_millis(started_at),
-                )
-                .await
-                .map_err(|error| anyhow::anyhow!(error.message))?;
-                let kind = error.kind();
-                let message = error.to_string();
-                match kind {
-                    GithubCodeSearchFailureKind::RateLimit => {
-                        let until = code_search_retry_at(&rate_limit, Utc::now());
-                        release_code_match_job(
-                            pool,
-                            job.report_id,
-                            job.claim_token,
-                            until,
-                            Some(&message),
-                        )
-                        .await
-                        .map_err(|error| anyhow::anyhow!(error.message))?;
-                        return Ok(CodeMatchJobOutcome::BackoffInstallation {
-                            until,
-                            error: message,
-                        });
+        verification_retry_count,
+        content_budget,
+        content_by_file,
+    )
+    .await?;
+    let (computed_at_sha, verification_retry_count, resumed_verification) = match content_preflight
+    {
+        CodeMatchContentPreflight::RetrySha {
+            computed_at_sha,
+            retry_count,
+        } => (computed_at_sha, retry_count, None),
+        CodeMatchContentPreflight::Resume {
+            computed_at_sha,
+            retry_count,
+            verification,
+        } => (computed_at_sha, retry_count, Some(verification)),
+        CodeMatchContentPreflight::Stop(outcome) => return Ok(outcome),
+        CodeMatchContentPreflight::Fresh { retry_count } => {
+            let repo_key = (repo_full_name.to_owned(), default_branch.to_owned());
+            let computed_at_sha = if let Some(sha) = head_sha_by_repo.get(&repo_key) {
+                sha.clone()
+            } else {
+                match github
+                    .repository_head_sha(token, repo_full_name, default_branch)
+                    .await
+                {
+                    Ok(sha) => {
+                        head_sha_by_repo.insert(repo_key, sha.clone());
+                        sha
                     }
-                    GithubCodeSearchFailureKind::InvalidRequest => {
-                        invalid_request_errors.push(message);
-                    }
-                    GithubCodeSearchFailureKind::Forbidden => {
-                        let reason = format!("permanent GitHub code-search failure: {message}");
-                        dead_letter_owned_code_match_job(pool, job, &reason).await?;
-                        return Ok(CodeMatchJobOutcome::Continue);
-                    }
-                    GithubCodeSearchFailureKind::Unauthorized
-                    | GithubCodeSearchFailureKind::NotFound
-                    | GithubCodeSearchFailureKind::Server
-                    | GithubCodeSearchFailureKind::Timeout
-                    | GithubCodeSearchFailureKind::InvalidResponse
-                    | GithubCodeSearchFailureKind::Transport => {
+                    Err(error) => {
+                        let message = format!("GitHub repository HEAD failed: {error}");
                         let until =
                             retry_or_dead_letter_code_match_job(pool, job, &message).await?;
                         let Some(until) = until else {
@@ -1119,31 +1124,222 @@ async fn process_code_match_job(
                         });
                     }
                 }
+            };
+            // A fresh search can return ten distinct files. Require a complete
+            // per-attempt verification slice before spending the scarcer
+            // search quota. If later queries discover more than ten files,
+            // their durable pending payload continues without another search.
+            if content_budget.remaining() < CODE_MATCH_CONTENT_FETCHES_PER_INSTALLATION_BATCH {
+                let incomplete = IncompleteCodeMatchContent {
+                    reason: "content_budget".to_owned(),
+                    file: None,
+                    required_content: i32::try_from(
+                        CODE_MATCH_CONTENT_FETCHES_PER_INSTALLATION_BATCH,
+                    )
+                    .unwrap_or(i32::MAX),
+                    pending_verification: None,
+                    error: "installation lacks a complete content-verification slice before search"
+                        .to_owned(),
+                };
+                return release_code_match_after_incomplete_content(
+                    pool,
+                    job,
+                    &computed_at_sha,
+                    repo_full_name,
+                    retry_count,
+                    &incomplete,
+                )
+                .await;
+            }
+            (computed_at_sha, retry_count, None)
+        }
+    };
+
+    let pending_verification = if let Some(verification) = resumed_verification {
+        // Search already completed before this content retry was persisted.
+        // Resume the durable candidate set; never spend those search calls a
+        // second time.
+        verification
+    } else {
+        let stored_findings =
+            serde_json::from_value::<Vec<StoredCodeMatchFinding>>(job.findings.clone())
+                .unwrap_or_default();
+        let match_findings = stored_findings
+            .iter()
+            .map(|finding| CodeMatchFinding {
+                kind: &finding.kind,
+                topic: &finding.topic,
+            })
+            .collect::<Vec<_>>();
+        let queries = derive_queries(CodeMatchInput {
+            repo_full_name,
+            path_prefix: job.path_prefix.as_deref(),
+            operation: &job.operation,
+            surface: &job.surface,
+            runtime_hint: job.runtime_hint.as_deref(),
+            findings: &match_findings,
+        });
+        let query_count = queries.len();
+        let mut calls_attempted = 0;
+        let mut successful_queries = 0;
+        let mut invalid_request_errors = Vec::new();
+        let mut verification = CodeMatchVerificationTracker::default();
+        let mut pending = Vec::new();
+        let mut resolved = Vec::new();
+        for query in queries {
+            if !budget.take() {
+                break;
+            }
+            tokio::time::sleep_until(*next_search_at).await;
+            let started_at = std::time::Instant::now();
+            match github.search_code(token, &query.expression).await {
+                Ok(result) => {
+                    calls_attempted += 1;
+                    let hit = !result.candidates.is_empty();
+                    record_code_match_call(
+                        pool,
+                        job.report_id,
+                        result.rate_limit.remaining,
+                        hit,
+                        elapsed_millis(started_at),
+                    )
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
+                    successful_queries += 1;
+                    budget.observe_headroom(result.rate_limit.remaining);
+                    let delay = code_search_pacing_delay(&result.rate_limit, Utc::now());
+                    *next_search_at = tokio::time::Instant::now() + delay;
+                    if result.rate_limit.remaining == Some(0) {
+                        *quota_retry_at =
+                            Some(code_search_retry_at(&result.rate_limit, Utc::now()));
+                    }
+                    let candidates = drop_fragmentless_code_search_candidates(
+                        result.candidates,
+                        &mut verification,
+                    );
+                    resolved.push(CodeSearchMatches {
+                        query: query.clone(),
+                        candidates: Vec::new(),
+                    });
+                    pending.push(PendingGithubCodeSearchMatches { query, candidates });
+                }
+                Err(error) => {
+                    calls_attempted += 1;
+                    let rate_limit = error.rate_limit().clone();
+                    record_code_match_call(
+                        pool,
+                        job.report_id,
+                        rate_limit.remaining,
+                        false,
+                        elapsed_millis(started_at),
+                    )
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
+                    let kind = error.kind();
+                    let message = error.to_string();
+                    match kind {
+                        GithubCodeSearchFailureKind::RateLimit => {
+                            let until = code_search_retry_at(&rate_limit, Utc::now());
+                            release_code_match_job(
+                                pool,
+                                job.report_id,
+                                job.claim_token,
+                                until,
+                                Some(&message),
+                            )
+                            .await
+                            .map_err(|error| anyhow::anyhow!(error.message))?;
+                            return Ok(CodeMatchJobOutcome::BackoffInstallation {
+                                until,
+                                error: message,
+                            });
+                        }
+                        GithubCodeSearchFailureKind::InvalidRequest => {
+                            invalid_request_errors.push(message);
+                        }
+                        GithubCodeSearchFailureKind::Forbidden => {
+                            let reason = format!("permanent GitHub code-search failure: {message}");
+                            dead_letter_owned_code_match_job(pool, job, &reason).await?;
+                            return Ok(CodeMatchJobOutcome::Continue);
+                        }
+                        GithubCodeSearchFailureKind::Unauthorized
+                        | GithubCodeSearchFailureKind::NotFound
+                        | GithubCodeSearchFailureKind::Server
+                        | GithubCodeSearchFailureKind::Timeout
+                        | GithubCodeSearchFailureKind::InvalidResponse
+                        | GithubCodeSearchFailureKind::Transport => {
+                            let until =
+                                retry_or_dead_letter_code_match_job(pool, job, &message).await?;
+                            let Some(until) = until else {
+                                return Ok(CodeMatchJobOutcome::Continue);
+                            };
+                            return Ok(CodeMatchJobOutcome::BackoffInstallation {
+                                until,
+                                error: message,
+                            });
+                        }
+                    }
+                }
             }
         }
-    }
 
-    if every_code_search_query_was_invalid(
-        query_count,
-        calls_attempted,
-        invalid_request_errors.len(),
-    ) {
-        let reason = format!(
-            "all {query_count} GitHub code-search queries were invalid: {}",
-            invalid_request_errors.join("; ")
-        );
-        dead_letter_owned_code_match_job(pool, job, &reason).await?;
-        return Ok(CodeMatchJobOutcome::Continue);
-    }
+        if every_code_search_query_was_invalid(
+            query_count,
+            calls_attempted,
+            invalid_request_errors.len(),
+        ) {
+            let reason = format!(
+                "all {query_count} GitHub code-search queries were invalid: {}",
+                invalid_request_errors.join("; ")
+            );
+            dead_letter_owned_code_match_job(pool, job, &reason).await?;
+            return Ok(CodeMatchJobOutcome::Continue);
+        }
 
-    if query_count > 0 && successful_queries == 0 {
-        let until = quota_retry_at.unwrap_or_else(|| Utc::now() + Duration::minutes(1));
-        let error = invalid_request_errors.last().map(String::as_str);
-        release_code_match_job(pool, job.report_id, job.claim_token, until, error)
-            .await
-            .map_err(|error| anyhow::anyhow!(error.message))?;
-        return Ok(CodeMatchJobOutcome::Continue);
-    }
+        if query_count > 0 && successful_queries == 0 {
+            let until = quota_retry_at.unwrap_or_else(|| Utc::now() + Duration::minutes(1));
+            let error = invalid_request_errors.last().map(String::as_str);
+            release_code_match_job(pool, job.report_id, job.claim_token, until, error)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            return Ok(CodeMatchJobOutcome::Continue);
+        }
+
+        PendingCodeMatchVerification {
+            pending,
+            resolved,
+            verification,
+        }
+    };
+
+    let (matches, verification) = match resolve_pending_code_search_candidates(
+        github,
+        token,
+        job.report_id,
+        repo_full_name,
+        &computed_at_sha,
+        pending_verification,
+        content_budget,
+        content_by_file,
+    )
+    .await?
+    {
+        PendingCodeMatchResolution::Complete {
+            matches,
+            verification,
+        } => (matches, verification),
+        PendingCodeMatchResolution::Incomplete(incomplete) => {
+            return release_code_match_after_incomplete_content(
+                pool,
+                job,
+                &computed_at_sha,
+                repo_full_name,
+                verification_retry_count,
+                &incomplete,
+            )
+            .await;
+        }
+    };
 
     settle_and_complete_code_match_job(
         pool,
@@ -1224,6 +1420,125 @@ async fn preflight_code_match_verification_retry(
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "content retry preflight owns the shared installation budget and pinned-file cache"
+)]
+async fn preflight_code_match_content_retry(
+    pool: &PgPool,
+    verifier: &impl PinnedCommitVerifier,
+    job: &CodeMatchJob,
+    repo_full_name: &str,
+    verification_retry_count: i32,
+    budget: &mut InstallationContentBudget,
+    content_by_file: &mut BTreeMap<(String, String, String), PinnedFileContent>,
+) -> anyhow::Result<CodeMatchContentPreflight> {
+    let Some(retry) = job.content_retry() else {
+        return Ok(CodeMatchContentPreflight::Fresh {
+            retry_count: verification_retry_count,
+        });
+    };
+    if !same_code_match_repo(retry.repo_full_name, repo_full_name) {
+        let cleared = reset_code_match_verification_retry(pool, job.report_id, job.claim_token)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        if !cleared {
+            tracing::warn!(
+                report_id = %job.report_id,
+                "code-match content retry remap reset lost its claim fencing race"
+            );
+            return Ok(CodeMatchContentPreflight::Stop(
+                CodeMatchJobOutcome::Continue,
+            ));
+        }
+        return Ok(CodeMatchContentPreflight::Fresh { retry_count: 0 });
+    }
+
+    let required_content = usize::try_from(retry.required_content).unwrap_or(usize::MAX);
+    let required_slice = required_content.min(CODE_MATCH_CONTENT_FETCHES_PER_INSTALLATION_BATCH);
+    if budget.remaining() < required_slice {
+        let incomplete = IncompleteCodeMatchContent {
+            reason: retry.reason.to_owned(),
+            file: retry.file.map(str::to_owned),
+            required_content: retry.required_content,
+            pending_verification: retry.candidates.cloned(),
+            error: format!(
+                "content verification needs a {required_slice}-fetch slice but only {} remain",
+                budget.remaining()
+            ),
+        };
+        return release_code_match_after_incomplete_content(
+            pool,
+            job,
+            retry.computed_at_sha,
+            retry.repo_full_name,
+            job.verification_retry_count,
+            &incomplete,
+        )
+        .await
+        .map(CodeMatchContentPreflight::Stop);
+    }
+
+    if retry.reason == "content_fetch" {
+        let file = retry
+            .file
+            .context("content-fetch retry is missing its file")?;
+        anyhow::ensure!(budget.take(), "reserved content retry budget disappeared");
+        let key = (
+            normalized_code_match_repo(retry.repo_full_name),
+            retry.computed_at_sha.to_owned(),
+            file.to_owned(),
+        );
+        let content = match verifier
+            .pinned_file_content(retry.repo_full_name, file, retry.computed_at_sha)
+            .await
+        {
+            Ok(content) => PinnedFileContent::Content(content),
+            Err(error) => pinned_file_content_for_failure(error.kind()),
+        };
+        if let PinnedFileContent::Incomplete(failure_kind) = &content {
+            let incomplete = IncompleteCodeMatchContent {
+                reason: "content_fetch".to_owned(),
+                file: Some(file.to_owned()),
+                required_content: retry.required_content,
+                pending_verification: retry.candidates.cloned(),
+                error: format!(
+                    "GitHub pinned file remains unverifiable at the retry SHA: {failure_kind:?}"
+                ),
+            };
+            return release_code_match_after_incomplete_content(
+                pool,
+                job,
+                retry.computed_at_sha,
+                retry.repo_full_name,
+                job.verification_retry_count,
+                &incomplete,
+            )
+            .await
+            .map(CodeMatchContentPreflight::Stop);
+        }
+        content_by_file.insert(key, content);
+    }
+
+    // Keep the durable candidate payload on the claimed row until genuine
+    // settlement. If the worker crashes after this preflight, stale-claim
+    // recovery resumes contents work instead of regenerating search hits.
+    if let Some(candidates) = retry.candidates {
+        let verification = serde_json::from_value(candidates.clone())
+            .context("code-match pending verification payload was invalid")?;
+        Ok(CodeMatchContentPreflight::Resume {
+            computed_at_sha: retry.computed_at_sha.to_owned(),
+            retry_count: job.verification_retry_count,
+            verification,
+        })
+    } else {
+        Ok(CodeMatchContentPreflight::RetrySha {
+            computed_at_sha: retry.computed_at_sha.to_owned(),
+            retry_count: job.verification_retry_count,
+        })
+    }
+}
+
 async fn settle_and_complete_code_match_job(
     pool: &PgPool,
     verifier: &impl PinnedCommitVerifier,
@@ -1271,10 +1586,13 @@ async fn settle_and_complete_code_match_job(
     } else {
         matches
     };
+    let unverified_dropped = verification.unverified_dropped() > 0;
     let verification = verification.finish(&matches);
     let hints = rank_matches(matches);
     let stored_outcome = if hints.is_empty() {
-        if verification.dropped_as_absent > 0 {
+        if unverified_dropped {
+            "unverified_dropped"
+        } else if verification.dropped_as_absent > 0 {
             "proven_absent"
         } else {
             "no_match"
@@ -1283,12 +1601,10 @@ async fn settle_and_complete_code_match_job(
         "matched"
     };
     let hints_json = code_hints_json(hints);
-    // Invariant: every stored hint was verified to exist at computed_at_sha,
-    // or is explicitly flagged unverified. Both legitimate no-hit and proven
-    // all-absent outcomes write an empty row with an explicit outcome. An
-    // unproven 404 writes neither row and instead retains a retry marker on the
-    // queue; a ceiling-exhausted marker writes `terminal_unverifiable`
-    // atomically with its dead letter and zero-count analytics row.
+    // Invariant: every stored hint was verified to exist at computed_at_sha.
+    // Fragmentless candidates are dropped; incomplete contents work requeues.
+    // A ceiling-exhausted retry writes `terminal_unverifiable` atomically with
+    // its dead letter and zero-count analytics row.
     let completed = complete_code_match_job(
         pool,
         job.report_id,
@@ -1365,8 +1681,10 @@ async fn release_code_match_after_unproven_pinned_commit(
         job.report_id,
         job.claim_token,
         CodeMatchVerificationRetry {
-            computed_at_sha,
-            repo_full_name: &normalized_code_match_repo(repo_full_name),
+            target: CodeMatchVerificationRetryTarget::PinnedCommit {
+                computed_at_sha,
+                repo_full_name: &normalized_code_match_repo(repo_full_name),
+            },
             counts_toward_ceiling,
             available_at: until,
             error,
@@ -1387,109 +1705,258 @@ async fn release_code_match_after_unproven_pinned_commit(
     })
 }
 
+async fn release_code_match_after_incomplete_content(
+    pool: &PgPool,
+    job: &CodeMatchJob,
+    computed_at_sha: &str,
+    repo_full_name: &str,
+    verification_retry_count: i32,
+    incomplete: &IncompleteCodeMatchContent,
+) -> anyhow::Result<CodeMatchJobOutcome> {
+    let next_verification_retry = verification_retry_count.saturating_add(1);
+    let until = generic_code_match_retry_at(next_verification_retry);
+    if next_verification_retry >= CODE_MATCH_MAX_VERIFICATION_RETRIES {
+        let reason = format!(
+            "content verification retry ceiling {CODE_MATCH_MAX_VERIFICATION_RETRIES} reached: {}",
+            incomplete.error
+        );
+        let terminal = terminally_dead_letter_code_match_verification(
+            pool,
+            job.report_id,
+            job.claim_token,
+            job.attempts,
+            computed_at_sha,
+            &reason,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+        if !terminal {
+            tracing::warn!(
+                report_id = %job.report_id,
+                "code-match terminal content transition lost its claim fencing race"
+            );
+            return Ok(CodeMatchJobOutcome::Continue);
+        }
+        return Ok(CodeMatchJobOutcome::BackoffInstallation {
+            until,
+            error: reason,
+        });
+    }
+
+    let normalized_repo = normalized_code_match_repo(repo_full_name);
+    let released = release_code_match_for_verification_retry(
+        pool,
+        job.report_id,
+        job.claim_token,
+        CodeMatchVerificationRetry {
+            target: CodeMatchVerificationRetryTarget::Content {
+                reason: &incomplete.reason,
+                computed_at_sha,
+                repo_full_name: &normalized_repo,
+                file: incomplete.file.as_deref(),
+                required_content: incomplete.required_content,
+                candidates: incomplete.pending_verification.as_ref(),
+            },
+            counts_toward_ceiling: true,
+            available_at: until,
+            error: &incomplete.error,
+        },
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!(error.message))?;
+    if !released {
+        tracing::warn!(
+            report_id = %job.report_id,
+            "code-match content retry lost its claim fencing race"
+        );
+        return Ok(CodeMatchJobOutcome::Continue);
+    }
+    Ok(CodeMatchJobOutcome::BackoffInstallation {
+        until,
+        error: incomplete.error.clone(),
+    })
+}
+
+fn drop_fragmentless_code_search_candidates(
+    candidates: Vec<GithubCodeSearchCandidate>,
+    verification: &mut CodeMatchVerificationTracker,
+) -> Vec<GithubCodeSearchCandidate> {
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            if candidate.needs_content() {
+                return true;
+            }
+            // Path existence would cost a contents call. The cheap future
+            // option is GET /repos/{o}/{r}/git/trees/{sha}?recursive=1 once
+            // per repo/SHA/batch, with `truncated: true` handled explicitly.
+            verification.observe_unverified_drop(1);
+            false
+        })
+        .collect()
+}
+
+fn pending_code_match_content_files(pending: &PendingCodeMatchVerification) -> usize {
+    pending
+        .pending
+        .iter()
+        .flat_map(|matches| matches.candidates.iter())
+        .map(GithubCodeSearchCandidate::file)
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+fn incomplete_pending_code_match_content(
+    pending: &PendingCodeMatchVerification,
+    reason: &str,
+    file: Option<String>,
+    error: String,
+) -> anyhow::Result<IncompleteCodeMatchContent> {
+    let required_content =
+        i32::try_from(pending_code_match_content_files(pending)).unwrap_or(i32::MAX);
+    Ok(IncompleteCodeMatchContent {
+        reason: reason.to_owned(),
+        file,
+        required_content: required_content.max(1),
+        pending_verification: Some(
+            serde_json::to_value(pending)
+                .context("code-match pending verification could not be serialized")?,
+        ),
+        error,
+    })
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the arguments keep pinned-SHA resolution and its installation budget explicit"
 )]
-async fn resolve_code_search_candidates(
+async fn resolve_pending_code_search_candidates(
     github: &GithubAppClient,
     token: &crate::github::GithubInstallationToken,
     report_id: Uuid,
     repo_full_name: &str,
     computed_at_sha: &str,
-    candidates: Vec<GithubCodeSearchCandidate>,
+    mut pending: PendingCodeMatchVerification,
     budget: &mut InstallationContentBudget,
     content_by_file: &mut BTreeMap<(String, String, String), PinnedFileContent>,
-    verification: &mut CodeMatchVerificationTracker,
-) -> Vec<CodeSearchCandidate> {
-    verification.observe_candidates(candidates.len());
-    let mut resolved = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        if !candidate.needs_content() {
-            // Search results without a fragment cannot be verified without a
-            // brand-new contents call. Keep them explicitly unverified so a
-            // single report cannot consume the installation's core quota.
-            resolved.push(candidate.into_unverified());
-            continue;
-        }
+) -> anyhow::Result<PendingCodeMatchResolution> {
+    while let Some(file) = pending
+        .pending
+        .iter()
+        .flat_map(|matches| &matches.candidates)
+        .next()
+        .map(|candidate| candidate.file().to_owned())
+    {
         let key = (
-            repo_full_name.to_owned(),
+            normalized_code_match_repo(repo_full_name),
             computed_at_sha.to_owned(),
-            candidate.file().to_owned(),
+            file.clone(),
         );
         if !content_by_file.contains_key(&key) {
-            let content = if budget.take() {
-                // Contents calls use GitHub's core quota, not the code-search
-                // quota represented by match_analytics. Cache them separately
-                // and deliberately do not write search analytics rows for them.
-                match github
-                    .repository_file_content(
-                        token,
-                        repo_full_name,
-                        candidate.file(),
-                        computed_at_sha,
-                    )
-                    .await
-                {
-                    Ok(content) => PinnedFileContent::Content(content),
-                    Err(error) => {
-                        let failure_kind = error.kind();
-                        if failure_kind == GithubFileContentFailureKind::NotFound {
-                            tracing::debug!(
-                                %report_id,
-                                repo = repo_full_name,
-                                file = candidate.file(),
-                                "code-match pinned file returned a provisional 404"
-                            );
-                        } else {
-                            tracing::warn!(
-                                %report_id,
-                                repo = repo_full_name,
-                                file = candidate.file(),
-                                ?failure_kind,
-                                %error,
-                                "code-match candidate could not be verified at the pinned SHA"
-                            );
-                        }
-                        pinned_file_content_for_failure(failure_kind)
+            if !budget.take() {
+                return incomplete_pending_code_match_content(
+                    &pending,
+                    "content_budget",
+                    None,
+                    "installation content-verification slice was exhausted; pending candidates were preserved"
+                        .to_owned(),
+                )
+                .map(PendingCodeMatchResolution::Incomplete);
+            }
+            // Contents calls use GitHub's core quota, not the code-search
+            // quota represented by match_analytics. The candidate payload is
+            // durable, so a release from here never regenerates search hits.
+            let content = match github
+                .repository_file_content(token, repo_full_name, &file, computed_at_sha)
+                .await
+            {
+                Ok(content) => PinnedFileContent::Content(content),
+                Err(error) => {
+                    let failure_kind = error.kind();
+                    if failure_kind == GithubFileContentFailureKind::NotFound {
+                        tracing::debug!(
+                            %report_id,
+                            repo = repo_full_name,
+                            %file,
+                            "code-match pinned file returned a provisional 404"
+                        );
+                    } else {
+                        tracing::warn!(
+                            %report_id,
+                            repo = repo_full_name,
+                            %file,
+                            ?failure_kind,
+                            %error,
+                            "code-match candidate could not be verified at the pinned SHA"
+                        );
                     }
+                    pinned_file_content_for_failure(failure_kind)
                 }
-            } else {
-                PinnedFileContent::Unverified
             };
             content_by_file.insert(key.clone(), content);
         }
+
         let Some(content) = content_by_file.get(&key) else {
-            tracing::warn!(
-                %report_id,
-                repo = repo_full_name,
-                file = candidate.file(),
-                "code-match pinned file classification was not cached"
-            );
-            resolved.push(candidate.into_unverified());
-            continue;
+            return incomplete_pending_code_match_content(
+                &pending,
+                "content_fetch",
+                Some(file),
+                "pinned file classification was not cached".to_owned(),
+            )
+            .map(PendingCodeMatchResolution::Incomplete);
         };
-        match content {
-            PinnedFileContent::Content(content) => {
-                if let Some(candidate) = candidate.verify_against_pinned_content(content) {
-                    resolved.push(candidate);
-                } else {
-                    verification.observe_absent(1);
-                    tracing::debug!(
-                        %report_id,
-                        repo = repo_full_name,
-                        file = key.2,
-                        "dropping code-match fragment absent at the pinned SHA"
-                    );
+        if let PinnedFileContent::Incomplete(failure_kind) = content {
+            return incomplete_pending_code_match_content(
+                &pending,
+                "content_fetch",
+                Some(file),
+                format!("GitHub pinned file could not be verified: {failure_kind:?}"),
+            )
+            .map(PendingCodeMatchResolution::Incomplete);
+        }
+
+        for (pending_matches, resolved_matches) in
+            pending.pending.iter_mut().zip(&mut pending.resolved)
+        {
+            let mut remaining = Vec::new();
+            for candidate in std::mem::take(&mut pending_matches.candidates) {
+                if candidate.file() != file {
+                    remaining.push(candidate);
+                    continue;
+                }
+                pending.verification.observe_candidates(1);
+                match content {
+                    PinnedFileContent::Content(content) => {
+                        if let Some(candidate) = candidate.verify_against_pinned_content(content) {
+                            resolved_matches.candidates.push(candidate);
+                        } else {
+                            pending.verification.observe_absent(1);
+                            tracing::debug!(
+                                %report_id,
+                                repo = repo_full_name,
+                                %file,
+                                "dropping code-match fragment absent at the pinned SHA"
+                            );
+                        }
+                    }
+                    PinnedFileContent::FileNotFound => {
+                        resolved_matches
+                            .candidates
+                            .push(candidate.into_file_not_found());
+                    }
+                    PinnedFileContent::Incomplete(_) => unreachable!(
+                        "incomplete contents return before consuming pending candidates"
+                    ),
                 }
             }
-            PinnedFileContent::FileNotFound => {
-                resolved.push(candidate.into_file_not_found());
-            }
-            PinnedFileContent::Unverified => resolved.push(candidate.into_unverified()),
+            pending_matches.candidates = remaining;
         }
     }
-    resolved
+
+    Ok(PendingCodeMatchResolution::Complete {
+        matches: pending.resolved,
+        verification: pending.verification,
+    })
 }
 
 async fn retry_or_dead_letter_code_match_job(
@@ -1537,13 +2004,16 @@ fn code_hints_json(hints: Vec<CodeHintCandidate>) -> serde_json::Value {
     serde_json::Value::Array(
         hints
             .into_iter()
+            .filter(|hint| hint.verified)
             .map(|hint| {
                 json!({
                     "file": hint.file,
                     "line_start": hint.line_start,
                     "line_end": hint.line_end,
                     "match_reason": hint.match_reason,
-                    "verified": hint.verified,
+                    // This key is now an invariant, not a variable. Keep it so
+                    // chunk 3's publishable-hint filter remains compatible.
+                    "verified": true,
                 })
             })
             .collect(),
@@ -5965,16 +6435,18 @@ mod page_tests {
     use axum::{body::to_bytes, http::StatusCode};
 
     use super::{
-        ApiError, CodeHintCandidate, GithubFileContentFailureKind, GithubIssue, GithubRateLimit,
+        ApiError, CodeHintCandidate, CodeMatchVerificationTracker, GithubCodeSearchCandidate,
+        GithubFileContentFailureKind, GithubIssue, GithubRateLimit,
         GroupIssueReconciliationDecision, GroupIssueReconciliationEvidence,
         GroupIssueReconciliationInconclusive, InstallationContentBudget, InstallationSearchBudget,
         PinnedFileContent, WORKSPACE_ID_QUERY_PARAM, build_app_router, code_hints_json,
         code_match_retry_exhausted, code_search_pacing_delay, code_search_retry_at, comma_values,
-        every_code_search_query_was_invalid, feedback_discovery, github_callback_redirect_target,
-        group_issue_reconciliation_resolution, group_issue_state_refresh_due,
-        group_issue_sync_needed, group_marker_comment, install_workspace_id, mcp_auth_error,
-        mcp_tool_allowed, mcp_tools, pinned_file_content_for_failure, resolve_web_app_url,
-        reveal_auth_error, same_code_match_repo, valid_report_group_key, validated_return_to,
+        drop_fragmentless_code_search_candidates, every_code_search_query_was_invalid,
+        feedback_discovery, github_callback_redirect_target, group_issue_reconciliation_resolution,
+        group_issue_state_refresh_due, group_issue_sync_needed, group_marker_comment,
+        install_workspace_id, mcp_auth_error, mcp_tool_allowed, mcp_tools,
+        pinned_file_content_for_failure, resolve_web_app_url, reveal_auth_error,
+        same_code_match_repo, valid_report_group_key, validated_return_to,
     };
     use chrono::{Duration, TimeZone as _, Utc};
     use serde_json::{Value, json};
@@ -6006,8 +6478,22 @@ mod page_tests {
         }
         assert!(
             !content_budget.take(),
-            "an eleventh content fetch must degrade to an absent range"
+            "an eleventh content fetch must requeue the report"
         );
+    }
+
+    #[test]
+    fn fragmentless_code_search_candidates_are_dropped_before_storage() {
+        let mut verification = CodeMatchVerificationTracker::default();
+        let candidates = drop_fragmentless_code_search_candidates(
+            vec![GithubCodeSearchCandidate::fragmentless_for_test(
+                "src/path-only.rs",
+            )],
+            &mut verification,
+        );
+
+        assert!(candidates.is_empty());
+        assert_eq!(verification.unverified_dropped(), 1);
     }
 
     #[test]
@@ -6037,7 +6523,7 @@ mod page_tests {
         ] {
             assert!(matches!(
                 pinned_file_content_for_failure(failure),
-                PinnedFileContent::Unverified
+                PinnedFileContent::Incomplete(kind) if kind == failure
             ));
         }
     }
@@ -6105,22 +6591,13 @@ mod page_tests {
                     verified: false,
                 }
             ]),
-            json!([
-                {
-                    "file": "backend/src/store.rs",
-                    "line_start": 42,
-                    "line_end": 45,
-                    "match_reason": "operation token `search`",
-                    "verified": true,
-                },
-                {
-                    "file": "backend/src/unresolved.rs",
-                    "line_start": null,
-                    "line_end": null,
-                    "match_reason": "surface token `search`",
-                    "verified": false,
-                }
-            ])
+            json!([{
+                "file": "backend/src/store.rs",
+                "line_start": 42,
+                "line_end": 45,
+                "match_reason": "operation token `search`",
+                "verified": true,
+            }])
         );
         assert_eq!(code_hints_json(Vec::new()), json!([]));
     }

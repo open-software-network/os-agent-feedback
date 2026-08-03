@@ -142,7 +142,7 @@ pub(crate) struct GithubCodeSearchResult {
     pub(crate) rate_limit: GithubRateLimit,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct GithubCodeSearchCandidate {
     file: String,
     text_match: Option<CodeSearchTextMatch>,
@@ -155,6 +155,27 @@ impl GithubCodeSearchCandidate {
 
     pub(crate) const fn needs_content(&self) -> bool {
         self.text_match.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fragmentless_for_test(file: &str) -> Self {
+        Self {
+            file: file.to_owned(),
+            text_match: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_fragment_for_test(file: &str, fragment: &str) -> Self {
+        Self {
+            file: file.to_owned(),
+            text_match: Some(CodeSearchTextMatch {
+                fragment: fragment.to_owned(),
+                matches: vec![CodeSearchTextMatchOccurrence {
+                    indices: [0, fragment.len()],
+                }],
+            }),
+        }
     }
 
     pub(crate) fn verify_against_pinned_content(
@@ -175,15 +196,6 @@ impl GithubCodeSearchCandidate {
             line_end: range.map(|range| range.1),
             verification: CodeSearchVerification::Verified,
         })
-    }
-
-    pub(crate) fn into_unverified(self) -> CodeSearchCandidate {
-        CodeSearchCandidate {
-            file: self.file,
-            line_start: None,
-            line_end: None,
-            verification: CodeSearchVerification::Unverified,
-        }
     }
 
     pub(crate) fn into_file_not_found(self) -> CodeSearchCandidate {
@@ -223,6 +235,14 @@ impl GithubFileContentError {
 
     pub(crate) const fn kind(&self) -> GithubFileContentFailureKind {
         self.kind
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(kind: GithubFileContentFailureKind) -> Self {
+        Self {
+            kind,
+            source: anyhow::anyhow!("test file-content failure: {kind:?}"),
+        }
     }
 }
 
@@ -602,14 +622,14 @@ struct CodeSearchItem {
     text_matches: Vec<CodeSearchTextMatch>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct CodeSearchTextMatch {
     fragment: String,
     #[serde(default)]
     matches: Vec<CodeSearchTextMatchOccurrence>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct CodeSearchTextMatchOccurrence {
     indices: [usize; 2],
 }
@@ -1704,21 +1724,12 @@ mod tests {
     }
 
     #[test]
-    fn no_fragment_is_unverified_and_ambiguous_fragment_is_verified_without_a_range() {
-        assert_eq!(
-            code_search_candidates(CodeSearchItem {
-                path: "src/fallback.rs".to_owned(),
-                text_matches: Vec::new(),
-            })[0]
-                .clone()
-                .into_unverified(),
-            CodeSearchCandidate {
-                file: "src/fallback.rs".to_owned(),
-                line_start: None,
-                line_end: None,
-                verification: CodeSearchVerification::Unverified,
-            }
-        );
+    fn no_fragment_needs_no_content_and_ambiguous_fragment_is_verified_without_a_range() {
+        let fragmentless = code_search_candidates(CodeSearchItem {
+            path: "src/fallback.rs".to_owned(),
+            text_matches: Vec::new(),
+        });
+        assert!(!fragmentless[0].needs_content());
         let duplicate = GithubCodeSearchCandidate {
             file: "src/duplicate.rs".to_owned(),
             text_match: Some(CodeSearchTextMatch {
