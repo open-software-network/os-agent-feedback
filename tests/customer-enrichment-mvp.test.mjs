@@ -35,9 +35,12 @@ test("the thin MVP ships five realistic company-owned examples", async () => {
 
   const anonymous = await read("examples/mvp-anonymous-express/index.js");
   assert.match(anonymous, /purpose: "targeted_advertising"/);
+  assert.match(anonymous, /interest\.topic:outdoor_travel/);
   assert.match(anonymous, /timingSafeEqual/);
   assert.match(anonymous, /"\/api\/ephemeral-discover"/);
   assert.match(anonymous, /customer\.contextFor\(request\)/);
+  assert.match(anonymous, /sessionRef: \(request\) => request\.journeyId/);
+  assert.match(anonymous, /runtimeHint: \(\) => "anonymous-express\/1\.0"/);
 
   const python = await read("examples/mvp-b2b-python/app.py");
   assert.match(python, /\/_epode\/v1\/enrichment\/answers/);

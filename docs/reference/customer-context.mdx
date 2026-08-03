@@ -81,6 +81,11 @@ vocabulary; unknown combinations fail closed. Epode generates the stored summary
 storing agent-written prose. Remembered items require the matching grant. Requested expiry is clamped to the
 product retention policy.
 
+For `targeted_advertising`, the backend also requires the selected catalog entry's
+`targetedAdvertisingSafe` field to be `true`. For example, the bounded `interest.topic` preference accepts
+non-sensitive values such as `outdoor_travel`; B2B company size, purchase intent, unknown audience labels, and
+sensitive or free-form attributes fail closed even after advertising permission is approved.
+
 ## Retrieve permitted context
 
 `POST /api/v2/customer-context`
