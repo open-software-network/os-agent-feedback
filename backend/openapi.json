@@ -6752,6 +6752,42 @@
           }
         }
       },
+      "CodeHintResponse": {
+        "type": "object",
+        "required": [
+          "file",
+          "match_reason",
+          "verified"
+        ],
+        "properties": {
+          "file": {
+            "type": "string"
+          },
+          "line_end": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "line_start": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "match_reason": {
+            "type": "string"
+          },
+          "verified": {
+            "type": "boolean",
+            "description": "Whether the hint was verified against `computed_at_sha`. Hints stored\nbefore this field existed are read as unverified."
+          }
+        }
+      },
       "ConsentDecisionInput": {
         "type": "object",
         "required": [
@@ -10338,6 +10374,7 @@
           "workaround",
           "source",
           "createdAt",
+          "codeHints",
           "sessionId",
           "surface",
           "operation",
@@ -10364,6 +10401,12 @@
           },
           "classification": {
             "type": "string"
+          },
+          "codeHints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CodeHintResponse"
+            }
           },
           "confidence": {
             "type": [

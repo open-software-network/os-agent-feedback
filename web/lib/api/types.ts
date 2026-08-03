@@ -863,6 +863,19 @@ export interface components {
             http: string;
             mcp: string;
         };
+        CodeHintResponse: {
+            file: string;
+            /** Format: int32 */
+            line_end?: number | null;
+            /** Format: int32 */
+            line_start?: number | null;
+            match_reason: string;
+            /**
+             * @description Whether the hint was verified against `computed_at_sha`. Hints stored
+             *     before this field existed are read as unverified.
+             */
+            verified: boolean;
+        };
         ConsentDecisionInput: {
             decision: string;
         };
@@ -1832,6 +1845,7 @@ export interface components {
         ProductFeedbackReportWithInteraction: {
             assigneeOsUserId: string | null;
             classification: string;
+            codeHints: components["schemas"]["CodeHintResponse"][];
             /** Format: double */
             confidence: number | null;
             confirmationMethod: string | null;

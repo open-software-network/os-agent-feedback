@@ -502,6 +502,8 @@ pub(crate) struct ProductFeedbackReportWithInteraction {
     pub workaround: Option<Value>,
     pub source: String,
     pub created_at: DateTime<Utc>,
+    #[schema(value_type = Vec<crate::api_types::CodeHintResponse>)]
+    pub code_hints: Value,
     #[schema(required = true, nullable)]
     pub session_id: Option<Uuid>,
     pub surface: String,

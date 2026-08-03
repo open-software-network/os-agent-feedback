@@ -153,6 +153,7 @@ export function dashboardFixture(overrides: Partial<DashboardData> = {}): Dashbo
         tags: [],
         internalNote: null,
         workflowUpdatedAt: null,
+        codeHints: [],
         operation: "search",
         surface: "http",
         classification: "confirmed",
