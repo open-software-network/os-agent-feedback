@@ -34,12 +34,10 @@ export function PolicyView({
   data,
   refresh,
   setNotice,
-  embedded = false,
 }: {
   data: DashboardData;
   refresh: () => Promise<unknown>;
   setNotice: (message: string) => void;
-  embedded?: boolean;
 }) {
   const [error, setError] = useState("");
   const environment = data.currentEnvironment;
@@ -91,13 +89,11 @@ export function PolicyView({
 
   return (
     <div className="flex flex-col gap-6">
-      {embedded ? null : (
-        <PageHeader
-          eyebrow="Collection policy"
-          title="Data controls"
-          description="Retention and legacy outcome settings are stored here. Enrichment permission is granted by the customer for each exact purpose."
-        />
-      )}
+      <PageHeader
+        eyebrow="Collection policy"
+        title="Data controls"
+        description="Retention and legacy outcome settings are stored here. Enrichment permission is granted by the customer for each exact purpose."
+      />
       <form className="flex flex-col gap-4" onSubmit={form.handleSubmit(submit)}>
         <Panel title="Allowed customer context">
           <p className="max-w-3xl text-sm text-muted-foreground">

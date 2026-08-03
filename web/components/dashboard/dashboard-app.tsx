@@ -537,11 +537,7 @@ export function DashboardApp() {
         );
       case "connectors":
         return isEditor(currentData.currentRole) ? (
-          configurationPage(
-            currentData,
-            "connectors",
-            <ConnectorsView data={currentData} embedded />,
-          )
+          configurationPage(currentData, "connectors", <ConnectorsView data={currentData} />)
         ) : (
           <HomeView
             data={currentData}
@@ -555,7 +551,7 @@ export function DashboardApp() {
         return configurationPage(
           currentData,
           "team",
-          <TeamView data={currentData} refresh={refresh} setNotice={showNotice} embedded />,
+          <TeamView data={currentData} refresh={refresh} setNotice={showNotice} />,
         );
       case "configuration":
         return configurationPage(
