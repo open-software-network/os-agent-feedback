@@ -73,6 +73,17 @@ test("dev-backend selects the API binary explicitly", () => {
   assert.match(output, /cargo run --locked --bin agent-feedback/);
 });
 
+test("Podman mode rediscovers its socket for bootstrap and backend startup", () => {
+  const bootstrap = make(["-n", "dev-bootstrap", "DEV_CONTAINER_RUNTIME=podman"]);
+  const backend = make(["-n", "dev-backend", "DEV_CONTAINER_RUNTIME=podman"]);
+
+  for (const output of [bootstrap, backend]) {
+    assert.match(output, /podman info --format/);
+    assert.match(output, /DOCKER_HOST=.*podman info.*docker-compose/);
+  }
+  assert.match(bootstrap, /make dev-backend DEV_CONTAINER_RUNTIME=podman/);
+});
+
 test("skill and README expose the canonical workflow", async () => {
   const [readme, skill] = await Promise.all([
     readFile(join(repoRoot, "README.md"), "utf8"),
@@ -85,5 +96,7 @@ test("skill and README expose the canonical workflow", async () => {
     assert.match(source, /make dev-backend/);
     assert.match(source, /make dev-web/);
   }
+  assert.match(readme, /make dev-backend DEV_CONTAINER_RUNTIME=podman/);
+  assert.match(skill, /make dev-backend DEV_CONTAINER_RUNTIME=podman/);
   assert.doesNotMatch(skill, /scripts\/bootstrap|configure_env/);
 });

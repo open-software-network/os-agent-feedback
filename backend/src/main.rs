@@ -5717,7 +5717,7 @@ mod page_tests {
     /// parameter callers are told to send, so pin them to one string here.
     #[test]
     fn github_install_query_parameter_is_documented() {
-        let (_router, openapi) = build_app_router().split_for_parts();
+        let (_router, openapi) = build_app_router(false).split_for_parts();
         let spec = serde_json::to_value(&openapi).expect("the OpenAPI document should serialize");
         let parameters = spec["paths"]["/api/github/install"]["get"]["parameters"]
             .as_array()

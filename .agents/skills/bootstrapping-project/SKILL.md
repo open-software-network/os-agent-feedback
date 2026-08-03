@@ -17,11 +17,12 @@ Bootstrap preserves every existing environment file. It does not enable develope
 
 Use Docker-backed `docker-compose` with its default socket for the normal team workflow. Do not set `DOCKER_HOST` preemptively.
 
-If Compose cannot reach Docker and the developer explicitly uses rootless Podman, discover its socket dynamically and retry only the current command:
+If the developer explicitly uses rootless Podman, select it on every Make command that manages PostgreSQL. Make rediscovers the current socket for each invocation:
 
 ```sh
-podman_socket="$(podman info --format '{{.Host.RemoteSocket.Path}}')"
-test -S "$podman_socket" && DOCKER_HOST="unix://$podman_socket" make dev-bootstrap
+make dev-bootstrap DEV_CONTAINER_RUNTIME=podman
+# Later, in the backend terminal:
+make dev-backend DEV_CONTAINER_RUNTIME=podman
 ```
 
-Do not persist `DOCKER_HOST` or commit machine-specific socket paths, host networking, port-selection logic, or Compose overrides. If Podman does not report a live socket, report the runtime error instead of guessing a path.
+Do not persist `DOCKER_HOST` or commit machine-specific socket paths, host networking, port-selection logic, or Compose overrides. If Make reports that Podman has no live rootless socket, report the runtime error instead of guessing a path.

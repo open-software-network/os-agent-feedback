@@ -24,6 +24,13 @@ node-version-check:  ## Require the repository's supported Node range (>=22.13.0
 # --- Local development ---
 DEV_BACKEND_ENV_FILE ?= backend/.env
 DEV_WEB_ENV_FILE ?= web/.env.local
+DEV_CONTAINER_RUNTIME ?= docker
+
+ifeq ($(DEV_CONTAINER_RUNTIME),podman)
+DEV_COMPOSE = DOCKER_HOST="unix://$$(podman info --format '{{.Host.RemoteSocket.Path}}')" docker-compose
+else
+DEV_COMPOSE = docker-compose
+endif
 
 dev-env:  ## Create missing local env files without changing existing files
 	@if test -f "$(DEV_BACKEND_ENV_FILE)"; then echo "Preserved $(DEV_BACKEND_ENV_FILE)"; else cp backend/.env.example "$(DEV_BACKEND_ENV_FILE)"; echo "Created $(DEV_BACKEND_ENV_FILE)"; fi
@@ -35,17 +42,25 @@ dev-setup: node-version-check node-install backend-install dev-env  ## Install d
 dev-bootstrap:  ## Prepare local development and start healthy PostgreSQL
 	@$(MAKE) --no-print-directory dev-setup
 	@$(MAKE) --no-print-directory dev-db
-	@printf '%s\n' "Bootstrap complete. PostgreSQL is healthy." "" "Next:" "  Terminal 1: make dev-backend" "  Terminal 2: make dev-web"
+	@if test "$(DEV_CONTAINER_RUNTIME)" = podman; then backend_command="make dev-backend DEV_CONTAINER_RUNTIME=podman"; else backend_command="make dev-backend"; fi; \
+		printf '%s\n' "Bootstrap complete. PostgreSQL is healthy." "" "Next:" "  Terminal 1: $$backend_command" "  Terminal 2: make dev-web"
 
 dev-compose-check:
 	@command -v docker-compose >/dev/null 2>&1 || { echo "docker-compose is required; install a Compose-compatible runtime and retry." >&2; exit 1; }
-	@docker-compose up --help 2>&1 | grep -q -- '--wait' || { echo "docker-compose must support 'up --wait' so PostgreSQL health can be verified." >&2; exit 1; }
+	@case "$(DEV_CONTAINER_RUNTIME)" in \
+		docker) ;; \
+		podman) command -v podman >/dev/null 2>&1 || { echo "DEV_CONTAINER_RUNTIME=podman requires podman." >&2; exit 1; }; \
+			podman_socket="$$(podman info --format '{{.Host.RemoteSocket.Path}}')"; \
+			test -S "$$podman_socket" || { echo "Podman did not report a live rootless socket." >&2; exit 1; } ;; \
+		*) echo "DEV_CONTAINER_RUNTIME must be either docker or podman." >&2; exit 1 ;; \
+	esac
+	@$(DEV_COMPOSE) up --help 2>&1 | grep -q -- '--wait' || { echo "docker-compose must support 'up --wait' so PostgreSQL health can be verified." >&2; exit 1; }
 
 dev-db: dev-compose-check  ## Start the local PostgreSQL container and wait until it is healthy
-	docker-compose -f backend/docker-compose.yml up -d --wait postgres
+	$(DEV_COMPOSE) -f backend/docker-compose.yml up -d --wait postgres
 
 dev-db-stop: dev-compose-check  ## Stop local PostgreSQL without deleting its data
-	docker-compose -f backend/docker-compose.yml stop postgres
+	$(DEV_COMPOSE) -f backend/docker-compose.yml stop postgres
 
 dev-backend: dev-db  ## Start the Rust API on http://localhost:8080
 	cd backend && cargo run --locked --bin agent-feedback

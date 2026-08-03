@@ -121,11 +121,12 @@ make dev-bootstrap
 
 This installs locked dependencies and Rust tooling, creates missing local environment files without changing existing ones, starts PostgreSQL through Docker-backed `docker-compose`, waits for it to become healthy, and exits. Use `make dev-setup` to prepare everything without starting PostgreSQL, or `make dev-env` to create only the missing environment files.
 
-Docker is the default team workflow. Rootless Podman also works without changing repository configuration by supplying its discovered socket for the current invocation:
+Docker is the default team workflow. Rootless Podman also works without changing repository configuration; select it on every Make command that manages PostgreSQL so each invocation discovers the current socket:
 
 ```sh
-podman_socket="$(podman info --format '{{.Host.RemoteSocket.Path}}')"
-test -S "$podman_socket" && DOCKER_HOST="unix://$podman_socket" make dev-bootstrap
+make dev-bootstrap DEV_CONTAINER_RUNTIME=podman
+# Later, in the backend terminal:
+make dev-backend DEV_CONTAINER_RUNTIME=podman
 ```
 
 Local login without OS Accounts is an explicit opt-in and is never enabled by bootstrap. In `backend/.env`, set `APP_ENV=development`, `DEV_AUTH_ENABLED=true`, and `DEV_AUTH_SIGNING_KEY` to an unpadded base64url encoding of exactly 32 random bytes. Generate a suitable key with:
