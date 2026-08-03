@@ -1145,6 +1145,69 @@ pub(crate) struct DashboardSignalsPage {
     pub next_cursor: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DashboardResponseFilters {
+    pub query: Option<String>,
+    pub statuses: Option<Vec<String>>,
+    pub since: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
+    pub limit: Option<i64>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardResponseAnswer {
+    pub key: String,
+    #[serde(rename = "type")]
+    pub answer_type: String,
+    pub value: String,
+    pub summary: String,
+    pub remembered: bool,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardResponseSummary {
+    pub id: Uuid,
+    pub question: String,
+    pub status: String,
+    pub purpose: String,
+    pub surface: String,
+    #[schema(required = true, nullable)]
+    pub customer_id: Option<Uuid>,
+    #[schema(required = true, nullable)]
+    pub customer_name: Option<String>,
+    #[schema(required = true, nullable)]
+    pub session_id: Option<Uuid>,
+    #[schema(required = true, nullable)]
+    pub session_ref: Option<String>,
+    pub asked_at: DateTime<Utc>,
+    #[schema(required = true, nullable)]
+    pub answered_at: Option<DateTime<Utc>>,
+    #[sqlx(skip)]
+    pub answers: Vec<DashboardResponseAnswer>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardResponseRollup {
+    pub questions: i64,
+    pub answered: i64,
+    pub awaiting_answer: i64,
+    pub declined: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardResponsesPage {
+    pub responses: Vec<DashboardResponseSummary>,
+    pub rollup: DashboardResponseRollup,
+    pub limit: i64,
+    #[schema(required = true, nullable)]
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct FeedbackFindingInput {
