@@ -102,6 +102,7 @@ export function DashboardApp() {
     }
     const requestedView = url.searchParams.get("view");
     setView(
+      // "home" is a retired view name kept as a URL alias for bookmarked links.
       requestedView === "home"
         ? "insights"
         : DASHBOARD_VIEWS.includes(requestedView as DashboardView)

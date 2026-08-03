@@ -1,6 +1,7 @@
 "use client";
 
 import { IconChevronGrabberVertical } from "central-icons/IconChevronGrabberVertical";
+import { IconConnectors1 } from "central-icons/IconConnectors1";
 import { IconPeople } from "central-icons/IconPeople";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
 import { IconShieldCheck } from "central-icons/IconShieldCheck";
@@ -67,8 +68,15 @@ const navigation: Array<{
     label: "Setup",
     icon: IconSettingsGear4,
   },
+  {
+    view: "connectors",
+    label: "Connectors",
+    icon: IconConnectors1,
+  },
   { view: "policy", label: "Data controls", icon: IconShieldCheck },
 ];
+
+const EDITOR_ONLY_VIEWS: ReadonlySet<DashboardView> = new Set(["setup", "connectors", "policy"]);
 
 function initials(value: string) {
   return value
@@ -212,13 +220,10 @@ function AppSidebar({
           <SidebarGroupContent>
             <SidebarMenu>
               {navigation
-                .filter(
-                  (item) => canCreateProduct || (item.view !== "setup" && item.view !== "policy"),
-                )
+                .filter((item) => canCreateProduct || !EDITOR_ONLY_VIEWS.has(item.view))
                 .map((item) => {
                   const active =
                     view === item.view ||
-                    (item.view === "insights" && view === "home") ||
                     (item.view === "customers" &&
                       (view === "features" ||
                         view === "sessions" ||
@@ -305,7 +310,6 @@ export function DashboardShell({
   children: ReactNode;
 }) {
   const shellTitle: Record<DashboardView, string> = {
-    home: "Insights",
     insights: "Insights",
     customers: "Customers",
     features: "Features",
