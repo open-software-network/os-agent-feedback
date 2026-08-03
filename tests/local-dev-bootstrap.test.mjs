@@ -84,19 +84,19 @@ test("Podman mode rediscovers its socket for bootstrap and backend startup", () 
   assert.match(bootstrap, /make dev-backend DEV_CONTAINER_RUNTIME=podman/);
 });
 
-test("skill and README expose the canonical workflow", async () => {
-  const [readme, skill] = await Promise.all([
+test("README exposes the workflow and AGENTS preserves its guardrails", async () => {
+  const [readme, agents] = await Promise.all([
     readFile(join(repoRoot, "README.md"), "utf8"),
-    readFile(join(repoRoot, ".agents/skills/bootstrapping-project/SKILL.md"), "utf8"),
+    readFile(join(repoRoot, "AGENTS.md"), "utf8"),
   ]);
 
-  assert.match(skill, /^name: bootstrapping-project$/m);
-  for (const source of [readme, skill]) {
-    assert.match(source, /make dev-bootstrap/);
-    assert.match(source, /make dev-backend/);
-    assert.match(source, /make dev-web/);
-  }
+  assert.match(readme, /make dev-bootstrap/);
+  assert.match(readme, /make dev-backend/);
+  assert.match(readme, /make dev-web/);
   assert.match(readme, /make dev-backend DEV_CONTAINER_RUNTIME=podman/);
-  assert.match(skill, /make dev-backend DEV_CONTAINER_RUNTIME=podman/);
-  assert.doesNotMatch(skill, /scripts\/bootstrap|configure_env/);
+  assert.match(agents, /Makefile.*executable source of truth/);
+  assert.match(agents, /Preserve existing local environment files/);
+  assert.match(agents, /DEV_CONTAINER_RUNTIME=podman/);
+  assert.match(agents, /Never persist `DOCKER_HOST`/);
+  assert.match(agents, /does not seed data, run a separate migration command/);
 });

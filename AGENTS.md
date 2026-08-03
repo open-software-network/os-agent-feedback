@@ -23,6 +23,14 @@ maps onto this tracker. Parent/child, labels, and assignment are native;
 blocking is a body convention and the frontier must be computed client-side
 and narrated.
 
+## Local development
+
+- Treat the root `Makefile` as the executable source of truth. Inspect `make help` and follow the next-step commands printed by Make instead of duplicating or inventing orchestration.
+- Preserve existing local environment files. Do not enable developer authentication automatically or generate or rotate local secrets.
+- Docker-backed `docker-compose` is the default. When the developer explicitly uses rootless Podman, pass `DEV_CONTAINER_RUNTIME=podman` to every Make invocation that manages PostgreSQL.
+- Never persist `DOCKER_HOST`, guess Podman socket paths, or commit machine-specific host networking or Compose overrides.
+- Bootstrap does not seed data, run a separate migration command, or start long-running backend and web processes. Backend startup owns local migrations.
+
 ## Verification
 
 - `pnpm test` — runs `node --test tests/*.test.mjs`.
