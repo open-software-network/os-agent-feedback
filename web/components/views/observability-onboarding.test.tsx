@@ -143,13 +143,13 @@ describe("observability onboarding states", () => {
     expect(screen.getByText("Loading sessions…")).toBeVisible();
   });
 
-  it("keeps team rename reachable inside the embedded Configuration layout", async () => {
+  it("keeps team rename reachable inside the Configuration layout", async () => {
     const data = dashboardFixture();
     const refresh = vi.fn().mockResolvedValue(undefined);
     const notice = vi.fn();
     const fetchMock = vi.fn().mockResolvedValue(json({ workspace: data.workspace }));
     vi.stubGlobal("fetch", fetchMock);
-    render(<TeamView data={data} refresh={refresh} setNotice={notice} embedded />);
+    render(<TeamView data={data} refresh={refresh} setNotice={notice} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Rename team" }));
     fireEvent.change(screen.getByLabelText("Team name"), {

@@ -12,7 +12,6 @@ describe("PolicyView", () => {
         data={dashboardFixture()}
         refresh={vi.fn().mockResolvedValue(undefined)}
         setNotice={vi.fn()}
-        embedded
       />,
     );
 

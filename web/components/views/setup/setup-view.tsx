@@ -45,14 +45,12 @@ export function SetupView({
   rememberSecret,
   refresh,
   setNotice,
-  embedded = false,
 }: {
   data: DashboardData;
   secrets: ShownSecrets | null;
   rememberSecret: (kind: "write" | "read", secret: string) => void;
   refresh: () => Promise<unknown>;
   setNotice: (message: string) => void;
-  embedded?: boolean;
 }) {
   const [surface, setSurface] = useState<SetupSurface>("api");
   const [stack, setStack] = useState<SetupStack>("node-express");
@@ -170,13 +168,11 @@ const result = context.available
 
   return (
     <div className="flex flex-col gap-6">
-      {embedded ? null : (
-        <PageHeader
-          eyebrow="Setup"
-          title={`Connect ${data.currentProduct.name}`}
-          description={activationDescription}
-        />
-      )}
+      <PageHeader
+        eyebrow="Setup"
+        title={`Connect ${data.currentProduct.name}`}
+        description={activationDescription}
+      />
       <Metrics
         items={[
           { label: "Product key", value: writeKey ? "Ready" : "Preparing" },
