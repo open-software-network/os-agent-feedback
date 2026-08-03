@@ -106,6 +106,7 @@ function report({ id, interactionId, sessionId, summary, status, impact, operati
     tags: ["release-e2e"],
     internalNote: null,
     workflowUpdatedAt: null,
+    codeHints: [],
     operation,
     surface: "http",
     classification: "confirmed",

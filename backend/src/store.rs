@@ -2890,6 +2890,7 @@ pub(crate) async fn dashboard_feedback_page(
     let mut reports = sqlx::query_as::<_, ProductFeedbackReportWithInteraction>(
         r"SELECT r.id, r.interaction_id, r.summary, r.impact, r.confidence,
         r.findings, r.workaround, r.source, r.created_at,
+        COALESCE(code_hints.hints, '[]'::JSONB) AS code_hints,
         i.session_id, i.surface, i.operation, i.status_code, i.duration_ms,
         i.customer_ref, i.classification, i.confirmation_method, i.runtime_hint,
         i.runtime_hint_source, i.occurred_at,
@@ -2898,6 +2899,7 @@ pub(crate) async fn dashboard_feedback_page(
         w.updated_at AS workflow_updated_at
         FROM feedback_reports r
         JOIN interactions_v2 i ON i.id = r.interaction_id
+        LEFT JOIN report_code_hints code_hints ON code_hints.report_id = r.id
         LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
         WHERE i.environment_id = $1 AND i.occurred_at >= $2 AND r.created_at >= $3
           AND ($4::TIMESTAMPTZ IS NULL OR r.created_at <= $4)
@@ -5132,6 +5134,7 @@ pub(crate) async fn dashboard_with_limits(
     let reports = sqlx::query_as::<_, ProductFeedbackReportWithInteraction>(
         r"SELECT r.id, r.interaction_id, r.summary, r.impact, r.confidence,
         r.findings, r.workaround, r.source, r.created_at,
+        COALESCE(code_hints.hints, '[]'::JSONB) AS code_hints,
         i.session_id, i.surface, i.operation, i.status_code, i.duration_ms,
         i.customer_ref, i.classification, i.confirmation_method, i.runtime_hint,
         i.runtime_hint_source, i.occurred_at,
@@ -5139,6 +5142,7 @@ pub(crate) async fn dashboard_with_limits(
         COALESCE(w.tags, '{}'::TEXT[]) AS tags, w.internal_note,
         w.updated_at AS workflow_updated_at
         FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id
+        LEFT JOIN report_code_hints code_hints ON code_hints.report_id = r.id
         LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
         WHERE i.environment_id = $1 AND i.occurred_at >= $2
         ORDER BY r.created_at DESC LIMIT $3",
@@ -5274,6 +5278,7 @@ pub(crate) async fn dashboard_report_by_id(
     sqlx::query_as::<_, ProductFeedbackReportWithInteraction>(
         r"SELECT r.id, r.interaction_id, r.summary, r.impact, r.confidence,
         r.findings, r.workaround, r.source, r.created_at,
+        COALESCE(code_hints.hints, '[]'::JSONB) AS code_hints,
         i.session_id, i.surface, i.operation, i.status_code, i.duration_ms,
         i.customer_ref, i.classification, i.confirmation_method, i.runtime_hint,
         i.runtime_hint_source, i.occurred_at,
@@ -5283,6 +5288,7 @@ pub(crate) async fn dashboard_report_by_id(
         FROM feedback_reports r
         JOIN interactions_v2 i ON i.id = r.interaction_id
         JOIN product_environments e ON e.id = i.environment_id
+        LEFT JOIN report_code_hints code_hints ON code_hints.report_id = r.id
         LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
         WHERE r.id = $1 AND i.workspace_id = $2 AND e.product_id = $3
           AND i.occurred_at >= NOW() - make_interval(days => e.retention_days)",
@@ -5447,6 +5453,7 @@ pub(crate) async fn dashboard_session_by_id(
     let reports = sqlx::query_as::<_, ProductFeedbackReportWithInteraction>(
         r"SELECT r.id, r.interaction_id, r.summary, r.impact, r.confidence,
         r.findings, r.workaround, r.source, r.created_at,
+        COALESCE(code_hints.hints, '[]'::JSONB) AS code_hints,
         i.session_id, i.surface, i.operation, i.status_code, i.duration_ms,
         i.customer_ref, i.classification, i.confirmation_method, i.runtime_hint,
         i.runtime_hint_source, i.occurred_at,
@@ -5455,6 +5462,7 @@ pub(crate) async fn dashboard_session_by_id(
         w.updated_at AS workflow_updated_at
         FROM feedback_reports r JOIN interactions_v2 i ON i.id = r.interaction_id
         JOIN product_environments e ON e.id = i.environment_id
+        LEFT JOIN report_code_hints code_hints ON code_hints.report_id = r.id
         LEFT JOIN feedback_report_workflow w ON w.report_id = r.id
         WHERE i.session_id = $1
           AND i.occurred_at >= NOW() - make_interval(days => e.retention_days)
@@ -10863,14 +10871,27 @@ mod product_tests {
         // code-intelligence state must disappear with that report.
         sqlx::query(
             r"INSERT INTO report_code_hints (report_id, computed_at_sha, hints)
-            VALUES ($1, '0123456789abcdef0123456789abcdef01234567', '[]'::JSONB)",
+            VALUES ($1, '0123456789abcdef0123456789abcdef01234567', $2)",
         )
         .bind(report.id)
+        .bind(serde_json::json!([{
+            "file": "backend/src/store.rs",
+            "line_start": 7988,
+            "line_end": 7992,
+            "match_reason": "exact operation identifier `search_reports`"
+        }]))
         .execute(&pool)
         .await?;
         record_code_match_call(&pool, report.id, Some(9), false, 12)
             .await
             .map_err(test_error)?;
+        let dashboard_report = dashboard_report_by_id(&pool, workspace_id, product.id, report.id)
+            .await
+            .map_err(test_error)?;
+        anyhow::ensure!(
+            dashboard_report.code_hints[0]["file"] == "backend/src/store.rs"
+                && dashboard_report.code_hints[0]["line_start"] == 7988
+        );
         sqlx::query("DELETE FROM interactions_v2 WHERE id = $1")
             .bind(interaction_id)
             .execute(&pool)

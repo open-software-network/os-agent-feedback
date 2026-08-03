@@ -863,6 +863,14 @@ export interface components {
             http: string;
             mcp: string;
         };
+        CodeHintResponse: {
+            file: string;
+            /** Format: int32 */
+            line_end: number;
+            /** Format: int32 */
+            line_start: number;
+            match_reason: string;
+        };
         ConsentDecisionInput: {
             decision: string;
         };
@@ -1832,6 +1840,7 @@ export interface components {
         ProductFeedbackReportWithInteraction: {
             assigneeOsUserId: string | null;
             classification: string;
+            codeHints: components["schemas"]["CodeHintResponse"][];
             /** Format: double */
             confidence: number | null;
             confirmationMethod: string | null;

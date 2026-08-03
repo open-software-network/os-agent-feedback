@@ -13,6 +13,14 @@ use crate::models::{
 };
 
 #[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct CodeHintResponse {
+    pub file: String,
+    pub line_start: u32,
+    pub line_end: u32,
+    pub match_reason: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub(crate) struct AuthenticationStateResponse {
     pub authenticated: bool,
 }
@@ -307,6 +315,7 @@ mod tests {
             workaround: None,
             source: "http".to_owned(),
             created_at: timestamp(),
+            code_hints: serde_json::json!([]),
             session_id: None,
             surface: "http".to_owned(),
             operation: "request".to_owned(),
@@ -402,6 +411,7 @@ mod tests {
                 "workaround",
                 "source",
                 "createdAt",
+                "codeHints",
                 "sessionId",
                 "surface",
                 "operation",
