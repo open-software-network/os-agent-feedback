@@ -111,13 +111,28 @@ For Codex and Claude Code users, **Epode Companion** is the trusted host adapter
 
 ## Local development
 
-Install Node `>=22.13.0 <25`, Rust with `rustup`, `pnpm`, and a container runtime that supports `docker-compose`. Then prepare the repository without overwriting existing local environment files:
+Install Node `>=22.13.0 <25`, Rust with `rustup`, `pnpm`, and a container runtime that supports `docker-compose`. Then bootstrap the repository:
 
 ```sh
-make dev-setup
+make dev-bootstrap
 ```
 
-For local login without OS Accounts, edit `backend/.env` and uncomment `APP_ENV=development` and `DEV_AUTH_ENABLED=true`. Set `DEV_AUTH_SIGNING_KEY` to an unpadded base64url encoding of 32 random bytes, and set `DEV_AUTH_ENABLED=true` in `web/.env.local`. The backend README documents the security constraints. Keep the API and dashboard on the same loopback hostname.
+This installs locked dependencies and Rust tooling, creates missing local environment files without changing existing ones, starts PostgreSQL through Docker-backed `docker-compose`, waits for it to become healthy, and exits. Use `make dev-setup` to prepare everything without starting PostgreSQL, or `make dev-env` to create only the missing environment files.
+
+Docker is the default team workflow. Rootless Podman also works without changing repository configuration by supplying its discovered socket for the current invocation:
+
+```sh
+podman_socket="$(podman info --format '{{.Host.RemoteSocket.Path}}')"
+test -S "$podman_socket" && DOCKER_HOST="unix://$podman_socket" make dev-bootstrap
+```
+
+Local login without OS Accounts is an explicit opt-in and is never enabled by bootstrap. In `backend/.env`, set `APP_ENV=development`, `DEV_AUTH_ENABLED=true`, and `DEV_AUTH_SIGNING_KEY` to an unpadded base64url encoding of exactly 32 random bytes. Generate a suitable key with:
+
+```sh
+node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64url"))'
+```
+
+Set `DEV_AUTH_ENABLED=true` in `web/.env.local` as well. The backend README documents the security constraints. Keep the API and dashboard on the same loopback hostname.
 
 Start the services in separate terminals:
 
@@ -126,7 +141,7 @@ make dev-backend # starts PostgreSQL, runs migrations, and serves http://localho
 make dev-web     # serves the dashboard at http://localhost:3000
 ```
 
-With developer authentication enabled, open `http://localhost:8080/__dev`, enter an email, and continue to the dashboard. Stop PostgreSQL later with `make dev-db-stop`. Run `make help` to list all setup and verification commands.
+With developer authentication enabled, open `http://localhost:8080/__dev`, enter an email, and continue to the dashboard. The backend applies local migrations before listening, and the first login creates a personal workspace, so bootstrap does not seed data. Run `pnpm run seed:dashboard-demo` only when an optional populated demo workspace is wanted. Stop PostgreSQL later with `make dev-db-stop`. Run `make help` to list all setup and verification commands.
 
 ## Production
 

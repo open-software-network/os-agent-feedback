@@ -1,4 +1,4 @@
-.PHONY: help install node-install backend-install node-version-check dev-setup dev-db dev-db-stop dev-backend dev-web backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test sdk-node-test web-install web-types-check web-check web-typecheck web-test web-release-e2e web-build docs-validate docs-a11y types check
+.PHONY: help install node-install backend-install node-version-check dev-env dev-setup dev-bootstrap dev-compose-check dev-db dev-db-stop dev-backend dev-web backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test sdk-node-test web-install web-types-check web-check web-typecheck web-test web-release-e2e web-build docs-validate docs-a11y types check
 
 .DEFAULT_GOAL := help
 
@@ -22,19 +22,33 @@ node-version-check:  ## Require the repository's supported Node range (>=22.13.0
 	@node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 22 || major >= 25 || (major === 22 && minor < 13)) { console.error(`Node $${process.versions.node} is unsupported; switch to Node >=22.13.0 <25 and retry.`); process.exit(1); }'
 
 # --- Local development ---
-dev-setup: node-version-check node-install backend-install  ## Install dependencies and create local env files without overwriting them
-	@test -f backend/.env || { cp backend/.env.example backend/.env; echo "Created backend/.env"; }
-	@test -f web/.env.local || { cp web/.env.example web/.env.local; echo "Created web/.env.local"; }
-	@echo "Local setup complete. Configure backend/.env, then run 'make dev-backend' and 'make dev-web' in separate terminals."
+DEV_BACKEND_ENV_FILE ?= backend/.env
+DEV_WEB_ENV_FILE ?= web/.env.local
 
-dev-db:  ## Start the local PostgreSQL container and wait until it is healthy
-	docker-compose -f backend/docker-compose.yml up -d --wait
+dev-env:  ## Create missing local env files without changing existing files
+	@if test -f "$(DEV_BACKEND_ENV_FILE)"; then echo "Preserved $(DEV_BACKEND_ENV_FILE)"; else cp backend/.env.example "$(DEV_BACKEND_ENV_FILE)"; echo "Created $(DEV_BACKEND_ENV_FILE)"; fi
+	@if test -f "$(DEV_WEB_ENV_FILE)"; then echo "Preserved $(DEV_WEB_ENV_FILE)"; else cp web/.env.example "$(DEV_WEB_ENV_FILE)"; echo "Created $(DEV_WEB_ENV_FILE)"; fi
 
-dev-db-stop:  ## Stop local PostgreSQL without deleting its data
-	docker-compose -f backend/docker-compose.yml stop
+dev-setup: node-version-check node-install backend-install dev-env  ## Install dependencies and create missing local env files
+	@echo "Local setup complete. Existing environment files were left unchanged."
+
+dev-bootstrap:  ## Prepare local development and start healthy PostgreSQL
+	@$(MAKE) --no-print-directory dev-setup
+	@$(MAKE) --no-print-directory dev-db
+	@printf '%s\n' "Bootstrap complete. PostgreSQL is healthy." "" "Next:" "  Terminal 1: make dev-backend" "  Terminal 2: make dev-web"
+
+dev-compose-check:
+	@command -v docker-compose >/dev/null 2>&1 || { echo "docker-compose is required; install a Compose-compatible runtime and retry." >&2; exit 1; }
+	@docker-compose up --help 2>&1 | grep -q -- '--wait' || { echo "docker-compose must support 'up --wait' so PostgreSQL health can be verified." >&2; exit 1; }
+
+dev-db: dev-compose-check  ## Start the local PostgreSQL container and wait until it is healthy
+	docker-compose -f backend/docker-compose.yml up -d --wait postgres
+
+dev-db-stop: dev-compose-check  ## Stop local PostgreSQL without deleting its data
+	docker-compose -f backend/docker-compose.yml stop postgres
 
 dev-backend: dev-db  ## Start the Rust API on http://localhost:8080
-	cd backend && cargo run --locked
+	cd backend && cargo run --locked --bin agent-feedback
 
 dev-web: node-version-check  ## Start the Next.js dashboard on http://localhost:3000
 	pnpm --filter @epode/web dev
