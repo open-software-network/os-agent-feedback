@@ -111,6 +111,41 @@ For Codex and Claude Code users, **Epode Companion** is the trusted host adapter
 - `examples/customer-agent-http/` — raw HTTP protocol/conformance harness; customer users install Epode Companion instead
 - `web/` — Next.js dashboard frontend
 
+## Local development
+
+Install Node `>=22.13.0 <25`, Rust with `rustup`, `pnpm`, and a container runtime that supports `docker-compose`. Then bootstrap the repository:
+
+```sh
+make dev-bootstrap
+```
+
+This installs locked dependencies and Rust tooling, creates missing local environment files without changing existing ones, starts PostgreSQL through Docker-backed `docker-compose`, waits for it to become healthy, and exits. Use `make dev-setup` to prepare everything without starting PostgreSQL, or `make dev-env` to create only the missing environment files.
+
+Docker is the default team workflow. Rootless Podman also works without changing repository configuration; select it on every Make command that manages PostgreSQL so each invocation discovers the current socket:
+
+```sh
+make dev-bootstrap DEV_CONTAINER_RUNTIME=podman
+# Later, in the backend terminal:
+make dev-backend DEV_CONTAINER_RUNTIME=podman
+```
+
+Local login without OS Accounts is an explicit opt-in and is never enabled by bootstrap. In `backend/.env`, set `APP_ENV=development`, `DEV_AUTH_ENABLED=true`, and `DEV_AUTH_SIGNING_KEY` to an unpadded base64url encoding of exactly 32 random bytes. Generate a suitable key with:
+
+```sh
+node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64url"))'
+```
+
+Set `DEV_AUTH_ENABLED=true` in `web/.env.local` as well. The backend README documents the security constraints. Keep the API and dashboard on the same loopback hostname.
+
+Start the services in separate terminals:
+
+```sh
+make dev-backend # starts PostgreSQL, runs migrations, and serves http://localhost:8080
+make dev-web     # serves the dashboard at http://localhost:3000
+```
+
+With developer authentication enabled, open `http://localhost:8080/__dev`, enter an email, and continue to the dashboard. The backend applies local migrations before listening, and the first login creates a personal workspace, so bootstrap does not seed data. Run `pnpm run seed:dashboard-demo` only when an optional populated demo workspace is wanted. Stop PostgreSQL later with `make dev-db-stop`. Run `make help` to list all setup and verification commands.
+
 ## Production
 
 - Dashboard/API: https://app.epode.ai

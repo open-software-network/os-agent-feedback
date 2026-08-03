@@ -1,6 +1,8 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
+import { DEV_AUTH_COOKIE, isLocalDevAuthRequest } from "@/lib/auth/dev-auth";
+
 const ACCESS_COOKIE = "af_oa_access";
 const REFRESH_COOKIE = "af_oa_refresh";
 
@@ -28,7 +30,8 @@ export function proxy(request: NextRequest): NextResponse {
 
   const hasAuthCookie =
     Boolean(request.cookies.get(ACCESS_COOKIE)?.value) ||
-    Boolean(request.cookies.get(REFRESH_COOKIE)?.value);
+    Boolean(request.cookies.get(REFRESH_COOKIE)?.value) ||
+    (isLocalDevAuthRequest(request) && Boolean(request.cookies.get(DEV_AUTH_COOKIE)?.value));
 
   if (!hasAuthCookie && !isPublicRoute(pathname)) {
     const signinUrl = new URL("/auth/signin", request.url);

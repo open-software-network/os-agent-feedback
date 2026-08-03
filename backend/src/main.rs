@@ -1,5 +1,6 @@
 mod api_types;
 mod customer_features;
+mod dev_auth;
 mod error;
 mod github;
 mod grouping;
@@ -10,7 +11,11 @@ mod os_accounts;
 mod security;
 mod store;
 
-use std::{env, net::SocketAddr, sync::Arc};
+use std::{
+    env,
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 
 use axum::{
     Json, Router,
@@ -132,6 +137,7 @@ struct AppState {
     public_base_url: String,
     web_app_url: String,
     secure_cookies: bool,
+    dev_auth: Option<dev_auth::DevAuthConfig>,
     accounts: OsAccountsClient,
     github: Option<GithubAppClient>,
     mcp_allowed_origins: Vec<String>,
@@ -189,7 +195,7 @@ impl Modify for SecuritySchemes {
     }
 }
 
-fn build_app_router() -> OpenApiRouter<Arc<AppState>> {
+fn build_app_router(dev_auth_enabled: bool) -> OpenApiRouter<Arc<AppState>> {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([
@@ -208,9 +214,12 @@ fn build_app_router() -> OpenApiRouter<Arc<AppState>> {
             header::HeaderName::from_static("mcp-method"),
             header::HeaderName::from_static("mcp-name"),
         ]);
-    let non_api_routes = Router::new()
+    let mut non_api_routes = Router::new()
         .route("/", get(root_page))
         .nest_service("/static", ServeDir::new("public"));
+    if dev_auth_enabled {
+        non_api_routes = non_api_routes.merge(dev_auth::router());
+    }
     let mut api_document = ApiDoc::openapi();
     // Cargo.toml has no license metadata, so omit utoipa's empty license object.
     api_document.info.license = None;
@@ -285,7 +294,7 @@ fn build_app_router() -> OpenApiRouter<Arc<AppState>> {
 }
 
 pub(crate) fn openapi_spec_json() -> anyhow::Result<String> {
-    let (_router, openapi) = build_app_router().split_for_parts();
+    let (_router, openapi) = build_app_router(false).split_for_parts();
     Ok(serde_json::to_string_pretty(&openapi)?)
 }
 
@@ -514,6 +523,11 @@ async fn main() -> anyhow::Result<()> {
     let public_base_url =
         env::var("PUBLIC_BASE_URL").unwrap_or_else(|_| format!("http://localhost:{port}"));
     let configured_web_app_url = env::var("WEB_APP_URL").ok();
+    let dev_auth = dev_auth::DevAuthConfig::from_env(
+        port,
+        &public_base_url,
+        configured_web_app_url.as_deref(),
+    )?;
     let web_app_url = resolve_web_app_url(&public_base_url, configured_web_app_url.as_deref());
     if production {
         let accounts_url = env::var("OS_ACCOUNTS_URL")?;
@@ -550,16 +564,21 @@ async fn main() -> anyhow::Result<()> {
         public_base_url,
         web_app_url,
         pool,
+        dev_auth: dev_auth.clone(),
         accounts,
         github,
         mcp_allowed_origins,
     });
     spawn_retention_worker(state.pool.clone());
 
-    let (app, _openapi) = build_app_router().split_for_parts();
+    let (app, _openapi) = build_app_router(dev_auth.is_some()).split_for_parts();
     let app = app.with_state(state);
 
-    let address = SocketAddr::from(([0, 0, 0, 0], port));
+    let bind_ip = dev_auth.as_ref().map_or_else(
+        || IpAddr::from([0, 0, 0, 0]),
+        dev_auth::DevAuthConfig::bind_ip,
+    );
+    let address = SocketAddr::from((bind_ip, port));
     let listener = tokio::net::TcpListener::bind(address).await?;
     tracing::info!(%address, "agent feedback server listening");
     axum::serve(listener, app)
@@ -603,12 +622,16 @@ async fn security_headers(request: Request<Body>, next: Next) -> Response {
         HeaderValue::from_static("nosniff"),
     );
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
-    headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    headers
+        .entry("referrer-policy")
+        .or_insert(HeaderValue::from_static("no-referrer"));
     headers.insert(
         "permissions-policy",
         HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
     );
-    headers.insert("content-security-policy", HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"));
+    headers.entry("content-security-policy").or_insert_with(|| {
+        HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+    });
     response
 }
 
@@ -953,6 +976,7 @@ async fn auth_callback(
     let mut response = Redirect::to(&redirect).into_response();
     attach_token_cookies(&mut response, &state, &tokens)?;
     clear_flow_cookies(&mut response, &state)?;
+    append_cookie(&mut response, &dev_auth::clear_dev_cookie())?;
     append_cookie(
         &mut response,
         &clear_cookie(TEAM_INVITE_COOKIE, state.secure_cookies),
@@ -2536,18 +2560,26 @@ async fn dashboard_auth(
     headers: &HeaderMap,
     requested_workspace_id: Option<Uuid>,
 ) -> Result<(DashboardContext, Option<TokenPair>), ApiError> {
-    let resolved = state.accounts.resolve(headers).await?;
+    let (os_user, rotated_tokens) = if let Some(user) = state
+        .dev_auth
+        .as_ref()
+        .and_then(|config| config.resolve_identity(headers, Utc::now()))
+    {
+        (user, None)
+    } else {
+        let resolved = state.accounts.resolve(headers).await?;
+        (resolved.user, resolved.rotated_tokens)
+    };
     let (workspace, role, workspace_memberships) =
-        resolve_workspace_access(&state.pool, &resolved.user, requested_workspace_id).await?;
-    let display_name = resolved
-        .user
+        resolve_workspace_access(&state.pool, &os_user, requested_workspace_id).await?;
+    let display_name = os_user
         .display_name
         .clone()
-        .unwrap_or_else(|| resolved.user.handle.clone());
+        .unwrap_or_else(|| os_user.handle.clone());
     let user = CurrentUser {
-        id: resolved.user.id,
-        handle: resolved.user.handle,
-        email: resolved.user.email,
+        id: os_user.id,
+        handle: os_user.handle,
+        email: os_user.email,
         display_name,
     };
     Ok((
@@ -2557,7 +2589,7 @@ async fn dashboard_auth(
             role,
             workspace_memberships,
         },
-        resolved.rotated_tokens,
+        rotated_tokens,
     ))
 }
 
@@ -2632,6 +2664,7 @@ async fn logout_handler(
         &mut response,
         &clear_cookie(REFRESH_COOKIE, state.secure_cookies),
     )?;
+    append_cookie(&mut response, &dev_auth::clear_dev_cookie())?;
     Ok(response)
 }
 
@@ -5404,7 +5437,7 @@ mod page_tests {
 
     fn route_builder_source() -> &'static str {
         let (_, after_signature) = include_str!("main.rs")
-            .split_once("fn build_app_router()")
+            .split_once("fn build_app_router(dev_auth_enabled: bool)")
             .expect("build_app_router source must be present");
         let (builder, _) = after_signature
             .split_once("pub(crate) fn openapi_spec_json")
@@ -5487,6 +5520,7 @@ mod page_tests {
     fn guarded_route_builder_source() -> String {
         const ALLOWED_REGISTRATION_FORMS: &[&str] = &[
             ".merge(non_api_routes.into())",
+            ".merge(dev_auth::router())",
             ".nest_service(\"/static\", ServeDir::new(\"public\"))",
         ];
         const DENIED_REGISTRATION_FORMS: &[&str] = &[
@@ -5683,7 +5717,7 @@ mod page_tests {
     /// parameter callers are told to send, so pin them to one string here.
     #[test]
     fn github_install_query_parameter_is_documented() {
-        let (_router, openapi) = build_app_router().split_for_parts();
+        let (_router, openapi) = build_app_router(false).split_for_parts();
         let spec = serde_json::to_value(&openapi).expect("the OpenAPI document should serialize");
         let parameters = spec["paths"]["/api/github/install"]["get"]["parameters"]
             .as_array()
@@ -5702,7 +5736,7 @@ mod page_tests {
 
     #[test]
     fn openapi_document_covers_every_api_route_and_method() {
-        let (_router, openapi) = build_app_router().split_for_parts();
+        let (_router, openapi) = build_app_router(false).split_for_parts();
         let documented = documented_operations(&openapi);
         let spec = documented
             .iter()

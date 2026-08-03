@@ -4,7 +4,7 @@ import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { NextRequest } from "next/server";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { GET as proxyDiscoveryGet } from "@/app/.well-known/agent-feedback-v1.json/route";
 import {
@@ -118,6 +118,7 @@ beforeAll(async () => {
 
 afterEach(() => {
   seenRequests.length = 0;
+  vi.unstubAllEnvs();
 });
 
 afterAll(async () => {
@@ -171,6 +172,36 @@ describe("BFF request header policy", () => {
     expect(request.headers["x-remove-me"]).toBeUndefined();
     expect(request.headers["accept-encoding"]).toBeUndefined();
     expect(request.headers.host).not.toBe("attacker.example");
+  });
+
+  it("forwards the dev cookie only from the configured loopback Next origin", async () => {
+    vi.stubEnv("DEV_AUTH_ENABLED", "true");
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("WEB_APP_URL", "http://localhost:3000");
+
+    await proxyApiGet(
+      new NextRequest("http://localhost:3000/api/dashboard", {
+        headers: {
+          cookie: "af_oa_access=access; af_dev_identity=signed-by-rust",
+          host: "localhost:3000",
+        },
+      }),
+      { params: Promise.resolve({ path: ["dashboard"] }) },
+    );
+    expect(lastRequest().headers.cookie).toBe(
+      "af_oa_access=access; af_dev_identity=signed-by-rust",
+    );
+
+    await proxyApiGet(
+      new NextRequest("https://remote.example/api/dashboard", {
+        headers: {
+          cookie: "af_oa_access=access; af_dev_identity=replayed",
+          host: "remote.example",
+        },
+      }),
+      { params: Promise.resolve({ path: ["dashboard"] }) },
+    );
+    expect(lastRequest().headers.cookie).toBe("af_oa_access=access");
   });
 
   it("restores only endpoint-appropriate machine bearer credentials", async () => {
