@@ -15,6 +15,7 @@ use sqlx::{Acquire, Executor, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
+    code_match::CodeMatchVerificationOutcome,
     error::ApiError,
     github::validate_repo_full_name,
     grouping::{GroupInput, ReportGrouper},
@@ -83,6 +84,7 @@ pub(crate) struct CodeMatchJob {
     pub(crate) surface: String,
     pub(crate) runtime_hint: Option<String>,
     pub(crate) findings: serde_json::Value,
+    pub(crate) verification_retry_sha: Option<String>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -467,6 +469,7 @@ pub(crate) async fn claim_code_match_batch(
     .await?;
     let jobs = sqlx::query_as::<_, CodeMatchJob>(
         r"SELECT queue.report_id, queue.product_id, queue.claim_token, queue.attempts,
+          queue.verification_retry_sha,
           mapping.installation_id,
           (installation.installation_id IS NOT NULL) AS installation_active,
           mapping.repo_full_name, mapping.default_branch, mapping.path_prefix,
@@ -516,30 +519,90 @@ pub(crate) async fn complete_code_match_job(
     pool: &PgPool,
     report_id: Uuid,
     claim_token: Uuid,
+    attempt: i32,
     computed_at_sha: &str,
     hints: serde_json::Value,
+    verification: CodeMatchVerificationOutcome,
 ) -> Result<bool, ApiError> {
     let completed = sqlx::query_scalar::<_, Uuid>(
         r"WITH completed AS (
           DELETE FROM code_match_queue
           WHERE report_id = $1 AND claim_token = $2
           RETURNING report_id
+        ), hints_written AS (
+          INSERT INTO report_code_hints (report_id, computed_at_sha, hints)
+          SELECT report_id, $3, $4 FROM completed
+          ON CONFLICT (report_id) DO UPDATE SET
+            computed_at_sha = EXCLUDED.computed_at_sha,
+            hints = EXCLUDED.hints,
+            created_at = NOW()
+          RETURNING report_id
+        ), verification_recorded AS (
+          INSERT INTO code_match_verification_analytics
+          (id, report_id, attempt, computed_at_sha, candidates_seen,
+            dropped_as_absent, kept_verified, kept_unverified)
+          SELECT $5, report_id, $6, $3, $7, $8, $9, $10 FROM hints_written
+          RETURNING report_id
         )
-        INSERT INTO report_code_hints (report_id, computed_at_sha, hints)
-        SELECT report_id, $3, $4 FROM completed
-        ON CONFLICT (report_id) DO UPDATE SET
-          computed_at_sha = EXCLUDED.computed_at_sha,
-          hints = EXCLUDED.hints,
-          created_at = NOW()
-        RETURNING report_id",
+        SELECT report_id FROM verification_recorded",
     )
     .bind(report_id)
     .bind(claim_token)
     .bind(computed_at_sha)
     .bind(hints)
+    .bind(Uuid::new_v4())
+    .bind(attempt)
+    .bind(verification.candidates_seen)
+    .bind(verification.dropped_as_absent)
+    .bind(verification.kept_verified)
+    .bind(verification.kept_unverified)
     .fetch_optional(pool)
     .await?;
     Ok(completed.is_some())
+}
+
+/// Releases an unsettled verification attempt without consuming its attempt
+/// slot. Later claims must pass the pinned-commit preflight before searching,
+/// and keeping the slot open prevents an attempts cap from parking a report
+/// that intentionally has no hints row yet.
+pub(crate) async fn release_code_match_for_verification_retry(
+    pool: &PgPool,
+    report_id: Uuid,
+    claim_token: Uuid,
+    verification_retry_sha: &str,
+    available_at: DateTime<Utc>,
+    error: &str,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE code_match_queue SET claimed_at = NULL, claim_token = NULL,
+          verification_retry_sha = $3, available_at = $4, last_error = LEFT($5, 500),
+          attempts = GREATEST(attempts - 1, 0)
+        WHERE report_id = $1 AND claim_token = $2",
+    )
+    .bind(report_id)
+    .bind(claim_token)
+    .bind(verification_retry_sha)
+    .bind(available_at)
+    .bind(error)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+pub(crate) async fn clear_code_match_verification_retry(
+    pool: &PgPool,
+    report_id: Uuid,
+    claim_token: Uuid,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        r"UPDATE code_match_queue SET verification_retry_sha = NULL, last_error = NULL
+        WHERE report_id = $1 AND claim_token = $2",
+    )
+    .bind(report_id)
+    .bind(claim_token)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
 }
 
 pub(crate) async fn dead_letter_code_match_job(
@@ -10215,7 +10278,10 @@ mod product_tests {
         reason = "test failures should abort at the assertion site with explicit context"
     )]
 
-    use std::str::FromStr;
+    use std::{
+        str::FromStr,
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
 
     use anyhow::Context as _;
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -10223,7 +10289,14 @@ mod product_tests {
     use sha2::Sha256;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
-    use crate::models::{ConsentDecisionInput, CurrentUser};
+    use crate::{
+        PinnedCommitVerifier,
+        code_match::{
+            CodeMatchVerificationTracker, CodeSearchCandidate, CodeSearchMatches, CodeSearchQuery,
+            CodeSearchVerification,
+        },
+        models::{ConsentDecisionInput, CurrentUser},
+    };
 
     use super::*;
 
@@ -10240,6 +10313,60 @@ mod product_tests {
     fn test_error(error: ApiError) -> anyhow::Error {
         let ApiError { status, message } = error;
         anyhow::anyhow!("{status}: {message}")
+    }
+
+    #[derive(Debug)]
+    struct TestPinnedCommitVerifier {
+        available: AtomicBool,
+        calls: AtomicUsize,
+    }
+
+    impl TestPinnedCommitVerifier {
+        const fn new(available: bool) -> Self {
+            Self {
+                available: AtomicBool::new(available),
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn set_available(&self, available: bool) {
+            self.available.store(available, Ordering::SeqCst);
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl PinnedCommitVerifier for TestPinnedCommitVerifier {
+        async fn pinned_commit_is_fetchable(
+            &self,
+            repo_full_name: &str,
+            computed_at_sha: &str,
+        ) -> anyhow::Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            anyhow::ensure!(repo_full_name == "open-software/code-match-test");
+            anyhow::ensure!(computed_at_sha == "0123456789abcdef0123456789abcdef01234567");
+            anyhow::ensure!(
+                self.available.load(Ordering::SeqCst),
+                "pinned commit unavailable"
+            );
+            Ok(())
+        }
+    }
+
+    fn provisional_file_404_matches(count: usize) -> Vec<CodeSearchMatches> {
+        vec![CodeSearchMatches {
+            query: CodeSearchQuery::for_test("operation token"),
+            candidates: (0..count)
+                .map(|index| CodeSearchCandidate {
+                    file: format!("src/missing-{index}.rs"),
+                    line_start: None,
+                    line_end: None,
+                    verification: CodeSearchVerification::FileNotFound,
+                })
+                .collect(),
+        }]
     }
 
     fn api_key_headers(secret: &str) -> anyhow::Result<HeaderMap> {
@@ -10953,16 +11080,147 @@ mod product_tests {
             .context("cleared dead letter should be claimable again")?;
         anyhow::ensure!(redriven.attempts == 3);
 
-        let completed_empty = complete_code_match_job(
+        let computed_at_sha = "0123456789abcdef0123456789abcdef01234567";
+        let verifier = TestPinnedCommitVerifier::new(false);
+        // Represent the search calls already spent by the first attempt. A
+        // failed exact-commit proof must send later claims through preflight
+        // without adding any more search-call rows.
+        record_code_match_call(&pool, report.id, Some(8), true, 10)
+            .await
+            .map_err(test_error)?;
+        record_code_match_call(&pool, report.id, Some(7), true, 11)
+            .await
+            .map_err(test_error)?;
+        let mut first_verification = CodeMatchVerificationTracker::default();
+        first_verification.observe_candidates(2);
+        let first_outcome = crate::settle_and_complete_code_match_job(
             &pool,
-            report.id,
-            redriven.claim_token,
-            "0123456789abcdef0123456789abcdef01234567",
-            serde_json::json!([]),
+            &verifier,
+            &redriven,
+            "open-software/code-match-test",
+            computed_at_sha,
+            provisional_file_404_matches(2),
+            first_verification,
         )
-        .await
-        .map_err(test_error)?;
-        anyhow::ensure!(completed_empty, "empty hints should complete the owned job");
+        .await?;
+        anyhow::ensure!(matches!(
+            first_outcome,
+            crate::CodeMatchJobOutcome::BackoffInstallation { .. }
+        ));
+        anyhow::ensure!(verifier.calls() == 1, "the exact commit must be fetched");
+        let unsettled_state = sqlx::query_as::<
+            _,
+            (
+                Option<DateTime<Utc>>,
+                Option<String>,
+                Option<DateTime<Utc>>,
+                Option<Uuid>,
+                i64,
+                i64,
+            ),
+        >(
+            r"SELECT queue.dead_lettered_at, queue.verification_retry_sha,
+              queue.claimed_at, queue.claim_token,
+              (SELECT COUNT(*) FROM report_code_hints hints
+                WHERE hints.report_id = queue.report_id),
+              (SELECT COUNT(*) FROM code_match_verification_analytics analytics
+                WHERE analytics.report_id = queue.report_id)
+            FROM code_match_queue queue WHERE queue.report_id = $1",
+        )
+        .bind(report.id)
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(
+            unsettled_state.0.is_none()
+                && unsettled_state.1.as_deref() == Some(computed_at_sha)
+                && unsettled_state.2.is_none()
+                && unsettled_state.3.is_none()
+                && unsettled_state.4 == 0
+                && unsettled_state.5 == 0,
+            "an unproven 404 must remain retryable without settling hints or analytics"
+        );
+
+        sqlx::query("UPDATE code_match_queue SET available_at = NOW() WHERE report_id = $1")
+            .bind(report.id)
+            .execute(&pool)
+            .await?;
+        let verification_retry =
+            claim_code_match_batch(&pool, 100, Utc::now() - Duration::minutes(5))
+                .await
+                .map_err(test_error)?
+                .into_iter()
+                .find(|job| job.report_id == report.id)
+                .context("verification retry should remain claimable")?;
+        anyhow::ensure!(
+            verification_retry.attempts == 3,
+            "pinned-commit proof polling must reuse the unsettled attempt slot"
+        );
+        let retry_outcome = crate::preflight_code_match_verification_retry(
+            &pool,
+            &verifier,
+            &verification_retry,
+            "open-software/code-match-test",
+        )
+        .await?
+        .context("a failed proof should short-circuit before search")?;
+        anyhow::ensure!(matches!(
+            retry_outcome,
+            crate::CodeMatchJobOutcome::BackoffInstallation { .. }
+        ));
+        anyhow::ensure!(verifier.calls() == 2);
+        let calls_after_failed_preflight = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM match_analytics WHERE report_id = $1",
+        )
+        .bind(report.id)
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(
+            calls_after_failed_preflight == 2,
+            "verification retries must not spend another search call"
+        );
+
+        sqlx::query("UPDATE code_match_queue SET available_at = NOW() WHERE report_id = $1")
+            .bind(report.id)
+            .execute(&pool)
+            .await?;
+        let recovered = claim_code_match_batch(&pool, 100, Utc::now() - Duration::minutes(5))
+            .await
+            .map_err(test_error)?
+            .into_iter()
+            .find(|job| job.report_id == report.id)
+            .context("reachable pinned commit should make the retry claimable")?;
+        anyhow::ensure!(recovered.attempts == 3);
+        verifier.set_available(true);
+        let recovered_preflight = crate::preflight_code_match_verification_retry(
+            &pool,
+            &verifier,
+            &recovered,
+            "open-software/code-match-test",
+        )
+        .await?;
+        anyhow::ensure!(recovered_preflight.is_none());
+        anyhow::ensure!(verifier.calls() == 3);
+
+        let mut settled_verification = CodeMatchVerificationTracker::default();
+        settled_verification.observe_candidates(2);
+        let settled_outcome = crate::settle_and_complete_code_match_job(
+            &pool,
+            &verifier,
+            &recovered,
+            "open-software/code-match-test",
+            computed_at_sha,
+            provisional_file_404_matches(2),
+            settled_verification,
+        )
+        .await?;
+        anyhow::ensure!(matches!(
+            settled_outcome,
+            crate::CodeMatchJobOutcome::Continue
+        ));
+        anyhow::ensure!(
+            verifier.calls() == 4,
+            "all-404 settlement must issue a fresh per-job exact-commit call"
+        );
         let stored_empty = sqlx::query_scalar::<_, serde_json::Value>(
             "SELECT hints FROM report_code_hints WHERE report_id = $1",
         )
@@ -10970,6 +11228,18 @@ mod product_tests {
         .fetch_one(&pool)
         .await?;
         anyhow::ensure!(stored_empty == serde_json::json!([]));
+        let verification_analytics = sqlx::query_as::<_, (i32, String, i64, i64, i64, i64)>(
+            r"SELECT attempt, computed_at_sha, candidates_seen, dropped_as_absent,
+              kept_verified, kept_unverified
+            FROM code_match_verification_analytics WHERE report_id = $1",
+        )
+        .bind(report.id)
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(
+            verification_analytics == (3, computed_at_sha.to_owned(), 2, 2, 0, 0,),
+            "the settled all-404 attempt must remain distinguishable from a no-hit search"
+        );
         let completed_queue_count = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM code_match_queue WHERE report_id = $1",
         )
@@ -10977,6 +11247,51 @@ mod product_tests {
         .fetch_one(&pool)
         .await?;
         anyhow::ensure!(completed_queue_count == 0);
+
+        // A later settled attempt that legitimately sees no candidates writes
+        // the same [] payload, but appends a zero-count outcome instead of
+        // erasing the earlier all-absent evidence.
+        sqlx::query("INSERT INTO code_match_queue (report_id, product_id) VALUES ($1, $2)")
+            .bind(report.id)
+            .bind(product.id)
+            .execute(&pool)
+            .await?;
+        let no_hit_job = claim_code_match_batch(&pool, 100, Utc::now() - Duration::minutes(5))
+            .await
+            .map_err(test_error)?
+            .into_iter()
+            .find(|job| job.report_id == report.id)
+            .context("legitimate no-hit attempt should be claimable")?;
+        let no_hit_outcome = crate::settle_and_complete_code_match_job(
+            &pool,
+            &verifier,
+            &no_hit_job,
+            "open-software/code-match-test",
+            computed_at_sha,
+            Vec::new(),
+            CodeMatchVerificationTracker::default(),
+        )
+        .await?;
+        anyhow::ensure!(matches!(
+            no_hit_outcome,
+            crate::CodeMatchJobOutcome::Continue
+        ));
+        anyhow::ensure!(
+            verifier.calls() == 4,
+            "a no-hit attempt must not issue a pinned-commit proof"
+        );
+        let verification_outcomes = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+            r"SELECT candidates_seen, dropped_as_absent, kept_verified, kept_unverified
+            FROM code_match_verification_analytics WHERE report_id = $1
+            ORDER BY candidates_seen DESC, dropped_as_absent DESC, id",
+        )
+        .bind(report.id)
+        .fetch_all(&pool)
+        .await?;
+        anyhow::ensure!(
+            verification_outcomes == vec![(2, 2, 0, 0), (0, 0, 0, 0)],
+            "append-only outcomes must distinguish all-absent from legitimate no-hit attempts"
+        );
 
         // Retention deletes interactions, which cascades through reports. All
         // code-intelligence state must disappear with that report.
@@ -11005,7 +11320,12 @@ mod product_tests {
             .bind(interaction_id)
             .execute(&pool)
             .await?;
-        for table in ["code_match_queue", "report_code_hints", "match_analytics"] {
+        for table in [
+            "code_match_queue",
+            "report_code_hints",
+            "match_analytics",
+            "code_match_verification_analytics",
+        ] {
             let count = match table {
                 "code_match_queue" => {
                     sqlx::query_scalar::<_, i64>(
@@ -11031,6 +11351,12 @@ mod product_tests {
                     .fetch_one(&pool)
                     .await?
                 }
+                "code_match_verification_analytics" => sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM code_match_verification_analytics WHERE report_id = $1",
+                )
+                .bind(report.id)
+                .fetch_one(&pool)
+                .await?,
                 _ => 1,
             };
             anyhow::ensure!(count == 0, "{table} should cascade with the report");

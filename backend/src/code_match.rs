@@ -76,12 +76,29 @@ pub(crate) struct CodeSearchQuery {
     specificity: usize,
 }
 
+#[cfg(test)]
+impl CodeSearchQuery {
+    pub(crate) fn for_test(match_reason: &str) -> Self {
+        Self {
+            expression: "test query".to_owned(),
+            match_reason: match_reason.to_owned(),
+            specificity: 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodeSearchCandidate {
     pub(crate) file: String,
     pub(crate) line_start: Option<u32>,
     pub(crate) line_end: Option<u32>,
     pub(crate) verification: CodeSearchVerification,
+}
+
+impl CodeSearchCandidate {
+    pub(crate) const fn is_file_not_found(&self) -> bool {
+        matches!(self.verification, CodeSearchVerification::FileNotFound)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +127,63 @@ pub(crate) struct CodeHintCandidate {
     pub(crate) line_end: Option<u32>,
     pub(crate) match_reason: String,
     pub(crate) verified: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CodeMatchVerificationOutcome {
+    pub(crate) candidates_seen: i64,
+    pub(crate) dropped_as_absent: i64,
+    pub(crate) kept_verified: i64,
+    pub(crate) kept_unverified: i64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct CodeMatchVerificationTracker {
+    candidates_seen: usize,
+    dropped_as_absent: usize,
+}
+
+impl CodeMatchVerificationTracker {
+    pub(crate) const fn observe_candidates(&mut self, count: usize) {
+        self.candidates_seen = self.candidates_seen.saturating_add(count);
+    }
+
+    pub(crate) const fn observe_absent(&mut self, count: usize) {
+        self.dropped_as_absent = self.dropped_as_absent.saturating_add(count);
+    }
+
+    pub(crate) fn finish(self, matches: &[CodeSearchMatches]) -> CodeMatchVerificationOutcome {
+        let mut kept_verified = 0_usize;
+        let mut kept_unverified = 0_usize;
+        for candidate in matches.iter().flat_map(|matches| &matches.candidates) {
+            match candidate.verification {
+                CodeSearchVerification::Verified => kept_verified += 1,
+                CodeSearchVerification::Unverified => kept_unverified += 1,
+                CodeSearchVerification::FileNotFound => {
+                    debug_assert!(false, "file-not-found candidates must be settled first");
+                }
+            }
+        }
+        let outcome = CodeMatchVerificationOutcome {
+            candidates_seen: bounded_count(self.candidates_seen),
+            dropped_as_absent: bounded_count(self.dropped_as_absent),
+            kept_verified: bounded_count(kept_verified),
+            kept_unverified: bounded_count(kept_unverified),
+        };
+        debug_assert_eq!(
+            outcome.candidates_seen,
+            outcome
+                .dropped_as_absent
+                .saturating_add(outcome.kept_verified)
+                .saturating_add(outcome.kept_unverified),
+            "verification outcomes must partition every search candidate"
+        );
+        outcome
+    }
+}
+
+fn bounded_count(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,28 +287,26 @@ pub(crate) fn rank_matches(matches: Vec<CodeSearchMatches>) -> Vec<CodeHintCandi
 
 pub(crate) fn settle_file_not_found_candidates(
     matches: Vec<CodeSearchMatches>,
-    another_pinned_file_was_verified: bool,
-) -> Vec<CodeSearchMatches> {
-    matches
+) -> (Vec<CodeSearchMatches>, usize) {
+    let mut dropped = 0_usize;
+    let matches = matches
         .into_iter()
         .map(|matches| CodeSearchMatches {
             query: matches.query,
             candidates: matches
                 .candidates
                 .into_iter()
-                .filter_map(|mut candidate| {
+                .filter(|candidate| {
                     if candidate.verification != CodeSearchVerification::FileNotFound {
-                        return Some(candidate);
+                        return true;
                     }
-                    if another_pinned_file_was_verified {
-                        return None;
-                    }
-                    candidate.verification = CodeSearchVerification::Unverified;
-                    Some(candidate)
+                    dropped = dropped.saturating_add(1);
+                    false
                 })
                 .collect(),
         })
-        .collect()
+        .collect();
+    (matches, dropped)
 }
 
 fn add_field_seeds(seeds: &mut Vec<QuerySeed>, value: &str, label: &str, source_weight: usize) {
@@ -571,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn file_404_needs_a_successful_pinned_file_before_it_is_definitive() {
+    fn file_404_is_dropped_after_the_caller_proves_the_pinned_commit() {
         let missing = || CodeSearchCandidate {
             file: "src/advanced-away.rs".to_owned(),
             line_start: None,
@@ -585,15 +657,66 @@ mod tests {
             }]
         };
 
-        let ambiguous_repo_404s = settle_file_not_found_candidates(matches(), false);
-        assert_eq!(ambiguous_repo_404s[0].candidates.len(), 1);
-        assert_eq!(
-            ambiguous_repo_404s[0].candidates[0].verification,
-            CodeSearchVerification::Unverified
-        );
+        let (settled, dropped_as_absent) = settle_file_not_found_candidates(matches());
 
-        let definite_file_404 = settle_file_not_found_candidates(matches(), true);
-        assert!(definite_file_404[0].candidates.is_empty());
+        assert!(settled[0].candidates.is_empty());
+        assert_eq!(dropped_as_absent, 1);
+    }
+
+    #[test]
+    fn one_file_404_is_dropped_without_discarding_successful_candidates() {
+        let matches = vec![CodeSearchMatches {
+            query: query("operation token", 10),
+            candidates: vec![
+                CodeSearchCandidate {
+                    file: "src/missing.rs".to_owned(),
+                    line_start: None,
+                    line_end: None,
+                    verification: CodeSearchVerification::FileNotFound,
+                },
+                CodeSearchCandidate {
+                    file: "src/present.rs".to_owned(),
+                    line_start: Some(2),
+                    line_end: Some(2),
+                    verification: CodeSearchVerification::Verified,
+                },
+            ],
+        }];
+
+        let (settled, dropped_as_absent) = settle_file_not_found_candidates(matches);
+
+        assert_eq!(dropped_as_absent, 1);
+        assert_eq!(settled[0].candidates.len(), 1);
+        assert_eq!(settled[0].candidates[0].file, "src/present.rs");
+    }
+
+    #[test]
+    fn verification_outcomes_partition_candidates_before_ranking() {
+        let mut tracker = CodeMatchVerificationTracker::default();
+        tracker.observe_candidates(4);
+        tracker.observe_absent(2);
+        let outcome = tracker.finish(&[CodeSearchMatches {
+            query: query("operation token", 10),
+            candidates: vec![
+                CodeSearchCandidate {
+                    file: "src/verified.rs".to_owned(),
+                    line_start: Some(1),
+                    line_end: Some(1),
+                    verification: CodeSearchVerification::Verified,
+                },
+                CodeSearchCandidate {
+                    file: "src/unverified.rs".to_owned(),
+                    line_start: None,
+                    line_end: None,
+                    verification: CodeSearchVerification::Unverified,
+                },
+            ],
+        }]);
+
+        assert_eq!(outcome.candidates_seen, 4);
+        assert_eq!(outcome.dropped_as_absent, 2);
+        assert_eq!(outcome.kept_verified, 1);
+        assert_eq!(outcome.kept_unverified, 1);
     }
 
     #[test]

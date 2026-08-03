@@ -921,6 +921,34 @@ impl GithubAppClient {
         Ok(sha.to_ascii_lowercase())
     }
 
+    /// Proves that this installation can still fetch the exact immutable
+    /// commit used for pinned-content verification. This deliberately issues
+    /// a fresh request: branch reachability and batch-cached HEAD resolution
+    /// cannot distinguish a missing path from a revoked or garbage-collected
+    /// pinned commit.
+    pub(crate) async fn repository_commit_is_fetchable(
+        &self,
+        token: &GithubInstallationToken,
+        repo_full_name: &str,
+        sha: &str,
+    ) -> anyhow::Result<()> {
+        validate_repo_full_name(repo_full_name)?;
+        anyhow::ensure!(
+            valid_git_sha(sha),
+            "GitHub repository commit SHA was invalid"
+        );
+        Self::request(self.http.get(format!(
+            "{GITHUB_API_URL}/repos/{repo_full_name}/commits/{sha}"
+        )))
+        .bearer_auth(token.as_str())
+        .send()
+        .await
+        .context("GitHub pinned commit request failed")?
+        .error_for_status()
+        .context("GitHub pinned commit request was rejected")?;
+        Ok(())
+    }
+
     pub(crate) async fn repository_file_content(
         &self,
         token: &GithubInstallationToken,
@@ -1687,33 +1715,52 @@ mod tests {
     }
 
     #[test]
-    fn local_file_content_failures_cannot_be_mistaken_for_absence() {
-        let error = anyhow::anyhow!("GitHub repository file exceeded the code-hint size limit");
-
-        assert_eq!(
-            github_file_content_failure_kind(&error),
-            GithubFileContentFailureKind::InvalidResponse
-        );
+    fn size_and_encoding_failures_cannot_be_mistaken_for_absence() {
+        for error in [
+            anyhow::anyhow!("GitHub repository file exceeded the code-hint size limit"),
+            anyhow::anyhow!("GitHub repository file was not UTF-8"),
+        ] {
+            assert_eq!(
+                github_file_content_failure_kind(&error),
+                GithubFileContentFailureKind::InvalidResponse
+            );
+        }
     }
 
     #[test]
     fn file_content_status_survives_anyhow_context_for_typed_classification() -> anyhow::Result<()>
     {
-        let response = reqwest::Response::from(
-            axum::http::Response::builder()
-                .status(reqwest::StatusCode::NOT_FOUND)
-                .body("not found")?,
-        );
-        let Err(request_error) = response.error_for_status() else {
-            anyhow::bail!("404 response should produce a reqwest error");
-        };
-        let error = anyhow::Error::new(request_error)
-            .context("GitHub repository file request was rejected");
+        for (status, expected) in [
+            (
+                reqwest::StatusCode::NOT_FOUND,
+                GithubFileContentFailureKind::NotFound,
+            ),
+            (
+                reqwest::StatusCode::UNAUTHORIZED,
+                GithubFileContentFailureKind::Unauthorized,
+            ),
+            (
+                reqwest::StatusCode::FORBIDDEN,
+                GithubFileContentFailureKind::Forbidden,
+            ),
+            (
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                GithubFileContentFailureKind::Server,
+            ),
+        ] {
+            let response = reqwest::Response::from(
+                axum::http::Response::builder()
+                    .status(status)
+                    .body("request failed")?,
+            );
+            let Err(request_error) = response.error_for_status() else {
+                anyhow::bail!("error status should produce a reqwest error");
+            };
+            let error = anyhow::Error::new(request_error)
+                .context("GitHub repository file request was rejected");
 
-        assert_eq!(
-            github_file_content_failure_kind(&error),
-            GithubFileContentFailureKind::NotFound
-        );
+            assert_eq!(github_file_content_failure_kind(&error), expected);
+        }
         Ok(())
     }
 

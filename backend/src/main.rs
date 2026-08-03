@@ -63,8 +63,9 @@ use crate::{
         UpdatedResponse, WorkspaceResponse,
     },
     code_match::{
-        CodeHintCandidate, CodeMatchFinding, CodeMatchInput, CodeSearchCandidate,
-        CodeSearchMatches, derive_queries, rank_matches, settle_file_not_found_candidates,
+        CodeHintCandidate, CodeMatchFinding, CodeMatchInput, CodeMatchVerificationTracker,
+        CodeSearchCandidate, CodeSearchMatches, derive_queries, rank_matches,
+        settle_file_not_found_candidates,
     },
     customer_features::{
         DashboardFeatureDetail, DashboardFeatureFilters, DashboardFeaturesPage,
@@ -113,14 +114,15 @@ use crate::{
         GroupIssueSyncContext, accept_team_invitation, agent_product_auth,
         backfill_customer_intelligence, backfill_report_groups, bump_last_commented_report_count,
         claim_code_match_batch, claim_group_issue_filing, claim_group_issue_reconciliation,
-        claim_group_issue_state_refresh, clear_product_github_repo, complete_code_match_job,
-        complete_group_issue_filing, complete_group_issue_reconciliation, create_api_key,
-        create_enrichment_request, create_product_with_default_key, create_team_invitation,
-        dashboard_customer_by_id, dashboard_customers_page, dashboard_feedback_page,
-        dashboard_interaction_by_id, dashboard_report_by_id, dashboard_responses_page,
-        dashboard_session_by_id, dashboard_sessions_page, dashboard_signals_page,
-        dashboard_with_limits, dead_letter_code_match_job, decide_enrichment_consent,
-        delete_product, feedback_consent_state, feedback_list_interactions, feedback_list_reports,
+        claim_group_issue_state_refresh, clear_code_match_verification_retry,
+        clear_product_github_repo, complete_code_match_job, complete_group_issue_filing,
+        complete_group_issue_reconciliation, create_api_key, create_enrichment_request,
+        create_product_with_default_key, create_team_invitation, dashboard_customer_by_id,
+        dashboard_customers_page, dashboard_feedback_page, dashboard_interaction_by_id,
+        dashboard_report_by_id, dashboard_responses_page, dashboard_session_by_id,
+        dashboard_sessions_page, dashboard_signals_page, dashboard_with_limits,
+        dead_letter_code_match_job, decide_enrichment_consent, delete_product,
+        feedback_consent_state, feedback_list_interactions, feedback_list_reports,
         get_group_github_issue, get_or_create_workspace, get_product_github_repo,
         github_installation_workspace, group_issue_context, group_issue_sync_context,
         ingest_telemetry_batch, inspect_feedback_capability, list_github_installations,
@@ -128,14 +130,14 @@ use crate::{
         purge_expired_product_data, read_product_auth, record_code_match_call,
         record_feedback_consent_decision, record_personalization_decision,
         record_personalization_outcome, regroup_report_groups, release_code_match_claim,
-        release_code_match_job, release_group_issue_filing_claim,
-        release_group_issue_reconciliation_claim, remove_team_member, rename_product,
-        rename_workspace, resolve_workspace_access, retrieve_customer_context,
-        revert_last_commented_report_count, revoke_api_key, revoke_github_installation,
-        revoke_team_invitation, rotate_api_key, set_product_github_repo, submit_enrichment_answer,
-        submit_product_feedback, transfer_team_ownership, update_feedback_workflow,
-        update_group_issue_state, update_policy, update_team_member_role,
-        upsert_github_installation,
+        release_code_match_for_verification_retry, release_code_match_job,
+        release_group_issue_filing_claim, release_group_issue_reconciliation_claim,
+        remove_team_member, rename_product, rename_workspace, resolve_workspace_access,
+        retrieve_customer_context, revert_last_commented_report_count, revoke_api_key,
+        revoke_github_installation, revoke_team_invitation, rotate_api_key,
+        set_product_github_repo, submit_enrichment_answer, submit_product_feedback,
+        transfer_team_ownership, update_feedback_workflow, update_group_issue_state, update_policy,
+        update_team_member_role, upsert_github_installation,
     },
 };
 
@@ -729,6 +731,43 @@ enum PinnedFileContent {
     Unverified,
 }
 
+const fn pinned_file_content_for_failure(kind: GithubFileContentFailureKind) -> PinnedFileContent {
+    match kind {
+        GithubFileContentFailureKind::NotFound => PinnedFileContent::FileNotFound,
+        GithubFileContentFailureKind::Unauthorized
+        | GithubFileContentFailureKind::Forbidden
+        | GithubFileContentFailureKind::Server
+        | GithubFileContentFailureKind::Timeout
+        | GithubFileContentFailureKind::InvalidResponse
+        | GithubFileContentFailureKind::Transport => PinnedFileContent::Unverified,
+    }
+}
+
+trait PinnedCommitVerifier: Sync {
+    fn pinned_commit_is_fetchable(
+        &self,
+        repo_full_name: &str,
+        computed_at_sha: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+}
+
+struct GithubPinnedCommitVerifier<'a> {
+    github: &'a GithubAppClient,
+    token: &'a crate::github::GithubInstallationToken,
+}
+
+impl PinnedCommitVerifier for GithubPinnedCommitVerifier<'_> {
+    async fn pinned_commit_is_fetchable(
+        &self,
+        repo_full_name: &str,
+        computed_at_sha: &str,
+    ) -> anyhow::Result<()> {
+        self.github
+            .repository_commit_is_fetchable(self.token, repo_full_name, computed_at_sha)
+            .await
+    }
+}
+
 impl InstallationContentBudget {
     const fn new() -> Self {
         Self {
@@ -781,7 +820,22 @@ async fn drain_code_match_batch(
             Err(error) => {
                 let message = format!("GitHub installation token failed: {error}");
                 for job in &installation_jobs {
-                    retry_or_dead_letter_code_match_job(pool, job, &message).await?;
+                    if let Some(computed_at_sha) = job.verification_retry_sha.as_deref() {
+                        // Once a pinned-commit proof has failed, keep this job
+                        // retryable even if the next batch cannot mint a token.
+                        // Dead-lettering here would strand a report with no
+                        // hints row; the marker also prevents any future claim
+                        // from reaching code search before proof recovers.
+                        release_code_match_after_unproven_pinned_commit(
+                            pool,
+                            job,
+                            computed_at_sha,
+                            &message,
+                        )
+                        .await?;
+                    } else {
+                        retry_or_dead_letter_code_match_job(pool, job, &message).await?;
+                    }
                 }
                 tracing::warn!(
                     installation_id,
@@ -862,6 +916,13 @@ async fn process_code_match_job(
         .default_branch
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("claimed code-match job is missing its default branch"))?;
+    let pinned_commit_verifier = GithubPinnedCommitVerifier { github, token };
+    if let Some(outcome) =
+        preflight_code_match_verification_retry(pool, &pinned_commit_verifier, job, repo_full_name)
+            .await?
+    {
+        return Ok(outcome);
+    }
     let repo_key = (repo_full_name.to_owned(), default_branch.to_owned());
     let computed_at_sha = if let Some(sha) = head_sha_by_repo.get(&repo_key) {
         sha.clone()
@@ -911,6 +972,7 @@ async fn process_code_match_job(
     let mut successful_queries = 0;
     let mut invalid_request_errors = Vec::new();
     let mut matches = Vec::new();
+    let mut verification = CodeMatchVerificationTracker::default();
     for query in queries {
         if !budget.take() {
             break;
@@ -946,6 +1008,7 @@ async fn process_code_match_job(
                     result.candidates,
                     content_budget,
                     content_by_file,
+                    &mut verification,
                 )
                 .await;
                 matches.push(CodeSearchMatches { query, candidates });
@@ -1032,28 +1095,110 @@ async fn process_code_match_job(
         return Ok(CodeMatchJobOutcome::Continue);
     }
 
-    // HEAD resolution above proves the repository was reachable. A contents
-    // 404 is still held provisionally until another pinned contents fetch for
-    // this repo/SHA succeeds, because GitHub also uses 404 for repo-level
-    // access failures. An all-404 response therefore remains unverified.
-    let another_pinned_file_was_verified =
-        content_by_file.iter().any(|((repo, sha, _), content)| {
-            repo == repo_full_name
-                && sha == &computed_at_sha
-                && matches!(content, PinnedFileContent::Content(_))
-        });
-    let matches = settle_file_not_found_candidates(matches, another_pinned_file_was_verified);
+    settle_and_complete_code_match_job(
+        pool,
+        &pinned_commit_verifier,
+        job,
+        repo_full_name,
+        &computed_at_sha,
+        matches,
+        verification,
+    )
+    .await
+}
+
+async fn preflight_code_match_verification_retry(
+    pool: &PgPool,
+    verifier: &impl PinnedCommitVerifier,
+    job: &CodeMatchJob,
+    repo_full_name: &str,
+) -> anyhow::Result<Option<CodeMatchJobOutcome>> {
+    let Some(computed_at_sha) = job.verification_retry_sha.as_deref() else {
+        return Ok(None);
+    };
+    if let Err(error) = verifier
+        .pinned_commit_is_fetchable(repo_full_name, computed_at_sha)
+        .await
+    {
+        let message = format!("GitHub pinned commit remains unavailable: {error}");
+        return release_code_match_after_unproven_pinned_commit(
+            pool,
+            job,
+            computed_at_sha,
+            &message,
+        )
+        .await
+        .map(Some);
+    }
+    let cleared = clear_code_match_verification_retry(pool, job.report_id, job.claim_token)
+        .await
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    if !cleared {
+        tracing::warn!(
+            report_id = %job.report_id,
+            "code-match verification retry preflight lost its claim fencing race"
+        );
+        return Ok(Some(CodeMatchJobOutcome::Continue));
+    }
+    Ok(None)
+}
+
+async fn settle_and_complete_code_match_job(
+    pool: &PgPool,
+    verifier: &impl PinnedCommitVerifier,
+    job: &CodeMatchJob,
+    repo_full_name: &str,
+    computed_at_sha: &str,
+    matches: Vec<CodeSearchMatches>,
+    mut verification: CodeMatchVerificationTracker,
+) -> anyhow::Result<CodeMatchJobOutcome> {
+    let has_provisional_absence = matches.iter().any(|matches| {
+        matches
+            .candidates
+            .iter()
+            .any(CodeSearchCandidate::is_file_not_found)
+    });
+    let matches = if has_provisional_absence {
+        // GitHub's contents endpoint uses 404 for a missing path, lost access,
+        // and an unavailable ref. Prove this exact immutable commit with a
+        // fresh request for every job before interpreting any 404 as absence.
+        // A changed branch HEAD still counts as success: it is deliberately
+        // neither fetched nor compared, because only this pinned SHA matters.
+        if let Err(error) = verifier
+            .pinned_commit_is_fetchable(repo_full_name, computed_at_sha)
+            .await
+        {
+            let message = format!("GitHub pinned commit could not be verified: {error}");
+            return release_code_match_after_unproven_pinned_commit(
+                pool,
+                job,
+                computed_at_sha,
+                &message,
+            )
+            .await;
+        }
+        let (matches, dropped_as_absent) = settle_file_not_found_candidates(matches);
+        verification.observe_absent(dropped_as_absent);
+        matches
+    } else {
+        matches
+    };
+    let verification = verification.finish(&matches);
     let hints = rank_matches(matches);
     let hints_json = code_hints_json(hints);
     // Invariant: every stored hint was verified to exist at computed_at_sha,
-    // or is explicitly flagged unverified. An empty array is also persisted
-    // so later regeneration can find this report_code_hints row.
+    // or is explicitly flagged unverified. Both legitimate no-hit and proven
+    // all-absent outcomes write an empty row; the append-only verification
+    // record distinguishes their candidate and drop counts. An unproven 404
+    // writes neither row and instead retains a retry marker on the queue.
     let completed = complete_code_match_job(
         pool,
         job.report_id,
         job.claim_token,
-        &computed_at_sha,
+        job.attempts,
+        computed_at_sha,
         hints_json,
+        verification,
     )
     .await
     .map_err(|error| anyhow::anyhow!(error.message))?;
@@ -1064,6 +1209,36 @@ async fn process_code_match_job(
         );
     }
     Ok(CodeMatchJobOutcome::Continue)
+}
+
+async fn release_code_match_after_unproven_pinned_commit(
+    pool: &PgPool,
+    job: &CodeMatchJob,
+    computed_at_sha: &str,
+    error: &str,
+) -> anyhow::Result<CodeMatchJobOutcome> {
+    let until = generic_code_match_retry_at(job.attempts);
+    let released = release_code_match_for_verification_retry(
+        pool,
+        job.report_id,
+        job.claim_token,
+        computed_at_sha,
+        until,
+        error,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!(error.message))?;
+    if !released {
+        tracing::warn!(
+            report_id = %job.report_id,
+            "code-match pinned-commit retry lost its claim fencing race"
+        );
+        return Ok(CodeMatchJobOutcome::Continue);
+    }
+    Ok(CodeMatchJobOutcome::BackoffInstallation {
+        until,
+        error: error.to_owned(),
+    })
 }
 
 #[allow(
@@ -1079,7 +1254,9 @@ async fn resolve_code_search_candidates(
     candidates: Vec<GithubCodeSearchCandidate>,
     budget: &mut InstallationContentBudget,
     content_by_file: &mut BTreeMap<(String, String, String), PinnedFileContent>,
+    verification: &mut CodeMatchVerificationTracker,
 ) -> Vec<CodeSearchCandidate> {
+    verification.observe_candidates(candidates.len());
     let mut resolved = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         if !candidate.needs_content() {
@@ -1109,25 +1286,26 @@ async fn resolve_code_search_candidates(
                     .await
                 {
                     Ok(content) => PinnedFileContent::Content(content),
-                    Err(error) if error.kind() == GithubFileContentFailureKind::NotFound => {
-                        tracing::debug!(
-                            %report_id,
-                            repo = repo_full_name,
-                            file = candidate.file(),
-                            "code-match pinned file returned a provisional 404"
-                        );
-                        PinnedFileContent::FileNotFound
-                    }
                     Err(error) => {
-                        tracing::warn!(
-                            %report_id,
-                            repo = repo_full_name,
-                            file = candidate.file(),
-                            failure_kind = ?error.kind(),
-                            %error,
-                            "code-match candidate could not be verified at the pinned SHA"
-                        );
-                        PinnedFileContent::Unverified
+                        let failure_kind = error.kind();
+                        if failure_kind == GithubFileContentFailureKind::NotFound {
+                            tracing::debug!(
+                                %report_id,
+                                repo = repo_full_name,
+                                file = candidate.file(),
+                                "code-match pinned file returned a provisional 404"
+                            );
+                        } else {
+                            tracing::warn!(
+                                %report_id,
+                                repo = repo_full_name,
+                                file = candidate.file(),
+                                ?failure_kind,
+                                %error,
+                                "code-match candidate could not be verified at the pinned SHA"
+                            );
+                        }
+                        pinned_file_content_for_failure(failure_kind)
                     }
                 }
             } else {
@@ -1150,6 +1328,7 @@ async fn resolve_code_search_candidates(
                 if let Some(candidate) = candidate.verify_against_pinned_content(content) {
                     resolved.push(candidate);
                 } else {
+                    verification.observe_absent(1);
                     tracing::debug!(
                         %report_id,
                         repo = repo_full_name,
@@ -5640,16 +5819,16 @@ mod page_tests {
     use axum::{body::to_bytes, http::StatusCode};
 
     use super::{
-        ApiError, CodeHintCandidate, GithubIssue, GithubRateLimit,
+        ApiError, CodeHintCandidate, GithubFileContentFailureKind, GithubIssue, GithubRateLimit,
         GroupIssueReconciliationDecision, GroupIssueReconciliationEvidence,
         GroupIssueReconciliationInconclusive, InstallationContentBudget, InstallationSearchBudget,
-        WORKSPACE_ID_QUERY_PARAM, build_app_router, code_hints_json, code_match_retry_exhausted,
-        code_search_pacing_delay, code_search_retry_at, comma_values,
+        PinnedFileContent, WORKSPACE_ID_QUERY_PARAM, build_app_router, code_hints_json,
+        code_match_retry_exhausted, code_search_pacing_delay, code_search_retry_at, comma_values,
         every_code_search_query_was_invalid, feedback_discovery, github_callback_redirect_target,
         group_issue_reconciliation_resolution, group_issue_state_refresh_due,
         group_issue_sync_needed, group_marker_comment, install_workspace_id, mcp_auth_error,
-        mcp_tool_allowed, mcp_tools, resolve_web_app_url, reveal_auth_error,
-        valid_report_group_key, validated_return_to,
+        mcp_tool_allowed, mcp_tools, pinned_file_content_for_failure, resolve_web_app_url,
+        reveal_auth_error, valid_report_group_key, validated_return_to,
     };
     use chrono::{Duration, TimeZone as _, Utc};
     use serde_json::{Value, json};
@@ -5694,6 +5873,27 @@ mod page_tests {
 
         assert!(!code_match_retry_exhausted(7));
         assert!(code_match_retry_exhausted(8));
+    }
+
+    #[test]
+    fn only_a_typed_file_404_can_become_provisional_absence() {
+        assert!(matches!(
+            pinned_file_content_for_failure(GithubFileContentFailureKind::NotFound),
+            PinnedFileContent::FileNotFound
+        ));
+        for failure in [
+            GithubFileContentFailureKind::Unauthorized,
+            GithubFileContentFailureKind::Forbidden,
+            GithubFileContentFailureKind::Server,
+            GithubFileContentFailureKind::Timeout,
+            GithubFileContentFailureKind::InvalidResponse,
+            GithubFileContentFailureKind::Transport,
+        ] {
+            assert!(matches!(
+                pinned_file_content_for_failure(failure),
+                PinnedFileContent::Unverified
+            ));
+        }
     }
 
     #[test]
