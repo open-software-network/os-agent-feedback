@@ -186,10 +186,11 @@ jobs:
           toolchain: "1.95"
       - name: Install locked SDK dependencies
         run: pnpm install --frozen-lockfile
-      - name: Install the disposable retail example
-        run: npm install --ignore-scripts --no-audit --no-fund
-        working-directory: examples/mvp-retail-express
-      - name: Run anonymous-to-known personalization journey
+      - name: Install the disposable retail and advertising examples
+        run: |
+          npm --prefix examples/mvp-retail-express install --ignore-scripts --no-audit --no-fund
+          npm --prefix examples/mvp-anonymous-express install --ignore-scripts --no-audit --no-fund
+      - name: Run customer personalization and advertising journeys
         run: pnpm test:customer-enrichment-e2e
 
   node:

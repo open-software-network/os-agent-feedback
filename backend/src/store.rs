@@ -8819,6 +8819,18 @@ const ENRICHMENT_CATALOG: &[EnrichmentCatalogDefinition] = &[
         targeted_advertising_safe: true,
     },
     EnrichmentCatalogDefinition {
+        key: "interest.topic",
+        signal_type: "preference",
+        allowed_values: &[
+            "outdoor_travel",
+            "technology",
+            "wellness",
+            "home",
+            "entertainment",
+        ],
+        targeted_advertising_safe: true,
+    },
+    EnrichmentCatalogDefinition {
         key: "b2b.company_size",
         signal_type: "constraint",
         allowed_values: &["solo", "small", "mid_market", "enterprise"],
@@ -15502,6 +15514,23 @@ mod product_tests {
         inference.provenance = "user_explicit".into();
         anyhow::ensure!(validate_enrichment_item(&inference, "product_personalization").is_err());
         anyhow::ensure!(validate_enrichment_item(&valid, "targeted_advertising").is_ok());
+        let advertising_interest = crate::models::EnrichmentAnswerItemInput {
+            key: "interest.topic".into(),
+            signal_type: "preference".into(),
+            value: "outdoor_travel".into(),
+            _summary: None,
+            provenance: "agent_reports_user_statement".into(),
+            confidence: Some(1.0),
+            remember: true,
+            expires_at: Some(Utc::now() + Duration::days(30)),
+        };
+        let advertising_definition =
+            validate_enrichment_item(&advertising_interest, "targeted_advertising")
+                .map_err(test_error)?;
+        anyhow::ensure!(
+            catalog_summary(advertising_definition, &advertising_interest.value)
+                == "interest topic: outdoor travel"
+        );
         let mut b2b = valid;
         b2b.key = "b2b.company_size".into();
         b2b.signal_type = "constraint".into();

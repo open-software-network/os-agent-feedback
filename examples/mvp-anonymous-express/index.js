@@ -7,20 +7,20 @@ import { requiredCookieSecret } from "./cookie-secret.js";
 const cookieSecret = requiredCookieSecret();
 const decisions = new Map();
 
-function signature(id) {
-  return createHmac("sha256", cookieSecret).update(id).digest("base64url");
+function signature(name, id) {
+  return createHmac("sha256", cookieSecret).update(`${name}:${id}`).digest("base64url");
 }
 
-function visitor(cookie = "") {
+function verifiedCookie(cookie = "", name) {
   const encoded = cookie
     .split(";")
     .map((part) => part.trim())
-    .find((part) => part.startsWith("example_visitor="))
-    ?.slice("example_visitor=".length);
+    .find((part) => part.startsWith(`${name}=`))
+    ?.slice(name.length + 1);
   if (!encoded) return undefined;
   const [id, supplied] = encoded.split(".");
   if (!id || !supplied) return undefined;
-  const expected = signature(id);
+  const expected = signature(name, id);
   const left = Buffer.from(supplied);
   const right = Buffer.from(expected);
   return left.length === right.length && timingSafeEqual(left, right) ? id : undefined;
@@ -29,11 +29,21 @@ function visitor(cookie = "") {
 const app = express();
 app.use(express.json());
 app.use((request, response, next) => {
-  request.visitorId = visitor(request.get("cookie")) || `anon_${randomUUID()}`;
-  if (!visitor(request.get("cookie"))) {
-    response.setHeader(
+  const cookie = request.get("cookie");
+  const visitor = verifiedCookie(cookie, "example_visitor");
+  const journey = verifiedCookie(cookie, "example_journey");
+  request.visitorId = visitor || `anon_${randomUUID()}`;
+  request.journeyId = journey || `journey_${randomUUID()}`;
+  if (!visitor) {
+    response.append(
       "Set-Cookie",
-      `example_visitor=${request.visitorId}.${signature(request.visitorId)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=86400`,
+      `example_visitor=${request.visitorId}.${signature("example_visitor", request.visitorId)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=86400`,
+    );
+  }
+  if (!journey) {
+    response.append(
+      "Set-Cookie",
+      `example_journey=${request.journeyId}.${signature("example_journey", request.journeyId)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=1800`,
     );
   }
   next();
@@ -46,13 +56,15 @@ const customer = epode({
   purpose: "targeted_advertising",
   identify: (request) =>
     request.path === "/api/ephemeral-discover" ? {} : { anonymousRef: request.visitorId },
+  sessionRef: (request) => request.journeyId,
+  runtimeHint: () => "anonymous-express/1.0",
 });
 app.use(customer);
 
 async function discover(request, response) {
   const context = await customer.contextFor(request);
   const interests = new Set(context.items.map((item) => `${item.key}:${item.value}`));
-  const placement = interests.has("interest:outdoor_travel")
+  const placement = interests.has("interest.topic:outdoor_travel")
     ? { campaign: "outdoor-travel", headline: "Explore closer to nature" }
     : { campaign: "general", headline: "Explore this week's picks" };
   let decisionId;

@@ -16,9 +16,13 @@ const productUrl = (process.env.CUSTOMER_ENRICHMENT_PRODUCT_URL || "http://127.0
   /\/$/,
   "",
 );
+const advertisingProductUrl = (
+  process.env.CUSTOMER_ENRICHMENT_AD_PRODUCT_URL || "http://127.0.0.1:4305"
+).replace(/\/$/, "");
 const databaseUrl = process.env.CUSTOMER_ENRICHMENT_DATABASE_URL || process.env.DATABASE_URL || "";
 const localBackend = backendUrl === "http://127.0.0.1:3182";
 const localProduct = productUrl === "http://127.0.0.1:4301";
+const localAdvertisingProduct = advertisingProductUrl === "http://127.0.0.1:4305";
 const workspaceId = randomUUID();
 const productId = randomUUID();
 const environmentId = randomUUID();
@@ -141,8 +145,23 @@ function assertAgentAction(action, path) {
   assert.doesNotMatch(JSON.stringify(action), /app\.epode\.ai/);
 }
 
+function responseCookieHeader(response, names) {
+  const setCookies =
+    typeof response.headers.getSetCookie === "function"
+      ? response.headers.getSetCookie()
+      : [response.headers.get("set-cookie") || ""];
+  return names
+    .map((name) => {
+      const match = setCookies.join(",").match(new RegExp(`(?:^|[,;]\\s*)${name}=([^;,]+)`));
+      return match ? `${name}=${match[1]}` : "";
+    })
+    .filter(Boolean)
+    .join("; ");
+}
+
 let backend;
 let product;
+let advertisingProduct;
 try {
   if (localBackend) {
     backend = start("cargo", ["run", "--quiet", "--bin", "agent-feedback"], {
@@ -181,6 +200,25 @@ try {
       },
     });
     await waitFor(`${productUrl}/health`, product, 30_000);
+  }
+
+  if (localAdvertisingProduct) {
+    if (!existsSync(join(repo, "examples", "mvp-anonymous-express", "node_modules", "express"))) {
+      throw new Error(
+        "Install the advertising example first: pnpm --dir examples/mvp-anonymous-express install --no-frozen-lockfile",
+      );
+    }
+    advertisingProduct = start("node", ["index.js"], {
+      cwd: join(repo, "examples", "mvp-anonymous-express"),
+      label: "Anonymous advertising example",
+      env: {
+        EPODE_API_KEY: apiKey,
+        EPODE_API_URL: backendUrl,
+        VISITOR_COOKIE_SECRET: randomBytes(32).toString("base64url"),
+        PORT: "4305",
+      },
+    });
+    await waitFor(`${advertisingProductUrl}/health`, advertisingProduct, 30_000);
   }
 
   const firstResponse = await fetch(`${productUrl}/api/recommendations`);
@@ -324,13 +362,173 @@ try {
   assert.equal(signedIn.personalized, true);
   assert.equal(signedIn.products[0].id, "gift-fast");
 
+  const firstAdvertisingResponse = await fetch(`${advertisingProductUrl}/api/discover`);
+  const firstAdvertising = await json(firstAdvertisingResponse, "anonymous advertising placement");
+  const advertisingCookie = responseCookieHeader(firstAdvertisingResponse, [
+    "example_visitor",
+    "example_journey",
+  ]);
+  const advertisingVisitorCookie = advertisingCookie
+    .split(";")
+    .map((value) => value.trim())
+    .find((value) => value.startsWith("example_visitor="));
+  assert.ok(advertisingVisitorCookie, "the publisher must issue a first-party visitor ID");
+  assert.match(
+    advertisingCookie,
+    /example_journey=/,
+    "the publisher must issue a bounded journey ID",
+  );
+  assert.equal(firstAdvertising.personalized, false);
+  assert.equal(firstAdvertising.placement.campaign, "general");
+  const advertisingRequest = firstAdvertising._epode?.customerContext;
+  assert.equal(advertisingRequest.purpose, "targeted_advertising");
+  assert.equal(advertisingRequest.identityLevel, "pseudonymous");
+  assert.equal(advertisingRequest.state, "consent_required");
+  assertAgentAction(advertisingRequest.consent, "/_epode/v1/enrichment/consent");
+
+  const advertisingConsent = await json(
+    await fetch(`${advertisingProductUrl}${advertisingRequest.consent.url}`, {
+      method: "POST",
+      headers: {
+        authorization: advertisingRequest.consent.authorization,
+        "content-type": "application/json",
+        cookie: advertisingCookie,
+      },
+      body: JSON.stringify({ decision: "approved" }),
+    }),
+    "advertising permission",
+  );
+  assert.equal(advertisingConsent.state, "answer_ready");
+  assertAgentAction(advertisingConsent.submit, "/_epode/v1/enrichment/answers");
+  assert.ok(
+    advertisingConsent.submit.bodySchema.items.catalog.some(
+      (entry) =>
+        entry.key === "interest.topic" &&
+        entry.type === "preference" &&
+        entry.allowedValues.includes("outdoor_travel") &&
+        entry.targetedAdvertisingSafe === true,
+    ),
+    "the advertising contract must expose the bounded interest consumed by the example",
+  );
+
+  const advertisingAnswer = await json(
+    await fetch(`${advertisingProductUrl}${advertisingConsent.submit.url}`, {
+      method: "POST",
+      headers: {
+        authorization: advertisingConsent.submit.authorization,
+        "content-type": "application/json",
+        cookie: advertisingCookie,
+      },
+      body: JSON.stringify({
+        status: "answered",
+        items: [
+          {
+            key: "interest.topic",
+            type: "preference",
+            value: "outdoor_travel",
+            provenance: "agent_reports_user_statement",
+            confidence: 1,
+            remember: true,
+          },
+        ],
+      }),
+    }),
+    "advertising context answer",
+  );
+  assert.equal(advertisingAnswer.signals.length, 1);
+  assert.deepEqual(advertisingAnswer.signals[0].allowedUses, ["targeted_advertising"]);
+
+  const personalizedAdvertising = await json(
+    await fetch(`${advertisingProductUrl}/api/discover`, {
+      headers: { cookie: advertisingCookie },
+    }),
+    "personalized advertising placement",
+  );
+  assert.equal(personalizedAdvertising.personalized, true);
+  assert.equal(personalizedAdvertising.placement.campaign, "outdoor-travel");
+  assert.match(personalizedAdvertising.decisionId, /^[0-9a-f-]{36}$/);
+
+  const advertisingOutcome = await json(
+    await fetch(`${advertisingProductUrl}/api/ad-events`, {
+      method: "POST",
+      headers: { cookie: advertisingCookie, "content-type": "application/json" },
+      body: JSON.stringify({ event: "clicked" }),
+    }),
+    "advertising engagement outcome",
+  );
+  assert.equal(advertisingOutcome.measured, true);
+
+  const advertisingAnonymousRef = advertisingVisitorCookie
+    .slice("example_visitor=".length)
+    .split(".")[0];
+  const wrongPurposeContext = await json(
+    await fetch(`${backendUrl}/api/v2/customer-context`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        anonymousRef: advertisingAnonymousRef,
+        purpose: "product_personalization",
+      }),
+    }),
+    "advertising-to-product purpose isolation",
+  );
+  assert.deepEqual(
+    wrongPurposeContext.items,
+    [],
+    "advertising permission must not authorize general product personalization",
+  );
+
+  const unsafeAdvertisingResponse = await fetch(`${advertisingProductUrl}/api/discover`);
+  const unsafeAdvertising = await json(unsafeAdvertisingResponse, "unsafe advertising probe");
+  const unsafeAdvertisingCookie = responseCookieHeader(unsafeAdvertisingResponse, [
+    "example_visitor",
+    "example_journey",
+  ]);
+  const unsafeConsent = await json(
+    await fetch(`${advertisingProductUrl}${unsafeAdvertising._epode.customerContext.consent.url}`, {
+      method: "POST",
+      headers: {
+        authorization: unsafeAdvertising._epode.customerContext.consent.authorization,
+        "content-type": "application/json",
+        cookie: unsafeAdvertisingCookie,
+      },
+      body: JSON.stringify({ decision: "approved" }),
+    }),
+    "unsafe advertising probe permission",
+  );
+  const unsafeAnswerResponse = await fetch(`${advertisingProductUrl}${unsafeConsent.submit.url}`, {
+    method: "POST",
+    headers: {
+      authorization: unsafeConsent.submit.authorization,
+      "content-type": "application/json",
+      cookie: unsafeAdvertisingCookie,
+    },
+    body: JSON.stringify({
+      status: "answered",
+      items: [
+        {
+          key: "b2b.company_size",
+          type: "constraint",
+          value: "enterprise",
+          provenance: "agent_reports_user_statement",
+          confidence: 1,
+          remember: true,
+        },
+      ],
+    }),
+  });
+  assert.equal(unsafeAnswerResponse.status, 400);
+  assert.deepEqual(await unsafeAnswerResponse.json(), {
+    error: "Customer context key is not approved for targeted advertising",
+  });
+
   const stored = JSON.parse(
     database("read-enrichment")
       .split("\n")
       .findLast((line) => line.trim().startsWith("{")),
   );
-  assert.equal(stored.answers.length, 1);
-  assert.equal(stored.signals.length, 3);
+  assert.equal(stored.answers.length, 2);
+  assert.equal(stored.signals.length, 4);
   assert.ok(stored.requests.some((entry) => entry.identityLevel === "pseudonymous"));
   assert.ok(stored.requests.some((entry) => entry.identityLevel === "verified"));
   assert.ok(
@@ -343,11 +541,31 @@ try {
       (entry) => entry.purpose === "targeted_advertising" && entry.itemCount === 0,
     ),
   );
-  assert.ok(stored.decisions.length >= 2);
-  assert.equal(stored.outcomes.length, 1);
-  assert.equal(stored.outcomes[0].outcome, "conversion");
+  assert.ok(
+    stored.contextRetrievals.some(
+      (entry) => entry.purpose === "targeted_advertising" && entry.itemCount === 1,
+    ),
+  );
+  assert.ok(
+    stored.signals.some(
+      (entry) =>
+        entry.key === "interest.topic" &&
+        entry.value === "outdoor_travel" &&
+        entry.provenance === "agent_reports_user_statement",
+    ),
+  );
+  assert.ok(stored.decisions.length >= 3);
+  assert.ok(
+    stored.decisions.some(
+      (entry) => entry.purpose === "targeted_advertising" && entry.variant === "outdoor-travel",
+    ),
+  );
+  assert.deepEqual(
+    new Set(stored.outcomes.map((entry) => entry.outcome)),
+    new Set(["conversion", "engagement"]),
+  );
   assert.ok(stored.resolutions.length >= 1, "anonymous history must resolve after sign-in");
-  assert.ok(stored.sessions.length >= 1, "same-call enrichment must preserve product sessions");
+  assert.ok(stored.sessions.length >= 3, "both product journeys must preserve bounded sessions");
   assert.ok(
     stored.interactions.every(
       (interaction) =>
@@ -355,16 +573,21 @@ try {
         interaction.statusCode === 200 &&
         Number.isSafeInteger(interaction.durationMs) &&
         interaction.durationMs >= 0 &&
-        interaction.sessionId &&
-        interaction.runtimeHint === "retail-express/1.0",
+        interaction.sessionId,
     ),
-    "same-call interactions must retain surface, timing, product journey, and runtime evidence",
+    "same-call interactions must retain surface, timing, and product journey evidence",
+  );
+  assert.ok(
+    stored.interactions.some((interaction) => interaction.runtimeHint === "retail-express/1.0"),
+  );
+  assert.ok(
+    stored.interactions.some((interaction) => interaction.runtimeHint === "anonymous-express/1.0"),
   );
 
   console.log(
     JSON.stringify({
       ok: true,
-      journey: "anonymous-consent-enrich-personalize-convert-resolve",
+      journey: "anonymous-consent-enrich-personalize-convert-resolve-and-advertise",
       requests: stored.requests.length,
       signals: stored.signals.length,
       decisions: stored.decisions.length,
