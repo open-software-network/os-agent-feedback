@@ -13,6 +13,7 @@ mod security;
 mod store;
 
 use std::{
+    collections::BTreeMap,
     env,
     net::{IpAddr, SocketAddr},
     sync::Arc,
@@ -61,14 +62,19 @@ use crate::{
         RevokedResponse, TeamInvitationCreatedResponse, TeamMemberResponse, TransferredResponse,
         UpdatedResponse, WorkspaceResponse,
     },
+    code_match::{
+        CodeHintCandidate, CodeMatchFinding, CodeMatchInput, CodeSearchMatches, derive_queries,
+        rank_matches,
+    },
     customer_features::{
         DashboardFeatureDetail, DashboardFeatureFilters, DashboardFeaturesPage,
         dashboard_feature_by_key, dashboard_features_page,
     },
     error::{ApiError, ApiErrorEnvelope},
     github::{
-        GithubAppClient, GithubAppConfig, GithubIssue, GithubIssueCreationOutcome,
-        GithubIssueListError, GithubIssueListFailureKind, validate_repo_full_name,
+        GithubAppClient, GithubAppConfig, GithubCodeSearchFailureKind, GithubIssue,
+        GithubIssueCreationOutcome, GithubIssueListError, GithubIssueListFailureKind,
+        GithubRateLimit, validate_repo_full_name,
     },
     grouping::FingerprintGrouper,
     issue_template::{
@@ -103,31 +109,34 @@ use crate::{
         bearer_token, clear_cookie, cookie, http_only_cookie, random_token, reject_sensitive_fields,
     },
     store::{
-        GithubInstallationUpsert, GroupIssueFilingClaim, GroupIssueFilingRequest,
+        CodeMatchJob, GithubInstallationUpsert, GroupIssueFilingClaim, GroupIssueFilingRequest,
         GroupIssueSyncContext, accept_team_invitation, agent_product_auth,
         backfill_customer_intelligence, backfill_report_groups, bump_last_commented_report_count,
-        claim_group_issue_filing, claim_group_issue_reconciliation,
-        claim_group_issue_state_refresh, clear_product_github_repo, complete_group_issue_filing,
-        complete_group_issue_reconciliation, create_api_key, create_enrichment_request,
-        create_product_with_default_key, create_team_invitation, dashboard_customer_by_id,
-        dashboard_customers_page, dashboard_feedback_page, dashboard_interaction_by_id,
-        dashboard_report_by_id, dashboard_responses_page, dashboard_session_by_id,
-        dashboard_sessions_page, dashboard_signals_page, dashboard_with_limits,
-        decide_enrichment_consent, delete_product, feedback_consent_state,
+        claim_code_match_batch, claim_group_issue_filing, claim_group_issue_reconciliation,
+        claim_group_issue_state_refresh, clear_product_github_repo, complete_code_match_job,
+        complete_group_issue_filing, complete_group_issue_reconciliation, create_api_key,
+        create_enrichment_request, create_product_with_default_key, create_team_invitation,
+        dashboard_customer_by_id, dashboard_customers_page, dashboard_feedback_page,
+        dashboard_interaction_by_id, dashboard_report_by_id, dashboard_responses_page,
+        dashboard_session_by_id, dashboard_sessions_page, dashboard_signals_page,
+        dashboard_with_limits, decide_enrichment_consent, delete_product, discard_code_match_job,
+        feedback_consent_state,
         feedback_list_interactions, feedback_list_reports, get_group_github_issue,
         get_or_create_workspace, get_product_github_repo, github_installation_workspace,
         group_issue_context, group_issue_sync_context, ingest_telemetry_batch,
         inspect_feedback_capability, list_github_installations, list_product_groups,
         mark_group_issue_filing_for_reconciliation, merge_report_groups,
-        purge_expired_product_data, read_product_auth, record_feedback_consent_decision,
-        record_personalization_decision, record_personalization_outcome, regroup_report_groups,
-        release_group_issue_filing_claim, release_group_issue_reconciliation_claim,
-        remove_team_member, rename_product, rename_workspace, resolve_workspace_access,
-        retrieve_customer_context, revert_last_commented_report_count, revoke_api_key,
-        revoke_github_installation, revoke_team_invitation, rotate_api_key,
-        set_product_github_repo, submit_enrichment_answer, submit_product_feedback,
-        transfer_team_ownership, update_feedback_workflow, update_group_issue_state, update_policy,
-        update_team_member_role, upsert_github_installation,
+        purge_expired_product_data, read_product_auth, record_code_match_call,
+        record_feedback_consent_decision, record_personalization_decision,
+        record_personalization_outcome, regroup_report_groups, release_code_match_claim,
+        release_code_match_job, release_group_issue_filing_claim,
+        release_group_issue_reconciliation_claim, remove_team_member, rename_product,
+        rename_workspace, resolve_workspace_access, retrieve_customer_context,
+        revert_last_commented_report_count, revoke_api_key, revoke_github_installation,
+        revoke_team_invitation, rotate_api_key, set_product_github_repo, submit_enrichment_answer,
+        submit_product_feedback, transfer_team_ownership, update_feedback_workflow,
+        update_group_issue_state, update_policy, update_team_member_role,
+        upsert_github_installation,
     },
 };
 
@@ -152,6 +161,11 @@ const MAX_GROUP_ISSUE_SYNCS_PER_REQUEST: usize = 5;
 const GROUP_ISSUE_STATE_REFRESH_INTERVAL_MINUTES: i64 = 15;
 const GROUP_ISSUE_RECONCILIATION_RETRY_MINUTES: i64 = 1;
 const GROUP_ISSUE_RECONCILIATION_CLOCK_SKEW_MINUTES: i64 = 5;
+const CODE_MATCH_BATCH_SIZE: i64 = 20;
+const CODE_MATCH_SEARCH_CALLS_PER_INSTALLATION_BATCH: usize = 10;
+const CODE_MATCH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+const CODE_MATCH_STALE_CLAIM_AGE: Duration = Duration::minutes(5);
+const CODE_MATCH_DEFAULT_PACE: std::time::Duration = std::time::Duration::from_secs(6);
 
 /// How long a `pending` filing claim is respected before a crashed filer is
 /// moved into reconciliation. Comfortably above the GitHub client's 15s
@@ -571,6 +585,7 @@ async fn main() -> anyhow::Result<()> {
         mcp_allowed_origins,
     });
     spawn_retention_worker(state.pool.clone());
+    spawn_code_match_worker(state.pool.clone(), state.github.clone());
 
     let (app, _openapi) = build_app_router(dev_auth.is_some()).split_for_parts();
     let app = app.with_state(state);
@@ -606,6 +621,443 @@ fn spawn_retention_worker(pool: PgPool) {
             }
         }
     });
+}
+
+fn spawn_code_match_worker(pool: PgPool, github: Option<GithubAppClient>) {
+    let Some(github) = github else {
+        // An unconfigured deployment has nothing useful to poll. In
+        // particular, do not wake up every few seconds just to emit the same
+        // configuration error while reports remain safely queued.
+        return;
+    };
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(CODE_MATCH_POLL_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let jobs = match claim_code_match_batch(
+                &pool,
+                CODE_MATCH_BATCH_SIZE,
+                Utc::now() - CODE_MATCH_STALE_CLAIM_AGE,
+            )
+            .await
+            {
+                Ok(jobs) if jobs.is_empty() => continue,
+                Ok(jobs) => jobs,
+                Err(error) => {
+                    tracing::warn!(error = %error.message, "code-match queue claim failed");
+                    continue;
+                }
+            };
+            let Some(claim_token) = jobs.first().map(|job| job.claim_token) else {
+                continue;
+            };
+            // Running one drain in its own task contains a matcher panic. The
+            // outer loop survives and releases every still-owned row so the
+            // next pass can retry instead of waiting for stale-claim expiry.
+            let drain_pool = pool.clone();
+            let drain_github = github.clone();
+            let drain = tokio::spawn(async move {
+                drain_code_match_batch(&drain_pool, &drain_github, jobs).await
+            })
+            .await;
+            let failure = match drain {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error.to_string()),
+                Err(error) => Some(format!("code-match drain task failed: {error}")),
+            };
+            if let Some(error) = failure {
+                tracing::warn!(%error, "code-match batch failed; releasing claims");
+                if let Err(release_error) = release_code_match_claim(
+                    &pool,
+                    claim_token,
+                    Utc::now() + Duration::seconds(30),
+                    &error,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        error = %release_error.message,
+                        "code-match batch claims could not be released"
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[derive(Debug)]
+struct InstallationSearchBudget {
+    remaining: usize,
+}
+
+impl InstallationSearchBudget {
+    const fn new() -> Self {
+        Self {
+            remaining: CODE_MATCH_SEARCH_CALLS_PER_INSTALLATION_BATCH,
+        }
+    }
+
+    const fn take(&mut self) -> bool {
+        if self.remaining == 0 {
+            return false;
+        }
+        self.remaining -= 1;
+        true
+    }
+
+    fn observe_headroom(&mut self, headroom: Option<i64>) {
+        if let Some(headroom) = headroom.and_then(|value| usize::try_from(value).ok()) {
+            self.remaining = self.remaining.min(headroom);
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct StoredCodeMatchFinding {
+    kind: String,
+    topic: String,
+}
+
+#[derive(Debug)]
+enum CodeMatchJobOutcome {
+    Continue,
+    BackoffInstallation { until: DateTime<Utc>, error: String },
+}
+
+async fn drain_code_match_batch(
+    pool: &PgPool,
+    github: &GithubAppClient,
+    jobs: Vec<CodeMatchJob>,
+) -> anyhow::Result<()> {
+    let mut jobs_by_installation = BTreeMap::<i64, Vec<CodeMatchJob>>::new();
+    for job in jobs {
+        let Some(installation_id) = job.installation_id.filter(|_| job.installation_active) else {
+            discard_code_match_job(pool, job.report_id, job.claim_token)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            tracing::info!(
+                report_id = %job.report_id,
+                product_id = %job.product_id,
+                "discarded code-match job after repository mapping or installation was removed"
+            );
+            continue;
+        };
+        jobs_by_installation
+            .entry(installation_id)
+            .or_default()
+            .push(job);
+    }
+
+    for (installation_id, installation_jobs) in jobs_by_installation {
+        let token = match github.installation_token(installation_id).await {
+            Ok(token) => token,
+            Err(error) => {
+                let message = format!("GitHub installation token failed: {error}");
+                for job in &installation_jobs {
+                    release_code_match_job(
+                        pool,
+                        job.report_id,
+                        job.claim_token,
+                        generic_code_match_retry_at(job.attempts),
+                        Some(&message),
+                    )
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
+                }
+                tracing::warn!(
+                    installation_id,
+                    jobs = installation_jobs.len(),
+                    error = %error,
+                    "code-match installation token failed; jobs released"
+                );
+                continue;
+            }
+        };
+
+        let mut budget = InstallationSearchBudget::new();
+        let mut next_search_at = tokio::time::Instant::now();
+        let mut quota_retry_at = None;
+        let mut head_sha_by_repo = BTreeMap::<(String, String), String>::new();
+        for (index, job) in installation_jobs.iter().enumerate() {
+            let outcome = process_code_match_job(
+                pool,
+                github,
+                &token,
+                job,
+                &mut budget,
+                &mut next_search_at,
+                &mut quota_retry_at,
+                &mut head_sha_by_repo,
+            )
+            .await?;
+            if let CodeMatchJobOutcome::BackoffInstallation { until, error } = outcome {
+                for pending in &installation_jobs[index + 1..] {
+                    release_code_match_job(
+                        pool,
+                        pending.report_id,
+                        pending.claim_token,
+                        until,
+                        Some(&error),
+                    )
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
+                }
+                tracing::warn!(
+                    installation_id,
+                    retry_at = %until,
+                    %error,
+                    "code-match installation batch backed off"
+                );
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the arguments make the per-installation shared quota and caches explicit"
+)]
+async fn process_code_match_job(
+    pool: &PgPool,
+    github: &GithubAppClient,
+    token: &crate::github::GithubInstallationToken,
+    job: &CodeMatchJob,
+    budget: &mut InstallationSearchBudget,
+    next_search_at: &mut tokio::time::Instant,
+    quota_retry_at: &mut Option<DateTime<Utc>>,
+    head_sha_by_repo: &mut BTreeMap<(String, String), String>,
+) -> anyhow::Result<CodeMatchJobOutcome> {
+    let repo_full_name = job
+        .repo_full_name
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("claimed code-match job is missing its repository"))?;
+    let default_branch = job
+        .default_branch
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("claimed code-match job is missing its default branch"))?;
+    let repo_key = (repo_full_name.to_owned(), default_branch.to_owned());
+    let computed_at_sha = if let Some(sha) = head_sha_by_repo.get(&repo_key) {
+        sha.clone()
+    } else {
+        match github
+            .repository_head_sha(token, repo_full_name, default_branch)
+            .await
+        {
+            Ok(sha) => {
+                head_sha_by_repo.insert(repo_key, sha.clone());
+                sha
+            }
+            Err(error) => {
+                let message = format!("GitHub repository HEAD failed: {error}");
+                let until = generic_code_match_retry_at(job.attempts);
+                release_code_match_job(pool, job.report_id, job.claim_token, until, Some(&message))
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
+                return Ok(CodeMatchJobOutcome::BackoffInstallation {
+                    until,
+                    error: message,
+                });
+            }
+        }
+    };
+
+    let stored_findings =
+        serde_json::from_value::<Vec<StoredCodeMatchFinding>>(job.findings.clone())
+            .unwrap_or_default();
+    let match_findings = stored_findings
+        .iter()
+        .map(|finding| CodeMatchFinding {
+            kind: &finding.kind,
+            topic: &finding.topic,
+        })
+        .collect::<Vec<_>>();
+    let queries = derive_queries(CodeMatchInput {
+        repo_full_name,
+        path_prefix: job.path_prefix.as_deref(),
+        operation: &job.operation,
+        surface: &job.surface,
+        runtime_hint: job.runtime_hint.as_deref(),
+        findings: &match_findings,
+    });
+    let had_queries = !queries.is_empty();
+    let mut calls_made = 0;
+    let mut matches = Vec::new();
+    for query in queries {
+        if !budget.take() {
+            break;
+        }
+        tokio::time::sleep_until(*next_search_at).await;
+        let started_at = std::time::Instant::now();
+        match github.search_code(token, &query.expression).await {
+            Ok(result) => {
+                let hit = !result.candidates.is_empty();
+                record_code_match_call(
+                    pool,
+                    job.report_id,
+                    result.rate_limit.remaining,
+                    hit,
+                    elapsed_millis(started_at),
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+                calls_made += 1;
+                budget.observe_headroom(result.rate_limit.remaining);
+                let delay = code_search_pacing_delay(&result.rate_limit, Utc::now());
+                *next_search_at = tokio::time::Instant::now() + delay;
+                if result.rate_limit.remaining == Some(0) {
+                    *quota_retry_at = Some(code_search_retry_at(&result.rate_limit, Utc::now()));
+                }
+                matches.push(CodeSearchMatches {
+                    query,
+                    candidates: result.candidates,
+                });
+            }
+            Err(error) => {
+                let rate_limit = error.rate_limit().clone();
+                record_code_match_call(
+                    pool,
+                    job.report_id,
+                    rate_limit.remaining,
+                    false,
+                    elapsed_millis(started_at),
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+                let kind = error.kind();
+                let message = error.to_string();
+                return match kind {
+                    GithubCodeSearchFailureKind::RateLimit => {
+                        let until = code_search_retry_at(&rate_limit, Utc::now());
+                        release_code_match_job(
+                            pool,
+                            job.report_id,
+                            job.claim_token,
+                            until,
+                            Some(&message),
+                        )
+                        .await
+                        .map_err(|error| anyhow::anyhow!(error.message))?;
+                        Ok(CodeMatchJobOutcome::BackoffInstallation {
+                            until,
+                            error: message,
+                        })
+                    }
+                    GithubCodeSearchFailureKind::Forbidden
+                    | GithubCodeSearchFailureKind::NotFound
+                    | GithubCodeSearchFailureKind::InvalidRequest => {
+                        discard_code_match_job(pool, job.report_id, job.claim_token)
+                            .await
+                            .map_err(|error| anyhow::anyhow!(error.message))?;
+                        tracing::warn!(
+                            report_id = %job.report_id,
+                            repo = repo_full_name,
+                            ?kind,
+                            "discarded non-retryable code-match job"
+                        );
+                        Ok(CodeMatchJobOutcome::Continue)
+                    }
+                    GithubCodeSearchFailureKind::Server
+                    | GithubCodeSearchFailureKind::Timeout
+                    | GithubCodeSearchFailureKind::InvalidResponse
+                    | GithubCodeSearchFailureKind::Transport => {
+                        let until = generic_code_match_retry_at(job.attempts);
+                        release_code_match_job(
+                            pool,
+                            job.report_id,
+                            job.claim_token,
+                            until,
+                            Some(&message),
+                        )
+                        .await
+                        .map_err(|error| anyhow::anyhow!(error.message))?;
+                        Ok(CodeMatchJobOutcome::BackoffInstallation {
+                            until,
+                            error: message,
+                        })
+                    }
+                };
+            }
+        }
+    }
+
+    if had_queries && calls_made == 0 {
+        let until = quota_retry_at.unwrap_or_else(|| Utc::now() + Duration::minutes(1));
+        release_code_match_job(pool, job.report_id, job.claim_token, until, None)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        return Ok(CodeMatchJobOutcome::Continue);
+    }
+
+    let hints = rank_matches(matches);
+    let hints_json = code_hints_json(hints);
+    complete_code_match_job(
+        pool,
+        job.report_id,
+        job.claim_token,
+        &computed_at_sha,
+        hints_json,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!(error.message))?;
+    Ok(CodeMatchJobOutcome::Continue)
+}
+
+fn code_hints_json(hints: Vec<CodeHintCandidate>) -> serde_json::Value {
+    serde_json::Value::Array(
+        hints
+            .into_iter()
+            .map(|hint| {
+                json!({
+                    "file": hint.file,
+                    "line_start": hint.line_start,
+                    "line_end": hint.line_end,
+                    "match_reason": hint.match_reason,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn elapsed_millis(started_at: std::time::Instant) -> i64 {
+    i64::try_from(started_at.elapsed().as_millis()).unwrap_or(i64::MAX)
+}
+
+fn generic_code_match_retry_at(attempts: i32) -> DateTime<Utc> {
+    let exponent = u32::try_from(attempts.clamp(0, 6)).unwrap_or(6);
+    Utc::now() + Duration::seconds(5 * 2_i64.pow(exponent))
+}
+
+fn code_search_pacing_delay(
+    rate_limit: &GithubRateLimit,
+    now: DateTime<Utc>,
+) -> std::time::Duration {
+    if let Some(retry_after) = rate_limit.retry_after {
+        return retry_after;
+    }
+    if let (Some(remaining), Some(reset_at)) = (rate_limit.remaining, rate_limit.reset_at)
+        && let (Ok(remaining), Ok(until_reset)) =
+            (u32::try_from(remaining.max(1)), (reset_at - now).to_std())
+    {
+        return (until_reset / remaining).max(std::time::Duration::from_secs(1));
+    }
+    CODE_MATCH_DEFAULT_PACE
+}
+
+fn code_search_retry_at(rate_limit: &GithubRateLimit, now: DateTime<Utc>) -> DateTime<Utc> {
+    if let Some(retry_after) = rate_limit.retry_after
+        && let Ok(retry_after) = Duration::from_std(retry_after)
+    {
+        return now + retry_after;
+    }
+    rate_limit
+        .reset_at
+        .filter(|reset_at| *reset_at > now)
+        .map_or(now + Duration::minutes(1), |reset_at| {
+            reset_at + Duration::seconds(1)
+        })
 }
 
 async fn security_headers(request: Request<Body>, next: Next) -> Response {
@@ -4972,8 +5424,10 @@ mod page_tests {
     use axum::{body::to_bytes, http::StatusCode};
 
     use super::{
-        ApiError, GithubIssue, GroupIssueReconciliationDecision, GroupIssueReconciliationEvidence,
-        GroupIssueReconciliationInconclusive, WORKSPACE_ID_QUERY_PARAM, build_app_router,
+        ApiError, CodeHintCandidate, GithubIssue, GithubRateLimit,
+        GroupIssueReconciliationDecision, GroupIssueReconciliationEvidence,
+        GroupIssueReconciliationInconclusive, InstallationSearchBudget, WORKSPACE_ID_QUERY_PARAM,
+        build_app_router, code_hints_json, code_search_pacing_delay, code_search_retry_at,
         comma_values, feedback_discovery, github_callback_redirect_target,
         group_issue_reconciliation_resolution, group_issue_state_refresh_due,
         group_issue_sync_needed, group_marker_comment, install_workspace_id, mcp_auth_error,
@@ -4985,6 +5439,75 @@ mod page_tests {
 
     const NON_API_ROUTES: &[&str] = &["GET /"];
     const COVERAGE_GUARD_GUIDANCE: &str = "route registration form not understood by the coverage guard — teach `served_operations` about it or register API handlers with `.routes(routes!(handler))`";
+
+    #[test]
+    fn code_match_budget_is_shared_across_an_installation_batch() {
+        let mut budget = InstallationSearchBudget::new();
+
+        for _ in 0..10 {
+            assert!(budget.take());
+        }
+        assert!(
+            !budget.take(),
+            "an eleventh report query must wait for another batch"
+        );
+
+        let mut header_bounded = InstallationSearchBudget::new();
+        header_bounded.observe_headroom(Some(2));
+        assert!(header_bounded.take());
+        assert!(header_bounded.take());
+        assert!(!header_bounded.take());
+    }
+
+    #[test]
+    fn code_match_pacing_uses_search_headroom_and_retry_headers() {
+        let now = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
+        let reset_at = now + Duration::seconds(60);
+        let paced = GithubRateLimit {
+            remaining: Some(9),
+            reset_at: Some(reset_at),
+            retry_after: None,
+        };
+        assert_eq!(
+            code_search_pacing_delay(&paced, now),
+            std::time::Duration::from_mins(1) / 9
+        );
+
+        let retry_after = GithubRateLimit {
+            retry_after: Some(std::time::Duration::from_secs(17)),
+            ..paced
+        };
+        assert_eq!(
+            code_search_pacing_delay(&retry_after, now),
+            std::time::Duration::from_secs(17)
+        );
+        assert_eq!(
+            code_search_retry_at(&retry_after, now),
+            now + Duration::seconds(17)
+        );
+        assert_eq!(
+            code_search_retry_at(&paced, now),
+            reset_at + Duration::seconds(1)
+        );
+    }
+
+    #[test]
+    fn stored_code_hints_use_the_canonical_database_shape() {
+        assert_eq!(
+            code_hints_json(vec![CodeHintCandidate {
+                file: "backend/src/store.rs".to_owned(),
+                line_start: 42,
+                line_end: 45,
+                match_reason: "operation token `search`".to_owned(),
+            }]),
+            json!([{
+                "file": "backend/src/store.rs",
+                "line_start": 42,
+                "line_end": 45,
+                "match_reason": "operation token `search`",
+            }])
+        );
+    }
 
     #[test]
     fn dashboard_comma_filters_are_bounded_and_unambiguous() {

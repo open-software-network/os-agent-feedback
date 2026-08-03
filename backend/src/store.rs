@@ -69,6 +69,23 @@ pub(crate) struct GithubInstallationRow {
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct CodeMatchJob {
+    pub(crate) report_id: Uuid,
+    pub(crate) product_id: Uuid,
+    pub(crate) claim_token: Uuid,
+    pub(crate) attempts: i32,
+    pub(crate) installation_id: Option<i64>,
+    pub(crate) installation_active: bool,
+    pub(crate) repo_full_name: Option<String>,
+    pub(crate) default_branch: Option<String>,
+    pub(crate) path_prefix: Option<String>,
+    pub(crate) operation: String,
+    pub(crate) surface: String,
+    pub(crate) runtime_hint: Option<String>,
+    pub(crate) findings: serde_json::Value,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct GroupGithubIssueRow {
     pub(crate) repo_full_name: String,
     pub(crate) issue_number: i64,
@@ -389,6 +406,193 @@ pub(crate) async fn clear_product_github_repo(
             .execute(pool)
             .await?;
     Ok(result.rows_affected() == 1)
+}
+
+async fn enqueue_code_match_if_mapped(
+    tx: &mut Transaction<'_, Postgres>,
+    report_id: Uuid,
+    product_id: Uuid,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        r"INSERT INTO code_match_queue (report_id, product_id)
+        SELECT $1, mapping.product_id
+        FROM product_github_repos mapping
+        WHERE mapping.product_id = $2
+        ON CONFLICT (report_id) DO NOTHING",
+    )
+    .bind(report_id)
+    .bind(product_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn claim_code_match_batch(
+    pool: &PgPool,
+    limit: i64,
+    stale_before: DateTime<Utc>,
+) -> Result<Vec<CodeMatchJob>, ApiError> {
+    if limit <= 0 {
+        return Ok(Vec::new());
+    }
+    let claim_token = Uuid::new_v4();
+    let mut tx = pool.begin().await?;
+    // A worker can die after claiming but before releasing. Reset only claims
+    // older than the client/request timeout envelope, then let the normal
+    // indexed claim predicate pick them up again.
+    sqlx::query(
+        r"UPDATE code_match_queue SET claimed_at = NULL, claim_token = NULL
+        WHERE claimed_at < $1",
+    )
+    .bind(stale_before)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r"WITH claimable AS (
+          SELECT report_id
+          FROM code_match_queue
+          WHERE claimed_at IS NULL AND available_at <= NOW()
+          ORDER BY available_at, enqueued_at, report_id
+          FOR UPDATE SKIP LOCKED
+          LIMIT $1
+        )
+        UPDATE code_match_queue queue SET
+          claimed_at = NOW(), claim_token = $2, attempts = queue.attempts + 1
+        FROM claimable
+        WHERE queue.report_id = claimable.report_id",
+    )
+    .bind(limit)
+    .bind(claim_token)
+    .execute(&mut *tx)
+    .await?;
+    let jobs = sqlx::query_as::<_, CodeMatchJob>(
+        r"SELECT queue.report_id, queue.product_id, queue.claim_token, queue.attempts,
+          mapping.installation_id,
+          (installation.installation_id IS NOT NULL) AS installation_active,
+          mapping.repo_full_name, mapping.default_branch, mapping.path_prefix,
+          interaction.operation, interaction.surface,
+          interaction.runtime_hint, report.findings
+        FROM code_match_queue queue
+        JOIN feedback_reports report ON report.id = queue.report_id
+        JOIN interactions_v2 interaction ON interaction.id = report.interaction_id
+        LEFT JOIN product_github_repos mapping ON mapping.product_id = queue.product_id
+        LEFT JOIN github_installations installation
+          ON installation.installation_id = mapping.installation_id
+         AND installation.workspace_id = report.workspace_id
+         AND installation.revoked_at IS NULL
+        WHERE queue.claim_token = $1
+        ORDER BY mapping.installation_id, queue.enqueued_at, queue.report_id",
+    )
+    .bind(claim_token)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(jobs)
+}
+
+pub(crate) async fn record_code_match_call(
+    pool: &PgPool,
+    report_id: Uuid,
+    rate_headroom: Option<i64>,
+    hit: bool,
+    latency_ms: i64,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        r"INSERT INTO match_analytics
+        (id, report_id, calls_used, rate_headroom, hit, latency_ms)
+        VALUES ($1, $2, 1, $3, $4, $5)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(report_id)
+    .bind(rate_headroom)
+    .bind(hit)
+    .bind(latency_ms.max(0))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn complete_code_match_job(
+    pool: &PgPool,
+    report_id: Uuid,
+    claim_token: Uuid,
+    computed_at_sha: &str,
+    hints: serde_json::Value,
+) -> Result<bool, ApiError> {
+    let completed = sqlx::query_scalar::<_, Uuid>(
+        r"WITH completed AS (
+          DELETE FROM code_match_queue
+          WHERE report_id = $1 AND claim_token = $2
+          RETURNING report_id
+        )
+        INSERT INTO report_code_hints (report_id, computed_at_sha, hints)
+        SELECT report_id, $3, $4 FROM completed
+        ON CONFLICT (report_id) DO UPDATE SET
+          computed_at_sha = EXCLUDED.computed_at_sha,
+          hints = EXCLUDED.hints,
+          created_at = NOW()
+        RETURNING report_id",
+    )
+    .bind(report_id)
+    .bind(claim_token)
+    .bind(computed_at_sha)
+    .bind(hints)
+    .fetch_optional(pool)
+    .await?;
+    Ok(completed.is_some())
+}
+
+pub(crate) async fn discard_code_match_job(
+    pool: &PgPool,
+    report_id: Uuid,
+    claim_token: Uuid,
+) -> Result<(), ApiError> {
+    sqlx::query("DELETE FROM code_match_queue WHERE report_id = $1 AND claim_token = $2")
+        .bind(report_id)
+        .bind(claim_token)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn release_code_match_job(
+    pool: &PgPool,
+    report_id: Uuid,
+    claim_token: Uuid,
+    available_at: DateTime<Utc>,
+    error: Option<&str>,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        r"UPDATE code_match_queue SET claimed_at = NULL, claim_token = NULL,
+          available_at = $3, last_error = LEFT($4, 500)
+        WHERE report_id = $1 AND claim_token = $2",
+    )
+    .bind(report_id)
+    .bind(claim_token)
+    .bind(available_at)
+    .bind(error)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn release_code_match_claim(
+    pool: &PgPool,
+    claim_token: Uuid,
+    available_at: DateTime<Utc>,
+    error: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        r"UPDATE code_match_queue SET claimed_at = NULL, claim_token = NULL,
+          available_at = $2, last_error = LEFT($3, 500)
+        WHERE claim_token = $1",
+    )
+    .bind(claim_token)
+    .bind(available_at)
+    .bind(error)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -7975,6 +8179,10 @@ pub(crate) async fn submit_product_feedback(
         tx.commit().await?;
         return Ok((interaction, existing));
     };
+    // Only the transaction that creates the report creates its outbox event.
+    // A duplicate capability submission returns the already-enqueued report
+    // above; it must not reset a claim or schedule duplicate GitHub work.
+    enqueue_code_match_if_mapped(&mut tx, report.id, key.4).await?;
     assign_report_group(
         &mut tx,
         &crate::grouping::FingerprintGrouper,
@@ -9967,6 +10175,7 @@ mod product_tests {
 
     use std::str::FromStr;
 
+    use anyhow::Context as _;
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
@@ -10504,6 +10713,198 @@ mod product_tests {
         complete_group_issue_filing(pool, workspace_id, group_key, &link, report_count)
             .await
             .map_err(test_error)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn code_match_outbox_is_idempotent_reclaimable_and_retention_safe() -> anyhow::Result<()>
+    {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        // The ignored suite shares its scratch database. No pre-existing test
+        // observes this new queue, so clear it to make the claim assertions
+        // independent of randomized test order.
+        sqlx::query("DELETE FROM code_match_queue")
+            .execute(&pool)
+            .await?;
+
+        let workspace_id = github_test_workspace(&pool, "Code match outbox test").await?;
+        let (product, environment) = create_product(
+            &pool,
+            workspace_id,
+            CreateProductInput {
+                name: "Mapped product".to_owned(),
+            },
+        )
+        .await
+        .map_err(test_error)?;
+        let (write_key, write_secret) = create_api_key(
+            &pool,
+            workspace_id,
+            environment.id,
+            Some("Code match writer".into()),
+            Some("write".into()),
+            None,
+        )
+        .await
+        .map_err(test_error)?;
+        let installation_id = i64::from(Uuid::new_v4().as_fields().0);
+        upsert_github_installation(
+            &pool,
+            workspace_id,
+            installation_id,
+            "code-match-test",
+            "Organization",
+        )
+        .await
+        .map_err(test_error)?;
+        set_product_github_repo(
+            &pool,
+            workspace_id,
+            product.id,
+            &ProductGithubRepoInput {
+                installation_id,
+                repo_full_name: "open-software/code-match-test".to_owned(),
+                default_branch: "main".to_owned(),
+                path_prefix: Some("backend/src".to_owned()),
+            },
+        )
+        .await
+        .map_err(test_error)?;
+
+        let interaction_id = Uuid::new_v4();
+        let capability = test_capability(&write_secret, write_key.id, interaction_id);
+        let (_, report) = submit_product_feedback(
+            &pool,
+            &capability,
+            feedback_input("A mapped report is queued for deterministic code matching."),
+        )
+        .await
+        .map_err(test_error)?;
+        let first_queue_state = sqlx::query_as::<_, (Uuid, DateTime<Utc>, i32)>(
+            r"SELECT product_id, enqueued_at, attempts FROM code_match_queue
+            WHERE report_id = $1",
+        )
+        .bind(report.id)
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(first_queue_state.0 == product.id && first_queue_state.2 == 0);
+
+        let (_, duplicate) = submit_product_feedback(
+            &pool,
+            &capability,
+            feedback_input("A duplicate submission must reuse the original outbox event."),
+        )
+        .await
+        .map_err(test_error)?;
+        anyhow::ensure!(duplicate.id == report.id);
+        let duplicate_queue_state = sqlx::query_as::<_, (i64, DateTime<Utc>)>(
+            r"SELECT COUNT(*) OVER (), enqueued_at FROM code_match_queue
+            WHERE report_id = $1",
+        )
+        .bind(report.id)
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(
+            duplicate_queue_state.0 == 1 && duplicate_queue_state.1 == first_queue_state.1
+        );
+
+        // Holding the candidate row lock proves SKIP LOCKED returns promptly
+        // instead of serializing another worker behind this claimant.
+        let mut lock = pool.begin().await?;
+        sqlx::query("SELECT report_id FROM code_match_queue WHERE report_id = $1 FOR UPDATE")
+            .bind(report.id)
+            .fetch_one(&mut *lock)
+            .await?;
+        let skipped = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            claim_code_match_batch(&pool, 100, Utc::now() - Duration::minutes(5)),
+        )
+        .await?
+        .map_err(test_error)?;
+        anyhow::ensure!(skipped.iter().all(|job| job.report_id != report.id));
+        lock.rollback().await?;
+
+        let first_claim = claim_code_match_batch(&pool, 100, Utc::now() - Duration::minutes(5))
+            .await
+            .map_err(test_error)?
+            .into_iter()
+            .find(|job| job.report_id == report.id)
+            .context("new report should be claimable")?;
+        anyhow::ensure!(
+            first_claim.attempts == 1
+                && first_claim.installation_id == Some(installation_id)
+                && first_claim.installation_active
+                && first_claim.repo_full_name.as_deref() == Some("open-software/code-match-test")
+                && first_claim.path_prefix.as_deref() == Some("backend/src")
+        );
+        sqlx::query(
+            "UPDATE code_match_queue SET claimed_at = NOW() - INTERVAL '10 minutes' WHERE report_id = $1",
+        )
+        .bind(report.id)
+        .execute(&pool)
+        .await?;
+        let reclaimed = claim_code_match_batch(&pool, 100, Utc::now() - Duration::minutes(5))
+            .await
+            .map_err(test_error)?
+            .into_iter()
+            .find(|job| job.report_id == report.id)
+            .context("stale report claim should be reclaimed")?;
+        anyhow::ensure!(
+            reclaimed.attempts == 2 && reclaimed.claim_token != first_claim.claim_token
+        );
+
+        // Retention deletes interactions, which cascades through reports. All
+        // code-intelligence state must disappear with that report.
+        sqlx::query(
+            r"INSERT INTO report_code_hints (report_id, computed_at_sha, hints)
+            VALUES ($1, '0123456789abcdef0123456789abcdef01234567', '[]'::JSONB)",
+        )
+        .bind(report.id)
+        .execute(&pool)
+        .await?;
+        record_code_match_call(&pool, report.id, Some(9), false, 12)
+            .await
+            .map_err(test_error)?;
+        sqlx::query("DELETE FROM interactions_v2 WHERE id = $1")
+            .bind(interaction_id)
+            .execute(&pool)
+            .await?;
+        for table in ["code_match_queue", "report_code_hints", "match_analytics"] {
+            let count = match table {
+                "code_match_queue" => {
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT COUNT(*) FROM code_match_queue WHERE report_id = $1",
+                    )
+                    .bind(report.id)
+                    .fetch_one(&pool)
+                    .await?
+                }
+                "report_code_hints" => {
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT COUNT(*) FROM report_code_hints WHERE report_id = $1",
+                    )
+                    .bind(report.id)
+                    .fetch_one(&pool)
+                    .await?
+                }
+                "match_analytics" => {
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT COUNT(*) FROM match_analytics WHERE report_id = $1",
+                    )
+                    .bind(report.id)
+                    .fetch_one(&pool)
+                    .await?
+                }
+                _ => 1,
+            };
+            anyhow::ensure!(count == 0, "{table} should cascade with the report");
+        }
         Ok(())
     }
 
