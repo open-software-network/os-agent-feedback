@@ -2938,7 +2938,7 @@ pub(crate) async fn dashboard_sessions_page(
     if filters
         .kind
         .as_deref()
-        .is_some_and(|kind| !["all", "multi", "feedback", "no_feedback"].contains(&kind))
+        .is_some_and(|kind| !["all", "multi", "response", "no_response"].contains(&kind))
     {
         return Err(ApiError::bad_request("Invalid session kind filter"));
     }
@@ -2988,8 +2988,16 @@ pub(crate) async fn dashboard_sessions_page(
                     OR COALESCE(i.customer_ref, '') ILIKE $4 ESCAPE '\')))
               AND ($5::TEXT IS NULL OR $5 = 'all'
                 OR ($5 = 'multi' AND activity.interaction_count > 1)
-                OR ($5 = 'feedback' AND activity.report_count > 0)
-                OR ($5 = 'no_feedback' AND activity.report_count = 0))
+                OR ($5 = 'response' AND EXISTS (
+                  SELECT 1 FROM interactions_v2 i
+                  JOIN enrichment_requests request ON request.interaction_id = i.id
+                    AND request.workspace_id = i.workspace_id
+                  WHERE i.session_id = s.id AND request.created_at >= $9))
+                OR ($5 = 'no_response' AND NOT EXISTS (
+                  SELECT 1 FROM interactions_v2 i
+                  JOIN enrichment_requests request ON request.interaction_id = i.id
+                    AND request.workspace_id = i.workspace_id
+                  WHERE i.session_id = s.id AND request.created_at >= $9)))
               AND ($6::TEXT[] IS NULL OR EXISTS (
                 SELECT 1 FROM interactions_v2 i JOIN feedback_reports r ON r.interaction_id = i.id
                 WHERE i.session_id = s.id AND i.occurred_at >= $9
@@ -3049,8 +3057,16 @@ pub(crate) async fn dashboard_sessions_page(
                 OR COALESCE(i.customer_ref, '') ILIKE $4 ESCAPE '\')))
           AND ($5::TEXT IS NULL OR $5 = 'all'
             OR ($5 = 'multi' AND activity.interaction_count > 1)
-            OR ($5 = 'feedback' AND activity.report_count > 0)
-            OR ($5 = 'no_feedback' AND activity.report_count = 0))
+            OR ($5 = 'response' AND EXISTS (
+              SELECT 1 FROM interactions_v2 i
+              JOIN enrichment_requests request ON request.interaction_id = i.id
+                AND request.workspace_id = i.workspace_id
+              WHERE i.session_id = s.id AND request.created_at >= $9))
+            OR ($5 = 'no_response' AND NOT EXISTS (
+              SELECT 1 FROM interactions_v2 i
+              JOIN enrichment_requests request ON request.interaction_id = i.id
+                AND request.workspace_id = i.workspace_id
+              WHERE i.session_id = s.id AND request.created_at >= $9)))
           AND ($6::TEXT[] IS NULL OR EXISTS (
             SELECT 1 FROM interactions_v2 i JOIN feedback_reports r ON r.interaction_id = i.id
             WHERE i.session_id = s.id AND i.occurred_at >= $9
@@ -12796,6 +12812,28 @@ mod product_tests {
                 .execute(&pool)
                 .await?;
             }
+            sqlx::query(
+                r"INSERT INTO enrichment_requests
+                (id, workspace_id, product_id, environment_id, interaction_id,
+                 surface, purpose, remember, consent_subject, identity_level, state,
+                 operation, question_key, question, request_hash, capability_nonce_hash,
+                 expires_at, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, 'mcp', 'product_personalization', FALSE,
+                  'afint1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'ephemeral',
+                  'consent_required', 'checkout', 'customer_context.v1',
+                  'What should the product prioritize for this customer?',
+                  decode(repeat('ab', 32), 'hex'), decode(repeat('cd', 32), 'hex'),
+                  $6, $7, $7)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(workspace.id)
+            .bind(product.id)
+            .bind(environment.id)
+            .bind(checkout)
+            .bind(now + Duration::hours(1))
+            .bind(now - Duration::minutes(4))
+            .execute(&pool)
+            .await?;
 
             let first = dashboard_feedback_page(
                 &pool,
@@ -12980,6 +13018,34 @@ mod product_tests {
                     .iter()
                     .all(|session| session.id != expired_session)
             );
+            let sessions_with_responses = dashboard_sessions_page(
+                &pool,
+                workspace.id,
+                product.id,
+                DashboardSessionFilters {
+                    kind: Some("response".into()),
+                    ..DashboardSessionFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(sessions_with_responses.rollup.sessions == 1);
+            anyhow::ensure!(sessions_with_responses.sessions.len() == 1);
+            anyhow::ensure!(sessions_with_responses.sessions[0].id == checkout_session);
+            let sessions_without_responses = dashboard_sessions_page(
+                &pool,
+                workspace.id,
+                product.id,
+                DashboardSessionFilters {
+                    kind: Some("no_response".into()),
+                    ..DashboardSessionFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(sessions_without_responses.rollup.sessions == 1);
+            anyhow::ensure!(sessions_without_responses.sessions.len() == 1);
+            anyhow::ensure!(sessions_without_responses.sessions[0].id == search_session);
             let checkout_summary = all_sessions
                 .sessions
                 .iter()

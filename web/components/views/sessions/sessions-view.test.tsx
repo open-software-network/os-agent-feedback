@@ -138,7 +138,7 @@ describe("SessionsView", () => {
     expect(within(row).queryByText(/evidence|signals|context/i)).not.toBeInTheDocument();
     expect(screen.getAllByText("Interactions")[0].parentElement).toHaveTextContent("12");
 
-    fireEvent.click(screen.getByRole("button", { name: "Has feedback" }));
+    fireEvent.click(screen.getByRole("button", { name: "Has response" }));
     expect(
       await screen.findByRole("row", { name: new RegExp(base.sessions[0].refHint) }),
     ).toBeVisible();
@@ -168,12 +168,35 @@ describe("SessionsView", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "Search sessions" }), {
       target: { value: "refund" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Has feedback" }));
+    fireEvent.click(screen.getByRole("button", { name: "Has response" }));
 
     await waitFor(() => {
       expect(window.location.search).toContain("sessionQ=refund");
-      expect(window.location.search).toContain("sessionKind=feedback");
+      expect(window.location.search).toContain("sessionKind=response");
     });
+  });
+
+  it("upgrades legacy feedback filter links to response filters", async () => {
+    const data = dashboardFixture();
+    window.history.replaceState({}, "", "/?view=sessions&sessionKind=feedback");
+    vi.stubGlobal("fetch", sessionFetch(data));
+
+    renderWithQuery(
+      <SessionsView
+        data={data}
+        selectedSessionId={null}
+        selectSession={vi.fn()}
+        openFeedback={vi.fn()}
+        openInteraction={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Has response" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await waitFor(() => expect(window.location.search).toContain("sessionKind=response"));
   });
 
   it("restores useful server constraints from the URL and applies them together", async () => {

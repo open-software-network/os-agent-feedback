@@ -50,7 +50,7 @@ import {
 } from "@/lib/dashboard/format";
 import { cn } from "@/lib/utils";
 
-type SessionFilter = "all" | "multi" | "feedback" | "no_feedback";
+type SessionFilter = "all" | "multi" | "response" | "no_response";
 type SessionRange = "all" | "7d" | "30d";
 type SessionConstraints = {
   operation: string;
@@ -76,7 +76,13 @@ const emptySessionConstraints: SessionConstraints = {
 };
 
 function isSessionFilter(value: string | null): value is SessionFilter {
-  return value !== null && ["all", "multi", "feedback", "no_feedback"].includes(value);
+  return value !== null && ["all", "multi", "response", "no_response"].includes(value);
+}
+
+function sessionFilterFromLocation(value: string | null): SessionFilter {
+  if (value === "feedback") return "response";
+  if (value === "no_feedback") return "no_response";
+  return isSessionFilter(value) ? value : "all";
 }
 
 function readSessionLocation(): {
@@ -93,7 +99,7 @@ function readSessionLocation(): {
   const range = params.get("sessionRange");
   return {
     query: params.get("sessionQ") ?? "",
-    filter: isSessionFilter(filter) ? filter : "all",
+    filter: sessionFilterFromLocation(filter),
     constraints: {
       operation: params.get("sessionOperation") ?? "",
       customerRef: params.get("sessionCustomer") ?? "",
@@ -338,8 +344,8 @@ export function SessionsView({
           >
             <ToggleGroupItem value="all">All</ToggleGroupItem>
             <ToggleGroupItem value="multi">Multi-step</ToggleGroupItem>
-            <ToggleGroupItem value="feedback">Has feedback</ToggleGroupItem>
-            <ToggleGroupItem value="no_feedback">No feedback</ToggleGroupItem>
+            <ToggleGroupItem value="response">Has response</ToggleGroupItem>
+            <ToggleGroupItem value="no_response">No response</ToggleGroupItem>
           </ToggleGroup>
           <SessionConstraintFilters value={constraints} onApply={setConstraints} />
           <Button

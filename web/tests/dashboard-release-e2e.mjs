@@ -621,7 +621,8 @@ function createFixture() {
 
     if (url.pathname === "/api/dashboard/sessions") {
       const filtered =
-        url.searchParams.get("kind") === "multi" || url.searchParams.get("q")?.includes("checkout")
+        ["multi", "response"].includes(url.searchParams.get("kind")) ||
+        url.searchParams.get("q")?.includes("checkout")
           ? [secondSession]
           : url.searchParams.get("cursor") === "session-page-2"
             ? [secondSession]
@@ -947,6 +948,7 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await textVisible(page, "Customers stay linked to their sessions");
   await metricVisible(page, "Customers", "1");
   await metricVisible(page, "Known", "1");
+  await metricVisible(page, "Active", "1");
   await clickText(page, "Acme workspace");
   await textVisible(page, "Permission");
   await textVisible(page, "Sessions");
@@ -965,6 +967,18 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
     String(customerDetail.headers.cookie).includes(TEST_COOKIE),
     "BFF must forward the real browser session cookie to its API origin",
   );
+
+  await clickText(page, "Sessions");
+  await textVisible(page, "Has response");
+  await textVisible(page, "No response");
+  await clickText(page, "Has response");
+  const responseFilteredSessions = await fixtureRequest(
+    state,
+    (request) =>
+      request.path.startsWith("/api/dashboard/sessions?") && request.path.includes("kind=response"),
+    "response-filtered session list",
+  );
+  assert.equal(responseFilteredSessions.headers["x-workspace-id"], ids.workspace);
 
   await clickText(page, "Configurations");
   await clickText(page, "Setup");
