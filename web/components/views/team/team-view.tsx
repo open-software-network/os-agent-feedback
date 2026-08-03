@@ -5,12 +5,7 @@ import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 
-import {
-  NativeSelect,
-  PageHeader,
-  Panel,
-  StatusMessage,
-} from "@/components/dashboard/view-primitives";
+import { NativeSelect, Panel, StatusMessage } from "@/components/dashboard/view-primitives";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -40,12 +35,10 @@ export function TeamView({
   data,
   refresh,
   setNotice,
-  embedded = false,
 }: {
   data: DashboardData;
   refresh: () => Promise<unknown>;
   setNotice: (message: string) => void;
-  embedded?: boolean;
 }) {
   const [error, setError] = useState("");
   const [renaming, setRenaming] = useState(false);
@@ -179,37 +172,21 @@ export function TeamView({
 
   return (
     <div className="flex flex-col gap-6">
-      {embedded ? null : (
-        <PageHeader
-          eyebrow="Team"
-          title={data.workspace.name}
-          description={`${data.teamMembers.length} member${data.teamMembers.length === 1 ? "" : "s"}`}
-          actions={
-            canInvite ? (
-              <Button variant="outline" onClick={() => setRenaming(true)}>
-                Rename team
-              </Button>
-            ) : null
-          }
-        />
-      )}
-      {embedded ? (
-        <Panel title="Team details">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="font-medium">{data.workspace.name}</p>
-              <p className="text-sm text-muted-foreground">
-                {data.teamMembers.length} member{data.teamMembers.length === 1 ? "" : "s"}
-              </p>
-            </div>
-            {canInvite ? (
-              <Button variant="outline" onClick={() => setRenaming(true)}>
-                Rename team
-              </Button>
-            ) : null}
+      <Panel title="Team details">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="font-medium">{data.workspace.name}</p>
+            <p className="text-sm text-muted-foreground">
+              {data.teamMembers.length} member{data.teamMembers.length === 1 ? "" : "s"}
+            </p>
           </div>
-        </Panel>
-      ) : null}
+          {canInvite ? (
+            <Button variant="outline" onClick={() => setRenaming(true)}>
+              Rename team
+            </Button>
+          ) : null}
+        </div>
+      </Panel>
       {error ? <StatusMessage tone="error">{error}</StatusMessage> : null}
       {renaming ? (
         <Panel title="Rename team">

@@ -20,7 +20,7 @@ use std::{
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, RawQuery, State},
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     middleware::{Next, from_fn},
     response::{Html, IntoResponse, Redirect, Response},
@@ -80,13 +80,13 @@ use crate::{
         CreateTeamInvitationInput, CurrentUser, CustomerContextInput, CustomerContextResponse,
         DashboardContext, DashboardCustomerDetail, DashboardCustomerFilters,
         DashboardCustomersPage, DashboardData, DashboardFeedbackFilters, DashboardFeedbackPage,
-        DashboardSessionDetail, DashboardSessionFilters, DashboardSessionsPage,
-        DashboardSignalFilters, DashboardSignalsPage, DeleteProductInput, EnrichmentAnswerInput,
-        EnrichmentAnswerResponse, EnrichmentConsentDecisionInput,
-        EnrichmentConsentDecisionResponse, EnrichmentRequestInput, EnrichmentRequestResponse,
-        FeedbackConsentDiscovery, FeedbackDiscoveryResponse, FeedbackFindingShapeDiscovery,
-        FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackModesDiscovery,
-        FeedbackRequiredFieldsDiscovery, FeedbackSubmissionDiscovery,
+        DashboardResponseFilters, DashboardResponsesPage, DashboardSessionDetail,
+        DashboardSessionFilters, DashboardSessionsPage, DashboardSignalFilters,
+        DashboardSignalsPage, DeleteProductInput, EnrichmentAnswerInput, EnrichmentAnswerResponse,
+        EnrichmentConsentDecisionInput, EnrichmentConsentDecisionResponse, EnrichmentRequestInput,
+        EnrichmentRequestResponse, FeedbackConsentDiscovery, FeedbackDiscoveryResponse,
+        FeedbackFindingShapeDiscovery, FeedbackListInteractionsInput, FeedbackListReportsInput,
+        FeedbackModesDiscovery, FeedbackRequiredFieldsDiscovery, FeedbackSubmissionDiscovery,
         FeedbackWorkaroundShapeDiscovery, GithubIssueLink, HealthResponse, IntegrationsDiscovery,
         McpDiscovery, MergeReportGroupsInput, MergeReportGroupsResponse,
         PersonalizationDecisionInput, PersonalizationDecisionResponse, PersonalizationOutcomeInput,
@@ -110,13 +110,14 @@ use crate::{
         complete_group_issue_reconciliation, create_api_key, create_enrichment_request,
         create_product_with_default_key, create_team_invitation, dashboard_customer_by_id,
         dashboard_customers_page, dashboard_feedback_page, dashboard_interaction_by_id,
-        dashboard_report_by_id, dashboard_session_by_id, dashboard_sessions_page,
-        dashboard_signals_page, dashboard_with_limits, decide_enrichment_consent, delete_product,
-        feedback_consent_state, feedback_list_interactions, feedback_list_reports,
-        get_group_github_issue, get_or_create_workspace, get_product_github_repo,
-        github_installation_workspace, group_issue_context, group_issue_sync_context,
-        ingest_telemetry_batch, inspect_feedback_capability, list_github_installations,
-        list_product_groups, mark_group_issue_filing_for_reconciliation, merge_report_groups,
+        dashboard_report_by_id, dashboard_responses_page, dashboard_session_by_id,
+        dashboard_sessions_page, dashboard_signals_page, dashboard_with_limits,
+        decide_enrichment_consent, delete_product, feedback_consent_state,
+        feedback_list_interactions, feedback_list_reports, get_group_github_issue,
+        get_or_create_workspace, get_product_github_repo, github_installation_workspace,
+        group_issue_context, group_issue_sync_context, ingest_telemetry_batch,
+        inspect_feedback_capability, list_github_installations, list_product_groups,
+        mark_group_issue_filing_for_reconciliation, merge_report_groups,
         purge_expired_product_data, read_product_auth, record_feedback_consent_decision,
         record_personalization_decision, record_personalization_outcome, regroup_report_groups,
         release_group_issue_filing_claim, release_group_issue_reconciliation_claim,
@@ -248,6 +249,7 @@ fn build_app_router(dev_auth_enabled: bool) -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(dashboard_feedback_list_handler))
         .routes(routes!(dashboard_customers_list_handler))
         .routes(routes!(dashboard_customer_handler))
+        .routes(routes!(dashboard_responses_list_handler))
         .routes(routes!(dashboard_features_list_handler))
         .routes(routes!(dashboard_feature_handler))
         .routes(routes!(dashboard_signals_list_handler))
@@ -982,12 +984,57 @@ async fn auth_callback(
     Ok(response)
 }
 
+/// The one spelling of the install endpoint's team query parameter.
+///
+/// The `OpenAPI` annotation and the parser must agree on it;
+/// `github_install_query_parameter_is_documented` pins that.
+const WORKSPACE_ID_QUERY_PARAM: &str = "workspaceId";
+
+/// Header wins when both are supplied; the query parameter is the no-header
+/// fallback. Neither is trusted on its own — the winner is handed to
+/// `dashboard_auth`, which rejects a team the caller is not a member of.
+///
+/// Takes the RAW query string rather than a deserialized value: an extractor
+/// would reject a malformed or repeated `workspaceId` before this function
+/// could decide it was irrelevant, which is how header precedence kept getting
+/// defeated. With a valid header the query is parsed but never consulted.
+///
+/// Without a header the parameter decides the team, so it must be unambiguous:
+/// exactly one well-formed value is used, no value keeps the caller's default
+/// team, and anything else fails loudly. A repeated parameter is rejected
+/// rather than resolved by first-or-last-wins, because the two orders disagree
+/// about which team gets the installation.
+fn install_workspace_id(
+    header_workspace_id: Option<Uuid>,
+    raw_query: Option<&str>,
+) -> Result<Option<Uuid>, ApiError> {
+    if let Some(workspace_id) = header_workspace_id {
+        return Ok(Some(workspace_id));
+    }
+    let values = raw_query.map_or_else(Vec::new, |query| {
+        form_urlencoded::parse(query.as_bytes())
+            .filter(|(key, _)| key == WORKSPACE_ID_QUERY_PARAM)
+            .map(|(_, value)| value.into_owned())
+            .collect::<Vec<_>>()
+    });
+    match values.as_slice() {
+        [] => Ok(None),
+        [value] => Uuid::parse_str(value)
+            .map(Some)
+            .map_err(|_| ApiError::bad_request("Invalid workspaceId query parameter")),
+        _ => Err(ApiError::bad_request(
+            "Repeated workspaceId query parameter",
+        )),
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/api/github/install",
     tag = "github",
     params(
-        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; wins over workspaceId when both are present"),
+        ("workspaceId" = Option<Uuid>, Query, description = "Team to configure when the x-workspace-id header cannot be sent, as on a plain link. Ignored when the header is present; must appear at most once."),
     ),
     responses(
         (
@@ -1000,7 +1047,7 @@ async fn auth_callback(
                 ("Set-Cookie" = String, description = "Short-lived GitHub installation state and team cookies")
             )
         ),
-        (status = 400, description = "Invalid team header", body = ApiErrorEnvelope),
+        (status = 400, description = "Invalid team header, or an unusable workspaceId with no team header", body = ApiErrorEnvelope),
         (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
         (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
         (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
@@ -1012,9 +1059,16 @@ async fn auth_callback(
 async fn github_install_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Response, ApiError> {
-    let (context, tokens) =
-        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    // The install entry point is a plain top-level link, so it cannot set the
+    // x-workspace-id header the rest of the dashboard API uses. Accept the team
+    // as a query parameter too, and resolve it through the SAME dashboard_auth
+    // path: `resolve_workspace_access` is what proves membership, so a crafted
+    // link cannot install into a team the caller does not belong to.
+    let requested_workspace =
+        install_workspace_id(requested_workspace_id(&headers)?, raw_query.as_deref())?;
+    let (context, tokens) = dashboard_auth(&state, &headers, requested_workspace).await?;
     require_workspace_editor(&context)?;
     let github = require_github(&state)?;
     let github_state = random_token("");
@@ -2760,6 +2814,20 @@ struct DashboardSignalsListQuery {
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
 #[into_params(parameter_in = Query)]
+struct DashboardResponsesListQuery {
+    product_id: Uuid,
+    q: Option<String>,
+    status: Option<String>,
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+    #[param(default = 50, minimum = 1, maximum = 100)]
+    limit: Option<i64>,
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
 struct DashboardFeaturesListQuery {
     product_id: Uuid,
     q: Option<String>,
@@ -2956,6 +3024,49 @@ async fn dashboard_feature_handler(
     )
     .await?;
     dashboard_response(&state, Json(detail), tokens)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/dashboard/responses",
+    tag = "dashboard",
+    params(
+        DashboardResponsesListQuery,
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Questions Epode asked and the answers customer agents returned", body = DashboardResponsesPage),
+        (status = 400, description = "Invalid filters, time range, cursor, or page size", body = ApiErrorEnvelope),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot access the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Product not found in the team", body = ApiErrorEnvelope),
+        (status = 410, description = "Cursor is outside the retained window", body = ApiErrorEnvelope),
+        (status = 500, description = "Responses could not be loaded", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn dashboard_responses_list_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<DashboardResponsesListQuery>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    let page = dashboard_responses_page(
+        &state.pool,
+        context.workspace.id,
+        query.product_id,
+        DashboardResponseFilters {
+            query: query.q,
+            statuses: comma_values(query.status, "status")?,
+            since: query.since,
+            until: query.until,
+            limit: query.limit,
+            cursor: query.cursor,
+        },
+    )
+    .await?;
+    dashboard_response(&state, Json(page), tokens)
 }
 
 #[utoipa::path(
@@ -4861,10 +4972,11 @@ mod page_tests {
 
     use super::{
         ApiError, GithubIssue, GroupIssueReconciliationDecision, GroupIssueReconciliationEvidence,
-        GroupIssueReconciliationInconclusive, build_app_router, comma_values, feedback_discovery,
-        github_callback_redirect_target, group_issue_reconciliation_resolution,
-        group_issue_state_refresh_due, group_issue_sync_needed, group_marker_comment,
-        mcp_auth_error, mcp_tool_allowed, mcp_tools, resolve_web_app_url, reveal_auth_error,
+        GroupIssueReconciliationInconclusive, WORKSPACE_ID_QUERY_PARAM, build_app_router,
+        comma_values, feedback_discovery, github_callback_redirect_target,
+        group_issue_reconciliation_resolution, group_issue_state_refresh_due,
+        group_issue_sync_needed, group_marker_comment, install_workspace_id, mcp_auth_error,
+        mcp_tool_allowed, mcp_tools, resolve_web_app_url, reveal_auth_error,
         valid_report_group_key, validated_return_to,
     };
     use chrono::{Duration, TimeZone as _, Utc};
@@ -4903,6 +5015,91 @@ mod page_tests {
         let revealed = reveal_auth_error(html);
         assert!(revealed.contains(r#"id="auth-error" class="auth-error">Try again"#));
         assert!(!revealed.contains("auth-error\" hidden"));
+    }
+
+    #[test]
+    fn install_workspace_id_prefers_the_header_and_falls_back_to_the_query() {
+        let header = uuid::Uuid::from_u128(1);
+        let query = uuid::Uuid::from_u128(2);
+        let one = format!("workspaceId={query}");
+        let q = Some(one.as_str());
+
+        // Header wins when both are present.
+        assert_eq!(
+            install_workspace_id(Some(header), q).ok().flatten(),
+            Some(header)
+        );
+        // Query parameter is the fallback for the plain install link, which
+        // cannot set headers.
+        assert_eq!(install_workspace_id(None, q).ok().flatten(), Some(query));
+        // Header alone keeps working for the header-driven dashboard calls.
+        assert_eq!(
+            install_workspace_id(Some(header), None).ok().flatten(),
+            Some(header)
+        );
+        // Neither: dashboard_auth falls back to the caller's personal team.
+        assert_eq!(install_workspace_id(None, None).ok().flatten(), None);
+        // An empty or unrelated query is the same as no parameter at all.
+        assert_eq!(install_workspace_id(None, Some("")).ok().flatten(), None);
+        assert_eq!(
+            install_workspace_id(None, Some("other=1&x=2"))
+                .ok()
+                .flatten(),
+            None
+        );
+        // Percent-encoded neighbours and a later position still resolve.
+        let mixed = format!("other=a%20b&workspaceId={query}");
+        assert_eq!(
+            install_workspace_id(None, Some(mixed.as_str()))
+                .ok()
+                .flatten(),
+            Some(query)
+        );
+    }
+
+    #[test]
+    fn install_workspace_id_ignores_a_malformed_query_only_when_a_header_decides() {
+        let header = uuid::Uuid::from_u128(1);
+        let good = uuid::Uuid::from_u128(2);
+        let other = uuid::Uuid::from_u128(3);
+        let bad_queries = [
+            "workspaceId=".to_owned(),
+            "workspaceId=not-a-uuid".to_owned(),
+            "workspaceId=../../etc/passwd".to_owned(),
+            "workspaceId=%00".to_owned(),
+            // Repeated keys: the reason an extractor cannot own this decision.
+            format!("workspaceId={good}&workspaceId={other}"),
+            format!("workspaceId={good}&workspaceId={good}"),
+            format!("workspaceId={good}&workspaceId=not-a-uuid"),
+        ];
+
+        // A valid header must not be defeated by anything in a parameter the
+        // docs say is ignored — malformed OR repeated. A serde extractor would
+        // reject these before the handler ever ran.
+        for query in &bad_queries {
+            assert_eq!(
+                install_workspace_id(Some(header), Some(query.as_str()))
+                    .ok()
+                    .flatten(),
+                Some(header),
+                "header must win over query {query:?}"
+            );
+        }
+
+        // With no header the parameter is load-bearing, so it must be
+        // unambiguous. Falling back to the caller's default team would
+        // resurrect the original bug, and picking first-or-last from a repeated
+        // key would silently choose a team.
+        for query in &bad_queries {
+            let error = install_workspace_id(None, Some(query.as_str()))
+                .expect_err("a load-bearing ambiguous workspaceId must fail");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST, "{query:?}");
+            assert!(
+                error.message.contains("workspaceId"),
+                "{} for {query:?}",
+                error.message
+            );
+        }
     }
 
     #[test]
@@ -5513,6 +5710,28 @@ mod page_tests {
         let calls = route_calls(&source);
         assert_eq!(calls.len(), 1);
         assert!(calls[0].contains("\"/live\""));
+    }
+
+    /// The parser matches a hardcoded key; the `OpenAPI` annotation documents a
+    /// name. If those two ever disagree the endpoint silently ignores the
+    /// parameter callers are told to send, so pin them to one string here.
+    #[test]
+    fn github_install_query_parameter_is_documented() {
+        let (_router, openapi) = build_app_router().split_for_parts();
+        let spec = serde_json::to_value(&openapi).expect("the OpenAPI document should serialize");
+        let parameters = spec["paths"]["/api/github/install"]["get"]["parameters"]
+            .as_array()
+            .expect("the install operation should document its parameters");
+        let documented = parameters
+            .iter()
+            .filter(|parameter| parameter["in"] == "query")
+            .map(|parameter| parameter["name"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            documented,
+            vec![WORKSPACE_ID_QUERY_PARAM],
+            "the documented query parameter must be the one the handler parses"
+        );
     }
 
     #[test]

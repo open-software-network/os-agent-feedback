@@ -239,6 +239,28 @@ const firstSignal = {
   consentState: "approved",
   allowedUses: ["product_personalization"],
 };
+const firstResponse = {
+  id: "89898989-8989-4898-8898-898989898989",
+  question: "What does the user need from search right now?",
+  status: "answered",
+  purpose: "product_personalization",
+  surface: "http_json",
+  customerId: ids.customerOne,
+  customerName: "Acme workspace",
+  sessionId: ids.sessionOne,
+  sessionRef: "session-42",
+  askedAt: now,
+  answeredAt: now,
+  answers: [
+    {
+      key: "b2b.primary_goal",
+      type: "intent",
+      value: "Find the newest indexed policy",
+      summary: "The user needs the newest indexed policy",
+      remembered: true,
+    },
+  ],
+};
 const firstFeature = {
   key: "freshness-gap",
   groupKey: "report-group-freshness",
@@ -523,6 +545,22 @@ function createFixture() {
         signals: selectedSearchProduct ? [firstSignal] : [],
         total: selectedSearchProduct ? 1 : 0,
         limit: Number(url.searchParams.get("limit") ?? 100),
+        nextCursor: null,
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/dashboard/responses") {
+      const selectedSearchProduct = url.searchParams.get("productId") === ids.search;
+      json(response, 200, {
+        responses: selectedSearchProduct ? [firstResponse] : [],
+        rollup: {
+          questions: selectedSearchProduct ? 1 : 0,
+          answered: selectedSearchProduct ? 1 : 0,
+          awaitingAnswer: 0,
+          declined: 0,
+        },
+        limit: Number(url.searchParams.get("limit") ?? 50),
         nextCursor: null,
       });
       return;
@@ -859,45 +897,51 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   );
 
   await clickText(page, "Continue");
-  await textVisible(page, "Epode learned 1 useful context item.");
+  await textVisible(page, "Epode asks customer agents questions and records their answers.");
   assert.equal(new URL(page.url()).pathname, "/", "the dashboard must live at the root, not /app");
   assert.equal(state.authStarts, 2, "retry should reach the same OS Accounts handoff route");
   await fixtureRequest(state, requestPath("/api/dashboard"), "initial dashboard data");
 
-  await textVisible(page, "Customer understanding");
-  await textVisible(page, "What customers care about");
+  await textVisible(page, "Recent responses");
+  await textVisible(page, "Recent customers");
+  await textVisible(page, "What does the user need from search right now?");
   await textVisible(page, "Find the newest indexed policy");
-  await metricVisible(page, "Customers with context", "1");
-  await metricVisible(page, "Context learned", "1");
-  await metricVisible(page, "Personalization-ready", "1");
-  await metricVisible(page, "Context retrievals", "2");
-  const signals = await fixtureRequest(
+  await metricVisible(page, "Customers", "1");
+  await metricVisible(page, "Questions asked", "1");
+  await metricVisible(page, "Answers received", "1");
+  await metricVisible(page, "Sessions", "2");
+  const responses = await fixtureRequest(
     state,
     (request) =>
-      request.path.startsWith("/api/dashboard/signals?") &&
-      request.path.includes(`productId=${ids.search}`) &&
-      new URL(request.path, "http://fixture.invalid").searchParams.get("type") ===
-        "intent,preference,constraint",
-    "permissioned customer context for Insights",
+      request.path.startsWith("/api/dashboard/responses?") &&
+      request.path.includes(`productId=${ids.search}`),
+    "question and answer list for Home",
   );
-  assert.equal(signals.headers["x-workspace-id"], ids.workspace);
+  assert.equal(responses.headers["x-workspace-id"], ids.workspace);
   assert.equal(
-    signals.headers.host,
+    responses.headers.host,
     upstreamHost,
-    "the browser must reach customer signals only through the root-host BFF",
+    "the browser must reach responses only through the root-host BFF",
   );
   assert.ok(
-    String(signals.headers.cookie).includes(TEST_COOKIE),
-    "the signals BFF must forward the real browser session cookie",
+    String(responses.headers.cookie).includes(TEST_COOKIE),
+    "the responses BFF must forward the real browser session cookie",
   );
 
   await page.click("button[aria-label*='open context menu']");
   await clickText(page, "Billing API");
-  await textVisible(page, "Connect your product to start learning what customers want.");
-  await textVisible(page, "No customers understood yet.");
+  await textVisible(page, "No questions have been asked yet.");
+  await textVisible(page, "No customers yet.");
   await page.click("button[aria-label*='open context menu']");
   await clickText(page, "Search API");
-  await textVisible(page, "Epode learned 1 useful context item.");
+  await textVisible(page, "What does the user need from search right now?");
+
+  await clickText(page, "Responses");
+  await textVisible(page, "Questions asked");
+  await textVisible(page, "What does the user need from search right now?");
+  await textVisible(page, "Find the newest indexed policy");
+  await textVisible(page, "Acme workspace");
+  await textVisible(page, "session-42");
 
   await clickText(page, "Customers");
   await textVisible(page, "Interaction-only context is not a durable customer profile.");

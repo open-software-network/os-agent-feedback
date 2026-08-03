@@ -310,6 +310,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/dashboard/responses": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["dashboard_responses_list_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/dashboard/features": {
         parameters: {
             query?: never;
@@ -1156,6 +1172,49 @@ export interface components {
         };
         DashboardReportResponse: {
             report: components["schemas"]["ProductFeedbackReportWithInteraction"];
+        };
+        DashboardResponseAnswer: {
+            key: string;
+            remembered: boolean;
+            summary: string;
+            type: string;
+            value: string;
+        };
+        DashboardResponseRollup: {
+            /** Format: int64 */
+            answered: number;
+            /** Format: int64 */
+            awaitingAnswer: number;
+            /** Format: int64 */
+            declined: number;
+            /** Format: int64 */
+            questions: number;
+        };
+        DashboardResponseSummary: {
+            /** Format: date-time */
+            answeredAt: string | null;
+            answers: components["schemas"]["DashboardResponseAnswer"][];
+            /** Format: date-time */
+            askedAt: string;
+            /** Format: uuid */
+            customerId: string | null;
+            customerName: string | null;
+            /** Format: uuid */
+            id: string;
+            purpose: string;
+            question: string;
+            /** Format: uuid */
+            sessionId: string | null;
+            sessionRef: string | null;
+            status: string;
+            surface: string;
+        };
+        DashboardResponsesPage: {
+            /** Format: int64 */
+            limit: number;
+            nextCursor: string | null;
+            responses: components["schemas"]["DashboardResponseSummary"][];
+            rollup: components["schemas"]["DashboardResponseRollup"];
         };
         DashboardSessionDetail: {
             interactions: components["schemas"]["ProductInteraction"][];
@@ -2124,9 +2183,12 @@ export interface operations {
     };
     github_install_handler: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Team to configure when the x-workspace-id header cannot be sent, as on a plain link. Ignored when the header is present; must appear at most once. */
+                workspaceId?: string;
+            };
             header?: {
-                /** @description Team to configure; defaults to the caller's personal team */
+                /** @description Team to configure; wins over workspaceId when both are present */
                 "x-workspace-id"?: string | null;
             };
             path?: never;
@@ -2147,7 +2209,7 @@ export interface operations {
                     "text/plain": string;
                 };
             };
-            /** @description Invalid team header */
+            /** @description Invalid team header, or an unusable workspaceId with no team header */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3483,6 +3545,91 @@ export interface operations {
                 };
             };
             /** @description Customer detail could not be loaded */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    dashboard_responses_list_handler: {
+        parameters: {
+            query: {
+                productId: string;
+                q?: string;
+                status?: string;
+                since?: string;
+                until?: string;
+                limit?: number;
+                cursor?: string;
+            };
+            header?: {
+                /** @description Team to access; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Questions Epode asked and the answers customer agents returned */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DashboardResponsesPage"];
+                };
+            };
+            /** @description Invalid filters, time range, cursor, or page size */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot access the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Product not found in the team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Cursor is outside the retained window */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Responses could not be loaded */
             500: {
                 headers: {
                     [name: string]: unknown;

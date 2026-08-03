@@ -151,10 +151,10 @@ test("the current Epode OpenAPI compiles reproducibly to a review-only manifest"
 
   assert.deepEqual(first, second);
   assert.equal(first.source.sha256, expectedDigest);
-  assert.equal(first.summary.totalOperations, 55);
-  assert.equal(first.summary.readOnlyGetOrHead, 23);
+  assert.equal(first.summary.totalOperations, 56);
+  assert.equal(first.summary.readOnlyGetOrHead, 24);
   assert.equal(first.summary.eligibleForCompanyReview, 1);
-  assert.equal(first.summary.excludedByPolicy, 54);
+  assert.equal(first.summary.excludedByPolicy, 55);
   assert.equal(first.summary.approvedForIr, 0);
   assert.equal(first.upstream.status, "company_input_required");
   assert.deepEqual(first.upstream.usablePinnedBaseUrls, []);
@@ -164,6 +164,7 @@ test("the current Epode OpenAPI compiles reproducibly to a review-only manifest"
     "/api/dashboard/customers/{customer_id}",
     "/api/dashboard/features",
     "/api/dashboard/features/{feature_key}",
+    "/api/dashboard/responses",
     "/api/dashboard/signals",
   ]) {
     assert.ok(first.operations.some((operation) => operation.path === path));

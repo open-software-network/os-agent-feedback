@@ -20,6 +20,7 @@ import { FeedbackView } from "@/components/views/feedback/feedback-view";
 import { HomeView } from "@/components/views/home/home-view";
 import { InteractionDetail } from "@/components/views/interactions/interaction-detail";
 import { PolicyView } from "@/components/views/policy/policy-view";
+import { ResponsesView } from "@/components/views/responses/responses-view";
 import { SessionsView } from "@/components/views/sessions/sessions-view";
 import { SetupView } from "@/components/views/setup/setup-view";
 import { TeamView } from "@/components/views/team/team-view";
@@ -46,7 +47,7 @@ type Notice = {
 
 export function DashboardApp() {
   const [ready, setReady] = useState(false);
-  const [view, setView] = useState<DashboardView>("insights");
+  const [view, setView] = useState<DashboardView>("home");
   const [workspaceId, setWorkspaceId] = useState("");
   const [productId, setProductId] = useState("");
   const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
@@ -102,11 +103,12 @@ export function DashboardApp() {
     }
     const requestedView = url.searchParams.get("view");
     setView(
-      requestedView === "home"
-        ? "insights"
+      // "insights" is a retired view name kept as a URL alias for bookmarked links.
+      requestedView === "insights"
+        ? "home"
         : DASHBOARD_VIEWS.includes(requestedView as DashboardView)
           ? (requestedView as DashboardView)
-          : "insights",
+          : "home",
     );
     const requestedWorkspaceId = url.searchParams.get("team");
     explicitWorkspaceSelection.current = Boolean(requestedWorkspaceId);
@@ -188,7 +190,7 @@ export function DashboardApp() {
       !isEditor(data.currentRole) &&
       (view === "connectors" || view === "setup" || view === "policy")
     ) {
-      setView("insights");
+      setView("home");
     }
     if (data.currentEnvironment && secrets?.environmentId !== data.currentEnvironment.id) {
       setSecrets({ environmentId: data.currentEnvironment.id });
@@ -198,7 +200,7 @@ export function DashboardApp() {
   useEffect(() => {
     if (!ready) return;
     const url = new URL(window.location.href);
-    setOrDelete(url, "view", view === "insights" ? "" : view);
+    setOrDelete(url, "view", view === "home" ? "" : view);
     setOrDelete(url, "team", workspaceId);
     setOrDelete(url, "product", productId);
     setOrDelete(url, "report", selectedReportId);
@@ -352,7 +354,7 @@ export function DashboardApp() {
     setProductId("");
     setSecrets(null);
     clearSelection();
-    setView("insights");
+    setView("home");
   }
 
   async function logout() {
@@ -370,6 +372,7 @@ export function DashboardApp() {
     configurationActive ||
     view === "feedback" ||
     view === "customers" ||
+    view === "responses" ||
     view === "features" ||
     view === "sessions";
 
@@ -481,6 +484,10 @@ export function DashboardApp() {
             refresh={refresh}
           />
         );
+      case "responses":
+        return (
+          <ResponsesView data={currentData} openCustomer={openCustomer} openSession={openSession} />
+        );
       case "features":
         return (
           <FeaturesView
@@ -536,17 +543,14 @@ export function DashboardApp() {
         );
       case "connectors":
         return isEditor(currentData.currentRole) ? (
-          configurationPage(
-            currentData,
-            "connectors",
-            <ConnectorsView data={currentData} embedded />,
-          )
+          configurationPage(currentData, "connectors", <ConnectorsView data={currentData} />)
         ) : (
           <HomeView
             data={currentData}
             openCustomer={openCustomer}
             openFeature={openFeature}
             openFeedback={openFeedback}
+            openSession={openSession}
             refresh={refresh}
           />
         );
@@ -554,7 +558,7 @@ export function DashboardApp() {
         return configurationPage(
           currentData,
           "team",
-          <TeamView data={currentData} refresh={refresh} setNotice={showNotice} embedded />,
+          <TeamView data={currentData} refresh={refresh} setNotice={showNotice} />,
         );
       case "configuration":
         return configurationPage(
@@ -584,6 +588,7 @@ export function DashboardApp() {
             openCustomer={openCustomer}
             openFeature={openFeature}
             openFeedback={openFeedback}
+            openSession={openSession}
             refresh={refresh}
           />
         );

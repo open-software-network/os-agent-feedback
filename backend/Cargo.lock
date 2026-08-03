@@ -17,6 +17,7 @@ dependencies = [
  "base64",
  "chrono",
  "dotenvy",
+ "form_urlencoded",
  "hmac",
  "jsonwebtoken",
  "rand 0.9.5",

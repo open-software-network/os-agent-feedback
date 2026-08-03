@@ -1,10 +1,13 @@
 "use client";
 
+import { IconChatBubbles } from "central-icons/IconChatBubbles";
 import { IconChevronGrabberVertical } from "central-icons/IconChevronGrabberVertical";
+import { IconClock9OClock } from "central-icons/IconClock9OClock";
+import { IconConnectors1 } from "central-icons/IconConnectors1";
+import { IconHome } from "central-icons/IconHome";
 import { IconPeople } from "central-icons/IconPeople";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
 import { IconShieldCheck } from "central-icons/IconShieldCheck";
-import { IconSparkle } from "central-icons/IconSparkle";
 import type { ComponentType, CSSProperties, ReactNode } from "react";
 import { PageHeader } from "@/components/dashboard/page-header";
 import { EpodeMark } from "@/components/epode-mark";
@@ -53,22 +56,39 @@ const navigation: Array<{
   icon: NavigationIcon;
 }> = [
   {
+    view: "home",
+    label: "Home",
+    icon: IconHome,
+  },
+  {
     view: "customers",
     label: "Customers",
     icon: IconPeople,
   },
   {
-    view: "insights",
-    label: "Insights",
-    icon: IconSparkle,
+    view: "responses",
+    label: "Responses",
+    icon: IconChatBubbles,
+  },
+  {
+    view: "sessions",
+    label: "Sessions",
+    icon: IconClock9OClock,
   },
   {
     view: "setup",
     label: "Setup",
     icon: IconSettingsGear4,
   },
+  {
+    view: "connectors",
+    label: "Connectors",
+    icon: IconConnectors1,
+  },
   { view: "policy", label: "Data controls", icon: IconShieldCheck },
 ];
+
+const EDITOR_ONLY_VIEWS: ReadonlySet<DashboardView> = new Set(["setup", "connectors", "policy"]);
 
 function initials(value: string) {
   return value
@@ -212,18 +232,13 @@ function AppSidebar({
           <SidebarGroupContent>
             <SidebarMenu>
               {navigation
-                .filter(
-                  (item) => canCreateProduct || (item.view !== "setup" && item.view !== "policy"),
-                )
+                .filter((item) => canCreateProduct || !EDITOR_ONLY_VIEWS.has(item.view))
                 .map((item) => {
                   const active =
                     view === item.view ||
-                    (item.view === "insights" && view === "home") ||
-                    (item.view === "customers" &&
-                      (view === "features" ||
-                        view === "sessions" ||
-                        view === "feedback" ||
-                        view === "interactions"));
+                    (item.view === "customers" && view === "features") ||
+                    (item.view === "responses" && view === "feedback") ||
+                    (item.view === "sessions" && view === "interactions");
                   return (
                     <SidebarMenuItem key={item.view}>
                       <SidebarMenuButton
@@ -305,9 +320,9 @@ export function DashboardShell({
   children: ReactNode;
 }) {
   const shellTitle: Record<DashboardView, string> = {
-    home: "Insights",
-    insights: "Insights",
+    home: "Home",
     customers: "Customers",
+    responses: "Responses",
     features: "Features",
     feedback: "Evidence",
     sessions: "Sessions",

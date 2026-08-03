@@ -2,58 +2,57 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import {
-  customersPageFixture,
-  dashboardFixture,
-  signalFixture,
-} from "@/components/dashboard/test-fixture";
-import type { DashboardData } from "@/lib/api/dashboard";
+import { customersPageFixture, dashboardFixture } from "@/components/dashboard/test-fixture";
+import type { DashboardData, DashboardResponsesPage } from "@/lib/api/dashboard";
 
 import { HomeView } from "./home-view";
 
-describe("InsightsView", () => {
+describe("HomeView", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
-    window.history.replaceState({}, "", "/?team=team-1&product=product-1&view=insights");
+    window.history.replaceState({}, "", "/?team=team-1&product=product-1");
   });
 
-  it("leads with customer understanding rather than observability", async () => {
-    renderInsights(dashboardFixture());
+  it("leads with the question-and-answer product model", async () => {
+    renderHome(dashboardFixture());
 
     expect(
-      await screen.findByRole("heading", { name: "Epode learned 3 useful context items." }),
+      await screen.findByRole("heading", {
+        name: "Epode asks customer agents questions and records their answers.",
+      }),
     ).toBeVisible();
-    const understanding = screen.getByRole("region", { name: "Customer understanding" });
-    expect(within(understanding).getByText("Customers with context")).toBeVisible();
-    expect(within(understanding).getByText("Personalization-ready")).toBeVisible();
-    expect(within(understanding).getByText("Context retrievals")).toBeVisible();
-    expect(within(understanding).getByText("Personalization decisions")).toBeVisible();
-    expect(within(understanding).getByText("Measured outcomes")).toBeVisible();
-    expect(screen.getByRole("heading", { name: "What customers care about" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "Recently understood customers" })).toBeVisible();
-    expect(screen.queryByText("Possibly prefers luxury brands")).not.toBeInTheDocument();
-    expect(screen.queryByText("Review coverage")).not.toBeInTheDocument();
+    const glance = screen.getByRole("region", { name: "At a glance" });
+    expect(within(glance).getByText("Customers")).toBeVisible();
+    expect(within(glance).getByText("Questions asked")).toBeVisible();
+    expect(within(glance).getByText("Answers received")).toBeVisible();
+    expect(within(glance).getByText("Sessions")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Recent responses" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Recent customers" })).toBeVisible();
+    expect(screen.queryByText(/signals|interactions|contexts|evidences/i)).not.toBeInTheDocument();
   });
 
-  it("opens a customer and routes only to visible MVP screens", async () => {
+  it("opens linked customers and sessions", async () => {
     const openCustomer = vi.fn();
-    renderInsights(dashboardFixture(), { openCustomer });
+    const openSession = vi.fn();
+    renderHome(dashboardFixture(), { openCustomer, openSession });
 
     fireEvent.click(await screen.findByRole("button", { name: "Acme workspace" }));
-    expect(openCustomer).toHaveBeenCalledWith("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    fireEvent.click(screen.getByRole("button", { name: "session-42" }));
 
-    fireEvent.click(screen.getByRole("button", { name: /view all customers/i }));
-    expect(new URL(window.location.href).searchParams.get("view")).toBe("customers");
+    expect(openCustomer).toHaveBeenCalledWith("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    expect(openSession).toHaveBeenCalledWith("33333333-3333-4333-8333-333333333333");
   });
 
-  it("refreshes dashboard, customers, and permissioned context", async () => {
+  it("routes to the core object screens and refreshes both lists", async () => {
     const refresh = vi.fn().mockResolvedValue(undefined);
-    const fetchMock = mockIntelligence();
-    renderInsights(dashboardFixture(), { refresh }, fetchMock);
+    const fetchMock = mockHome();
+    renderHome(dashboardFixture(), { refresh }, fetchMock);
 
-    await screen.findByText("Sustainable products");
+    await screen.findByText("Blue");
+    fireEvent.click(screen.getByRole("button", { name: /view responses/i }));
+    expect(new URL(window.location.href).searchParams.get("view")).toBe("responses");
+
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-
     await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
     expect(
       fetchMock.mock.calls.filter(([input]) =>
@@ -61,16 +60,17 @@ describe("InsightsView", () => {
       ).length,
     ).toBeGreaterThan(1);
     expect(
-      fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/dashboard/signals?"))
-        .length,
+      fetchMock.mock.calls.filter(([input]) =>
+        String(input).startsWith("/api/dashboard/responses?"),
+      ).length,
     ).toBeGreaterThan(1);
   });
 });
 
-function renderInsights(
+function renderHome(
   data: DashboardData,
   overrides: Partial<Parameters<typeof HomeView>[0]> = {},
-  fetchMock = mockIntelligence(),
+  fetchMock = mockHome(),
 ) {
   vi.stubGlobal("fetch", fetchMock);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -79,6 +79,7 @@ function renderInsights(
       <HomeView
         data={data}
         openCustomer={vi.fn()}
+        openSession={vi.fn()}
         openFeature={vi.fn()}
         openFeedback={vi.fn()}
         refresh={vi.fn().mockResolvedValue(undefined)}
@@ -88,47 +89,46 @@ function renderInsights(
   );
 }
 
-function mockIntelligence() {
-  const signals = [
-    signalFixture({
-      type: "preference",
-      summary: "Sustainable products",
-      consentScope: "share_preferences",
-      allowedUses: ["product_personalization"],
-    }),
-    signalFixture({
-      id: "signal-intent",
-      type: "intent",
-      summary: "Buying a birthday gift",
-      consentScope: "share_preferences",
-      allowedUses: ["product_personalization"],
-    }),
-    signalFixture({
-      id: "signal-constraint",
-      type: "constraint",
-      summary: "Under $150",
-      consentScope: "share_preferences",
-      allowedUses: ["product_personalization"],
-    }),
-    signalFixture({
-      id: "signal-inference",
-      type: "preference",
-      summary: "Possibly prefers luxury brands",
-      provenance: "agent_inference",
-      consentScope: "share_preferences",
-      consentState: "approved",
-      allowedUses: ["product_personalization"],
-    }),
-  ];
+function responsesPage(): DashboardResponsesPage {
+  return {
+    responses: [
+      {
+        id: "response-1",
+        question: "What color does the user prefer?",
+        status: "answered",
+        purpose: "product_personalization",
+        surface: "mcp",
+        customerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        customerName: "Acme workspace",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        sessionRef: "session-42",
+        askedAt: "2026-08-02T12:00:00Z",
+        answeredAt: "2026-08-02T12:01:00Z",
+        answers: [
+          {
+            key: "preferred_color",
+            type: "preference",
+            value: "Blue",
+            summary: "The user prefers blue",
+            remembered: true,
+          },
+        ],
+      },
+    ],
+    rollup: { questions: 4, answered: 3, awaitingAnswer: 1, declined: 0 },
+    limit: 6,
+    nextCursor: null,
+  };
+}
+
+function mockHome() {
   return vi.fn().mockImplementation((input: RequestInfo | URL) => {
     const path = String(input);
     if (path.startsWith("/api/dashboard/customers?")) {
       return Promise.resolve(json(customersPageFixture()));
     }
-    if (path.startsWith("/api/dashboard/signals?")) {
-      return Promise.resolve(
-        json({ signals, total: signals.length, limit: 100, nextCursor: null }),
-      );
+    if (path.startsWith("/api/dashboard/responses?")) {
+      return Promise.resolve(json(responsesPage()));
     }
     throw new Error(`Unexpected request: ${path}`);
   });

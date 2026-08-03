@@ -9,7 +9,7 @@ describe("DashboardShell", () => {
     render(
       <DashboardShell
         data={dashboardFixture()}
-        view="insights"
+        view="home"
         onNavigate={vi.fn()}
         onWorkspaceChange={vi.fn()}
         onProductChange={vi.fn()}
@@ -19,10 +19,86 @@ describe("DashboardShell", () => {
       </DashboardShell>,
     );
 
-    const labels = ["Customers", "Insights", "Setup", "Data controls"];
+    const labels = [
+      "Home",
+      "Customers",
+      "Responses",
+      "Sessions",
+      "Setup",
+      "Connectors",
+      "Data controls",
+    ];
     for (const label of labels) expect(screen.getByRole("button", { name: label })).toBeVisible();
-    for (const hidden of ["Home", "Features", "Sessions", "Feedback", "Interactions"]) {
+    for (const hidden of ["Insights", "Signals", "Interactions", "Contexts", "Evidences"]) {
       expect(screen.queryByRole("button", { name: hidden })).not.toBeInTheDocument();
+    }
+
+    const coreLabels = screen
+      .getAllByRole("button")
+      .map((item) => item.textContent)
+      .filter((label) => ["Home", "Customers", "Responses", "Sessions"].includes(label ?? ""));
+    expect(coreLabels).toEqual(["Home", "Customers", "Responses", "Sessions"]);
+  });
+
+  it("navigates to connectors from the sidebar", () => {
+    const onNavigate = vi.fn();
+    render(
+      <DashboardShell
+        data={dashboardFixture()}
+        view="home"
+        onNavigate={onNavigate}
+        onWorkspaceChange={vi.fn()}
+        onProductChange={vi.fn()}
+        onLogout={vi.fn()}
+      >
+        <div>Dashboard content</div>
+      </DashboardShell>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Connectors" }));
+
+    expect(onNavigate).toHaveBeenCalledWith("connectors");
+  });
+
+  it("marks the connectors entry current while the connectors view is open", () => {
+    render(
+      <DashboardShell
+        data={dashboardFixture()}
+        view="connectors"
+        onNavigate={vi.fn()}
+        onWorkspaceChange={vi.fn()}
+        onProductChange={vi.fn()}
+        onLogout={vi.fn()}
+      >
+        <div>Dashboard content</div>
+      </DashboardShell>,
+    );
+
+    expect(screen.getByRole("button", { name: "Connectors" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+  });
+
+  it("hides editor-only entries from read-only members", () => {
+    render(
+      <DashboardShell
+        data={dashboardFixture({ currentRole: "member" })}
+        view="home"
+        onNavigate={vi.fn()}
+        onWorkspaceChange={vi.fn()}
+        onProductChange={vi.fn()}
+        onLogout={vi.fn()}
+      >
+        <div>Dashboard content</div>
+      </DashboardShell>,
+    );
+
+    for (const hidden of ["Connectors", "Setup", "Data controls"]) {
+      expect(screen.queryByRole("button", { name: hidden })).not.toBeInTheDocument();
+    }
+    for (const label of ["Home", "Customers", "Responses", "Sessions"]) {
+      expect(screen.getByRole("button", { name: label })).toBeVisible();
     }
   });
 
@@ -32,7 +108,7 @@ describe("DashboardShell", () => {
     render(
       <DashboardShell
         data={data}
-        view="insights"
+        view="home"
         onNavigate={onNavigate}
         onWorkspaceChange={vi.fn()}
         onProductChange={vi.fn()}
@@ -57,7 +133,7 @@ describe("DashboardShell", () => {
     render(
       <DashboardShell
         data={data}
-        view="insights"
+        view="home"
         onNavigate={vi.fn()}
         onWorkspaceChange={vi.fn()}
         onProductChange={vi.fn()}

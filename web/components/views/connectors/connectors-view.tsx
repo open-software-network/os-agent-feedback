@@ -8,7 +8,6 @@ import {
   EmptyState,
   ErrorState,
   NativeSelect,
-  PageHeader,
   Panel,
   StatusMessage,
 } from "@/components/dashboard/view-primitives";
@@ -33,10 +32,7 @@ import { formatDate, isEditor } from "@/lib/dashboard/format";
 
 const PLANNED_CONNECTORS = ["Slack", "Linear", "OS Platform"] as const;
 
-export function ConnectorsView({
-  data,
-  embedded = false,
-}: Pick<ViewBaseProps, "data"> & { embedded?: boolean }) {
+export function ConnectorsView({ data }: Pick<ViewBaseProps, "data">) {
   const [githubExpanded, setGithubExpanded] = useState(true);
   const [mappingExpanded, setMappingExpanded] = useState(false);
   const installationsQuery = useQuery({
@@ -48,14 +44,6 @@ export function ConnectorsView({
 
   return (
     <div className="space-y-6">
-      {!embedded ? (
-        <PageHeader
-          eyebrow="Workspace"
-          title="Connectors"
-          description="Connect Epode to the tools your team uses to act on product feedback."
-        />
-      ) : null}
-
       <div className="space-y-3">
         <Panel>
           <div className="flex flex-wrap items-center justify-between gap-3">

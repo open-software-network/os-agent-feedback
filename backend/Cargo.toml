@@ -11,6 +11,9 @@ axum = "0.8"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
+# Already in the tree via reqwest -> url; taken as a direct dependency so the
+# GitHub install endpoint can read raw query pairs without a serde extractor.
+form_urlencoded = "1"
 hmac = "0.12"
 jsonwebtoken = "9"
 rand = "0.9"
