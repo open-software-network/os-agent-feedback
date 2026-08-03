@@ -100,7 +100,7 @@ export function ResponsesView({
     <div className="flex h-full min-h-0 flex-col bg-background">
       <MetricStrip
         items={[
-          { label: "Questions asked", value: rollup.questions.toLocaleString(), signal: true },
+          { label: "Questions asked", value: rollup.questions.toLocaleString(), accent: true },
           { label: "Answered", value: rollup.answered.toLocaleString() },
           { label: "Awaiting answer", value: rollup.awaitingAnswer.toLocaleString() },
           { label: "Declined", value: rollup.declined.toLocaleString() },

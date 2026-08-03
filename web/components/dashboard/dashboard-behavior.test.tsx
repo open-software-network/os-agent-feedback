@@ -12,7 +12,6 @@ import { PolicyView } from "@/components/views/policy/policy-view";
 import { SessionsView } from "@/components/views/sessions/sessions-view";
 import { SetupView } from "@/components/views/setup/setup-view";
 import { TeamView } from "@/components/views/team/team-view";
-import type { ProductReportGroup } from "@/lib/api/groups";
 
 describe("dashboard view behavior", () => {
   beforeEach(() => {
@@ -720,7 +719,7 @@ describe("dashboard view behavior", () => {
     rendered.unmount();
   });
 
-  it("fetches an interaction outside the dashboard page and links its context", async () => {
+  it("fetches an interaction outside the dashboard page and links its records", async () => {
     const complete = dashboardFixture();
     const interaction = complete.interactions[0];
     const data = dashboardFixture({ interactions: [] });
@@ -852,9 +851,9 @@ describe("dashboard view behavior", () => {
       />,
     );
 
-    expect(screen.getAllByText("Customer context learned").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Customer answers received").length).toBeGreaterThan(0);
     expect(screen.getAllByText("SDK connected").length).toBeGreaterThan(0);
-    expect(screen.getByText(/3 context items are available/)).toBeVisible();
+    expect(screen.getByText(/3 answers are available/)).toBeVisible();
   });
 
   it("keeps product setup connected while a rotated key overlaps its unused successor", () => {
@@ -885,7 +884,7 @@ describe("dashboard view behavior", () => {
       />,
     );
 
-    expect(screen.getAllByText("Customer context learned").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Customer answers received").length).toBeGreaterThan(0);
     expect(screen.getAllByText("SDK connected").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByText("Advanced integration details"));
     expect(screen.getAllByText(/af_live_5678efab/).length).toBeGreaterThan(0);
@@ -895,8 +894,8 @@ describe("dashboard view behavior", () => {
   it.each([
     [0, 0, 0, "Not connected", /Next: deploy the product key/],
     [1, 0, 0, "SDK connected", /company-side connection works/],
-    [1, 1, 0, "Customer context learned", /Context is ready/],
-    [1, 1, 1, "Customer context is ready for personalization", /Setup complete/],
+    [1, 1, 0, "Customer answers received", /Answers are ready/],
+    [1, 1, 1, "Customer answers are ready for personalization", /Setup complete/],
   ] as const)("separates SDK, learning, and retrieval activation at %i/%i/%i", (connected, learned, retrieved, description, nextAction) => {
     const base = dashboardFixture();
     const activationMilestones = base.activationMilestones;
@@ -950,8 +949,8 @@ describe("dashboard view behavior", () => {
 
     expect(screen.getAllByText(description).length).toBeGreaterThan(0);
     expect(screen.getAllByText("SDK connected").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Customer context learned").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Customer context retrieved").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Customer answers received").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Answers retrieved").length).toBeGreaterThan(0);
     expect(screen.getByText(nextAction)).toBeVisible();
   });
 
@@ -987,9 +986,9 @@ describe("dashboard view behavior", () => {
       />,
     );
 
-    expect(screen.getAllByText("Customer context learned").length).toBeGreaterThan(0);
-    expect(screen.getByText(/3 context items are available/i)).toBeVisible();
-    expect(screen.getByText(/Context is ready/i)).toBeVisible();
+    expect(screen.getAllByText("Customer answers received").length).toBeGreaterThan(0);
+    expect(screen.getByText(/3 answers are available/i)).toBeVisible();
+    expect(screen.getByText(/Answers are ready/i)).toBeVisible();
   });
 
   it("does not auto-recreate a removed write key and offers manual recovery", async () => {
@@ -1133,36 +1132,6 @@ describe("dashboard view behavior", () => {
     );
   });
 
-  it("renders editor feedback groups in Signals alongside the report workspace", async () => {
-    const data = dashboardFixture();
-    const group = reportGroup();
-    const fetchMock = feedbackGroupFetch(data, [group]);
-    vi.stubGlobal("fetch", fetchMock);
-
-    renderWithQuery(
-      <FeedbackView
-        data={data}
-        selectedReportId={null}
-        selectReport={vi.fn()}
-        openInteraction={vi.fn()}
-        openSession={vi.fn()}
-        loadMore={vi.fn()}
-        refresh={vi.fn().mockResolvedValue(undefined)}
-        setNotice={vi.fn()}
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
-    expect(await screen.findByText(group.explanation)).toBeVisible();
-    expect(screen.getByText(group.groupKey)).toBeVisible();
-    fireEvent.click(screen.getByRole("tab", { name: "Reports" }));
-    expect(
-      screen.getByRole("row", { name: /Search results omitted the newest document/ }),
-    ).toBeVisible();
-    expect(screen.getByLabelText("Search feedback")).toBeVisible();
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-  });
-
   it("keeps the Feedback list usable when one report has malformed findings", async () => {
     const data = dashboardFixture();
     const malformedReport = {
@@ -1172,7 +1141,7 @@ describe("dashboard view behavior", () => {
       findings: null as never,
     };
     const malformedData = { ...data, reports: [malformedReport, data.reports[0]] };
-    vi.stubGlobal("fetch", feedbackGroupFetch(malformedData));
+    vi.stubGlobal("fetch", feedbackFetch(malformedData));
 
     renderWithQuery(
       <FeedbackView
@@ -1193,9 +1162,6 @@ describe("dashboard view behavior", () => {
     expect(
       screen.getByRole("row", { name: /Search results omitted the newest document/ }),
     ).toBeVisible();
-    fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
-    expect(await screen.findByText("No signals yet")).toBeVisible();
-    fireEvent.click(screen.getByRole("tab", { name: "Reports" }));
     expect(
       await screen.findByRole("row", { name: /Legacy report with malformed findings/ }),
     ).toBeVisible();
@@ -1219,10 +1185,6 @@ describe("dashboard view behavior", () => {
             json({ reports, total: reports.length, limit: 50, nextCursor: null }),
           );
         }
-        if (path.includes("/groups?")) {
-          return Promise.resolve(json({ groups: [], hasMore: false, limit: 50, offset: 0 }));
-        }
-        if (path.endsWith("/github-repo")) return Promise.resolve(json(null));
         throw new Error(`Unexpected request: ${path}`);
       }),
     );
@@ -1240,9 +1202,6 @@ describe("dashboard view behavior", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("tab", { name: "Signals" }));
-    expect(await screen.findByText("No signals yet")).toBeVisible();
-    fireEvent.click(screen.getByRole("tab", { name: "Reports" }));
     fireEvent.click(screen.getByRole("button", { name: /^Filters/ }));
     fireEvent.click(await screen.findByRole("tab", { name: /^Received/ }));
     fireEvent.click(screen.getByRole("button", { name: "Last 7 days" }));
@@ -1373,11 +1332,7 @@ function renderWithQuery(element: ReactElement) {
   return { ...rendered, client };
 }
 
-function feedbackGroupFetch(
-  data: ReturnType<typeof dashboardFixture>,
-  groups: ProductReportGroup[] = [],
-) {
-  const productId = data.currentProduct?.id ?? "";
+function feedbackFetch(data: ReturnType<typeof dashboardFixture>) {
   return vi.fn().mockImplementation((input: RequestInfo | URL) => {
     const path = String(input);
     if (path.startsWith("/api/dashboard/feedback?")) {
@@ -1385,24 +1340,8 @@ function feedbackGroupFetch(
         json({ reports: data.reports, total: data.reports.length, limit: 50, nextCursor: null }),
       );
     }
-    if (path === `/api/products/${productId}/github-repo`) {
-      return Promise.resolve(json(null));
-    }
-    if (path === `/api/products/${productId}/groups?limit=50&offset=0`) {
-      return Promise.resolve(json({ groups, hasMore: false, limit: 50, offset: 0 }));
-    }
     throw new Error(`Unexpected request: ${path}`);
   });
-}
-
-function reportGroup(): ProductReportGroup {
-  return {
-    groupKey: "search:http:bug:freshness:2xx",
-    explanation: "Grouped by operation, surface, finding, and status class.",
-    reportCount: 3,
-    latestOccurredAt: "2026-07-30T12:00:00Z",
-    githubIssue: null,
-  };
 }
 
 function json(body: unknown, status = 200): Response {

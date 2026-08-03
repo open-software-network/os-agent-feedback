@@ -230,7 +230,7 @@ const firstSignal = {
   value: "improve_operations",
   type: "intent",
   summary: "Find the newest indexed policy",
-  detail: "The customer needs current policy context before making a decision.",
+  detail: "The customer needs current policy information before making a decision.",
   provenance: "agent_reports_user_statement",
   confidence: 0.9,
   collectedAt: now,
@@ -928,11 +928,11 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
     "the responses BFF must forward the real browser session cookie",
   );
 
-  await page.click("button[aria-label*='open context menu']");
+  await page.click("button[aria-label*='open product menu']");
   await clickText(page, "Billing API");
   await textVisible(page, "No questions have been asked yet.");
   await textVisible(page, "No customers yet.");
-  await page.click("button[aria-label*='open context menu']");
+  await page.click("button[aria-label*='open product menu']");
   await clickText(page, "Search API");
   await textVisible(page, "What does the user need from search right now?");
 
@@ -944,14 +944,12 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await textVisible(page, "session-42");
 
   await clickText(page, "Customers");
-  await textVisible(page, "Interaction-only context is not a durable customer profile.");
+  await textVisible(page, "Customers stay linked to their sessions");
   await metricVisible(page, "Customers", "1");
   await metricVisible(page, "Known", "1");
   await clickText(page, "Acme workspace");
-  await textVisible(page, "Personalization context");
-  await textVisible(page, "Find the newest indexed policy");
   await textVisible(page, "Permission");
-  await textVisible(page, "Why Epode knows this");
+  await textVisible(page, "Sessions");
   const customerDetail = await fixtureRequest(
     state,
     requestPath(`/api/dashboard/customers/${ids.customerOne}`),
@@ -968,25 +966,26 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
     "BFF must forward the real browser session cookie to its API origin",
   );
 
+  await clickText(page, "Configurations");
   await clickText(page, "Setup");
   await textVisible(page, "Connect Search API");
   await textVisible(page, "Install Epode once in your company's product.");
   await metricVisible(page, "Product key", "Ready");
   await metricVisible(page, "SDK connected", "Complete");
-  await metricVisible(page, "Context items", "1");
-  await metricVisible(page, "Customers with context", "1");
+  await metricVisible(page, "Answers stored", "1");
+  await metricVisible(page, "Customers with answers", "1");
   await metricVisible(page, "Ready customers", "1");
-  await metricVisible(page, "Context retrievals", "2");
+  await metricVisible(page, "Answer retrievals", "2");
   await textVisible(page, "1. Install Epode");
   await textVisible(page, "2. Identify customers when possible");
-  await textVisible(page, "3. Retrieve context and personalize");
+  await textVisible(page, "3. Use answers to personalize");
   await textVisible(
     page,
-    "Setup complete: Epode learned customer context and your product retrieved it.",
+    "Setup complete: Epode received customer answers and your product retrieved them.",
   );
 
   await clickText(page, "Data controls");
-  await textVisible(page, "Allowed customer context");
+  await textVisible(page, "Allowed customer information");
   await textVisible(page, "Product personalization");
   await textVisible(page, "Targeted advertising");
   await textVisible(page, "Data retention");

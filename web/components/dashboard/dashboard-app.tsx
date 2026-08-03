@@ -15,7 +15,6 @@ import {
 } from "@/components/views/configuration/configuration-view";
 import { ConnectorsView } from "@/components/views/connectors/connectors-view";
 import { CustomersView } from "@/components/views/customers/customers-view";
-import { FeaturesView } from "@/components/views/features/features-view";
 import { FeedbackView } from "@/components/views/feedback/feedback-view";
 import { HomeView } from "@/components/views/home/home-view";
 import { InteractionDetail } from "@/components/views/interactions/interaction-detail";
@@ -52,7 +51,6 @@ export function DashboardApp() {
   const [productId, setProductId] = useState("");
   const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
-  const [selectedFeatureKey, setSelectedFeatureKey] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedInteractionId, setSelectedInteractionId] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -116,7 +114,6 @@ export function DashboardApp() {
     setProductId(url.searchParams.get("product") ?? "");
     setSelectedReportId(url.searchParams.get("report"));
     setSelectedCustomerId(url.searchParams.get("customer"));
-    setSelectedFeatureKey(url.searchParams.get("feature"));
     setSelectedSessionId(url.searchParams.get("session"));
     setSelectedInteractionId(url.searchParams.get("interaction"));
   }, [showNotice]);
@@ -171,7 +168,6 @@ export function DashboardApp() {
     setProductId("");
     setSelectedReportId(null);
     setSelectedCustomerId(null);
-    setSelectedFeatureKey(null);
     setSelectedSessionId(null);
     setSelectedInteractionId(null);
   }, [dashboardQuery.error, workspaceId]);
@@ -205,7 +201,6 @@ export function DashboardApp() {
     setOrDelete(url, "product", productId);
     setOrDelete(url, "report", selectedReportId);
     setOrDelete(url, "customer", selectedCustomerId);
-    setOrDelete(url, "feature", selectedFeatureKey);
     setOrDelete(url, "session", selectedSessionId);
     setOrDelete(url, "interaction", selectedInteractionId);
     if (historyMode.current === "push") window.history.pushState({}, "", url);
@@ -216,7 +211,6 @@ export function DashboardApp() {
     ready,
     selectedInteractionId,
     selectedCustomerId,
-    selectedFeatureKey,
     selectedReportId,
     selectedSessionId,
     view,
@@ -259,7 +253,6 @@ export function DashboardApp() {
   function clearSelection() {
     setSelectedReportId(null);
     setSelectedCustomerId(null);
-    setSelectedFeatureKey(null);
     setSelectedSessionId(null);
     setSelectedInteractionId(null);
   }
@@ -270,7 +263,6 @@ export function DashboardApp() {
     setView(nextView);
     if (nextView !== "feedback") setSelectedReportId(null);
     if (nextView !== "customers") setSelectedCustomerId(null);
-    if (nextView !== "features") setSelectedFeatureKey(null);
     if (nextView !== "sessions") setSelectedSessionId(null);
     if (nextView !== "interactions") setSelectedInteractionId(null);
   }
@@ -281,7 +273,6 @@ export function DashboardApp() {
     setSelectedSessionId(null);
     setSelectedInteractionId(null);
     setSelectedCustomerId(null);
-    setSelectedFeatureKey(null);
     setSelectedReportId(reportId);
     setView("feedback");
   }
@@ -290,22 +281,10 @@ export function DashboardApp() {
     setNotice(null);
     historyMode.current = "push";
     setSelectedReportId(null);
-    setSelectedFeatureKey(null);
     setSelectedSessionId(null);
     setSelectedInteractionId(null);
     setSelectedCustomerId(customerId);
     setView("customers");
-  }
-
-  function openFeature(featureKey: string) {
-    setNotice(null);
-    historyMode.current = "push";
-    setSelectedReportId(null);
-    setSelectedCustomerId(null);
-    setSelectedSessionId(null);
-    setSelectedInteractionId(null);
-    setSelectedFeatureKey(featureKey);
-    setView("features");
   }
 
   function openSession(sessionId: string) {
@@ -314,7 +293,6 @@ export function DashboardApp() {
     setSelectedReportId(null);
     setSelectedInteractionId(null);
     setSelectedCustomerId(null);
-    setSelectedFeatureKey(null);
     setSelectedSessionId(sessionId);
     setView("sessions");
   }
@@ -325,7 +303,6 @@ export function DashboardApp() {
     setSelectedReportId(null);
     setSelectedSessionId(null);
     setSelectedCustomerId(null);
-    setSelectedFeatureKey(null);
     setSelectedInteractionId(interactionId);
     setView("interactions");
   }
@@ -373,7 +350,6 @@ export function DashboardApp() {
     view === "feedback" ||
     view === "customers" ||
     view === "responses" ||
-    view === "features" ||
     view === "sessions";
 
   return (
@@ -406,7 +382,7 @@ export function DashboardApp() {
 
   function configurationPage(
     currentData: DashboardData,
-    section: "configuration" | "connectors" | "team",
+    section: "setup" | "configuration" | "connectors" | "team" | "policy",
     content: ReactNode,
   ) {
     return (
@@ -477,9 +453,6 @@ export function DashboardApp() {
               historyMode.current = "push";
               setSelectedCustomerId(customerId);
             }}
-            openFeature={openFeature}
-            openFeedback={openFeedback}
-            openInteraction={openInteraction}
             openSession={openSession}
             refresh={refresh}
           />
@@ -487,24 +460,6 @@ export function DashboardApp() {
       case "responses":
         return (
           <ResponsesView data={currentData} openCustomer={openCustomer} openSession={openSession} />
-        );
-      case "features":
-        return (
-          <FeaturesView
-            data={currentData}
-            selectedFeatureKey={selectedFeatureKey}
-            selectFeature={(featureKey) => {
-              setNotice(null);
-              historyMode.current = "push";
-              setSelectedFeatureKey(featureKey);
-            }}
-            openCustomer={openCustomer}
-            openFeedback={openFeedback}
-            openInteraction={openInteraction}
-            openSession={openSession}
-            refresh={refresh}
-            setNotice={showNotice}
-          />
         );
       case "sessions":
         return (
@@ -517,29 +472,27 @@ export function DashboardApp() {
               setSelectedSessionId(sessionId);
             }}
             openFeedback={openFeedback}
-            openCustomer={openCustomer}
-            openFeature={openFeature}
             openInteraction={openInteraction}
             refresh={refresh}
           />
         );
       case "setup":
-        return (
-          <div className="mx-auto w-full max-w-6xl">
-            <SetupView
-              data={currentData}
-              secrets={secrets}
-              rememberSecret={rememberSecret}
-              refresh={refresh}
-              setNotice={showNotice}
-            />
-          </div>
+        return configurationPage(
+          currentData,
+          "setup",
+          <SetupView
+            data={currentData}
+            secrets={secrets}
+            rememberSecret={rememberSecret}
+            refresh={refresh}
+            setNotice={showNotice}
+          />,
         );
       case "policy":
-        return (
-          <div className="mx-auto w-full max-w-6xl">
-            <PolicyView data={currentData} refresh={refresh} setNotice={showNotice} />
-          </div>
+        return configurationPage(
+          currentData,
+          "policy",
+          <PolicyView data={currentData} refresh={refresh} setNotice={showNotice} />,
         );
       case "connectors":
         return isEditor(currentData.currentRole) ? (
@@ -548,7 +501,6 @@ export function DashboardApp() {
           <HomeView
             data={currentData}
             openCustomer={openCustomer}
-            openFeature={openFeature}
             openFeedback={openFeedback}
             openSession={openSession}
             refresh={refresh}
@@ -586,7 +538,6 @@ export function DashboardApp() {
           <HomeView
             data={currentData}
             openCustomer={openCustomer}
-            openFeature={openFeature}
             openFeedback={openFeedback}
             openSession={openSession}
             refresh={refresh}

@@ -29,7 +29,7 @@ describe("dashboard data flow", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
-    for (const view of ["Home", "Customers", "Responses", "Sessions", "Setup", "Data controls"]) {
+    for (const view of ["Home", "Customers", "Responses", "Sessions", "Configurations"]) {
       expect(screen.getByRole("button", { name: view })).toBeVisible();
     }
     expect(fetchMock).toHaveBeenCalledWith(
@@ -177,6 +177,7 @@ describe("dashboard data flow", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Configurations" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Setup" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Data controls" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Connectors" })).not.toBeInTheDocument();
@@ -186,9 +187,9 @@ describe("dashboard data flow", () => {
       fetchMock.mock.calls.some(([input]) => String(input) === "/api/github/installations"),
     ).toBe(false);
 
-    fireEvent.click(screen.getByRole("button", { name: /Owner User/ }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Configuration" }));
-    expect(await screen.findByRole("heading", { name: "Product" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Configurations" }));
+    expect(await screen.findByRole("heading", { name: "Configurations" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Product details" })).toBeVisible();
     expect(screen.getByRole("tab", { name: "Team" })).toBeVisible();
     expect(screen.queryByRole("tab", { name: "Setup" })).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Collection" })).not.toBeInTheDocument();
@@ -218,7 +219,10 @@ describe("dashboard data flow", () => {
       </Providers>,
     );
 
-    expect(await screen.findByRole("heading", { name: "Connectors" })).toBeVisible();
+    expect(await screen.findByRole("tab", { name: "Connectors" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
     expect(await screen.findByText(message)).toHaveAttribute("role", role);
     expect(window.location.search).not.toContain("github=");
   });
@@ -245,11 +249,13 @@ describe("dashboard data flow", () => {
     expect(await screen.findByText(message)).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Home" }));
     expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: /Owner User/ }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Configuration" }));
+    fireEvent.click(screen.getByRole("button", { name: "Configurations" }));
     fireEvent.click(await screen.findByRole("tab", { name: "Connectors" }));
 
-    expect(await screen.findByRole("heading", { name: "Connectors" })).toBeVisible();
+    expect(await screen.findByRole("tab", { name: "Connectors" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
     expect(screen.queryByText(message)).not.toBeInTheDocument();
   });
 
@@ -295,7 +301,7 @@ describe("dashboard data flow", () => {
     expect(message).not.toBeInTheDocument();
   });
 
-  it("opens Setup and Data controls as first-class product screens", async () => {
+  it("opens Setup and Data controls as tabs within Configurations", async () => {
     window.history.replaceState({}, "", "/?view=policy");
     vi.stubGlobal(
       "fetch",
@@ -311,12 +317,23 @@ describe("dashboard data flow", () => {
     expect(
       (await screen.findAllByRole("heading", { name: "Data controls" })).length,
     ).toBeGreaterThan(0);
-    expect(screen.getByRole("button", { name: "Data controls" })).toHaveAttribute(
+    expect(screen.getByRole("button", { name: "Configurations" })).toHaveAttribute(
       "aria-current",
       "page",
     );
-    fireEvent.click(screen.getByRole("button", { name: "Setup" }));
-    expect((await screen.findAllByRole("heading", { name: "Setup" })).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+      "Setup",
+      "Product",
+      "Connectors",
+      "Team",
+      "Data controls",
+    ]);
+    expect(screen.getByRole("tab", { name: "Data controls" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Setup" }));
+    expect(await screen.findByRole("heading", { name: "Connect Search API" })).toBeVisible();
     expect(new URL(window.location.href).searchParams.get("view")).toBe("setup");
   });
 
@@ -340,9 +357,9 @@ describe("dashboard data flow", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: /Owner User/ }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Configuration" }));
-    expect(await screen.findByRole("heading", { name: "Product" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Configurations" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Product" }));
+    expect(await screen.findByRole("heading", { name: "Product details" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Rename" }));
     fireEvent.change(screen.getByLabelText("New name"), { target: { value: "Search API 2" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));

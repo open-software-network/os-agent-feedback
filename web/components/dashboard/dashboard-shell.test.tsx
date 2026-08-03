@@ -19,17 +19,18 @@ describe("DashboardShell", () => {
       </DashboardShell>,
     );
 
-    const labels = [
-      "Home",
-      "Customers",
-      "Responses",
-      "Sessions",
+    const labels = ["Home", "Customers", "Responses", "Sessions", "Configurations"];
+    for (const label of labels) expect(screen.getByRole("button", { name: label })).toBeVisible();
+    for (const hidden of [
+      "Insights",
+      "Signals",
+      "Interactions",
+      "Contexts",
+      "Evidences",
       "Setup",
       "Connectors",
       "Data controls",
-    ];
-    for (const label of labels) expect(screen.getByRole("button", { name: label })).toBeVisible();
-    for (const hidden of ["Insights", "Signals", "Interactions", "Contexts", "Evidences"]) {
+    ]) {
       expect(screen.queryByRole("button", { name: hidden })).not.toBeInTheDocument();
     }
 
@@ -40,7 +41,7 @@ describe("DashboardShell", () => {
     expect(coreLabels).toEqual(["Home", "Customers", "Responses", "Sessions"]);
   });
 
-  it("navigates to connectors from the sidebar", () => {
+  it("opens Setup from the Configurations sidebar entry for editors", () => {
     const onNavigate = vi.fn();
     render(
       <DashboardShell
@@ -55,12 +56,12 @@ describe("DashboardShell", () => {
       </DashboardShell>,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Connectors" }));
+    fireEvent.click(screen.getByRole("button", { name: "Configurations" }));
 
-    expect(onNavigate).toHaveBeenCalledWith("connectors");
+    expect(onNavigate).toHaveBeenCalledWith("setup");
   });
 
-  it("marks the connectors entry current while the connectors view is open", () => {
+  it("marks Configurations current while a configuration tab is open", () => {
     render(
       <DashboardShell
         data={dashboardFixture()}
@@ -74,18 +75,19 @@ describe("DashboardShell", () => {
       </DashboardShell>,
     );
 
-    expect(screen.getByRole("button", { name: "Connectors" })).toHaveAttribute(
+    expect(screen.getByRole("button", { name: "Configurations" })).toHaveAttribute(
       "aria-current",
       "page",
     );
   });
 
-  it("hides editor-only entries from read-only members", () => {
+  it("routes members to the read-only Product configuration tab", () => {
+    const onNavigate = vi.fn();
     render(
       <DashboardShell
         data={dashboardFixture({ currentRole: "member" })}
         view="home"
-        onNavigate={vi.fn()}
+        onNavigate={onNavigate}
         onWorkspaceChange={vi.fn()}
         onProductChange={vi.fn()}
         onLogout={vi.fn()}
@@ -97,12 +99,14 @@ describe("DashboardShell", () => {
     for (const hidden of ["Connectors", "Setup", "Data controls"]) {
       expect(screen.queryByRole("button", { name: hidden })).not.toBeInTheDocument();
     }
-    for (const label of ["Home", "Customers", "Responses", "Sessions"]) {
+    for (const label of ["Home", "Customers", "Responses", "Sessions", "Configurations"]) {
       expect(screen.getByRole("button", { name: label })).toBeVisible();
     }
+    fireEvent.click(screen.getByRole("button", { name: "Configurations" }));
+    expect(onNavigate).toHaveBeenCalledWith("configuration");
   });
 
-  it("offers product creation from the context switcher even with one product", async () => {
+  it("offers product creation from the product menu even with one product", async () => {
     const data = dashboardFixture();
     const onNavigate = vi.fn();
     render(
@@ -120,7 +124,7 @@ describe("DashboardShell", () => {
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: `${data.currentProduct?.name}, ${data.workspace.name} - open context menu`,
+        name: `${data.currentProduct?.name}, ${data.workspace.name} - open product menu`,
       }),
     );
     fireEvent.click(await screen.findByRole("menuitem", { name: "New product" }));
@@ -143,6 +147,6 @@ describe("DashboardShell", () => {
       </DashboardShell>,
     );
 
-    expect(screen.queryByRole("button", { name: /open context menu/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /open product menu/i })).not.toBeInTheDocument();
   });
 });

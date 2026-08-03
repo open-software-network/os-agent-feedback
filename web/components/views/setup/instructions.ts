@@ -1,7 +1,7 @@
 export const SETUP_SURFACES = {
   api: {
     name: "HTTP API",
-    description: "Add permissioned customer-context requests to selected JSON responses.",
+    description: "Add permissioned customer-answer requests to selected JSON responses.",
     stacks: ["node-express", "node-fastify"],
   },
   website: {
@@ -12,7 +12,7 @@ export const SETUP_SURFACES = {
   mcp: {
     name: "MCP server",
     description:
-      "Register company-owned permission and context tools beside selected product tools.",
+      "Register company-owned permission and answer tools beside selected product tools.",
     stacks: ["node-mcp"],
   },
 } as const;
@@ -108,7 +108,7 @@ const customer = epode({
 customer.instrument(server);
 // Register selected product tools after instrumenting the server.`,
     verify:
-      "Call a selected product tool from a real MCP client and confirm the result contains _epode.customerContext and the company-owned consent/context tools.",
+      "Call a selected product tool from a real MCP client and confirm the result contains _epode.customerContext and the company-owned permission tools.",
   };
 }
 
@@ -122,7 +122,7 @@ export function setupAgentPrompt(
     surface === "mcp"
       ? "Keep includeTools limited to customer-facing product tools."
       : "Keep include limited to customer-facing product routes.";
-  return `Install Epode's company-side customer-context integration in this repository.
+  return `Install Epode's company-side customer-answer integration in this repository.
 
 Surface: ${SETUP_SURFACES[surface].name}
 Stack: ${stackName(stack)}
@@ -133,7 +133,7 @@ Requirements:
 - Run existing product authentication before Epode. accountRef and userRef may come only from verified server state; anonymousRef may come only from a product-owned first-party visitor ID.
 - ${boundary}
 - Keep the original product result and error behavior intact.
-- Do not invent customer identity, permission, context, or a successful verification.
+- Do not invent customer identity, permission, answers, or a successful verification.
 
 Reference integration:
 

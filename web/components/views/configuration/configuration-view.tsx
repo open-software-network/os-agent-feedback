@@ -1,19 +1,23 @@
 "use client";
 
 import type { ReactNode } from "react";
-import type { DashboardView } from "@/components/dashboard/types";
+import { DASHBOARD_CONFIGURATION_VIEWS, type DashboardView } from "@/components/dashboard/types";
 import { Panel } from "@/components/dashboard/view-primitives";
 import { Tabs, TabsList, TabsPanel, TabsTab } from "@/components/ui/tabs";
 import type { DashboardData } from "@/lib/api/dashboard";
 import { titleCase } from "@/lib/dashboard/format";
 
-export type ConfigurationSection = "configuration" | "connectors" | "team";
+export type ConfigurationSection = (typeof DASHBOARD_CONFIGURATION_VIEWS)[number];
 
 const sectionContent: Record<ConfigurationSection, { label: string }> = {
+  setup: { label: "Setup" },
   configuration: { label: "Product" },
   connectors: { label: "Connectors" },
   team: { label: "Team" },
+  policy: { label: "Data controls" },
 };
+
+const MEMBER_CONFIGURATION_VIEWS: readonly ConfigurationSection[] = ["configuration", "team"];
 
 export function ConfigurationView({
   data,
@@ -27,9 +31,7 @@ export function ConfigurationView({
   children: ReactNode;
 }) {
   const editor = data.currentRole === "owner" || data.currentRole === "admin";
-  const sections: ConfigurationSection[] = editor
-    ? ["configuration", "connectors", "team"]
-    : ["configuration", "team"];
+  const sections = editor ? DASHBOARD_CONFIGURATION_VIEWS : MEMBER_CONFIGURATION_VIEWS;
   return (
     <div className="flex size-full min-h-0 flex-col bg-canvas">
       <Tabs

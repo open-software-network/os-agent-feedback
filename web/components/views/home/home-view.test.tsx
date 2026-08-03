@@ -80,7 +80,6 @@ function renderHome(
         data={data}
         openCustomer={vi.fn()}
         openSession={vi.fn()}
-        openFeature={vi.fn()}
         openFeedback={vi.fn()}
         refresh={vi.fn().mockResolvedValue(undefined)}
         {...overrides}

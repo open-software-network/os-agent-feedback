@@ -169,7 +169,7 @@ export function FeedbackFilters({
           </InputGroupAddon>
           <InputGroupInput
             aria-label="Search feedback"
-            placeholder="Search feedback, evidence, operation, or customer"
+            placeholder="Search feedback, operation, or customer"
             value={query}
             onChange={(event) => onQueryChange(event.target.value)}
           />

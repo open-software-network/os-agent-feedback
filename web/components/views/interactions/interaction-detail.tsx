@@ -80,7 +80,7 @@ export function InteractionDetail({
         </dl>
       </Panel>
 
-      <Panel title="Evidence">
+      <Panel title="Verification">
         <dl className="grid gap-4 text-sm sm:grid-cols-2">
           <Property label="Classification" value={titleCase(interaction.classification)} />
           <Property
@@ -119,7 +119,7 @@ export function InteractionDetail({
       </Panel>
 
       {session ? (
-        <Panel title="Session context">
+        <Panel title="Session">
           <p className="text-sm leading-6">
             This interaction belongs to a continuity group supplied by{" "}
             {interfaceLabel(session.source)}.

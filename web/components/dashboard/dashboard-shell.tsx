@@ -3,11 +3,9 @@
 import { IconChatBubbles } from "central-icons/IconChatBubbles";
 import { IconChevronGrabberVertical } from "central-icons/IconChevronGrabberVertical";
 import { IconClock9OClock } from "central-icons/IconClock9OClock";
-import { IconConnectors1 } from "central-icons/IconConnectors1";
 import { IconHome } from "central-icons/IconHome";
 import { IconPeople } from "central-icons/IconPeople";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
-import { IconShieldCheck } from "central-icons/IconShieldCheck";
 import type { ComponentType, CSSProperties, ReactNode } from "react";
 import { PageHeader } from "@/components/dashboard/page-header";
 import { EpodeMark } from "@/components/epode-mark";
@@ -41,7 +39,7 @@ import {
 import type { DashboardData } from "@/lib/api/dashboard";
 import { cn } from "@/lib/utils";
 
-import type { DashboardView } from "./types";
+import { DASHBOARD_CONFIGURATION_VIEWS, type DashboardView } from "./types";
 
 type NavigationIcon = ComponentType<{
   className?: string;
@@ -77,18 +75,12 @@ const navigation: Array<{
   },
   {
     view: "setup",
-    label: "Setup",
+    label: "Configurations",
     icon: IconSettingsGear4,
   },
-  {
-    view: "connectors",
-    label: "Connectors",
-    icon: IconConnectors1,
-  },
-  { view: "policy", label: "Data controls", icon: IconShieldCheck },
 ];
 
-const EDITOR_ONLY_VIEWS: ReadonlySet<DashboardView> = new Set(["setup", "connectors", "policy"]);
+const CONFIGURATION_VIEWS: ReadonlySet<DashboardView> = new Set(DASHBOARD_CONFIGURATION_VIEWS);
 
 function initials(value: string) {
   return value
@@ -119,22 +111,22 @@ function AppSidebar({
   const productName = data.currentProduct?.name ?? "No product selected";
   const userInitials = initials(data.user.displayName) || "OS";
   const canCreateProduct = data.currentRole === "owner" || data.currentRole === "admin";
-  const canOpenContext =
+  const canOpenProductMenu =
     canCreateProduct || data.workspaceMemberships.length > 1 || data.products.length > 1;
 
-  function contextChanged(change: () => void) {
+  function productSelectionChanged(change: () => void) {
     change();
     if (isMobile) setOpenMobile(false);
   }
 
-  const contextIdentity = (
+  const productIdentity = (
     <>
       <EpodeMark />
       <div className="grid min-w-0 flex-1 text-left leading-tight">
         <span className="truncate text-sm font-medium">{productName}</span>
         <span className="truncate text-xs text-muted-foreground">{data.workspace.name}</span>
       </div>
-      {canOpenContext ? (
+      {canOpenProductMenu ? (
         <IconChevronGrabberVertical className="shrink-0 text-muted-foreground" />
       ) : null}
     </>
@@ -144,15 +136,15 @@ function AppSidebar({
     <Sidebar collapsible="icon" className="border-r-0">
       <SidebarHeader className="h-12 shrink-0 justify-center border-b px-2 py-0">
         <div className="relative flex h-7 items-center">
-          {canOpenContext ? (
+          {canOpenProductMenu ? (
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={
                   <button
                     type="button"
-                    aria-label={`${productName}, ${data.workspace.name} - open context menu`}
+                    aria-label={`${productName}, ${data.workspace.name} - open product menu`}
                     className={cn(
-                      "group/context mr-10 flex min-w-0 flex-1 items-center gap-2 overflow-hidden rounded-md px-1 py-1 text-left transition-[opacity,transform,background-color] duration-150 ease-out hover:bg-sidebar-accent data-popup-open:bg-sidebar-accent motion-reduce:transition-none",
+                      "group/product-menu mr-10 flex min-w-0 flex-1 items-center gap-2 overflow-hidden rounded-md px-1 py-1 text-left transition-[opacity,transform,background-color] duration-150 ease-out hover:bg-sidebar-accent data-popup-open:bg-sidebar-accent motion-reduce:transition-none",
                       isCollapsed
                         ? "pointer-events-none -translate-x-1 opacity-0"
                         : "translate-x-0 opacity-100",
@@ -160,7 +152,7 @@ function AppSidebar({
                   />
                 }
               >
-                {contextIdentity}
+                {productIdentity}
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" sideOffset={6} className="min-w-52">
                 {data.workspaceMemberships.length > 1 ? (
@@ -168,7 +160,9 @@ function AppSidebar({
                     <DropdownMenuLabel>Team</DropdownMenuLabel>
                     <DropdownMenuRadioGroup
                       value={data.workspace.id}
-                      onValueChange={(value) => contextChanged(() => onWorkspaceChange(value))}
+                      onValueChange={(value) =>
+                        productSelectionChanged(() => onWorkspaceChange(value))
+                      }
                     >
                       {data.workspaceMemberships.map((membership) => (
                         <DropdownMenuRadioItem
@@ -187,7 +181,9 @@ function AppSidebar({
                   {data.products.length ? (
                     <DropdownMenuRadioGroup
                       value={data.currentProduct?.id ?? ""}
-                      onValueChange={(value) => contextChanged(() => onProductChange(value))}
+                      onValueChange={(value) =>
+                        productSelectionChanged(() => onProductChange(value))
+                      }
                     >
                       {data.products.map((product) => (
                         <DropdownMenuRadioItem key={product.id} value={product.id}>
@@ -203,7 +199,7 @@ function AppSidebar({
                   <>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem
-                      onClick={() => contextChanged(() => onNavigate("configuration"))}
+                      onClick={() => productSelectionChanged(() => onNavigate("configuration"))}
                     >
                       New product
                     </DropdownMenuItem>
@@ -220,7 +216,7 @@ function AppSidebar({
                   : "translate-x-0 opacity-100",
               )}
             >
-              {contextIdentity}
+              {productIdentity}
             </div>
           )}
           <SidebarCollapseTrigger />
@@ -231,30 +227,30 @@ function AppSidebar({
         <SidebarGroup>
           <SidebarGroupContent>
             <SidebarMenu>
-              {navigation
-                .filter((item) => canCreateProduct || !EDITOR_ONLY_VIEWS.has(item.view))
-                .map((item) => {
-                  const active =
-                    view === item.view ||
-                    (item.view === "customers" && view === "features") ||
-                    (item.view === "responses" && view === "feedback") ||
-                    (item.view === "sessions" && view === "interactions");
-                  return (
-                    <SidebarMenuItem key={item.view}>
-                      <SidebarMenuButton
-                        type="button"
-                        isActive={active}
-                        tooltip={item.label}
-                        aria-current={active ? "page" : undefined}
-                        onClick={() => onNavigate(item.view)}
-                        className="data-active:shadow-[inset_2px_0_0_var(--attention)]"
-                      >
-                        <item.icon />
-                        <span>{item.label}</span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  );
-                })}
+              {navigation.map((item) => {
+                const active =
+                  view === item.view ||
+                  (item.view === "setup" && CONFIGURATION_VIEWS.has(view)) ||
+                  (item.view === "responses" && view === "feedback") ||
+                  (item.view === "sessions" && view === "interactions");
+                const destination =
+                  item.view === "setup" && !canCreateProduct ? "configuration" : item.view;
+                return (
+                  <SidebarMenuItem key={item.view}>
+                    <SidebarMenuButton
+                      type="button"
+                      isActive={active}
+                      tooltip={item.label}
+                      aria-current={active ? "page" : undefined}
+                      onClick={() => onNavigate(destination)}
+                      className="data-active:shadow-[inset_2px_0_0_var(--attention)]"
+                    >
+                      <item.icon />
+                      <span>{item.label}</span>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                );
+              })}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
@@ -286,9 +282,11 @@ function AppSidebar({
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
                 <DropdownMenuGroup>
-                  <DropdownMenuItem onClick={() => onNavigate("configuration")}>
+                  <DropdownMenuItem
+                    onClick={() => onNavigate(canCreateProduct ? "setup" : "configuration")}
+                  >
                     <IconSettingsGear4 />
-                    Configuration
+                    Configurations
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={onLogout}>Sign out</DropdownMenuItem>
                 </DropdownMenuGroup>
@@ -323,14 +321,13 @@ export function DashboardShell({
     home: "Home",
     customers: "Customers",
     responses: "Responses",
-    features: "Features",
-    feedback: "Evidence",
+    feedback: "Response",
     sessions: "Sessions",
-    configuration: "Product",
-    setup: "Setup",
-    policy: "Collection",
-    connectors: "Connectors",
-    team: "Team",
+    configuration: "Configurations",
+    setup: "Configurations",
+    policy: "Configurations",
+    connectors: "Configurations",
+    team: "Configurations",
     interactions: "Interaction",
   };
 
