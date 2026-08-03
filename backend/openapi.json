@@ -6756,7 +6756,8 @@
         "type": "object",
         "required": [
           "file",
-          "match_reason"
+          "match_reason",
+          "verified"
         ],
         "properties": {
           "file": {
@@ -6780,6 +6781,10 @@
           },
           "match_reason": {
             "type": "string"
+          },
+          "verified": {
+            "type": "boolean",
+            "description": "Whether the hint was verified against `computed_at_sha`. Hints stored\nbefore this field existed are read as unverified."
           }
         }
       },

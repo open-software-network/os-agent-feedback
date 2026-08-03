@@ -18,6 +18,9 @@ pub(crate) struct CodeHintResponse {
     pub line_start: Option<u32>,
     pub line_end: Option<u32>,
     pub match_reason: String,
+    /// Whether the hint was verified against `computed_at_sha`. Hints stored
+    /// before this field existed are read as unverified.
+    pub verified: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

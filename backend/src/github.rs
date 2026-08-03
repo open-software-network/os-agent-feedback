@@ -14,7 +14,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
-use crate::code_match::CodeSearchCandidate;
+use crate::code_match::{CodeSearchCandidate, CodeSearchVerification};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -157,17 +157,84 @@ impl GithubCodeSearchCandidate {
         self.text_match.is_some()
     }
 
-    pub(crate) fn into_resolved(self, content: Option<&str>) -> CodeSearchCandidate {
-        let range = content.and_then(|content| {
-            self.text_match
-                .as_ref()
-                .and_then(|text_match| locate_text_match(content, text_match))
-        });
-        CodeSearchCandidate {
+    pub(crate) fn verify_against_pinned_content(
+        self,
+        content: &str,
+    ) -> Option<CodeSearchCandidate> {
+        let range = if let Some(text_match) = self.text_match.as_ref() {
+            if !content_contains_fragment(content, &text_match.fragment) {
+                return None;
+            }
+            locate_text_match(content, text_match)
+        } else {
+            None
+        };
+        Some(CodeSearchCandidate {
             file: self.file,
             line_start: range.map(|range| range.0),
             line_end: range.map(|range| range.1),
+            verification: CodeSearchVerification::Verified,
+        })
+    }
+
+    pub(crate) fn into_unverified(self) -> CodeSearchCandidate {
+        CodeSearchCandidate {
+            file: self.file,
+            line_start: None,
+            line_end: None,
+            verification: CodeSearchVerification::Unverified,
         }
+    }
+
+    pub(crate) fn into_file_not_found(self) -> CodeSearchCandidate {
+        CodeSearchCandidate {
+            file: self.file,
+            line_start: None,
+            line_end: None,
+            verification: CodeSearchVerification::FileNotFound,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GithubFileContentFailureKind {
+    NotFound,
+    Unauthorized,
+    Forbidden,
+    Server,
+    Timeout,
+    InvalidResponse,
+    Transport,
+}
+
+#[derive(Debug)]
+pub(crate) struct GithubFileContentError {
+    kind: GithubFileContentFailureKind,
+    source: anyhow::Error,
+}
+
+impl GithubFileContentError {
+    fn from_source(source: anyhow::Error) -> Self {
+        Self {
+            kind: github_file_content_failure_kind(&source),
+            source,
+        }
+    }
+
+    pub(crate) const fn kind(&self) -> GithubFileContentFailureKind {
+        self.kind
+    }
+}
+
+impl fmt::Display for GithubFileContentError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for GithubFileContentError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
     }
 }
 
@@ -396,6 +463,23 @@ fn issue_list_failure_kind(
         Some(_) => GithubIssueListFailureKind::Access,
         None if is_timeout => GithubIssueListFailureKind::Timeout,
         None => GithubIssueListFailureKind::Transport,
+    }
+}
+
+fn github_file_content_failure_kind(error: &anyhow::Error) -> GithubFileContentFailureKind {
+    let Some(request_error) = error.downcast_ref::<reqwest::Error>() else {
+        // Size-limit, UTF-8, and local validation failures have no HTTP
+        // status and therefore can never prove absence at the pinned SHA.
+        return GithubFileContentFailureKind::InvalidResponse;
+    };
+    match request_error.status() {
+        Some(reqwest::StatusCode::NOT_FOUND) => GithubFileContentFailureKind::NotFound,
+        Some(reqwest::StatusCode::UNAUTHORIZED) => GithubFileContentFailureKind::Unauthorized,
+        Some(reqwest::StatusCode::FORBIDDEN) => GithubFileContentFailureKind::Forbidden,
+        Some(status) if status.is_server_error() => GithubFileContentFailureKind::Server,
+        Some(_) => GithubFileContentFailureKind::InvalidResponse,
+        None if request_error.is_timeout() => GithubFileContentFailureKind::Timeout,
+        None => GithubFileContentFailureKind::Transport,
     }
 }
 
@@ -843,6 +927,18 @@ impl GithubAppClient {
         repo_full_name: &str,
         path: &str,
         sha: &str,
+    ) -> Result<String, GithubFileContentError> {
+        self.repository_file_content_untyped(token, repo_full_name, path, sha)
+            .await
+            .map_err(GithubFileContentError::from_source)
+    }
+
+    async fn repository_file_content_untyped(
+        &self,
+        token: &GithubInstallationToken,
+        repo_full_name: &str,
+        path: &str,
+        sha: &str,
     ) -> anyhow::Result<String> {
         validate_repo_full_name(repo_full_name)?;
         anyhow::ensure!(valid_git_sha(sha), "GitHub repository file SHA was invalid");
@@ -1057,6 +1153,23 @@ fn locate_text_match(content: &str, text_match: &CodeSearchTextMatch) -> Option<
     let final_character_offset = content[..end_offset].char_indices().next_back()?.0;
     let line_end = line_number_at(content, final_character_offset)?;
     Some((line_start, line_end.max(line_start)))
+}
+
+fn content_contains_fragment(content: &str, fragment: &str) -> bool {
+    if fragment.is_empty() {
+        return false;
+    }
+    if content.contains(fragment) {
+        return true;
+    }
+    if !content.contains('\r') && !fragment.contains('\r') {
+        return false;
+    }
+    normalize_line_endings(content).contains(&normalize_line_endings(fragment))
+}
+
+fn normalize_line_endings(value: &str) -> String {
+    value.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn character_offset(value: &str, character: usize) -> Option<usize> {
@@ -1469,29 +1582,31 @@ mod tests {
         let content = "use sqlx::PgPool;\n\npub async fn submit_product_feedback(\n    pool: &PgPool,\n) {}\n";
 
         assert_eq!(
-            candidates[0].clone().into_resolved(Some(content)),
-            CodeSearchCandidate {
+            candidates[0].clone().verify_against_pinned_content(content),
+            Some(CodeSearchCandidate {
                 file: "backend/src/store.rs".to_owned(),
                 line_start: Some(3),
                 line_end: Some(3),
-            }
+                verification: CodeSearchVerification::Verified,
+            })
         );
         Ok(())
     }
 
     #[test]
-    fn unresolved_or_ambiguous_text_matches_have_no_fabricated_range() {
+    fn no_fragment_is_unverified_and_ambiguous_fragment_is_verified_without_a_range() {
         assert_eq!(
             code_search_candidates(CodeSearchItem {
                 path: "src/fallback.rs".to_owned(),
                 text_matches: Vec::new(),
             })[0]
                 .clone()
-                .into_resolved(None),
+                .into_unverified(),
             CodeSearchCandidate {
                 file: "src/fallback.rs".to_owned(),
                 line_start: None,
                 line_end: None,
+                verification: CodeSearchVerification::Unverified,
             }
         );
         let duplicate = GithubCodeSearchCandidate {
@@ -1502,12 +1617,13 @@ mod tests {
             }),
         };
         assert_eq!(
-            duplicate.into_resolved(Some("needle\nneedle\n")),
-            CodeSearchCandidate {
+            duplicate.verify_against_pinned_content("needle\nneedle\n"),
+            Some(CodeSearchCandidate {
                 file: "src/duplicate.rs".to_owned(),
                 line_start: None,
                 line_end: None,
-            }
+                verification: CodeSearchVerification::Verified,
+            })
         );
     }
 
@@ -1522,13 +1638,83 @@ mod tests {
         };
 
         assert_eq!(
-            candidate.into_resolved(Some("// unicode\nfn café_lookup() {}\n")),
-            CodeSearchCandidate {
+            candidate.verify_against_pinned_content("// unicode\nfn café_lookup() {}\n"),
+            Some(CodeSearchCandidate {
                 file: "src/unicode.rs".to_owned(),
                 line_start: Some(2),
                 line_end: Some(2),
-            }
+                verification: CodeSearchVerification::Verified,
+            })
         );
+    }
+
+    #[test]
+    fn branch_advanced_search_fragment_absent_at_pinned_sha_is_dropped() {
+        let stale_search_hit = GithubCodeSearchCandidate {
+            file: "src/old-module.rs".to_owned(),
+            text_match: Some(CodeSearchTextMatch {
+                fragment: "fn removed_after_search_indexed()".to_owned(),
+                matches: vec![CodeSearchTextMatchOccurrence { indices: [3, 31] }],
+            }),
+        };
+        let pinned_content = "fn replacement_at_pinned_sha() {}\n";
+
+        assert_eq!(
+            stale_search_hit.verify_against_pinned_content(pinned_content),
+            None
+        );
+    }
+
+    #[test]
+    fn crlf_fragment_presence_is_verified_even_when_range_math_cannot_resolve_it() {
+        let candidate = GithubCodeSearchCandidate {
+            file: "src/windows.rs".to_owned(),
+            text_match: Some(CodeSearchTextMatch {
+                fragment: "fn windows() {\n    run();\n}".to_owned(),
+                matches: vec![CodeSearchTextMatchOccurrence { indices: [3, 10] }],
+            }),
+        };
+
+        assert_eq!(
+            candidate.verify_against_pinned_content("fn windows() {\r\n    run();\r\n}\r\n"),
+            Some(CodeSearchCandidate {
+                file: "src/windows.rs".to_owned(),
+                line_start: None,
+                line_end: None,
+                verification: CodeSearchVerification::Verified,
+            })
+        );
+    }
+
+    #[test]
+    fn local_file_content_failures_cannot_be_mistaken_for_absence() {
+        let error = anyhow::anyhow!("GitHub repository file exceeded the code-hint size limit");
+
+        assert_eq!(
+            github_file_content_failure_kind(&error),
+            GithubFileContentFailureKind::InvalidResponse
+        );
+    }
+
+    #[test]
+    fn file_content_status_survives_anyhow_context_for_typed_classification() -> anyhow::Result<()>
+    {
+        let response = reqwest::Response::from(
+            axum::http::Response::builder()
+                .status(reqwest::StatusCode::NOT_FOUND)
+                .body("not found")?,
+        );
+        let Err(request_error) = response.error_for_status() else {
+            anyhow::bail!("404 response should produce a reqwest error");
+        };
+        let error = anyhow::Error::new(request_error)
+            .context("GitHub repository file request was rejected");
+
+        assert_eq!(
+            github_file_content_failure_kind(&error),
+            GithubFileContentFailureKind::NotFound
+        );
+        Ok(())
     }
 
     #[test]

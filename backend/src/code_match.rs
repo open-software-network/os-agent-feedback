@@ -81,6 +81,20 @@ pub(crate) struct CodeSearchCandidate {
     pub(crate) file: String,
     pub(crate) line_start: Option<u32>,
     pub(crate) line_end: Option<u32>,
+    pub(crate) verification: CodeSearchVerification,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodeSearchVerification {
+    Verified,
+    Unverified,
+    FileNotFound,
+}
+
+impl CodeSearchVerification {
+    const fn is_verified(self) -> bool {
+        matches!(self, Self::Verified)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +109,7 @@ pub(crate) struct CodeHintCandidate {
     pub(crate) line_start: Option<u32>,
     pub(crate) line_end: Option<u32>,
     pub(crate) match_reason: String,
+    pub(crate) verified: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,13 +169,22 @@ pub(crate) fn rank_matches(matches: Vec<CodeSearchMatches>) -> Vec<CodeHintCandi
         })
         .collect::<Vec<_>>();
     ranked.sort_by(|left, right| {
-        (&left.0, left.1, left.2, &left.3.file, left.3.line_start).cmp(&(
-            &right.0,
-            right.1,
-            right.2,
-            &right.3.file,
-            right.3.line_start,
-        ))
+        (
+            Reverse(left.3.verification.is_verified()),
+            &left.0,
+            left.1,
+            left.2,
+            &left.3.file,
+            left.3.line_start,
+        )
+            .cmp(&(
+                Reverse(right.3.verification.is_verified()),
+                &right.0,
+                right.1,
+                right.2,
+                &right.3.file,
+                right.3.line_start,
+            ))
     });
 
     let mut seen = BTreeSet::new();
@@ -180,9 +204,36 @@ pub(crate) fn rank_matches(matches: Vec<CodeSearchMatches>) -> Vec<CodeHintCandi
                     line_start,
                     line_end,
                     match_reason,
+                    verified: candidate.verification.is_verified(),
                 })
         })
         .take(MAX_CODE_HINTS_PER_REPORT)
+        .collect()
+}
+
+pub(crate) fn settle_file_not_found_candidates(
+    matches: Vec<CodeSearchMatches>,
+    another_pinned_file_was_verified: bool,
+) -> Vec<CodeSearchMatches> {
+    matches
+        .into_iter()
+        .map(|matches| CodeSearchMatches {
+            query: matches.query,
+            candidates: matches
+                .candidates
+                .into_iter()
+                .filter_map(|mut candidate| {
+                    if candidate.verification != CodeSearchVerification::FileNotFound {
+                        return Some(candidate);
+                    }
+                    if another_pinned_file_was_verified {
+                        return None;
+                    }
+                    candidate.verification = CodeSearchVerification::Unverified;
+                    Some(candidate)
+                })
+                .collect(),
+        })
         .collect()
 }
 
@@ -429,6 +480,7 @@ mod tests {
             file: file.to_owned(),
             line_start: Some(line_start),
             line_end: Some(line_end),
+            verification: CodeSearchVerification::Verified,
         }
     }
 
@@ -478,17 +530,79 @@ mod tests {
     }
 
     #[test]
-    fn ranking_preserves_an_honest_missing_line_range() {
+    fn ranking_keeps_an_unverifiable_candidate_and_flags_it() {
         let hints = rank_matches(vec![CodeSearchMatches {
             query: query("operation token", 10),
             candidates: vec![CodeSearchCandidate {
                 file: "src/unresolved.rs".to_owned(),
                 line_start: None,
                 line_end: None,
+                verification: CodeSearchVerification::Unverified,
             }],
         }]);
 
         assert_eq!(hints[0].line_start, None);
         assert_eq!(hints[0].line_end, None);
+        assert!(!hints[0].verified);
+    }
+
+    #[test]
+    fn verified_duplicate_outranks_unverified_duplicate() {
+        let duplicate = |verification| CodeSearchCandidate {
+            file: "src/search.rs".to_owned(),
+            line_start: None,
+            line_end: None,
+            verification,
+        };
+        let hints = rank_matches(vec![
+            CodeSearchMatches {
+                query: query("specific unverified", 100),
+                candidates: vec![duplicate(CodeSearchVerification::Unverified)],
+            },
+            CodeSearchMatches {
+                query: query("broad verified", 10),
+                candidates: vec![duplicate(CodeSearchVerification::Verified)],
+            },
+        ]);
+
+        assert_eq!(hints.len(), 1);
+        assert!(hints[0].verified);
+        assert_eq!(hints[0].match_reason, "broad verified");
+    }
+
+    #[test]
+    fn file_404_needs_a_successful_pinned_file_before_it_is_definitive() {
+        let missing = || CodeSearchCandidate {
+            file: "src/advanced-away.rs".to_owned(),
+            line_start: None,
+            line_end: None,
+            verification: CodeSearchVerification::FileNotFound,
+        };
+        let matches = || {
+            vec![CodeSearchMatches {
+                query: query("operation token", 10),
+                candidates: vec![missing()],
+            }]
+        };
+
+        let ambiguous_repo_404s = settle_file_not_found_candidates(matches(), false);
+        assert_eq!(ambiguous_repo_404s[0].candidates.len(), 1);
+        assert_eq!(
+            ambiguous_repo_404s[0].candidates[0].verification,
+            CodeSearchVerification::Unverified
+        );
+
+        let definite_file_404 = settle_file_not_found_candidates(matches(), true);
+        assert!(definite_file_404[0].candidates.is_empty());
+    }
+
+    #[test]
+    fn all_definitively_absent_candidates_produce_empty_hints() {
+        let hints = rank_matches(vec![CodeSearchMatches {
+            query: query("operation token", 10),
+            candidates: Vec::new(),
+        }]);
+
+        assert!(hints.is_empty());
     }
 }

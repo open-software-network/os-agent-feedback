@@ -870,6 +870,11 @@ export interface components {
             /** Format: int32 */
             line_start?: number | null;
             match_reason: string;
+            /**
+             * @description Whether the hint was verified against `computed_at_sha`. Hints stored
+             *     before this field existed are read as unverified.
+             */
+            verified: boolean;
         };
         ConsentDecisionInput: {
             decision: string;

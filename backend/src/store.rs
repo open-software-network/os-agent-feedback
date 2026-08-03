@@ -2896,7 +2896,14 @@ pub(crate) async fn dashboard_feedback_page(
     let mut reports = sqlx::query_as::<_, ProductFeedbackReportWithInteraction>(
         r"SELECT r.id, r.interaction_id, r.summary, r.impact, r.confidence,
         r.findings, r.workaround, r.source, r.created_at,
-        COALESCE(code_hints.hints, '[]'::JSONB) AS code_hints,
+        COALESCE((
+          SELECT jsonb_agg(
+            CASE WHEN stored_hint.value ? 'verified' THEN stored_hint.value
+              ELSE stored_hint.value || jsonb_build_object('verified', FALSE) END
+            ORDER BY stored_hint.ordinality)
+          FROM jsonb_array_elements(code_hints.hints)
+            WITH ORDINALITY AS stored_hint(value, ordinality)
+        ), '[]'::JSONB) AS code_hints,
         i.session_id, i.surface, i.operation, i.status_code, i.duration_ms,
         i.customer_ref, i.classification, i.confirmation_method, i.runtime_hint,
         i.runtime_hint_source, i.occurred_at,
@@ -5140,7 +5147,14 @@ pub(crate) async fn dashboard_with_limits(
     let reports = sqlx::query_as::<_, ProductFeedbackReportWithInteraction>(
         r"SELECT r.id, r.interaction_id, r.summary, r.impact, r.confidence,
         r.findings, r.workaround, r.source, r.created_at,
-        COALESCE(code_hints.hints, '[]'::JSONB) AS code_hints,
+        COALESCE((
+          SELECT jsonb_agg(
+            CASE WHEN stored_hint.value ? 'verified' THEN stored_hint.value
+              ELSE stored_hint.value || jsonb_build_object('verified', FALSE) END
+            ORDER BY stored_hint.ordinality)
+          FROM jsonb_array_elements(code_hints.hints)
+            WITH ORDINALITY AS stored_hint(value, ordinality)
+        ), '[]'::JSONB) AS code_hints,
         i.session_id, i.surface, i.operation, i.status_code, i.duration_ms,
         i.customer_ref, i.classification, i.confirmation_method, i.runtime_hint,
         i.runtime_hint_source, i.occurred_at,
@@ -5284,7 +5298,14 @@ pub(crate) async fn dashboard_report_by_id(
     sqlx::query_as::<_, ProductFeedbackReportWithInteraction>(
         r"SELECT r.id, r.interaction_id, r.summary, r.impact, r.confidence,
         r.findings, r.workaround, r.source, r.created_at,
-        COALESCE(code_hints.hints, '[]'::JSONB) AS code_hints,
+        COALESCE((
+          SELECT jsonb_agg(
+            CASE WHEN stored_hint.value ? 'verified' THEN stored_hint.value
+              ELSE stored_hint.value || jsonb_build_object('verified', FALSE) END
+            ORDER BY stored_hint.ordinality)
+          FROM jsonb_array_elements(code_hints.hints)
+            WITH ORDINALITY AS stored_hint(value, ordinality)
+        ), '[]'::JSONB) AS code_hints,
         i.session_id, i.surface, i.operation, i.status_code, i.duration_ms,
         i.customer_ref, i.classification, i.confirmation_method, i.runtime_hint,
         i.runtime_hint_source, i.occurred_at,
@@ -5459,7 +5480,14 @@ pub(crate) async fn dashboard_session_by_id(
     let reports = sqlx::query_as::<_, ProductFeedbackReportWithInteraction>(
         r"SELECT r.id, r.interaction_id, r.summary, r.impact, r.confidence,
         r.findings, r.workaround, r.source, r.created_at,
-        COALESCE(code_hints.hints, '[]'::JSONB) AS code_hints,
+        COALESCE((
+          SELECT jsonb_agg(
+            CASE WHEN stored_hint.value ? 'verified' THEN stored_hint.value
+              ELSE stored_hint.value || jsonb_build_object('verified', FALSE) END
+            ORDER BY stored_hint.ordinality)
+          FROM jsonb_array_elements(code_hints.hints)
+            WITH ORDINALITY AS stored_hint(value, ordinality)
+        ), '[]'::JSONB) AS code_hints,
         i.session_id, i.surface, i.operation, i.status_code, i.duration_ms,
         i.customer_ref, i.classification, i.confirmation_method, i.runtime_hint,
         i.runtime_hint_source, i.occurred_at,
@@ -10925,21 +10953,43 @@ mod product_tests {
             .context("cleared dead letter should be claimable again")?;
         anyhow::ensure!(redriven.attempts == 3);
 
-        // Retention deletes interactions, which cascades through reports. All
-        // code-intelligence state must disappear with that report.
-        sqlx::query(
-            r"INSERT INTO report_code_hints (report_id, computed_at_sha, hints)
-            VALUES ($1, '0123456789abcdef0123456789abcdef01234567', $2)",
+        let completed_empty = complete_code_match_job(
+            &pool,
+            report.id,
+            redriven.claim_token,
+            "0123456789abcdef0123456789abcdef01234567",
+            serde_json::json!([]),
+        )
+        .await
+        .map_err(test_error)?;
+        anyhow::ensure!(completed_empty, "empty hints should complete the owned job");
+        let stored_empty = sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT hints FROM report_code_hints WHERE report_id = $1",
         )
         .bind(report.id)
-        .bind(serde_json::json!([{
-            "file": "backend/src/store.rs",
-            "line_start": 7988,
-            "line_end": 7992,
-            "match_reason": "exact operation identifier `search_reports`"
-        }]))
-        .execute(&pool)
+        .fetch_one(&pool)
         .await?;
+        anyhow::ensure!(stored_empty == serde_json::json!([]));
+        let completed_queue_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM code_match_queue WHERE report_id = $1",
+        )
+        .bind(report.id)
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(completed_queue_count == 0);
+
+        // Retention deletes interactions, which cascades through reports. All
+        // code-intelligence state must disappear with that report.
+        sqlx::query(r"UPDATE report_code_hints SET hints = $2 WHERE report_id = $1")
+            .bind(report.id)
+            .bind(serde_json::json!([{
+                "file": "backend/src/store.rs",
+                "line_start": 7988,
+                "line_end": 7992,
+                "match_reason": "exact operation identifier `search_reports`"
+            }]))
+            .execute(&pool)
+            .await?;
         record_code_match_call(&pool, report.id, Some(9), false, 12)
             .await
             .map_err(test_error)?;
@@ -10949,6 +10999,7 @@ mod product_tests {
         anyhow::ensure!(
             dashboard_report.code_hints[0]["file"] == "backend/src/store.rs"
                 && dashboard_report.code_hints[0]["line_start"] == 7988
+                && dashboard_report.code_hints[0]["verified"] == false
         );
         sqlx::query("DELETE FROM interactions_v2 WHERE id = $1")
             .bind(interaction_id)

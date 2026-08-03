@@ -64,7 +64,7 @@ use crate::{
     },
     code_match::{
         CodeHintCandidate, CodeMatchFinding, CodeMatchInput, CodeSearchCandidate,
-        CodeSearchMatches, derive_queries, rank_matches,
+        CodeSearchMatches, derive_queries, rank_matches, settle_file_not_found_candidates,
     },
     customer_features::{
         DashboardFeatureDetail, DashboardFeatureFilters, DashboardFeaturesPage,
@@ -73,8 +73,8 @@ use crate::{
     error::{ApiError, ApiErrorEnvelope},
     github::{
         GithubAppClient, GithubAppConfig, GithubCodeSearchCandidate, GithubCodeSearchFailureKind,
-        GithubIssue, GithubIssueCreationOutcome, GithubIssueListError, GithubIssueListFailureKind,
-        GithubRateLimit, validate_repo_full_name,
+        GithubFileContentFailureKind, GithubIssue, GithubIssueCreationOutcome,
+        GithubIssueListError, GithubIssueListFailureKind, GithubRateLimit, validate_repo_full_name,
     },
     grouping::FingerprintGrouper,
     issue_template::{
@@ -722,6 +722,13 @@ struct InstallationContentBudget {
     remaining: usize,
 }
 
+#[derive(Debug)]
+enum PinnedFileContent {
+    Content(String),
+    FileNotFound,
+    Unverified,
+}
+
 impl InstallationContentBudget {
     const fn new() -> Self {
         Self {
@@ -791,7 +798,7 @@ async fn drain_code_match_batch(
         let mut next_search_at = tokio::time::Instant::now();
         let mut quota_retry_at = None;
         let mut head_sha_by_repo = BTreeMap::<(String, String), String>::new();
-        let mut content_by_file = BTreeMap::<(String, String, String), Option<String>>::new();
+        let mut content_by_file = BTreeMap::<(String, String, String), PinnedFileContent>::new();
         for (index, job) in installation_jobs.iter().enumerate() {
             let outcome = process_code_match_job(
                 pool,
@@ -845,7 +852,7 @@ async fn process_code_match_job(
     next_search_at: &mut tokio::time::Instant,
     quota_retry_at: &mut Option<DateTime<Utc>>,
     head_sha_by_repo: &mut BTreeMap<(String, String), String>,
-    content_by_file: &mut BTreeMap<(String, String, String), Option<String>>,
+    content_by_file: &mut BTreeMap<(String, String, String), PinnedFileContent>,
 ) -> anyhow::Result<CodeMatchJobOutcome> {
     let repo_full_name = job
         .repo_full_name
@@ -1025,8 +1032,22 @@ async fn process_code_match_job(
         return Ok(CodeMatchJobOutcome::Continue);
     }
 
+    // HEAD resolution above proves the repository was reachable. A contents
+    // 404 is still held provisionally until another pinned contents fetch for
+    // this repo/SHA succeeds, because GitHub also uses 404 for repo-level
+    // access failures. An all-404 response therefore remains unverified.
+    let another_pinned_file_was_verified =
+        content_by_file.iter().any(|((repo, sha, _), content)| {
+            repo == repo_full_name
+                && sha == &computed_at_sha
+                && matches!(content, PinnedFileContent::Content(_))
+        });
+    let matches = settle_file_not_found_candidates(matches, another_pinned_file_was_verified);
     let hints = rank_matches(matches);
     let hints_json = code_hints_json(hints);
+    // Invariant: every stored hint was verified to exist at computed_at_sha,
+    // or is explicitly flagged unverified. An empty array is also persisted
+    // so later regeneration can find this report_code_hints row.
     let completed = complete_code_match_job(
         pool,
         job.report_id,
@@ -1057,12 +1078,15 @@ async fn resolve_code_search_candidates(
     computed_at_sha: &str,
     candidates: Vec<GithubCodeSearchCandidate>,
     budget: &mut InstallationContentBudget,
-    content_by_file: &mut BTreeMap<(String, String, String), Option<String>>,
+    content_by_file: &mut BTreeMap<(String, String, String), PinnedFileContent>,
 ) -> Vec<CodeSearchCandidate> {
     let mut resolved = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         if !candidate.needs_content() {
-            resolved.push(candidate.into_resolved(None));
+            // Search results without a fragment cannot be verified without a
+            // brand-new contents call. Keep them explicitly unverified so a
+            // single report cannot consume the installation's core quota.
+            resolved.push(candidate.into_unverified());
             continue;
         }
         let key = (
@@ -1070,30 +1094,75 @@ async fn resolve_code_search_candidates(
             computed_at_sha.to_owned(),
             candidate.file().to_owned(),
         );
-        if !content_by_file.contains_key(&key) && budget.take() {
-            // Contents calls use GitHub's core quota, not the code-search
-            // quota represented by match_analytics. Cache them separately and
-            // deliberately do not write search analytics rows for them.
-            let content = match github
-                .repository_file_content(token, repo_full_name, candidate.file(), computed_at_sha)
-                .await
-            {
-                Ok(content) => Some(content),
-                Err(error) => {
-                    tracing::warn!(
-                        %report_id,
-                        repo = repo_full_name,
-                        file = candidate.file(),
-                        %error,
-                        "code-match line resolution failed; storing an absent range"
-                    );
-                    None
+        if !content_by_file.contains_key(&key) {
+            let content = if budget.take() {
+                // Contents calls use GitHub's core quota, not the code-search
+                // quota represented by match_analytics. Cache them separately
+                // and deliberately do not write search analytics rows for them.
+                match github
+                    .repository_file_content(
+                        token,
+                        repo_full_name,
+                        candidate.file(),
+                        computed_at_sha,
+                    )
+                    .await
+                {
+                    Ok(content) => PinnedFileContent::Content(content),
+                    Err(error) if error.kind() == GithubFileContentFailureKind::NotFound => {
+                        tracing::debug!(
+                            %report_id,
+                            repo = repo_full_name,
+                            file = candidate.file(),
+                            "code-match pinned file returned a provisional 404"
+                        );
+                        PinnedFileContent::FileNotFound
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %report_id,
+                            repo = repo_full_name,
+                            file = candidate.file(),
+                            failure_kind = ?error.kind(),
+                            %error,
+                            "code-match candidate could not be verified at the pinned SHA"
+                        );
+                        PinnedFileContent::Unverified
+                    }
                 }
+            } else {
+                PinnedFileContent::Unverified
             };
             content_by_file.insert(key.clone(), content);
         }
-        let content = content_by_file.get(&key).and_then(Option::as_deref);
-        resolved.push(candidate.into_resolved(content));
+        let Some(content) = content_by_file.get(&key) else {
+            tracing::warn!(
+                %report_id,
+                repo = repo_full_name,
+                file = candidate.file(),
+                "code-match pinned file classification was not cached"
+            );
+            resolved.push(candidate.into_unverified());
+            continue;
+        };
+        match content {
+            PinnedFileContent::Content(content) => {
+                if let Some(candidate) = candidate.verify_against_pinned_content(content) {
+                    resolved.push(candidate);
+                } else {
+                    tracing::debug!(
+                        %report_id,
+                        repo = repo_full_name,
+                        file = key.2,
+                        "dropping code-match fragment absent at the pinned SHA"
+                    );
+                }
+            }
+            PinnedFileContent::FileNotFound => {
+                resolved.push(candidate.into_file_not_found());
+            }
+            PinnedFileContent::Unverified => resolved.push(candidate.into_unverified()),
+        }
     }
     resolved
 }
@@ -1149,6 +1218,7 @@ fn code_hints_json(hints: Vec<CodeHintCandidate>) -> serde_json::Value {
                     "line_start": hint.line_start,
                     "line_end": hint.line_end,
                     "match_reason": hint.match_reason,
+                    "verified": hint.verified,
                 })
             })
             .collect(),
@@ -5667,12 +5737,14 @@ mod page_tests {
                     line_start: Some(42),
                     line_end: Some(45),
                     match_reason: "operation token `search`".to_owned(),
+                    verified: true,
                 },
                 CodeHintCandidate {
                     file: "backend/src/unresolved.rs".to_owned(),
                     line_start: None,
                     line_end: None,
                     match_reason: "surface token `search`".to_owned(),
+                    verified: false,
                 }
             ]),
             json!([
@@ -5681,15 +5753,18 @@ mod page_tests {
                     "line_start": 42,
                     "line_end": 45,
                     "match_reason": "operation token `search`",
+                    "verified": true,
                 },
                 {
                     "file": "backend/src/unresolved.rs",
                     "line_start": null,
                     "line_end": null,
                     "match_reason": "surface token `search`",
+                    "verified": false,
                 }
             ])
         );
+        assert_eq!(code_hints_json(Vec::new()), json!([]));
     }
 
     #[test]
