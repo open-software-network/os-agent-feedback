@@ -15,7 +15,7 @@ describe("CustomersView", () => {
     window.history.replaceState({}, "", "/?view=customers");
   });
 
-  it("renders durable customer profiles separately from unresolved interactions", async () => {
+  it("renders customer metrics without exposing unlinked telemetry", async () => {
     const fetchMock = mockCustomers();
     renderCustomers(fetchMock);
 
@@ -24,7 +24,8 @@ describe("CustomersView", () => {
     expect(within(row).getByText("2")).toBeVisible();
     expect(within(row).getByText("Allowed")).toBeVisible();
     expect(screen.getAllByText("Anonymous")[0].parentElement).toHaveTextContent("1");
-    expect(screen.getByText("Unresolved interactions").parentElement).toHaveTextContent("0");
+    expect(screen.getByText("Active").parentElement).toHaveTextContent("2");
+    expect(screen.queryByText("Unresolved interactions")).not.toBeInTheDocument();
     expect(screen.getByText(/Customers stay linked to their sessions/i)).toBeVisible();
     expect(screen.getByRole("columnheader", { name: "Sessions" })).toBeVisible();
     expect(screen.queryByText(/context|evidence|signals/i)).not.toBeInTheDocument();

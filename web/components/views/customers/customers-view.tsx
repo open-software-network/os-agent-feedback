@@ -183,7 +183,7 @@ export function CustomersView({
           { label: "Customers", value: rollup.customers.toLocaleString(), accent: true },
           { label: "Known", value: rollup.verified.toLocaleString() },
           { label: "Anonymous", value: rollup.pseudonymous.toLocaleString() },
-          { label: "Unresolved interactions", value: rollup.unclassified.toLocaleString() },
+          { label: "Active", value: rollup.active.toLocaleString() },
         ]}
       />
       <div className="border-b bg-muted/20 px-4 py-2 text-xs text-muted-foreground">
