@@ -15,7 +15,7 @@ use std::{env, net::SocketAddr, sync::Arc};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, RawQuery, State},
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     middleware::{Next, from_fn},
     response::{Html, IntoResponse, Redirect, Response},
@@ -958,42 +958,48 @@ async fn auth_callback(
     Ok(response)
 }
 
-#[derive(Debug, Deserialize, utoipa::IntoParams)]
-#[into_params(parameter_in = Query)]
-#[serde(rename_all = "camelCase")]
-struct GithubInstallQuery {
-    /// Team to configure when the `x-workspace-id` header cannot be sent, as on
-    /// a plain link. Ignored when the header is present.
-    ///
-    /// Captured as a string, not a `Uuid`: typing it as `Uuid` makes the
-    /// extractor reject a malformed value with 400 *before* the handler runs,
-    /// which would fail a request whose header is valid and whose query
-    /// parameter is documented as ignored. Precedence belongs in
-    /// `install_workspace_id`, not in the extractor.
-    workspace_id: Option<String>,
-}
+/// The one spelling of the install endpoint's team query parameter.
+///
+/// The `OpenAPI` annotation and the parser must agree on it;
+/// `github_install_query_parameter_is_documented` pins that.
+const WORKSPACE_ID_QUERY_PARAM: &str = "workspaceId";
 
 /// Header wins when both are supplied; the query parameter is the no-header
 /// fallback. Neither is trusted on its own — the winner is handed to
 /// `dashboard_auth`, which rejects a team the caller is not a member of.
 ///
-/// A malformed query parameter is only an error when it would actually be used.
-/// With a valid header it is ignored outright; without one it is about to
-/// decide the team, so it fails loudly rather than silently falling back to the
-/// caller's default team — that silent fallback is the original bug.
+/// Takes the RAW query string rather than a deserialized value: an extractor
+/// would reject a malformed or repeated `workspaceId` before this function
+/// could decide it was irrelevant, which is how header precedence kept getting
+/// defeated. With a valid header the query is parsed but never consulted.
+///
+/// Without a header the parameter decides the team, so it must be unambiguous:
+/// exactly one well-formed value is used, no value keeps the caller's default
+/// team, and anything else fails loudly. A repeated parameter is rejected
+/// rather than resolved by first-or-last-wins, because the two orders disagree
+/// about which team gets the installation.
 fn install_workspace_id(
     header_workspace_id: Option<Uuid>,
-    query_workspace_id: Option<&str>,
+    raw_query: Option<&str>,
 ) -> Result<Option<Uuid>, ApiError> {
     if let Some(workspace_id) = header_workspace_id {
         return Ok(Some(workspace_id));
     }
-    query_workspace_id
-        .map(|value| {
-            Uuid::parse_str(value)
-                .map_err(|_| ApiError::bad_request("Invalid workspaceId query parameter"))
-        })
-        .transpose()
+    let values = raw_query.map_or_else(Vec::new, |query| {
+        form_urlencoded::parse(query.as_bytes())
+            .filter(|(key, _)| key == WORKSPACE_ID_QUERY_PARAM)
+            .map(|(_, value)| value.into_owned())
+            .collect::<Vec<_>>()
+    });
+    match values.as_slice() {
+        [] => Ok(None),
+        [value] => Uuid::parse_str(value)
+            .map(Some)
+            .map_err(|_| ApiError::bad_request("Invalid workspaceId query parameter")),
+        _ => Err(ApiError::bad_request(
+            "Repeated workspaceId query parameter",
+        )),
+    }
 }
 
 #[utoipa::path(
@@ -1002,7 +1008,7 @@ fn install_workspace_id(
     tag = "github",
     params(
         ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; wins over workspaceId when both are present"),
-        GithubInstallQuery
+        ("workspaceId" = Option<Uuid>, Query, description = "Team to configure when the x-workspace-id header cannot be sent, as on a plain link. Ignored when the header is present; must appear at most once."),
     ),
     responses(
         (
@@ -1027,17 +1033,15 @@ fn install_workspace_id(
 async fn github_install_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Query(query): Query<GithubInstallQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Response, ApiError> {
     // The install entry point is a plain top-level link, so it cannot set the
     // x-workspace-id header the rest of the dashboard API uses. Accept the team
     // as a query parameter too, and resolve it through the SAME dashboard_auth
     // path: `resolve_workspace_access` is what proves membership, so a crafted
     // link cannot install into a team the caller does not belong to.
-    let requested_workspace = install_workspace_id(
-        requested_workspace_id(&headers)?,
-        query.workspace_id.as_deref(),
-    )?;
+    let requested_workspace =
+        install_workspace_id(requested_workspace_id(&headers)?, raw_query.as_deref())?;
     let (context, tokens) = dashboard_auth(&state, &headers, requested_workspace).await?;
     require_workspace_editor(&context)?;
     let github = require_github(&state)?;
@@ -4876,11 +4880,12 @@ mod page_tests {
 
     use super::{
         ApiError, GithubIssue, GroupIssueReconciliationDecision, GroupIssueReconciliationEvidence,
-        GroupIssueReconciliationInconclusive, build_app_router, comma_values, feedback_discovery,
-        github_callback_redirect_target, group_issue_reconciliation_resolution,
-        group_issue_state_refresh_due, group_issue_sync_needed, group_marker_comment,
-        install_workspace_id, mcp_auth_error, mcp_tool_allowed, mcp_tools, resolve_web_app_url,
-        reveal_auth_error, valid_report_group_key, validated_return_to,
+        GroupIssueReconciliationInconclusive, WORKSPACE_ID_QUERY_PARAM, build_app_router,
+        comma_values, feedback_discovery, github_callback_redirect_target,
+        group_issue_reconciliation_resolution, group_issue_state_refresh_due,
+        group_issue_sync_needed, group_marker_comment, install_workspace_id, mcp_auth_error,
+        mcp_tool_allowed, mcp_tools, resolve_web_app_url, reveal_auth_error,
+        valid_report_group_key, validated_return_to,
     };
     use chrono::{Duration, TimeZone as _, Utc};
     use serde_json::{Value, json};
@@ -4924,8 +4929,8 @@ mod page_tests {
     fn install_workspace_id_prefers_the_header_and_falls_back_to_the_query() {
         let header = uuid::Uuid::from_u128(1);
         let query = uuid::Uuid::from_u128(2);
-        let query_text = query.to_string();
-        let q = Some(query_text.as_str());
+        let one = format!("workspaceId={query}");
+        let q = Some(one.as_str());
 
         // Header wins when both are present.
         assert_eq!(
@@ -4942,34 +4947,66 @@ mod page_tests {
         );
         // Neither: dashboard_auth falls back to the caller's personal team.
         assert_eq!(install_workspace_id(None, None).ok().flatten(), None);
+        // An empty or unrelated query is the same as no parameter at all.
+        assert_eq!(install_workspace_id(None, Some("")).ok().flatten(), None);
+        assert_eq!(
+            install_workspace_id(None, Some("other=1&x=2"))
+                .ok()
+                .flatten(),
+            None
+        );
+        // Percent-encoded neighbours and a later position still resolve.
+        let mixed = format!("other=a%20b&workspaceId={query}");
+        assert_eq!(
+            install_workspace_id(None, Some(mixed.as_str()))
+                .ok()
+                .flatten(),
+            Some(query)
+        );
     }
 
     #[test]
     fn install_workspace_id_ignores_a_malformed_query_only_when_a_header_decides() {
         let header = uuid::Uuid::from_u128(1);
-        let junk_values = ["", "not-a-uuid", "../../etc/passwd", "%00"];
+        let good = uuid::Uuid::from_u128(2);
+        let other = uuid::Uuid::from_u128(3);
+        let bad_queries = [
+            "workspaceId=".to_owned(),
+            "workspaceId=not-a-uuid".to_owned(),
+            "workspaceId=../../etc/passwd".to_owned(),
+            "workspaceId=%00".to_owned(),
+            // Repeated keys: the reason an extractor cannot own this decision.
+            format!("workspaceId={good}&workspaceId={other}"),
+            format!("workspaceId={good}&workspaceId={good}"),
+            format!("workspaceId={good}&workspaceId=not-a-uuid"),
+        ];
 
-        // A valid header must not be defeated by junk in a parameter the docs
-        // say is ignored. Typing the extractor as `Uuid` would 400 this before
-        // the handler ever ran.
-        for junk in junk_values {
+        // A valid header must not be defeated by anything in a parameter the
+        // docs say is ignored — malformed OR repeated. A serde extractor would
+        // reject these before the handler ever ran.
+        for query in &bad_queries {
             assert_eq!(
-                install_workspace_id(Some(header), Some(junk))
+                install_workspace_id(Some(header), Some(query.as_str()))
                     .ok()
                     .flatten(),
                 Some(header),
-                "header must win over junk query {junk:?}"
+                "header must win over query {query:?}"
             );
         }
 
-        // With no header the parameter is load-bearing, so a malformed value is
-        // a hard error. Falling back to the caller's default team here would
-        // resurrect exactly the bug this endpoint was fixed for.
-        for junk in junk_values {
-            let error = install_workspace_id(None, Some(junk))
-                .expect_err("a load-bearing malformed workspaceId must fail");
-            assert_eq!(error.status, StatusCode::BAD_REQUEST, "{junk:?}");
-            assert!(error.message.contains("workspaceId"), "{}", error.message);
+        // With no header the parameter is load-bearing, so it must be
+        // unambiguous. Falling back to the caller's default team would
+        // resurrect the original bug, and picking first-or-last from a repeated
+        // key would silently choose a team.
+        for query in &bad_queries {
+            let error = install_workspace_id(None, Some(query.as_str()))
+                .expect_err("a load-bearing ambiguous workspaceId must fail");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST, "{query:?}");
+            assert!(
+                error.message.contains("workspaceId"),
+                "{} for {query:?}",
+                error.message
+            );
         }
     }
 
@@ -5580,6 +5617,28 @@ mod page_tests {
         let calls = route_calls(&source);
         assert_eq!(calls.len(), 1);
         assert!(calls[0].contains("\"/live\""));
+    }
+
+    /// The parser matches a hardcoded key; the `OpenAPI` annotation documents a
+    /// name. If those two ever disagree the endpoint silently ignores the
+    /// parameter callers are told to send, so pin them to one string here.
+    #[test]
+    fn github_install_query_parameter_is_documented() {
+        let (_router, openapi) = build_app_router().split_for_parts();
+        let spec = serde_json::to_value(&openapi).expect("the OpenAPI document should serialize");
+        let parameters = spec["paths"]["/api/github/install"]["get"]["parameters"]
+            .as_array()
+            .expect("the install operation should document its parameters");
+        let documented = parameters
+            .iter()
+            .filter(|parameter| parameter["in"] == "query")
+            .map(|parameter| parameter["name"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            documented,
+            vec![WORKSPACE_ID_QUERY_PARAM],
+            "the documented query parameter must be the one the handler parses"
+        );
     }
 
     #[test]
