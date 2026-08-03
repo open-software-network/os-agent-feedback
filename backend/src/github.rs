@@ -14,12 +14,16 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
+use crate::code_match::CodeSearchCandidate;
+
 type HmacSha256 = Hmac<Sha256>;
 
 const GITHUB_API_URL: &str = "https://api.github.com";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
+const GITHUB_CODE_SEARCH_ACCEPT: &str = "application/vnd.github.text-match+json";
 const GITHUB_USER_AGENT: &str = "epode-agent-feedback";
+const CODE_SEARCH_RESULTS_PER_QUERY: usize = 10;
 const REPOSITORIES_PER_PAGE: usize = 100;
 const MAX_REPOSITORY_PAGES: usize = 10;
 const ISSUES_PER_PAGE: usize = 100;
@@ -106,6 +110,100 @@ pub(crate) struct GithubRepo {
     pub(crate) full_name: String,
     pub(crate) default_branch: String,
     pub(crate) private: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct GithubInstallationToken(String);
+
+impl GithubInstallationToken {
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for GithubInstallationToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GithubInstallationToken([redacted])")
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct GithubRateLimit {
+    pub(crate) remaining: Option<i64>,
+    pub(crate) reset_at: Option<DateTime<Utc>>,
+    pub(crate) retry_after: Option<StdDuration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GithubCodeSearchResult {
+    pub(crate) candidates: Vec<CodeSearchCandidate>,
+    pub(crate) rate_limit: GithubRateLimit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GithubCodeSearchFailureKind {
+    RateLimit,
+    Forbidden,
+    NotFound,
+    InvalidRequest,
+    Server,
+    Timeout,
+    InvalidResponse,
+    Transport,
+}
+
+#[derive(Debug)]
+pub(crate) struct GithubCodeSearchError {
+    kind: GithubCodeSearchFailureKind,
+    rate_limit: GithubRateLimit,
+    source: anyhow::Error,
+}
+
+impl GithubCodeSearchError {
+    const fn new(
+        kind: GithubCodeSearchFailureKind,
+        rate_limit: GithubRateLimit,
+        source: anyhow::Error,
+    ) -> Self {
+        Self {
+            kind,
+            rate_limit,
+            source,
+        }
+    }
+
+    fn from_request(error: reqwest::Error, context: &'static str) -> Self {
+        let kind = if error.is_timeout() {
+            GithubCodeSearchFailureKind::Timeout
+        } else {
+            GithubCodeSearchFailureKind::Transport
+        };
+        Self::new(
+            kind,
+            GithubRateLimit::default(),
+            anyhow::Error::new(error).context(context),
+        )
+    }
+
+    pub(crate) const fn kind(&self) -> GithubCodeSearchFailureKind {
+        self.kind
+    }
+
+    pub(crate) const fn rate_limit(&self) -> &GithubRateLimit {
+        &self.rate_limit
+    }
+}
+
+impl fmt::Display for GithubCodeSearchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for GithubCodeSearchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -305,6 +403,23 @@ struct InstallationTokenResponse {
     token: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CodeSearchResponse {
+    items: Vec<CodeSearchItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodeSearchItem {
+    path: String,
+    #[serde(default)]
+    line_numbers: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitResponse {
+    sha: String,
+}
+
 impl fmt::Debug for InstallationTokenResponse {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -402,7 +517,10 @@ impl GithubAppClient {
         })
     }
 
-    async fn installation_token(&self, installation_id: i64) -> anyhow::Result<String> {
+    pub(crate) async fn installation_token(
+        &self,
+        installation_id: i64,
+    ) -> anyhow::Result<GithubInstallationToken> {
         let jwt = self.app_jwt(Utc::now())?;
         let response = Self::request(self.http.post(format!(
             "{GITHUB_API_URL}/app/installations/{installation_id}/access_tokens"
@@ -416,7 +534,7 @@ impl GithubAppClient {
         .json::<InstallationTokenResponse>()
         .await
         .context("GitHub installation token response was invalid")?;
-        Ok(response.token)
+        Ok(GithubInstallationToken(response.token))
     }
 
     pub(crate) async fn installation_repositories(
@@ -433,7 +551,7 @@ impl GithubAppClient {
                     .get(format!("{GITHUB_API_URL}/installation/repositories"))
                     .query(&[("per_page", REPOSITORIES_PER_PAGE), ("page", page)]),
             )
-            .bearer_auth(&token)
+            .bearer_auth(token.as_str())
             .send()
             .await
             .context("GitHub repositories request failed")?
@@ -489,7 +607,7 @@ impl GithubAppClient {
             self.http
                 .post(format!("{GITHUB_API_URL}/repos/{repo_full_name}/issues")),
         )
-        .bearer_auth(token)
+        .bearer_auth(token.as_str())
         .json(&CreateIssueRequest { title, body })
         .send()
         .await
@@ -550,7 +668,7 @@ impl GithubAppClient {
                         ("page", page_number.as_str()),
                     ]),
             )
-            .bearer_auth(&token)
+            .bearer_auth(token.as_str())
             .send()
             .await
             .map_err(|error| {
@@ -605,7 +723,7 @@ impl GithubAppClient {
         Self::request(self.http.post(format!(
             "{GITHUB_API_URL}/repos/{repo_full_name}/issues/{issue_number}/comments"
         )))
-        .bearer_auth(token)
+        .bearer_auth(token.as_str())
         .json(&CreateIssueCommentRequest { body })
         .send()
         .await
@@ -626,7 +744,7 @@ impl GithubAppClient {
         Self::request(self.http.get(format!(
             "{GITHUB_API_URL}/repos/{repo_full_name}/issues/{issue_number}"
         )))
-        .bearer_auth(token)
+        .bearer_auth(token.as_str())
         .send()
         .await
         .context("GitHub issue request failed")?
@@ -641,12 +759,197 @@ impl GithubAppClient {
         verify_webhook_signature(&self.config.webhook_secret, body, header)
     }
 
+    pub(crate) async fn repository_head_sha(
+        &self,
+        token: &GithubInstallationToken,
+        repo_full_name: &str,
+        default_branch: &str,
+    ) -> anyhow::Result<String> {
+        validate_repo_full_name(repo_full_name)?;
+        anyhow::ensure!(!default_branch.trim().is_empty(), "default branch is empty");
+        let commits = Self::request(
+            self.http
+                .get(format!("{GITHUB_API_URL}/repos/{repo_full_name}/commits"))
+                .query(&[("sha", default_branch), ("per_page", "1")]),
+        )
+        .bearer_auth(token.as_str())
+        .send()
+        .await
+        .context("GitHub repository HEAD request failed")?
+        .error_for_status()
+        .context("GitHub repository HEAD request was rejected")?
+        .json::<Vec<CommitResponse>>()
+        .await
+        .context("GitHub repository HEAD response was invalid")?;
+        let sha = commits
+            .into_iter()
+            .next()
+            .map(|commit| commit.sha)
+            .context("GitHub repository HEAD response was empty")?;
+        anyhow::ensure!(
+            valid_git_sha(&sha),
+            "GitHub repository HEAD SHA was invalid"
+        );
+        Ok(sha.to_ascii_lowercase())
+    }
+
+    pub(crate) async fn search_code(
+        &self,
+        token: &GithubInstallationToken,
+        query: &str,
+    ) -> Result<GithubCodeSearchResult, GithubCodeSearchError> {
+        if query.trim().is_empty() || query.len() > 512 || query.chars().any(char::is_control) {
+            return Err(GithubCodeSearchError::new(
+                GithubCodeSearchFailureKind::InvalidRequest,
+                GithubRateLimit::default(),
+                anyhow::anyhow!("GitHub code-search query was invalid"),
+            ));
+        }
+        let response = Self::request(
+            self.http
+                .get(format!("{GITHUB_API_URL}/search/code"))
+                .query(&[("q", query), ("per_page", "10")]),
+        )
+        .header(reqwest::header::ACCEPT, GITHUB_CODE_SEARCH_ACCEPT)
+        .bearer_auth(token.as_str())
+        .send()
+        .await
+        .map_err(|error| {
+            GithubCodeSearchError::from_request(error, "GitHub code-search request failed")
+        })?;
+
+        let status = response.status();
+        let rate_limit = parse_rate_limit(response.headers(), Utc::now());
+        if !status.is_success() {
+            // Consume the bounded GitHub error body only for secondary-limit
+            // classification. Do not retain it in the error: it can echo query
+            // text and is unnecessary for diagnostics.
+            let body = response.text().await.unwrap_or_default();
+            let kind = code_search_failure_kind(status, &rate_limit, &body);
+            return Err(GithubCodeSearchError::new(
+                kind,
+                rate_limit,
+                anyhow::anyhow!("GitHub code-search request was rejected with status {status}"),
+            ));
+        }
+
+        let search = response
+            .json::<CodeSearchResponse>()
+            .await
+            .map_err(|error| {
+                GithubCodeSearchError::new(
+                    GithubCodeSearchFailureKind::InvalidResponse,
+                    rate_limit.clone(),
+                    anyhow::Error::new(error).context("GitHub code-search response was invalid"),
+                )
+            })?;
+        Ok(GithubCodeSearchResult {
+            candidates: search
+                .items
+                .into_iter()
+                .flat_map(code_search_candidates)
+                .take(CODE_SEARCH_RESULTS_PER_QUERY)
+                .collect(),
+            rate_limit,
+        })
+    }
+
     fn request(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         request
             .header(reqwest::header::ACCEPT, GITHUB_ACCEPT)
             .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
             .header(reqwest::header::USER_AGENT, GITHUB_USER_AGENT)
     }
+}
+
+fn code_search_failure_kind(
+    status: reqwest::StatusCode,
+    rate_limit: &GithubRateLimit,
+    body: &str,
+) -> GithubCodeSearchFailureKind {
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || (status == reqwest::StatusCode::FORBIDDEN
+            && (rate_limit.remaining == Some(0)
+                || rate_limit.retry_after.is_some()
+                || body.to_ascii_lowercase().contains("rate limit")))
+    {
+        GithubCodeSearchFailureKind::RateLimit
+    } else if status == reqwest::StatusCode::FORBIDDEN {
+        GithubCodeSearchFailureKind::Forbidden
+    } else if status == reqwest::StatusCode::NOT_FOUND {
+        GithubCodeSearchFailureKind::NotFound
+    } else if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        || status == reqwest::StatusCode::BAD_REQUEST
+    {
+        GithubCodeSearchFailureKind::InvalidRequest
+    } else if status.is_server_error() {
+        GithubCodeSearchFailureKind::Server
+    } else {
+        GithubCodeSearchFailureKind::Forbidden
+    }
+}
+
+fn parse_rate_limit(headers: &reqwest::header::HeaderMap, now: DateTime<Utc>) -> GithubRateLimit {
+    let remaining = header_str(headers, "x-ratelimit-remaining")
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value >= 0);
+    let reset_at = header_str(headers, "x-ratelimit-reset")
+        .and_then(|value| value.parse::<i64>().ok())
+        .and_then(|timestamp| DateTime::from_timestamp(timestamp, 0));
+    let retry_after = header_str(headers, reqwest::header::RETRY_AFTER.as_str())
+        .and_then(|value| parse_retry_after(value, now));
+    GithubRateLimit {
+        remaining,
+        reset_at,
+        retry_after,
+    }
+}
+
+fn header_str<'a>(headers: &'a reqwest::header::HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+fn parse_retry_after(value: &str, now: DateTime<Utc>) -> Option<StdDuration> {
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(StdDuration::from_secs(seconds));
+    }
+    DateTime::parse_from_rfc2822(value)
+        .ok()
+        .and_then(|retry_at| (retry_at.with_timezone(&Utc) - now).to_std().ok())
+}
+
+fn code_search_candidates(item: CodeSearchItem) -> Vec<CodeSearchCandidate> {
+    let ranges = item
+        .line_numbers
+        .iter()
+        .filter_map(|range| parse_line_range(range))
+        .collect::<Vec<_>>();
+    if ranges.is_empty() {
+        return vec![CodeSearchCandidate {
+            file: item.path,
+            line_start: 1,
+            line_end: 1,
+        }];
+    }
+    ranges
+        .into_iter()
+        .map(|(line_start, line_end)| CodeSearchCandidate {
+            file: item.path.clone(),
+            line_start,
+            line_end,
+        })
+        .collect()
+}
+
+fn parse_line_range(value: &str) -> Option<(u32, u32)> {
+    let (start, end) = value.split_once("..").unwrap_or((value, value));
+    let start = start.parse::<u32>().ok()?.max(1);
+    let end = end.parse::<u32>().ok()?.max(start);
+    Some((start, end))
+}
+
+fn valid_git_sha(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn app_bot_login(app_slug: &str) -> String {
@@ -906,5 +1209,123 @@ mod tests {
             issue_list_failure_kind(None, false),
             GithubIssueListFailureKind::Transport
         );
+    }
+
+    #[test]
+    fn installation_token_debug_output_is_redacted() {
+        let token = GithubInstallationToken("github_pat_secret".to_owned());
+
+        let debug = format!("{token:?}");
+
+        assert_eq!(debug, "GithubInstallationToken([redacted])");
+        assert!(!debug.contains("github_pat_secret"));
+    }
+
+    #[test]
+    fn parses_success_and_failure_rate_limit_headers() -> anyhow::Result<()> {
+        let now =
+            DateTime::from_timestamp(1_800_000_000, 0).context("test timestamp should be valid")?;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-remaining", "7".parse()?);
+        headers.insert("x-ratelimit-reset", "1800000060".parse()?);
+        headers.insert(reqwest::header::RETRY_AFTER, "12".parse()?);
+
+        let limit = parse_rate_limit(&headers, now);
+
+        assert_eq!(limit.remaining, Some(7));
+        assert_eq!(limit.reset_at, DateTime::from_timestamp(1_800_000_060, 0));
+        assert_eq!(limit.retry_after, Some(StdDuration::from_secs(12)));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_http_date_retry_after() -> anyhow::Result<()> {
+        let now =
+            DateTime::parse_from_rfc2822("Wed, 21 Oct 2015 07:27:00 GMT")?.with_timezone(&Utc);
+
+        assert_eq!(
+            parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT", now),
+            Some(StdDuration::from_mins(1))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn code_search_distinguishes_forbidden_from_rate_limits() {
+        use reqwest::StatusCode;
+
+        let available = GithubRateLimit {
+            remaining: Some(8),
+            ..GithubRateLimit::default()
+        };
+        assert_eq!(
+            code_search_failure_kind(StatusCode::FORBIDDEN, &available, "Resource not accessible"),
+            GithubCodeSearchFailureKind::Forbidden
+        );
+        assert_eq!(
+            code_search_failure_kind(
+                StatusCode::FORBIDDEN,
+                &GithubRateLimit {
+                    remaining: Some(0),
+                    ..GithubRateLimit::default()
+                },
+                ""
+            ),
+            GithubCodeSearchFailureKind::RateLimit
+        );
+        assert_eq!(
+            code_search_failure_kind(
+                StatusCode::FORBIDDEN,
+                &available,
+                "You have exceeded a secondary rate limit"
+            ),
+            GithubCodeSearchFailureKind::RateLimit
+        );
+        assert_eq!(
+            code_search_failure_kind(StatusCode::TOO_MANY_REQUESTS, &available, ""),
+            GithubCodeSearchFailureKind::RateLimit
+        );
+    }
+
+    #[test]
+    fn code_search_line_ranges_are_bounded_and_file_fallback_is_explicit() {
+        let candidates = code_search_candidates(CodeSearchItem {
+            path: "src/search.rs".to_owned(),
+            line_numbers: vec!["73..77".to_owned(), "90".to_owned(), "invalid".to_owned()],
+        });
+        assert_eq!(
+            candidates,
+            vec![
+                CodeSearchCandidate {
+                    file: "src/search.rs".to_owned(),
+                    line_start: 73,
+                    line_end: 77,
+                },
+                CodeSearchCandidate {
+                    file: "src/search.rs".to_owned(),
+                    line_start: 90,
+                    line_end: 90,
+                }
+            ]
+        );
+        assert_eq!(
+            code_search_candidates(CodeSearchItem {
+                path: "src/fallback.rs".to_owned(),
+                line_numbers: Vec::new(),
+            }),
+            vec![CodeSearchCandidate {
+                file: "src/fallback.rs".to_owned(),
+                line_start: 1,
+                line_end: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn validates_repository_head_sha_shape() {
+        assert!(valid_git_sha("0123456789abcdef0123456789abcdef01234567"));
+        assert!(valid_git_sha("0123456789ABCDEF0123456789ABCDEF01234567"));
+        assert!(!valid_git_sha("main"));
+        assert!(!valid_git_sha("g123456789abcdef0123456789abcdef01234567"));
     }
 }
