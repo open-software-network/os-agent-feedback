@@ -75,7 +75,8 @@ use crate::{
     github::{
         GithubAppClient, GithubAppConfig, GithubCodeSearchCandidate, GithubCodeSearchFailureKind,
         GithubFileContentFailureKind, GithubIssue, GithubIssueCreationOutcome,
-        GithubIssueListError, GithubIssueListFailureKind, GithubRateLimit, validate_repo_full_name,
+        GithubIssueListError, GithubIssueListFailureKind, GithubPinnedCommitError, GithubRateLimit,
+        validate_repo_full_name,
     },
     grouping::FingerprintGrouper,
     issue_template::{
@@ -110,11 +111,12 @@ use crate::{
         bearer_token, clear_cookie, cookie, http_only_cookie, random_token, reject_sensitive_fields,
     },
     store::{
-        CodeMatchJob, GithubInstallationUpsert, GroupIssueFilingClaim, GroupIssueFilingRequest,
-        GroupIssueSyncContext, accept_team_invitation, agent_product_auth,
-        backfill_customer_intelligence, backfill_report_groups, bump_last_commented_report_count,
-        claim_code_match_batch, claim_group_issue_filing, claim_group_issue_reconciliation,
-        claim_group_issue_state_refresh, clear_code_match_verification_retry,
+        CodeMatchCompletion, CodeMatchJob, CodeMatchVerificationRetry, GithubInstallationUpsert,
+        GroupIssueFilingClaim, GroupIssueFilingRequest, GroupIssueSyncContext,
+        accept_team_invitation, agent_product_auth, backfill_customer_intelligence,
+        backfill_report_groups, bump_last_commented_report_count, claim_code_match_batch,
+        claim_group_issue_filing, claim_group_issue_reconciliation,
+        claim_group_issue_state_refresh, clear_code_match_verification_retry_marker,
         clear_product_github_repo, complete_code_match_job, complete_group_issue_filing,
         complete_group_issue_reconciliation, create_api_key, create_enrichment_request,
         create_product_with_default_key, create_team_invitation, dashboard_customer_by_id,
@@ -132,12 +134,13 @@ use crate::{
         record_personalization_outcome, regroup_report_groups, release_code_match_claim,
         release_code_match_for_verification_retry, release_code_match_job,
         release_group_issue_filing_claim, release_group_issue_reconciliation_claim,
-        remove_team_member, rename_product, rename_workspace, resolve_workspace_access,
-        retrieve_customer_context, revert_last_commented_report_count, revoke_api_key,
-        revoke_github_installation, revoke_team_invitation, rotate_api_key,
+        remove_team_member, rename_product, rename_workspace, reset_code_match_verification_retry,
+        resolve_workspace_access, retrieve_customer_context, revert_last_commented_report_count,
+        revoke_api_key, revoke_github_installation, revoke_team_invitation, rotate_api_key,
         set_product_github_repo, submit_enrichment_answer, submit_product_feedback,
-        transfer_team_ownership, update_feedback_workflow, update_group_issue_state, update_policy,
-        update_team_member_role, upsert_github_installation,
+        terminally_dead_letter_code_match_verification, transfer_team_ownership,
+        update_feedback_workflow, update_group_issue_state, update_policy, update_team_member_role,
+        upsert_github_installation,
     },
 };
 
@@ -166,6 +169,7 @@ const CODE_MATCH_BATCH_SIZE: i64 = 20;
 const CODE_MATCH_SEARCH_CALLS_PER_INSTALLATION_BATCH: usize = 10;
 const CODE_MATCH_CONTENT_FETCHES_PER_INSTALLATION_BATCH: usize = 10;
 const CODE_MATCH_MAX_ATTEMPTS: i32 = 8;
+const CODE_MATCH_MAX_VERIFICATION_RETRIES: i32 = 8;
 const CODE_MATCH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 // A 20-job batch can span 20 installations. At the GitHub client's 15s
 // timeout, token + HEAD + five searches + ten bounded content fetches, plus
@@ -743,12 +747,20 @@ const fn pinned_file_content_for_failure(kind: GithubFileContentFailureKind) -> 
     }
 }
 
+fn normalized_code_match_repo(repo_full_name: &str) -> String {
+    repo_full_name.trim().to_ascii_lowercase()
+}
+
+fn same_code_match_repo(left: &str, right: &str) -> bool {
+    normalized_code_match_repo(left) == normalized_code_match_repo(right)
+}
+
 trait PinnedCommitVerifier: Sync {
     fn pinned_commit_is_fetchable(
         &self,
         repo_full_name: &str,
         computed_at_sha: &str,
-    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+    ) -> impl std::future::Future<Output = Result<(), GithubPinnedCommitError>> + Send;
 }
 
 struct GithubPinnedCommitVerifier<'a> {
@@ -761,7 +773,7 @@ impl PinnedCommitVerifier for GithubPinnedCommitVerifier<'_> {
         &self,
         repo_full_name: &str,
         computed_at_sha: &str,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), GithubPinnedCommitError> {
         self.github
             .repository_commit_is_fetchable(self.token, repo_full_name, computed_at_sha)
             .await
@@ -796,6 +808,18 @@ enum CodeMatchJobOutcome {
     BackoffInstallation { until: DateTime<Utc>, error: String },
 }
 
+enum CodeMatchVerificationPreflight {
+    Proceed { retry_count: i32 },
+    Stop(CodeMatchJobOutcome),
+}
+
+struct CodeMatchSettlement<'a> {
+    computed_at_sha: &'a str,
+    matches: Vec<CodeSearchMatches>,
+    verification: CodeMatchVerificationTracker,
+    verification_retry_count: i32,
+}
+
 async fn drain_code_match_batch(
     pool: &PgPool,
     github: &GithubAppClient,
@@ -820,7 +844,25 @@ async fn drain_code_match_batch(
             Err(error) => {
                 let message = format!("GitHub installation token failed: {error}");
                 for job in &installation_jobs {
-                    if let Some(computed_at_sha) = job.verification_retry_sha.as_deref() {
+                    if let Some((computed_at_sha, verification_retry_repo)) =
+                        job.verification_retry()
+                    {
+                        let mapping_changed = job.repo_full_name.as_deref().is_some_and(|repo| {
+                            !same_code_match_repo(repo, verification_retry_repo)
+                        });
+                        if mapping_changed {
+                            let cleared = reset_code_match_verification_retry(
+                                pool,
+                                job.report_id,
+                                job.claim_token,
+                            )
+                            .await
+                            .map_err(|error| anyhow::anyhow!(error.message))?;
+                            if cleared {
+                                retry_or_dead_letter_code_match_job(pool, job, &message).await?;
+                            }
+                            continue;
+                        }
                         // Once a pinned-commit proof has failed, keep this job
                         // retryable even if the next batch cannot mint a token.
                         // Dead-lettering here would strand a report with no
@@ -830,6 +872,9 @@ async fn drain_code_match_batch(
                             pool,
                             job,
                             computed_at_sha,
+                            verification_retry_repo,
+                            job.verification_retry_count,
+                            false,
                             &message,
                         )
                         .await?;
@@ -917,12 +962,17 @@ async fn process_code_match_job(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("claimed code-match job is missing its default branch"))?;
     let pinned_commit_verifier = GithubPinnedCommitVerifier { github, token };
-    if let Some(outcome) =
-        preflight_code_match_verification_retry(pool, &pinned_commit_verifier, job, repo_full_name)
-            .await?
+    let verification_retry_count = match preflight_code_match_verification_retry(
+        pool,
+        &pinned_commit_verifier,
+        job,
+        repo_full_name,
+    )
+    .await?
     {
-        return Ok(outcome);
-    }
+        CodeMatchVerificationPreflight::Proceed { retry_count } => retry_count,
+        CodeMatchVerificationPreflight::Stop(outcome) => return Ok(outcome),
+    };
     let repo_key = (repo_full_name.to_owned(), default_branch.to_owned());
     let computed_at_sha = if let Some(sha) = head_sha_by_repo.get(&repo_key) {
         sha.clone()
@@ -1100,9 +1150,12 @@ async fn process_code_match_job(
         &pinned_commit_verifier,
         job,
         repo_full_name,
-        &computed_at_sha,
-        matches,
-        verification,
+        CodeMatchSettlement {
+            computed_at_sha: &computed_at_sha,
+            matches,
+            verification,
+            verification_retry_count,
+        },
     )
     .await
 }
@@ -1112,12 +1165,33 @@ async fn preflight_code_match_verification_retry(
     verifier: &impl PinnedCommitVerifier,
     job: &CodeMatchJob,
     repo_full_name: &str,
-) -> anyhow::Result<Option<CodeMatchJobOutcome>> {
-    let Some(computed_at_sha) = job.verification_retry_sha.as_deref() else {
-        return Ok(None);
+) -> anyhow::Result<CodeMatchVerificationPreflight> {
+    let Some((computed_at_sha, verification_retry_repo)) = job.verification_retry() else {
+        return Ok(CodeMatchVerificationPreflight::Proceed {
+            retry_count: job.verification_retry_count,
+        });
     };
+    if !same_code_match_repo(verification_retry_repo, repo_full_name) {
+        // The SHA belongs to the repository recorded when verification first
+        // failed. A supported product remap makes that proof irrelevant: clear
+        // the whole episode before any GitHub call, then run fresh against the
+        // current mapping without charging the verification-retry ceiling.
+        let cleared = reset_code_match_verification_retry(pool, job.report_id, job.claim_token)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        if !cleared {
+            tracing::warn!(
+                report_id = %job.report_id,
+                "code-match remap reset lost its claim fencing race"
+            );
+            return Ok(CodeMatchVerificationPreflight::Stop(
+                CodeMatchJobOutcome::Continue,
+            ));
+        }
+        return Ok(CodeMatchVerificationPreflight::Proceed { retry_count: 0 });
+    }
     if let Err(error) = verifier
-        .pinned_commit_is_fetchable(repo_full_name, computed_at_sha)
+        .pinned_commit_is_fetchable(verification_retry_repo, computed_at_sha)
         .await
     {
         let message = format!("GitHub pinned commit remains unavailable: {error}");
@@ -1125,12 +1199,15 @@ async fn preflight_code_match_verification_retry(
             pool,
             job,
             computed_at_sha,
+            verification_retry_repo,
+            job.verification_retry_count,
+            error.kind().counts_toward_verification_ceiling(),
             &message,
         )
         .await
-        .map(Some);
+        .map(CodeMatchVerificationPreflight::Stop);
     }
-    let cleared = clear_code_match_verification_retry(pool, job.report_id, job.claim_token)
+    let cleared = clear_code_match_verification_retry_marker(pool, job.report_id, job.claim_token)
         .await
         .map_err(|error| anyhow::anyhow!(error.message))?;
     if !cleared {
@@ -1138,9 +1215,13 @@ async fn preflight_code_match_verification_retry(
             report_id = %job.report_id,
             "code-match verification retry preflight lost its claim fencing race"
         );
-        return Ok(Some(CodeMatchJobOutcome::Continue));
+        return Ok(CodeMatchVerificationPreflight::Stop(
+            CodeMatchJobOutcome::Continue,
+        ));
     }
-    Ok(None)
+    Ok(CodeMatchVerificationPreflight::Proceed {
+        retry_count: job.verification_retry_count,
+    })
 }
 
 async fn settle_and_complete_code_match_job(
@@ -1148,10 +1229,14 @@ async fn settle_and_complete_code_match_job(
     verifier: &impl PinnedCommitVerifier,
     job: &CodeMatchJob,
     repo_full_name: &str,
-    computed_at_sha: &str,
-    matches: Vec<CodeSearchMatches>,
-    mut verification: CodeMatchVerificationTracker,
+    settlement: CodeMatchSettlement<'_>,
 ) -> anyhow::Result<CodeMatchJobOutcome> {
+    let CodeMatchSettlement {
+        computed_at_sha,
+        matches,
+        mut verification,
+        verification_retry_count,
+    } = settlement;
     let has_provisional_absence = matches.iter().any(|matches| {
         matches
             .candidates
@@ -1173,6 +1258,9 @@ async fn settle_and_complete_code_match_job(
                 pool,
                 job,
                 computed_at_sha,
+                repo_full_name,
+                verification_retry_count,
+                error.kind().counts_toward_verification_ceiling(),
                 &message,
             )
             .await;
@@ -1185,20 +1273,33 @@ async fn settle_and_complete_code_match_job(
     };
     let verification = verification.finish(&matches);
     let hints = rank_matches(matches);
+    let stored_outcome = if hints.is_empty() {
+        if verification.dropped_as_absent > 0 {
+            "proven_absent"
+        } else {
+            "no_match"
+        }
+    } else {
+        "matched"
+    };
     let hints_json = code_hints_json(hints);
     // Invariant: every stored hint was verified to exist at computed_at_sha,
     // or is explicitly flagged unverified. Both legitimate no-hit and proven
-    // all-absent outcomes write an empty row; the append-only verification
-    // record distinguishes their candidate and drop counts. An unproven 404
-    // writes neither row and instead retains a retry marker on the queue.
+    // all-absent outcomes write an empty row with an explicit outcome. An
+    // unproven 404 writes neither row and instead retains a retry marker on the
+    // queue; a ceiling-exhausted marker writes `terminal_unverifiable`
+    // atomically with its dead letter and zero-count analytics row.
     let completed = complete_code_match_job(
         pool,
         job.report_id,
         job.claim_token,
-        job.attempts,
-        computed_at_sha,
-        hints_json,
-        verification,
+        CodeMatchCompletion {
+            attempt: job.attempts,
+            computed_at_sha,
+            hints: hints_json,
+            verification,
+            outcome: stored_outcome,
+        },
     )
     .await
     .map_err(|error| anyhow::anyhow!(error.message))?;
@@ -1215,16 +1316,61 @@ async fn release_code_match_after_unproven_pinned_commit(
     pool: &PgPool,
     job: &CodeMatchJob,
     computed_at_sha: &str,
+    repo_full_name: &str,
+    verification_retry_count: i32,
+    counts_toward_ceiling: bool,
     error: &str,
 ) -> anyhow::Result<CodeMatchJobOutcome> {
-    let until = generic_code_match_retry_at(job.attempts);
+    let next_verification_retry =
+        verification_retry_count.saturating_add(i32::from(counts_toward_ceiling));
+    let until = generic_code_match_retry_at(next_verification_retry);
+    if counts_toward_ceiling && next_verification_retry >= CODE_MATCH_MAX_VERIFICATION_RETRIES {
+        let reason = format!(
+            "pinned-commit verification retry ceiling {CODE_MATCH_MAX_VERIFICATION_RETRIES} reached: {error}"
+        );
+        // A preflight failure has no successfully computed revision. Persist
+        // the marker SHA only as the intended verification target; the
+        // explicit `terminal_unverifiable` outcome is what prevents readers
+        // from interpreting this row as a successful computation at that SHA.
+        let terminal = terminally_dead_letter_code_match_verification(
+            pool,
+            job.report_id,
+            job.claim_token,
+            job.attempts,
+            computed_at_sha,
+            &reason,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+        if !terminal {
+            tracing::warn!(
+                report_id = %job.report_id,
+                "code-match terminal verification transition lost its claim fencing race"
+            );
+            return Ok(CodeMatchJobOutcome::Continue);
+        }
+        tracing::warn!(
+            report_id = %job.report_id,
+            verification_retries = next_verification_retry,
+            %reason,
+            "code-match verification retry ceiling reached"
+        );
+        return Ok(CodeMatchJobOutcome::BackoffInstallation {
+            until,
+            error: reason,
+        });
+    }
     let released = release_code_match_for_verification_retry(
         pool,
         job.report_id,
         job.claim_token,
-        computed_at_sha,
-        until,
-        error,
+        CodeMatchVerificationRetry {
+            computed_at_sha,
+            repo_full_name: &normalized_code_match_repo(repo_full_name),
+            counts_toward_ceiling,
+            available_at: until,
+            error,
+        },
     )
     .await
     .map_err(|error| anyhow::anyhow!(error.message))?;
@@ -5828,7 +5974,7 @@ mod page_tests {
         group_issue_reconciliation_resolution, group_issue_state_refresh_due,
         group_issue_sync_needed, group_marker_comment, install_workspace_id, mcp_auth_error,
         mcp_tool_allowed, mcp_tools, pinned_file_content_for_failure, resolve_web_app_url,
-        reveal_auth_error, valid_report_group_key, validated_return_to,
+        reveal_auth_error, same_code_match_repo, valid_report_group_key, validated_return_to,
     };
     use chrono::{Duration, TimeZone as _, Utc};
     use serde_json::{Value, json};
@@ -5894,6 +6040,18 @@ mod page_tests {
                 PinnedFileContent::Unverified
             ));
         }
+    }
+
+    #[test]
+    fn code_match_remap_detection_normalizes_both_repo_names() {
+        assert!(same_code_match_repo(
+            "Open-Software/Code-Match-Test",
+            "open-software/code-match-test"
+        ));
+        assert!(!same_code_match_repo(
+            "open-software/code-match-test",
+            "open-software/another-repo"
+        ));
     }
 
     #[test]

@@ -239,6 +239,62 @@ impl std::error::Error for GithubFileContentError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GithubPinnedCommitFailureKind {
+    NotFound,
+    Unauthorized,
+    Forbidden,
+    Server,
+    Timeout,
+    InvalidResponse,
+    Transport,
+}
+
+impl GithubPinnedCommitFailureKind {
+    pub(crate) const fn counts_toward_verification_ceiling(self) -> bool {
+        matches!(self, Self::NotFound)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct GithubPinnedCommitError {
+    kind: GithubPinnedCommitFailureKind,
+    source: anyhow::Error,
+}
+
+impl GithubPinnedCommitError {
+    fn from_source(source: anyhow::Error) -> Self {
+        Self {
+            kind: github_pinned_commit_failure_kind(&source),
+            source,
+        }
+    }
+
+    pub(crate) const fn kind(&self) -> GithubPinnedCommitFailureKind {
+        self.kind
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(kind: GithubPinnedCommitFailureKind) -> Self {
+        Self {
+            kind,
+            source: anyhow::anyhow!("test pinned-commit failure: {kind:?}"),
+        }
+    }
+}
+
+impl fmt::Display for GithubPinnedCommitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for GithubPinnedCommitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GithubCodeSearchFailureKind {
     RateLimit,
     Unauthorized,
@@ -480,6 +536,21 @@ fn github_file_content_failure_kind(error: &anyhow::Error) -> GithubFileContentF
         Some(_) => GithubFileContentFailureKind::InvalidResponse,
         None if request_error.is_timeout() => GithubFileContentFailureKind::Timeout,
         None => GithubFileContentFailureKind::Transport,
+    }
+}
+
+fn github_pinned_commit_failure_kind(error: &anyhow::Error) -> GithubPinnedCommitFailureKind {
+    let Some(request_error) = error.downcast_ref::<reqwest::Error>() else {
+        return GithubPinnedCommitFailureKind::InvalidResponse;
+    };
+    match request_error.status() {
+        Some(reqwest::StatusCode::NOT_FOUND) => GithubPinnedCommitFailureKind::NotFound,
+        Some(reqwest::StatusCode::UNAUTHORIZED) => GithubPinnedCommitFailureKind::Unauthorized,
+        Some(reqwest::StatusCode::FORBIDDEN) => GithubPinnedCommitFailureKind::Forbidden,
+        Some(status) if status.is_server_error() => GithubPinnedCommitFailureKind::Server,
+        Some(_) => GithubPinnedCommitFailureKind::InvalidResponse,
+        None if request_error.is_timeout() => GithubPinnedCommitFailureKind::Timeout,
+        None => GithubPinnedCommitFailureKind::Transport,
     }
 }
 
@@ -927,6 +998,17 @@ impl GithubAppClient {
     /// cannot distinguish a missing path from a revoked or garbage-collected
     /// pinned commit.
     pub(crate) async fn repository_commit_is_fetchable(
+        &self,
+        token: &GithubInstallationToken,
+        repo_full_name: &str,
+        sha: &str,
+    ) -> Result<(), GithubPinnedCommitError> {
+        self.repository_commit_is_fetchable_untyped(token, repo_full_name, sha)
+            .await
+            .map_err(GithubPinnedCommitError::from_source)
+    }
+
+    async fn repository_commit_is_fetchable_untyped(
         &self,
         token: &GithubInstallationToken,
         repo_full_name: &str,
@@ -1760,6 +1842,62 @@ mod tests {
                 .context("GitHub repository file request was rejected");
 
             assert_eq!(github_file_content_failure_kind(&error), expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn pinned_commit_404_is_terminal_counted_but_transient_failures_are_not() -> anyhow::Result<()>
+    {
+        for (status, expected, counts_toward_ceiling) in [
+            (
+                reqwest::StatusCode::NOT_FOUND,
+                GithubPinnedCommitFailureKind::NotFound,
+                true,
+            ),
+            (
+                reqwest::StatusCode::UNAUTHORIZED,
+                GithubPinnedCommitFailureKind::Unauthorized,
+                false,
+            ),
+            (
+                reqwest::StatusCode::FORBIDDEN,
+                GithubPinnedCommitFailureKind::Forbidden,
+                false,
+            ),
+            (
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                GithubPinnedCommitFailureKind::Server,
+                false,
+            ),
+        ] {
+            let response = reqwest::Response::from(
+                axum::http::Response::builder()
+                    .status(status)
+                    .body("request failed")?,
+            );
+            let Err(request_error) = response.error_for_status() else {
+                anyhow::bail!("error status should produce a reqwest error");
+            };
+            let error = anyhow::Error::new(request_error)
+                .context("GitHub pinned commit request was rejected");
+            let kind = github_pinned_commit_failure_kind(&error);
+
+            assert_eq!(kind, expected);
+            assert_eq!(
+                kind.counts_toward_verification_ceiling(),
+                counts_toward_ceiling
+            );
+        }
+        for transient_kind in [
+            GithubPinnedCommitFailureKind::Unauthorized,
+            GithubPinnedCommitFailureKind::Forbidden,
+            GithubPinnedCommitFailureKind::Server,
+            GithubPinnedCommitFailureKind::Timeout,
+            GithubPinnedCommitFailureKind::InvalidResponse,
+            GithubPinnedCommitFailureKind::Transport,
+        ] {
+            assert!(!transient_kind.counts_toward_verification_ceiling());
         }
         Ok(())
     }
