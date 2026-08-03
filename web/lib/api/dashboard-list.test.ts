@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { feedbackListPath, sessionsListPath } from "./dashboard";
+import { dashboardResponsesPath, feedbackListPath, sessionsListPath } from "./dashboard";
 
 describe("dashboard list request paths", () => {
   it("serializes bounded feedback filters and its opaque cursor", () => {
@@ -60,6 +60,30 @@ describe("dashboard list request paths", () => {
       since: "2026-07-01T00:00:00.000Z",
       limit: "25",
       cursor: "next-session",
+    });
+  });
+
+  it("serializes response search, status, time, and cursor filters", () => {
+    const path = dashboardResponsesPath({
+      productId: "product-1",
+      q: "preferred color",
+      status: ["answered", "declined"],
+      since: "2026-07-01T00:00:00.000Z",
+      until: "2026-07-31T00:00:00.000Z",
+      limit: 50,
+      cursor: "next-response",
+    });
+    const url = new URL(path, "https://app.epode.ai");
+
+    expect(url.pathname).toBe("/api/dashboard/responses");
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      productId: "product-1",
+      q: "preferred color",
+      status: "answered,declined",
+      since: "2026-07-01T00:00:00.000Z",
+      until: "2026-07-31T00:00:00.000Z",
+      limit: "50",
+      cursor: "next-response",
     });
   });
 });

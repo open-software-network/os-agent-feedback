@@ -28,8 +28,8 @@ describe("dashboard data flow", () => {
       </Providers>,
     );
 
-    expect(await screen.findByRole("heading", { name: "Insights" })).toBeVisible();
-    for (const view of ["Customers", "Insights", "Setup", "Data controls"]) {
+    expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
+    for (const view of ["Home", "Customers", "Responses", "Sessions", "Setup", "Data controls"]) {
       expect(screen.getByRole("button", { name: view })).toBeVisible();
     }
     expect(fetchMock).toHaveBeenCalledWith(
@@ -45,7 +45,14 @@ describe("dashboard data flow", () => {
       expect.any(Object),
     );
 
-    for (const hidden of ["Features", "Sessions", "Feedback", "Interactions"]) {
+    for (const hidden of [
+      "Features",
+      "Feedback",
+      "Interactions",
+      "Signals",
+      "Contexts",
+      "Evidences",
+    ]) {
       expect(screen.queryByRole("button", { name: hidden })).not.toBeInTheDocument();
     }
     fireEvent.click(screen.getByRole("button", { name: "Customers" }));
@@ -120,7 +127,7 @@ describe("dashboard data flow", () => {
       </Providers>,
     );
 
-    expect(await screen.findByRole("heading", { name: "Insights" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining(`workspaceId=${staleTeam}`),
       expect.any(Object),
@@ -169,7 +176,7 @@ describe("dashboard data flow", () => {
       </Providers>,
     );
 
-    expect(await screen.findByRole("heading", { name: "Insights" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Setup" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Data controls" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Connectors" })).not.toBeInTheDocument();
@@ -236,8 +243,8 @@ describe("dashboard data flow", () => {
     );
 
     expect(await screen.findByText(message)).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Insights" }));
-    expect(await screen.findByRole("heading", { name: "Insights" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Home" }));
+    expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: /Owner User/ }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Configuration" }));
     fireEvent.click(await screen.findByRole("tab", { name: "Connectors" }));
@@ -255,12 +262,12 @@ describe("dashboard data flow", () => {
       </Providers>,
     );
 
-    expect(await screen.findByRole("heading", { name: "Insights" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Customers" }));
     expect(await screen.findByRole("heading", { name: "Customers" })).toBeVisible();
     window.history.back();
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "Insights" })).toBeVisible());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Home" })).toBeVisible());
   });
 
   it("surfaces an invalid invitation and removes it from the URL", async () => {
@@ -332,7 +339,7 @@ describe("dashboard data flow", () => {
       </Providers>,
     );
 
-    expect(await screen.findByRole("heading", { name: "Insights" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: /Owner User/ }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Configuration" }));
     expect(await screen.findByRole("heading", { name: "Product" })).toBeVisible();

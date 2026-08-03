@@ -75,13 +75,13 @@ use crate::{
         CreateTeamInvitationInput, CurrentUser, CustomerContextInput, CustomerContextResponse,
         DashboardContext, DashboardCustomerDetail, DashboardCustomerFilters,
         DashboardCustomersPage, DashboardData, DashboardFeedbackFilters, DashboardFeedbackPage,
-        DashboardSessionDetail, DashboardSessionFilters, DashboardSessionsPage,
-        DashboardSignalFilters, DashboardSignalsPage, DeleteProductInput, EnrichmentAnswerInput,
-        EnrichmentAnswerResponse, EnrichmentConsentDecisionInput,
-        EnrichmentConsentDecisionResponse, EnrichmentRequestInput, EnrichmentRequestResponse,
-        FeedbackConsentDiscovery, FeedbackDiscoveryResponse, FeedbackFindingShapeDiscovery,
-        FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackModesDiscovery,
-        FeedbackRequiredFieldsDiscovery, FeedbackSubmissionDiscovery,
+        DashboardResponseFilters, DashboardResponsesPage, DashboardSessionDetail,
+        DashboardSessionFilters, DashboardSessionsPage, DashboardSignalFilters,
+        DashboardSignalsPage, DeleteProductInput, EnrichmentAnswerInput, EnrichmentAnswerResponse,
+        EnrichmentConsentDecisionInput, EnrichmentConsentDecisionResponse, EnrichmentRequestInput,
+        EnrichmentRequestResponse, FeedbackConsentDiscovery, FeedbackDiscoveryResponse,
+        FeedbackFindingShapeDiscovery, FeedbackListInteractionsInput, FeedbackListReportsInput,
+        FeedbackModesDiscovery, FeedbackRequiredFieldsDiscovery, FeedbackSubmissionDiscovery,
         FeedbackWorkaroundShapeDiscovery, GithubIssueLink, HealthResponse, IntegrationsDiscovery,
         McpDiscovery, MergeReportGroupsInput, MergeReportGroupsResponse,
         PersonalizationDecisionInput, PersonalizationDecisionResponse, PersonalizationOutcomeInput,
@@ -105,13 +105,14 @@ use crate::{
         complete_group_issue_reconciliation, create_api_key, create_enrichment_request,
         create_product_with_default_key, create_team_invitation, dashboard_customer_by_id,
         dashboard_customers_page, dashboard_feedback_page, dashboard_interaction_by_id,
-        dashboard_report_by_id, dashboard_session_by_id, dashboard_sessions_page,
-        dashboard_signals_page, dashboard_with_limits, decide_enrichment_consent, delete_product,
-        feedback_consent_state, feedback_list_interactions, feedback_list_reports,
-        get_group_github_issue, get_or_create_workspace, get_product_github_repo,
-        github_installation_workspace, group_issue_context, group_issue_sync_context,
-        ingest_telemetry_batch, inspect_feedback_capability, list_github_installations,
-        list_product_groups, mark_group_issue_filing_for_reconciliation, merge_report_groups,
+        dashboard_report_by_id, dashboard_responses_page, dashboard_session_by_id,
+        dashboard_sessions_page, dashboard_signals_page, dashboard_with_limits,
+        decide_enrichment_consent, delete_product, feedback_consent_state,
+        feedback_list_interactions, feedback_list_reports, get_group_github_issue,
+        get_or_create_workspace, get_product_github_repo, github_installation_workspace,
+        group_issue_context, group_issue_sync_context, ingest_telemetry_batch,
+        inspect_feedback_capability, list_github_installations, list_product_groups,
+        mark_group_issue_filing_for_reconciliation, merge_report_groups,
         purge_expired_product_data, read_product_auth, record_feedback_consent_decision,
         record_personalization_decision, record_personalization_outcome, regroup_report_groups,
         release_group_issue_filing_claim, release_group_issue_reconciliation_claim,
@@ -239,6 +240,7 @@ fn build_app_router() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(dashboard_feedback_list_handler))
         .routes(routes!(dashboard_customers_list_handler))
         .routes(routes!(dashboard_customer_handler))
+        .routes(routes!(dashboard_responses_list_handler))
         .routes(routes!(dashboard_features_list_handler))
         .routes(routes!(dashboard_feature_handler))
         .routes(routes!(dashboard_signals_list_handler))
@@ -2779,6 +2781,20 @@ struct DashboardSignalsListQuery {
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
 #[into_params(parameter_in = Query)]
+struct DashboardResponsesListQuery {
+    product_id: Uuid,
+    q: Option<String>,
+    status: Option<String>,
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+    #[param(default = 50, minimum = 1, maximum = 100)]
+    limit: Option<i64>,
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
 struct DashboardFeaturesListQuery {
     product_id: Uuid,
     q: Option<String>,
@@ -2975,6 +2991,49 @@ async fn dashboard_feature_handler(
     )
     .await?;
     dashboard_response(&state, Json(detail), tokens)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/dashboard/responses",
+    tag = "dashboard",
+    params(
+        DashboardResponsesListQuery,
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Questions Epode asked and the answers customer agents returned", body = DashboardResponsesPage),
+        (status = 400, description = "Invalid filters, time range, cursor, or page size", body = ApiErrorEnvelope),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot access the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Product not found in the team", body = ApiErrorEnvelope),
+        (status = 410, description = "Cursor is outside the retained window", body = ApiErrorEnvelope),
+        (status = 500, description = "Responses could not be loaded", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn dashboard_responses_list_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<DashboardResponsesListQuery>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    let page = dashboard_responses_page(
+        &state.pool,
+        context.workspace.id,
+        query.product_id,
+        DashboardResponseFilters {
+            query: query.q,
+            statuses: comma_values(query.status, "status")?,
+            since: query.since,
+            until: query.until,
+            limit: query.limit,
+            cursor: query.cursor,
+        },
+    )
+    .await?;
+    dashboard_response(&state, Json(page), tokens)
 }
 
 #[utoipa::path(

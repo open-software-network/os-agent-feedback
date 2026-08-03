@@ -55,6 +55,47 @@ export const DASHBOARD_LIMIT_DEFAULTS = {
   sessionLimit: 100,
 } as const;
 
+export type DashboardResponseAnswer = components["schemas"]["DashboardResponseAnswer"];
+export type DashboardResponseSummary = Omit<
+  components["schemas"]["DashboardResponseSummary"],
+  "status"
+> & {
+  status: "answered" | "awaiting_answer" | "declined" | "no_relevant_context";
+};
+
+export type DashboardResponsesPage = Omit<
+  components["schemas"]["DashboardResponsesPage"],
+  "responses"
+> & { responses: DashboardResponseSummary[] };
+
+export type DashboardResponsesListQuery = {
+  productId: string;
+  q?: string;
+  status?: string[];
+  since?: string;
+  until?: string;
+  limit?: number;
+  cursor?: string;
+};
+
+export function dashboardResponsesPath(query: DashboardResponsesListQuery): string {
+  const params = new URLSearchParams({ productId: query.productId });
+  if (query.q) params.set("q", query.q);
+  if (query.status?.length) params.set("status", query.status.join(","));
+  if (query.since) params.set("since", query.since);
+  if (query.until) params.set("until", query.until);
+  if (query.limit !== undefined) params.set("limit", String(query.limit));
+  if (query.cursor) params.set("cursor", query.cursor);
+  return `/api/dashboard/responses?${params}`;
+}
+
+export function fetchDashboardResponsesPage(
+  workspaceId: string,
+  query: DashboardResponsesListQuery,
+) {
+  return apiRequest<DashboardResponsesPage>(dashboardResponsesPath(query), { workspaceId });
+}
+
 export function dashboardQueryPath(query: DashboardQuery): string {
   const params = new URLSearchParams();
   if (query.workspaceId) params.set("workspaceId", query.workspaceId);

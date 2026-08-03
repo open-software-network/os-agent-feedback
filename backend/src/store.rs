@@ -29,12 +29,13 @@ use crate::{
         CustomerRollup, CustomerSignal, CustomerSummary, DashboardContext, DashboardCustomerDetail,
         DashboardCustomerFilters, DashboardCustomersPage, DashboardData, DashboardFeedbackFacets,
         DashboardFeedbackFilters, DashboardFeedbackPage, DashboardListState,
-        DashboardSessionDetail, DashboardSessionFilters, DashboardSessionRollup,
-        DashboardSessionSummary, DashboardSessionsPage, DashboardSignalFilters,
-        DashboardSignalsPage, DeleteProductInput, EnrichmentAnswerAction,
-        EnrichmentAnswerBodySchema, EnrichmentAnswerInput, EnrichmentAnswerItemsSchema,
-        EnrichmentAnswerResponse, EnrichmentCatalogEntry, EnrichmentConsentAction,
-        EnrichmentConsentBodySchema, EnrichmentConsentDecisionInput,
+        DashboardResponseAnswer, DashboardResponseFilters, DashboardResponseRollup,
+        DashboardResponseSummary, DashboardResponsesPage, DashboardSessionDetail,
+        DashboardSessionFilters, DashboardSessionRollup, DashboardSessionSummary,
+        DashboardSessionsPage, DashboardSignalFilters, DashboardSignalsPage, DeleteProductInput,
+        EnrichmentAnswerAction, EnrichmentAnswerBodySchema, EnrichmentAnswerInput,
+        EnrichmentAnswerItemsSchema, EnrichmentAnswerResponse, EnrichmentCatalogEntry,
+        EnrichmentConsentAction, EnrichmentConsentBodySchema, EnrichmentConsentDecisionInput,
         EnrichmentConsentDecisionResponse, EnrichmentRequestInput, EnrichmentRequestResponse,
         FeedbackFindingInput, FeedbackInteractionItem, FeedbackInteractionsPage,
         FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackOperationSummary,
@@ -3505,6 +3506,180 @@ fn validate_signal_filters(filters: &DashboardSignalFilters) -> Result<(), ApiEr
         return Err(ApiError::bad_request("since must not be after until"));
     }
     Ok(())
+}
+
+pub(crate) async fn dashboard_responses_page(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    filters: DashboardResponseFilters,
+) -> Result<DashboardResponsesPage, ApiError> {
+    validate_feedback_values(
+        filters.statuses.as_deref(),
+        &[
+            "answered",
+            "awaiting_answer",
+            "declined",
+            "no_relevant_context",
+        ],
+        "status",
+    )?;
+    validate_dashboard_text(filters.query.as_deref(), "query", 200)?;
+    if filters
+        .since
+        .zip(filters.until)
+        .is_some_and(|(since, until)| since > until)
+    {
+        return Err(ApiError::bad_request("since must not be after until"));
+    }
+
+    let environment = dashboard_environment_for_product(pool, workspace_id, product_id).await?;
+    let retained_since = Utc::now() - Duration::days(environment.retention_days.into());
+    let since = filters
+        .since
+        .filter(|since| *since > retained_since)
+        .unwrap_or(retained_since);
+    let limit = dashboard_list_limit(filters.limit)?;
+    let page_size = usize::try_from(limit).map_err(ApiError::internal)?;
+    let cursor = decode_feedback_cursor(filters.cursor.as_deref(), retained_since)?;
+    let cursor_asked_at = cursor.as_ref().map(|cursor| cursor.occurred_at);
+    let cursor_id = cursor.as_ref().map(|cursor| cursor.id);
+    let search = filters.query.as_deref().map(dashboard_search_pattern);
+
+    let (questions, answered, awaiting_answer, declined) =
+        sqlx::query_as::<_, (i64, i64, i64, i64)>(
+            r"SELECT COUNT(*),
+              COUNT(*) FILTER (WHERE answer.status = 'answered'),
+              COUNT(*) FILTER (WHERE answer.id IS NULL
+                AND request.state NOT IN ('declined', 'no_relevant_context')),
+              COUNT(*) FILTER (WHERE COALESCE(answer.status, request.state) = 'declined')
+            FROM enrichment_requests request
+            LEFT JOIN enrichment_answers answer ON answer.request_id = request.id
+              AND answer.workspace_id = request.workspace_id
+            WHERE request.workspace_id = $1 AND request.product_id = $2
+              AND request.created_at >= $3",
+        )
+        .bind(workspace_id)
+        .bind(product_id)
+        .bind(retained_since)
+        .fetch_one(pool)
+        .await?;
+
+    let mut responses = sqlx::query_as::<_, DashboardResponseSummary>(
+        r"SELECT request.id, request.question,
+          CASE
+            WHEN answer.status = 'answered' THEN 'answered'
+            WHEN COALESCE(answer.status, request.state) = 'declined' THEN 'declined'
+            WHEN COALESCE(answer.status, request.state) = 'no_relevant_context'
+              THEN 'no_relevant_context'
+            ELSE 'awaiting_answer'
+          END AS status,
+          request.purpose, request.surface, request.customer_id,
+          COALESCE(customer.display_name, interaction.customer_ref) AS customer_name,
+          interaction.session_id, session.ref_hint AS session_ref,
+          request.created_at AS asked_at,
+          COALESCE(answer.created_at, request.answered_at) AS answered_at
+        FROM enrichment_requests request
+        LEFT JOIN enrichment_answers answer ON answer.request_id = request.id
+          AND answer.workspace_id = request.workspace_id
+        LEFT JOIN interactions_v2 interaction ON interaction.id = request.interaction_id
+          AND interaction.workspace_id = request.workspace_id
+        LEFT JOIN sessions_v2 session ON session.id = interaction.session_id
+          AND session.workspace_id = request.workspace_id
+        LEFT JOIN customers customer ON customer.id = request.customer_id
+          AND customer.workspace_id = request.workspace_id
+        WHERE request.workspace_id = $1 AND request.product_id = $2
+          AND request.created_at >= $3
+          AND ($4::TIMESTAMPTZ IS NULL OR request.created_at <= $4)
+          AND ($5::TEXT IS NULL OR request.question ILIKE $5 ESCAPE '\'
+            OR request.purpose ILIKE $5 ESCAPE '\'
+            OR COALESCE(customer.display_name, '') ILIKE $5 ESCAPE '\'
+            OR COALESCE(interaction.customer_ref, '') ILIKE $5 ESCAPE '\'
+            OR COALESCE(session.ref_hint, '') ILIKE $5 ESCAPE '\'
+            OR EXISTS (
+              SELECT 1 FROM enrichment_signal_items item
+              WHERE item.enrichment_answer_id = answer.id
+                AND (item.signal_key ILIKE $5 ESCAPE '\'
+                  OR item.signal_value ILIKE $5 ESCAPE '\')
+            ))
+          AND ($6::TEXT[] IS NULL OR CASE
+            WHEN answer.status = 'answered' THEN 'answered'
+            WHEN COALESCE(answer.status, request.state) = 'declined' THEN 'declined'
+            WHEN COALESCE(answer.status, request.state) = 'no_relevant_context'
+              THEN 'no_relevant_context'
+            ELSE 'awaiting_answer'
+          END = ANY($6))
+          AND ($7::TIMESTAMPTZ IS NULL OR (request.created_at, request.id) < ($7, $8))
+        ORDER BY request.created_at DESC, request.id DESC LIMIT $9",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(since)
+    .bind(filters.until)
+    .bind(search)
+    .bind(filters.statuses)
+    .bind(cursor_asked_at)
+    .bind(cursor_id)
+    .bind(limit + 1)
+    .fetch_all(pool)
+    .await?;
+
+    let next_cursor = if responses.len() > page_size {
+        let last = &responses[page_size - 1];
+        Some(encode_feedback_cursor(last.asked_at, last.id)?)
+    } else {
+        None
+    };
+    responses.truncate(page_size);
+
+    let request_ids = responses
+        .iter()
+        .map(|response| response.id)
+        .collect::<Vec<_>>();
+    if !request_ids.is_empty() {
+        let answer_items = sqlx::query_as::<_, (Uuid, String, String, String, String, bool)>(
+            r"SELECT answer.request_id, item.signal_key,
+              COALESCE(signal.attributes->>'enrichmentType', signal.signal_type),
+              item.signal_value, signal.summary, item.remembered
+            FROM enrichment_answers answer
+            JOIN enrichment_signal_items item ON item.enrichment_answer_id = answer.id
+              AND item.workspace_id = answer.workspace_id
+            JOIN customer_signals signal ON signal.id = item.signal_id
+              AND signal.workspace_id = answer.workspace_id
+            WHERE answer.workspace_id = $1 AND answer.request_id = ANY($2)
+            ORDER BY answer.request_id, item.item_index",
+        )
+        .bind(workspace_id)
+        .bind(&request_ids)
+        .fetch_all(pool)
+        .await?;
+        for (request_id, key, answer_type, value, summary, remembered) in answer_items {
+            if let Some(response) = responses
+                .iter_mut()
+                .find(|response| response.id == request_id)
+            {
+                response.answers.push(DashboardResponseAnswer {
+                    key,
+                    answer_type,
+                    value,
+                    summary,
+                    remembered,
+                });
+            }
+        }
+    }
+
+    Ok(DashboardResponsesPage {
+        responses,
+        rollup: DashboardResponseRollup {
+            questions,
+            answered,
+            awaiting_answer,
+            declined,
+        },
+        limit,
+        next_cursor,
+    })
 }
 
 pub(crate) async fn dashboard_signals_page(
@@ -16776,6 +16951,57 @@ mod product_tests {
             .await
             .map_err(test_error)?;
             anyhow::ensure!(!ephemeral_answer.signals[0].remembered);
+
+            let response_page = dashboard_responses_page(
+                &pool,
+                auth_a.workspace.id,
+                auth_a.environment.product_id,
+                DashboardResponseFilters {
+                    query: Some("quality".into()),
+                    statuses: Some(vec!["answered".into()]),
+                    limit: Some(1),
+                    ..DashboardResponseFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(response_page.responses.len() == 1);
+            anyhow::ensure!(response_page.responses[0].id == ephemeral.request_id);
+            anyhow::ensure!(response_page.responses[0].status == "answered");
+            anyhow::ensure!(response_page.responses[0].answers.len() == 1);
+            anyhow::ensure!(response_page.responses[0].answers[0].value == "quality");
+            anyhow::ensure!(response_page.rollup.questions > 1);
+
+            let first_response_page = dashboard_responses_page(
+                &pool,
+                auth_a.workspace.id,
+                auth_a.environment.product_id,
+                DashboardResponseFilters {
+                    limit: Some(1),
+                    ..DashboardResponseFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let response_cursor = first_response_page
+                .next_cursor
+                .ok_or_else(|| anyhow::anyhow!("first response page did not return a cursor"))?;
+            let second_response_page = dashboard_responses_page(
+                &pool,
+                auth_a.workspace.id,
+                auth_a.environment.product_id,
+                DashboardResponseFilters {
+                    limit: Some(1),
+                    cursor: Some(response_cursor),
+                    ..DashboardResponseFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(second_response_page.responses.len() == 1);
+            anyhow::ensure!(
+                second_response_page.responses[0].id != first_response_page.responses[0].id
+            );
             Ok::<(), anyhow::Error>(())
         })
         .await;
