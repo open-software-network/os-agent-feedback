@@ -30,7 +30,6 @@ export function HomeView({
   data: DashboardData;
   openCustomer?: (customerId: string) => void;
   openSession?: (sessionId: string) => void;
-  openFeature?: (featureKey: string) => void;
   openFeedback: (reportId: string) => void;
   refresh: () => Promise<unknown>;
 }) {

@@ -14,7 +14,6 @@ export const DASHBOARD_VIEWS = [
   "responses",
   "sessions",
   ...DASHBOARD_CONFIGURATION_VIEWS,
-  "features",
   "feedback",
   "interactions",
 ] as const;

@@ -9,7 +9,6 @@ import {
   ConsentBadge,
   IdentityBadge,
   identityLabel,
-  ProvenanceBadge,
 } from "@/components/dashboard/intelligence-badges";
 import { MetricStrip } from "@/components/dashboard/metric-strip";
 import { EmptyState, ErrorState, NativeSelect } from "@/components/dashboard/view-primitives";
@@ -29,7 +28,6 @@ import {
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import {
   type CustomerDetail,
-  type CustomerSignal,
   type CustomerSummary,
   fetchCustomerDetail,
   fetchCustomersPage,
@@ -40,14 +38,12 @@ import { formatDate, relativeDate, titleCase } from "@/lib/dashboard/format";
 type CustomerFilters = {
   identityLevel: string;
   consentState: string;
-  signalType: string;
   range: "all" | "7d" | "30d";
 };
 
 const emptyFilters: CustomerFilters = {
   identityLevel: "",
   consentState: "",
-  signalType: "",
   range: "30d",
 };
 
@@ -60,7 +56,6 @@ function readCustomerLocation() {
     filters: {
       identityLevel: params.get("customerIdentity") ?? "",
       consentState: params.get("customerConsent") ?? "",
-      signalType: params.get("customerSignal") ?? "",
       range: range === "all" || range === "7d" ? range : "30d",
     } satisfies CustomerFilters,
   };
@@ -72,7 +67,7 @@ function writeCustomerLocation(query: string, filters: CustomerFilters) {
   setParam(url, "customerQ", query);
   setParam(url, "customerIdentity", filters.identityLevel);
   setParam(url, "customerConsent", filters.consentState);
-  setParam(url, "customerSignal", filters.signalType);
+  url.searchParams.delete("customerSignal");
   setParam(url, "customerRange", filters.range === "30d" ? "" : filters.range);
   window.history.replaceState(window.history.state, "", url);
 }
@@ -92,7 +87,6 @@ function customerFilterCount(filters: CustomerFilters) {
   return [
     filters.identityLevel,
     filters.consentState,
-    filters.signalType,
     filters.range === "30d" ? "" : filters.range,
   ].filter(Boolean).length;
 }
@@ -101,18 +95,12 @@ export function CustomersView({
   data,
   selectedCustomerId,
   selectCustomer,
-  openFeature,
-  openFeedback,
-  openInteraction,
   openSession,
   refresh,
 }: {
   data: DashboardData;
   selectedCustomerId: string | null;
   selectCustomer: (customerId: string | null) => void;
-  openFeature: (featureKey: string) => void;
-  openFeedback: (reportId: string) => void;
-  openInteraction: (interactionId: string) => void;
   openSession: (sessionId: string) => void;
   refresh: () => Promise<unknown>;
 }) {
@@ -130,7 +118,6 @@ export function CustomersView({
         q: debouncedQuery.trim() || undefined,
         identityLevel: filters.identityLevel ? [filters.identityLevel] : undefined,
         consentState: filters.consentState ? [filters.consentState] : undefined,
-        signalType: filters.signalType ? [filters.signalType] : undefined,
         since: rangeStart(filters.range),
         cursor: pageParam,
         limit: 50,
@@ -186,9 +173,6 @@ export function CustomersView({
             error={detail.isError ? detail.error : null}
             close={() => selectCustomer(null)}
             retry={() => detail.refetch()}
-            openFeature={openFeature}
-            openFeedback={openFeedback}
-            openInteraction={openInteraction}
             openSession={openSession}
           />
         ) : null
@@ -196,15 +180,14 @@ export function CustomersView({
     >
       <MetricStrip
         items={[
-          { label: "Customers", value: rollup.customers.toLocaleString(), signal: true },
+          { label: "Customers", value: rollup.customers.toLocaleString(), accent: true },
           { label: "Known", value: rollup.verified.toLocaleString() },
           { label: "Anonymous", value: rollup.pseudonymous.toLocaleString() },
           { label: "Unresolved interactions", value: rollup.unclassified.toLocaleString() },
         ]}
       />
       <div className="border-b bg-muted/20 px-4 py-2 text-xs text-muted-foreground">
-        Interaction-only context is not a durable customer profile. It remains attached to its
-        short-lived interaction handle and evidence until retention removes it.
+        Customers stay linked to their sessions whenever the product supplies a stable reference.
       </div>
       <div className="flex shrink-0 flex-col gap-2 border-b px-4 py-3 xl:flex-row xl:items-center xl:justify-between">
         <InputGroup className="max-w-xl bg-background">
@@ -215,7 +198,7 @@ export function CustomersView({
             aria-label="Search customers"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search customer or context"
+            placeholder="Search customers"
           />
         </InputGroup>
         <div className="flex min-w-0 items-center gap-2 overflow-x-auto">
@@ -224,12 +207,6 @@ export function CustomersView({
             value={filters.identityLevel}
             options={facets?.identityLevel ?? []}
             onChange={(identityLevel) => applyFilters({ ...filters, identityLevel })}
-          />
-          <CustomerSelect
-            label="Context"
-            value={filters.signalType}
-            options={facets?.signalType ?? []}
-            onChange={(signalType) => applyFilters({ ...filters, signalType })}
           />
           <CustomerSelect
             label="Sharing"
@@ -279,12 +256,11 @@ export function CustomersView({
           <Table className="min-w-[820px] table-fixed">
             <TableHeader className="sticky top-0 z-[1] bg-background">
               <TableRow className="hover:bg-background">
-                <TableHead className="h-9 w-[25%] pl-5 text-xs">Customer</TableHead>
-                <TableHead className="h-9 w-[14%] text-xs">Type</TableHead>
-                <TableHead className="h-9 w-[29%] text-xs">Recent evidence</TableHead>
-                <TableHead className="h-9 w-[12%] text-xs">Signals</TableHead>
-                <TableHead className="h-9 w-[10%] text-xs">Permission</TableHead>
-                <TableHead className="h-9 w-[10%] pr-5 text-right text-xs">Updated</TableHead>
+                <TableHead className="h-9 w-[34%] pl-5 text-xs">Customer</TableHead>
+                <TableHead className="h-9 w-[18%] text-xs">Type</TableHead>
+                <TableHead className="h-9 w-[16%] text-xs">Sessions</TableHead>
+                <TableHead className="h-9 w-[16%] text-xs">Permission</TableHead>
+                <TableHead className="h-9 w-[16%] pr-5 text-right text-xs">Updated</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -305,7 +281,7 @@ export function CustomersView({
               description={
                 rollup.customers
                   ? "Clear filters or broaden the activity window."
-                  : "Known and anonymous profiles appear after your product supplies a stable company-owned reference. Interaction-only context stays with its evidence instead."
+                  : "Known and anonymous customers appear after your product supplies a stable company-owned reference."
               }
             />
           </div>
@@ -409,15 +385,7 @@ function CustomerRow({
       <TableCell>
         <IdentityBadge level={customer.identityLevel} />
       </TableCell>
-      <TableCell className="overflow-hidden text-xs">
-        <p className="line-clamp-2 text-foreground">
-          {customer.contextSummary ??
-            (customer.signalCount
-              ? `${customer.signalCount} retained evidence ${customer.signalCount === 1 ? "signal" : "signals"}`
-              : "No retained evidence yet")}
-        </p>
-      </TableCell>
-      <TableCell className="text-xs">{customer.signalCount.toLocaleString()}</TableCell>
+      <TableCell className="text-xs">{customer.sessionCount.toLocaleString()}</TableCell>
       <TableCell>
         <ConsentBadge state={customer.consentState} />
       </TableCell>
@@ -437,9 +405,6 @@ function CustomerInspector({
   error,
   close,
   retry,
-  openFeature,
-  openFeedback,
-  openInteraction,
   openSession,
 }: {
   requestedId: string;
@@ -447,9 +412,6 @@ function CustomerInspector({
   error: Error | null;
   close: () => void;
   retry: () => Promise<unknown>;
-  openFeature: (featureKey: string) => void;
-  openFeedback: (reportId: string) => void;
-  openInteraction: (interactionId: string) => void;
   openSession: (sessionId: string) => void;
 }) {
   return (
@@ -467,13 +429,7 @@ function CustomerInspector({
           {error ? (
             <ErrorState error={error} onRetry={() => void retry()} />
           ) : detail ? (
-            <CustomerDetailContent
-              detail={detail}
-              openFeature={openFeature}
-              openFeedback={openFeedback}
-              openInteraction={openInteraction}
-              openSession={openSession}
-            />
+            <CustomerDetailContent detail={detail} openSession={openSession} />
           ) : (
             <p className="text-sm text-muted-foreground" role="status">
               Loading customer…
@@ -487,28 +443,12 @@ function CustomerInspector({
 
 function CustomerDetailContent({
   detail,
-  openFeature,
-  openFeedback,
-  openInteraction,
   openSession,
 }: {
   detail: CustomerDetail;
-  openFeature: (featureKey: string) => void;
-  openFeedback: (reportId: string) => void;
-  openInteraction: (interactionId: string) => void;
   openSession: (sessionId: string) => void;
 }) {
   const customer = detail.customer;
-  const availableSignals = detail.signals.filter((signal) => isAvailableContext(signal));
-  const taskSignals = availableSignals.filter(
-    (signal) => signal.type === "intent" || signal.provenance === "agent_reports_current_task",
-  );
-  const otherAllowedSignals = availableSignals.filter(
-    (signal) => !taskSignals.includes(signal) && contextSignalTypes.has(signal.type),
-  );
-  const supportingSignals = detail.signals.filter(
-    (signal) => !taskSignals.includes(signal) && !otherAllowedSignals.includes(signal),
-  );
 
   return (
     <>
@@ -537,40 +477,6 @@ function CustomerDetailContent({
           ))}
         </div>
       ) : null}
-
-      <Separator className="my-5" />
-      <section aria-labelledby="personalization-context-heading">
-        <div className="flex items-center justify-between gap-3">
-          <h3 id="personalization-context-heading" className="text-xs font-medium">
-            Personalization context
-          </h3>
-          <span className="text-[11px] text-muted-foreground">
-            {availableSignals.length} available
-          </span>
-        </div>
-        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-          Only relevant, permissioned, and unexpired context is returned to the product.
-        </p>
-        <div className="mt-4">
-          <h4 className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            Intent and task context
-          </h4>
-          <div className="mt-2">
-            <ContextList signals={taskSignals} empty="No intent or task constraint is available." />
-          </div>
-        </div>
-        <div className="mt-5">
-          <h4 className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            Other allowed context
-          </h4>
-          <div className="mt-2">
-            <ContextList
-              signals={otherAllowedSignals}
-              empty="No additional context is currently allowed for a product use."
-            />
-          </div>
-        </div>
-      </section>
 
       <Separator className="my-5" />
       <section aria-labelledby="customer-consent-heading">
@@ -626,33 +532,12 @@ function CustomerDetailContent({
       </section>
 
       <Separator className="my-5" />
-      <details>
-        <summary className="cursor-pointer text-xs font-medium">Why Epode knows this</summary>
-        <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
-          Source records are supporting evidence, not additional customer facts.
-        </p>
-        {supportingSignals.length ? (
-          <div className="mt-3">
-            <ContextList signals={supportingSignals} />
-          </div>
-        ) : null}
-        {detail.identifiers.length ? (
-          <dl className="mt-4 grid grid-cols-[100px_1fr] gap-x-3 gap-y-3 text-xs">
-            {detail.identifiers.map((identifier) => (
-              <div key={identifier.id} className="contents">
-                <dt className="text-muted-foreground">{titleCase(identifier.kind)}</dt>
-                <dd>
-                  <p className="font-mono">{identifier.displayHint}</p>
-                  <p className="mt-1 text-[11px] text-muted-foreground">
-                    {titleCase(identifier.provenance)} · {identityLabel(identifier.identityLevel)}
-                  </p>
-                </dd>
-              </div>
-            ))}
-          </dl>
-        ) : null}
+      <section aria-labelledby="customer-sessions-heading">
+        <h3 id="customer-sessions-heading" className="text-xs font-medium">
+          Sessions
+        </h3>
         {detail.sessions.length ? (
-          <ol className="mt-4 divide-y border-t">
+          <ol className="mt-3 divide-y">
             {detail.sessions.map((session) => (
               <li key={session.id} className="flex items-center justify-between gap-3 py-2">
                 <div className="min-w-0">
@@ -662,103 +547,15 @@ function CustomerDetailContent({
                   </p>
                 </div>
                 <Button variant="outline" size="xs" onClick={() => openSession(session.id)}>
-                  Evidence
+                  Open session
                 </Button>
               </li>
             ))}
           </ol>
-        ) : null}
-        <div className="mt-3 flex flex-wrap gap-1">
-          {supportingSignals.flatMap((signal) => [
-            signal.feedbackReportId ? (
-              <Button
-                key={`report-${signal.id}`}
-                variant="link"
-                size="xs"
-                onClick={() => openFeedback(signal.feedbackReportId as string)}
-              >
-                Report evidence
-              </Button>
-            ) : null,
-            signal.interactionId ? (
-              <Button
-                key={`interaction-${signal.id}`}
-                variant="link"
-                size="xs"
-                onClick={() => openInteraction(signal.interactionId as string)}
-              >
-                Interaction evidence
-              </Button>
-            ) : null,
-            signal.featureKey ? (
-              <Button
-                key={`feature-${signal.id}`}
-                variant="link"
-                size="xs"
-                onClick={() => openFeature(signal.featureKey as string)}
-              >
-                Related need
-              </Button>
-            ) : null,
-          ])}
-        </div>
-      </details>
+        ) : (
+          <p className="mt-2 text-sm text-muted-foreground">No sessions for this customer yet.</p>
+        )}
+      </section>
     </>
   );
-}
-
-const contextSignalTypes = new Set(["intent", "preference", "constraint"]);
-
-function isAvailableContext(signal: CustomerSignal) {
-  if (!contextSignalTypes.has(signal.type) || signal.allowedUses.length === 0) return false;
-  if (signal.provenance === "agent_inference") return false;
-  if (signal.consentState !== "approved") return false;
-  return signal.expiresAt === null || new Date(signal.expiresAt).getTime() > Date.now();
-}
-
-function ContextList({
-  signals,
-  empty = "No additional context is available.",
-}: {
-  signals: CustomerSignal[];
-  empty?: string;
-}) {
-  if (!signals.length) return <p className="text-sm text-muted-foreground">{empty}</p>;
-
-  return (
-    <ol className="divide-y rounded-lg border px-3">
-      {signals.map((signal) => (
-        <li key={signal.id} className="py-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="outline">{titleCase(signal.type)}</Badge>
-            <ProvenanceBadge provenance={signal.provenance} />
-          </div>
-          <p className="mt-2 text-sm font-medium leading-5">{signal.summary}</p>
-          {signal.signalKey && signal.value !== null ? (
-            <p className="mt-1 break-words font-mono text-[11px] text-muted-foreground">
-              {signal.signalKey} = {formatSignalValue(signal.value)}
-            </p>
-          ) : null}
-          {signal.detail ? (
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">{signal.detail}</p>
-          ) : null}
-          <p className="mt-2 text-[11px] text-muted-foreground">
-            {signal.confidence === null
-              ? "Confidence not supplied"
-              : `${Math.round(signal.confidence * 100)}% confidence`}
-            {signal.expiresAt ? ` · expires ${formatDate(signal.expiresAt)}` : " · no expiry"}
-          </p>
-          {signal.allowedUses.length ? (
-            <p className="mt-1 text-[11px] text-muted-foreground">
-              Allowed for {signal.allowedUses.map(titleCase).join(", ")}
-            </p>
-          ) : null}
-        </li>
-      ))}
-    </ol>
-  );
-}
-
-function formatSignalValue(value: unknown) {
-  return typeof value === "string" ? value : JSON.stringify(value);
 }

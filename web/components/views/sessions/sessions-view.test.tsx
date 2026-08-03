@@ -133,9 +133,9 @@ describe("SessionsView", () => {
     const row = screen.getByRole("row", { name: new RegExp(base.sessions[0].refHint) });
     expect(within(row).getByText("12-step journey")).toBeVisible();
     expect(within(row).getByText("12")).toBeVisible();
-    expect(within(row).getByText("3 evidence items")).toBeVisible();
     expect(within(row).getByText("Blocked")).toBeVisible();
     expect(within(row).getByText("account-high-volume")).toBeVisible();
+    expect(within(row).queryByText(/evidence|signals|context/i)).not.toBeInTheDocument();
     expect(screen.getAllByText("Interactions")[0].parentElement).toHaveTextContent("12");
 
     fireEvent.click(screen.getByRole("button", { name: "Has feedback" }));

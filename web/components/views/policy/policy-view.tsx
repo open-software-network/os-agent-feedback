@@ -95,9 +95,9 @@ export function PolicyView({
         description="Retention and legacy outcome settings are stored here. Enrichment permission is granted by the customer for each exact purpose."
       />
       <form className="flex flex-col gap-4" onSubmit={form.handleSubmit(submit)}>
-        <Panel title="Allowed customer context">
+        <Panel title="Allowed customer information">
           <p className="max-w-3xl text-sm text-muted-foreground">
-            Epode can learn only bounded context that helps personalize the customer&apos;s product
+            Epode can store only bounded answers that help personalize the customer&apos;s product
             experience. Sensitive categories are never collected in the MVP.
           </p>
           <div className="grid gap-3 sm:grid-cols-3">
@@ -134,8 +134,8 @@ export function PolicyView({
                 <Badge variant="outline">Off by default</Badge>
               </div>
               <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                Advertising is a separate purpose. The Context API returns no items for it unless
-                the customer explicitly approved that use.
+                Advertising is a separate purpose. Epode returns no customer information for it
+                unless the customer explicitly approved that use.
               </p>
             </div>
           </div>
@@ -143,14 +143,13 @@ export function PolicyView({
 
         <Panel title="Enrichment permission">
           <p className="max-w-3xl text-sm text-muted-foreground">
-            Epode asks the customer through their agent and returns context only while the exact
+            Epode asks the customer through their agent and returns answers only while the exact
             purpose grant is active. Product personalization never authorizes targeted advertising,
             and silence or ambiguity never becomes approval.
           </p>
           <p className="max-w-3xl text-sm text-muted-foreground">
             Known and anonymous references can support remembered permission. Without a stable
-            company reference, context stays bounded to the current interaction and is available
-            only through its interaction handle and evidence.
+            company reference, answers stay bounded to the current session and expire with it.
           </p>
         </Panel>
         <Panel title="Data retention">

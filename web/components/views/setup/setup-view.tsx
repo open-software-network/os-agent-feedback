@@ -73,9 +73,9 @@ export function SetupView({
   const personalizationDecisions = insights.personalizationDecisions ?? 0;
   const personalizationOutcomes = insights.personalizationOutcomes ?? 0;
   const activationDescription = contextRetrieved
-    ? "Customer context is ready for personalization"
+    ? "Customer answers are ready for personalization"
     : contextLearned
-      ? "Customer context learned"
+      ? "Customer answers received"
       : opportunityActivated
         ? "SDK connected"
         : "Not connected";
@@ -156,14 +156,14 @@ export function SetupView({
   }
 
   const legacyKey = writeKey && !/^af_(live|read)_[0-9a-f]{8}$/.test(writeKey.prefix);
-  const contextSnippet = `const context = await customer.context.get({
+  const contextSnippet = `const answers = await customer.context.get({
     userRef: req.user?.id,
     anonymousRef: req.user ? undefined : req.cookies.visitorId,
     purpose: "product_personalization",
 });
 
-const result = context.available
-  ? personalize(normalResult, context.items)
+const result = answers.available
+  ? personalize(normalResult, answers.items)
   : normalResult;`;
 
   return (
@@ -177,10 +177,10 @@ const result = context.available
         items={[
           { label: "Product key", value: writeKey ? "Ready" : "Preparing" },
           { label: "SDK connected", value: opportunityActivated ? "Complete" : "Waiting" },
-          { label: "Context items", value: contextLearned.toLocaleString() },
-          { label: "Customers with context", value: customersWithContext.toLocaleString() },
+          { label: "Answers stored", value: contextLearned.toLocaleString() },
+          { label: "Customers with answers", value: customersWithContext.toLocaleString() },
           { label: "Ready customers", value: personalizationReady.toLocaleString() },
-          { label: "Context retrievals", value: contextRetrieved.toLocaleString() },
+          { label: "Answer retrievals", value: contextRetrieved.toLocaleString() },
           { label: "Decisions", value: personalizationDecisions.toLocaleString() },
           { label: "Measured outcomes", value: personalizationOutcomes.toLocaleString() },
         ]}
@@ -291,12 +291,12 @@ const result = context.available
         <CodeBlock label="Configure once" value={integration.code} copy={copy} />
       </Panel>
 
-      <Panel title="3. Retrieve context and personalize">
+      <Panel title="3. Use answers to personalize">
         <p className="max-w-3xl text-sm text-muted-foreground">
-          Call the Context API from your server. Epode returns only relevant, permissioned, and
-          unexpired items for the requested purpose.
+          Retrieve approved answers from your server. Epode returns only relevant, permissioned, and
+          unexpired information for the requested purpose.
         </p>
-        <CodeBlock label="Server-side Context API" value={contextSnippet} copy={copy} />
+        <CodeBlock label="Server-side retrieval" value={contextSnippet} copy={copy} />
         <p className="text-sm text-muted-foreground">
           Use <code>product_personalization</code> for products, recommendations, content, and
           offers. <code>targeted_advertising</code> is separate and returns no items unless that use
@@ -317,20 +317,20 @@ const result = context.available
           />
           <ActivationMilestone
             complete={Boolean(contextLearned)}
-            title="Customer context learned"
+            title="Customer answers received"
             detail={
               contextLearned
-                ? `${contextLearned} context ${contextLearned === 1 ? "item is" : "items are"} available.`
-                : "Use the product through a real customer agent and share permitted context."
+                ? `${contextLearned} ${contextLearned === 1 ? "answer is" : "answers are"} available.`
+                : "Use the product through a real customer agent and share approved answers."
             }
           />
           <ActivationMilestone
             complete={Boolean(contextRetrieved)}
-            title="Customer context retrieved"
+            title="Answers retrieved"
             detail={
               contextRetrieved
                 ? `${contextRetrieved} server-side ${contextRetrieved === 1 ? "retrieval has" : "retrievals have"} completed.`
-                : "Call POST /api/v2/customer-context from your server for product_personalization."
+                : "Retrieve approved answers from your server for product personalization."
             }
           />
         </ol>
@@ -340,8 +340,8 @@ const result = context.available
             : !contextLearned
               ? "The company-side connection works. Next: complete one real customer-agent journey."
               : !contextRetrieved
-                ? "Context is ready. Retrieve it from your server and personalize the experience."
-                : "Setup complete: Epode learned customer context and your product retrieved it."}
+                ? "Answers are ready. Retrieve them from your server and personalize the experience."
+                : "Setup complete: Epode received customer answers and your product retrieved them."}
         </StatusMessage>
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" onClick={() => void refresh()}>
@@ -365,9 +365,9 @@ const result = context.available
         <div className="mt-4 flex flex-col gap-5">
           <CodeBlock label="Coding-agent setup prompt" value={agentPrompt} copy={copy} />
           <p className="text-sm text-muted-foreground">
-            Routes stay in code. Derive accountRef and userRef only from authenticated server
-            context; anonymousRef must be a product-owned first-party ID. Add sessionRef only when
-            your product already proves a journey belongs together.
+            Routes stay in code. Derive accountRef and userRef only from authenticated requests;
+            anonymousRef must be a product-owned first-party ID. Add sessionRef only when your
+            product already proves a journey belongs together.
           </p>
           <p className="text-sm">Verify the transport: {integration.verify}</p>
           <div className="divide-y rounded-lg border px-3">
@@ -394,12 +394,12 @@ const result = context.available
 
 function identityDescription(identity: IdentityExample) {
   if (identity === "known") {
-    return "Pass an opaque user or account reference from your existing authenticated server context.";
+    return "Pass an opaque user or account reference from your existing authenticated request.";
   }
   if (identity === "anonymous") {
     return "Pass a stable first-party visitor reference from your own cookie or session.";
   }
-  return "Pass no identity reference. Epode keeps context bounded to the current interaction.";
+  return "Pass no identity reference. Epode keeps answers bounded to the current interaction.";
 }
 
 function identityExampleLabel(identity: IdentityExample) {
@@ -415,7 +415,7 @@ userRef: req => req.user?.id,`;
     return `anonymousRef: req => req.cookies.visitorId, // first-party ID`;
   }
   return `// No customer reference required.
-// Epode keeps context on this interaction handle; it does not create a durable customer profile.`;
+// Epode keeps answers on this interaction handle; it does not create a durable customer profile.`;
 }
 
 function writeKeyEnsureStorageKey(environmentId: string) {

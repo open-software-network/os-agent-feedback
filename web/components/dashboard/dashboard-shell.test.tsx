@@ -106,7 +106,7 @@ describe("DashboardShell", () => {
     expect(onNavigate).toHaveBeenCalledWith("configuration");
   });
 
-  it("offers product creation from the context switcher even with one product", async () => {
+  it("offers product creation from the product menu even with one product", async () => {
     const data = dashboardFixture();
     const onNavigate = vi.fn();
     render(
@@ -124,7 +124,7 @@ describe("DashboardShell", () => {
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: `${data.currentProduct?.name}, ${data.workspace.name} - open context menu`,
+        name: `${data.currentProduct?.name}, ${data.workspace.name} - open product menu`,
       }),
     );
     fireEvent.click(await screen.findByRole("menuitem", { name: "New product" }));
@@ -147,6 +147,6 @@ describe("DashboardShell", () => {
       </DashboardShell>,
     );
 
-    expect(screen.queryByRole("button", { name: /open context menu/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /open product menu/i })).not.toBeInTheDocument();
   });
 });

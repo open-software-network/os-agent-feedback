@@ -7,7 +7,7 @@ import { dashboardFixture } from "@/components/dashboard/test-fixture";
 import { InteractionDetail } from "./interaction-detail";
 
 describe("InteractionDetail", () => {
-  it("prioritizes result, evidence, and attached feedback", () => {
+  it("prioritizes result, verification, and attached feedback", () => {
     const data = dashboardFixture();
     const interaction = data.interactions[0];
     const openFeedback = vi.fn();
@@ -30,9 +30,9 @@ describe("InteractionDetail", () => {
     ).toEqual([
       "search",
       "Result",
-      "Evidence",
+      "Verification",
       "Attached feedback",
-      "Session context",
+      "Session",
       "Technical metadata",
     ]);
     expect(screen.getByText(interaction.id)).toHaveClass("font-mono");

@@ -61,7 +61,7 @@ describe("company-side customer enrichment setup", () => {
     expect(prompt).toContain(`Install exactly: ${instructions.install}`);
     expect(prompt).toMatch(/authentication before Epode/i);
     expect(prompt).toMatch(/product-owned first-party visitor ID/i);
-    expect(prompt).toMatch(/do not invent customer identity, permission, context/i);
+    expect(prompt).toMatch(/do not invent customer identity, permission, answers/i);
     expect(prompt).not.toContain("AGENT_FEEDBACK_KEY");
     expect(prompt).not.toContain("af_live_");
     expect(prompt).not.toContain("agent-feedback-node");

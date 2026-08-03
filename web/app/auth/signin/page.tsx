@@ -11,8 +11,8 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
     <main className="min-h-screen p-8">
       <h1 className="text-2xl font-semibold">Sign in to Epode</h1>
       <p className="mt-2 max-w-md text-sm text-muted-foreground">
-        Understand known, anonymous, and ephemeral customers, then retrieve permissioned context to
-        personalize your product.
+        Ask customer agents questions, record their answers, and connect every response to the
+        customer and session where it happened.
       </p>
       <a className="mt-5 inline-block underline" href={startPath}>
         Continue
