@@ -968,6 +968,7 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
     "BFF must forward the real browser session cookie to its API origin",
   );
 
+  await clickText(page, "Configurations");
   await clickText(page, "Setup");
   await textVisible(page, "Connect Search API");
   await textVisible(page, "Install Epode once in your company's product.");

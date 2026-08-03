@@ -3,11 +3,9 @@
 import { IconChatBubbles } from "central-icons/IconChatBubbles";
 import { IconChevronGrabberVertical } from "central-icons/IconChevronGrabberVertical";
 import { IconClock9OClock } from "central-icons/IconClock9OClock";
-import { IconConnectors1 } from "central-icons/IconConnectors1";
 import { IconHome } from "central-icons/IconHome";
 import { IconPeople } from "central-icons/IconPeople";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
-import { IconShieldCheck } from "central-icons/IconShieldCheck";
 import type { ComponentType, CSSProperties, ReactNode } from "react";
 import { PageHeader } from "@/components/dashboard/page-header";
 import { EpodeMark } from "@/components/epode-mark";
@@ -41,7 +39,7 @@ import {
 import type { DashboardData } from "@/lib/api/dashboard";
 import { cn } from "@/lib/utils";
 
-import type { DashboardView } from "./types";
+import { DASHBOARD_CONFIGURATION_VIEWS, type DashboardView } from "./types";
 
 type NavigationIcon = ComponentType<{
   className?: string;
@@ -77,18 +75,12 @@ const navigation: Array<{
   },
   {
     view: "setup",
-    label: "Setup",
+    label: "Configurations",
     icon: IconSettingsGear4,
   },
-  {
-    view: "connectors",
-    label: "Connectors",
-    icon: IconConnectors1,
-  },
-  { view: "policy", label: "Data controls", icon: IconShieldCheck },
 ];
 
-const EDITOR_ONLY_VIEWS: ReadonlySet<DashboardView> = new Set(["setup", "connectors", "policy"]);
+const CONFIGURATION_VIEWS: ReadonlySet<DashboardView> = new Set(DASHBOARD_CONFIGURATION_VIEWS);
 
 function initials(value: string) {
   return value
@@ -231,30 +223,31 @@ function AppSidebar({
         <SidebarGroup>
           <SidebarGroupContent>
             <SidebarMenu>
-              {navigation
-                .filter((item) => canCreateProduct || !EDITOR_ONLY_VIEWS.has(item.view))
-                .map((item) => {
-                  const active =
-                    view === item.view ||
-                    (item.view === "customers" && view === "features") ||
-                    (item.view === "responses" && view === "feedback") ||
-                    (item.view === "sessions" && view === "interactions");
-                  return (
-                    <SidebarMenuItem key={item.view}>
-                      <SidebarMenuButton
-                        type="button"
-                        isActive={active}
-                        tooltip={item.label}
-                        aria-current={active ? "page" : undefined}
-                        onClick={() => onNavigate(item.view)}
-                        className="data-active:shadow-[inset_2px_0_0_var(--attention)]"
-                      >
-                        <item.icon />
-                        <span>{item.label}</span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  );
-                })}
+              {navigation.map((item) => {
+                const active =
+                  view === item.view ||
+                  (item.view === "setup" && CONFIGURATION_VIEWS.has(view)) ||
+                  (item.view === "customers" && view === "features") ||
+                  (item.view === "responses" && view === "feedback") ||
+                  (item.view === "sessions" && view === "interactions");
+                const destination =
+                  item.view === "setup" && !canCreateProduct ? "configuration" : item.view;
+                return (
+                  <SidebarMenuItem key={item.view}>
+                    <SidebarMenuButton
+                      type="button"
+                      isActive={active}
+                      tooltip={item.label}
+                      aria-current={active ? "page" : undefined}
+                      onClick={() => onNavigate(destination)}
+                      className="data-active:shadow-[inset_2px_0_0_var(--attention)]"
+                    >
+                      <item.icon />
+                      <span>{item.label}</span>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                );
+              })}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
@@ -286,9 +279,11 @@ function AppSidebar({
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
                 <DropdownMenuGroup>
-                  <DropdownMenuItem onClick={() => onNavigate("configuration")}>
+                  <DropdownMenuItem
+                    onClick={() => onNavigate(canCreateProduct ? "setup" : "configuration")}
+                  >
                     <IconSettingsGear4 />
-                    Configuration
+                    Configurations
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={onLogout}>Sign out</DropdownMenuItem>
                 </DropdownMenuGroup>
@@ -326,11 +321,11 @@ export function DashboardShell({
     features: "Features",
     feedback: "Evidence",
     sessions: "Sessions",
-    configuration: "Product",
-    setup: "Setup",
-    policy: "Collection",
-    connectors: "Connectors",
-    team: "Team",
+    configuration: "Configurations",
+    setup: "Configurations",
+    policy: "Configurations",
+    connectors: "Configurations",
+    team: "Configurations",
     interactions: "Interaction",
   };
 

@@ -406,7 +406,7 @@ export function DashboardApp() {
 
   function configurationPage(
     currentData: DashboardData,
-    section: "configuration" | "connectors" | "team",
+    section: "setup" | "configuration" | "connectors" | "team" | "policy",
     content: ReactNode,
   ) {
     return (
@@ -524,22 +524,22 @@ export function DashboardApp() {
           />
         );
       case "setup":
-        return (
-          <div className="mx-auto w-full max-w-6xl">
-            <SetupView
-              data={currentData}
-              secrets={secrets}
-              rememberSecret={rememberSecret}
-              refresh={refresh}
-              setNotice={showNotice}
-            />
-          </div>
+        return configurationPage(
+          currentData,
+          "setup",
+          <SetupView
+            data={currentData}
+            secrets={secrets}
+            rememberSecret={rememberSecret}
+            refresh={refresh}
+            setNotice={showNotice}
+          />,
         );
       case "policy":
-        return (
-          <div className="mx-auto w-full max-w-6xl">
-            <PolicyView data={currentData} refresh={refresh} setNotice={showNotice} />
-          </div>
+        return configurationPage(
+          currentData,
+          "policy",
+          <PolicyView data={currentData} refresh={refresh} setNotice={showNotice} />,
         );
       case "connectors":
         return isEditor(currentData.currentRole) ? (
