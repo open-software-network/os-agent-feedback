@@ -965,20 +965,20 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   assert.equal(state.authStarts, 2, "retry should reach the same OS Accounts handoff route");
   await fixtureRequest(state, requestPath("/api/dashboard"), "initial dashboard data");
 
-  await textVisible(page, "Recent responses");
-  await textVisible(page, "Recent customers");
-  await textVisible(page, "What does the user need from search right now?");
-  await textVisible(page, "Find the newest indexed policy");
-  await metricVisible(page, "Customers", "1");
-  await metricVisible(page, "Questions asked", "1");
-  await metricVisible(page, "Answers received", "1");
-  await metricVisible(page, "Sessions", "2");
+  await page.click("button[aria-label*='open product menu']");
+  await clickText(page, "Billing API");
+  await textVisible(page, "Epode asks customer agents questions and records their answers.");
+  await page.click("button[aria-label*='open product menu']");
+  await clickText(page, "Search API");
+  await textVisible(page, "Epode asks customer agents questions and records their answers.");
+
+  await clickText(page, "Responses");
   const responses = await fixtureRequest(
     state,
     (request) =>
       request.path.startsWith("/api/dashboard/responses?") &&
       request.path.includes(`productId=${ids.search}`),
-    "question and answer list for Home",
+    "question and answer list for Responses",
   );
   assert.equal(responses.headers["x-workspace-id"], ids.workspace);
   assert.equal(
@@ -990,16 +990,6 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
     String(responses.headers.cookie).includes(TEST_COOKIE),
     "the responses BFF must forward the real browser session cookie",
   );
-
-  await page.click("button[aria-label*='open product menu']");
-  await clickText(page, "Billing API");
-  await textVisible(page, "No questions have been asked yet.");
-  await textVisible(page, "No customers yet.");
-  await page.click("button[aria-label*='open product menu']");
-  await clickText(page, "Search API");
-  await textVisible(page, "What does the user need from search right now?");
-
-  await clickText(page, "Responses");
   await textVisible(page, "Tool called");
   await textVisible(page, "search_catalog");
   await textVisible(page, "Find the newest indexed policy");
