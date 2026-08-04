@@ -235,6 +235,38 @@ describe("SessionsView", () => {
     expect(selectSession).toHaveBeenNthCalledWith(3, data.sessions[0].id);
   });
 
+  it("shows the stable linked customer when no legacy customer reference was sent", () => {
+    const base = dashboardFixture();
+    const data = dashboardFixture({
+      sessions: [
+        {
+          ...base.sessions[0],
+          customerRef: null,
+          customerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          customerDisplayName: "user-checkout",
+          identityLevel: "verified",
+        },
+      ],
+    });
+
+    renderWithQuery(
+      <SessionsView
+        data={data}
+        selectedSessionId={null}
+        selectSession={vi.fn()}
+        openFeedback={vi.fn()}
+        openInteraction={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    const row = screen.getByRole("row", { name: new RegExp(base.sessions[0].refHint) });
+    expect(within(row).getByText("user-checkout")).toBeVisible();
+    expect(within(row).getByText("Verified")).toBeVisible();
+    expect(within(row).queryByText("Unresolved actor")).not.toBeInTheDocument();
+    expect(within(row).queryByText("Identity not resolved")).not.toBeInTheDocument();
+  });
+
   it("uses complete server rollups when interaction and report windows do not overlap", async () => {
     const base = dashboardFixture();
     const data = dashboardFixture({
@@ -248,6 +280,9 @@ describe("SessionsView", () => {
           firstOperation: "search",
           lastOperation: "export",
           customerRef: "account-high-volume",
+          customerId: null,
+          customerDisplayName: null,
+          identityLevel: null,
           strongestImpact: "blocked",
         },
       ],

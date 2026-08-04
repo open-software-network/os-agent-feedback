@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { promisify } from "node:util";
 
@@ -86,4 +87,15 @@ test("production runner can be imported by desktop harnesses without a process g
     "--eval",
     `globalThis.process = undefined; await import(${JSON.stringify(runnerUrl)});`,
   ]);
+});
+
+test("production runner loads MCP through its package instead of importing its internal CJS file", async () => {
+  const runnerUrl = new URL(
+    "../experiments/agent-compliance/industry-production-e2e.mjs",
+    import.meta.url,
+  );
+  const source = await readFile(runnerUrl, "utf8");
+  assert.match(source, /require\("@modelcontextprotocol\/server"\)/);
+  assert.doesNotMatch(source, /require\.resolve\("@modelcontextprotocol\/server"\)/);
+  assert.doesNotMatch(source, /import\(pathToFileURL\(packageEntry\)/);
 });

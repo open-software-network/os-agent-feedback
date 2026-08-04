@@ -34,7 +34,6 @@ import {
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { apiRequest } from "@/lib/api/client";
-import type { IdentityLevel } from "@/lib/api/customer-intelligence";
 import type {
   DashboardData,
   DashboardSessionDetail,
@@ -60,9 +59,6 @@ type SessionConstraints = {
 };
 
 type EnrichedSessionSummary = DashboardSessionSummary & {
-  customerId?: string | null;
-  customerDisplayName?: string | null;
-  identityLevel?: IdentityLevel | string | null;
   desiredOutcome?: string | null;
   outcomeHealth?: string | null;
   signalCount?: number;
