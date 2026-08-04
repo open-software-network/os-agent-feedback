@@ -106,6 +106,31 @@ type RegisterTool = (
 
 type FailureGuidance = { retryable: boolean; text: string };
 
+const MCP_OPERATION_PATTERN = /^[A-Za-z0-9/_:.*{}-]{1,160}$/;
+const MCP_REFERENCE_PATTERN = /^[A-Za-z0-9_.:-]{1,160}$/;
+const ASCII_EDGE_WHITESPACE = /^[\t-\r ]+|[\t-\r ]+$/g;
+
+function validMcpOperation(value: string): boolean {
+  return MCP_OPERATION_PATTERN.test(value) && !value.includes("://");
+}
+
+function trimAsciiEdgeWhitespace(value: string): string {
+  return value.replace(ASCII_EDGE_WHITESPACE, "");
+}
+
+function sanitizeReference(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = trimAsciiEdgeWhitespace(value);
+  return MCP_REFERENCE_PATTERN.test(trimmed) ? trimmed : undefined;
+}
+
+function sanitizeRuntimeHint(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = trimAsciiEdgeWhitespace(value);
+  const length = Array.from(trimmed).length;
+  return length >= 1 && length <= 200 ? trimmed : undefined;
+}
+
 function isTransientHttpStatus(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
 }
@@ -234,7 +259,7 @@ function instrumentServer(
       invokeBusinessHandler: () => Promise<McpResult> | McpResult,
     ): Promise<McpResult> => {
       const started = performance.now();
-      const contextValue = (
+      const extractedValue = (
         callback:
           | ((
               arguments_: unknown,
@@ -242,27 +267,45 @@ function instrumentServer(
               result?: McpResult,
             ) => string | undefined | null)
           | undefined,
+        sanitize: (value: unknown) => string | undefined,
         completedResult?: McpResult,
       ): string | undefined => {
         try {
-          return callback?.(arguments_, context, completedResult)?.trim() || undefined;
+          return sanitize(callback?.(arguments_, context, completedResult));
         } catch (error) {
           runtime.logger.warn(`[agent-feedback] MCP extractor failed: ${String(error)}`);
           return undefined;
         }
       };
-      const observed = matchesTool(name, options.includeTools, options.excludeTools);
+      const contextValues = (completedResult?: McpResult) => {
+        const accountRef = extractedValue(options.accountRef, sanitizeReference, completedResult);
+        const userRef = extractedValue(options.userRef, sanitizeReference, completedResult);
+        const anonymousRef = extractedValue(
+          options.anonymousRef,
+          sanitizeReference,
+          completedResult,
+        );
+        let customerRef = extractedValue(options.customerRef, sanitizeReference, completedResult);
+        const sessionRef = extractedValue(options.sessionRef, sanitizeReference, completedResult);
+        const runtimeHint = extractedValue(
+          options.runtimeHint,
+          sanitizeRuntimeHint,
+          completedResult,
+        );
+        if (customerRef && (accountRef || userRef) && accountRef !== customerRef) {
+          customerRef = undefined;
+        }
+        return { accountRef, userRef, anonymousRef, customerRef, sessionRef, runtimeHint };
+      };
+      const observed =
+        validMcpOperation(name) && matchesTool(name, options.includeTools, options.excludeTools);
       let result: McpResult;
       try {
         result = await invokeBusinessHandler();
       } catch (error) {
         if (runtime.enabled && observed) {
-          const sessionRef = contextValue(options.sessionRef);
-          const accountRef = contextValue(options.accountRef);
-          const userRef = contextValue(options.userRef);
-          const anonymousRef = contextValue(options.anonymousRef);
-          const customerRef = contextValue(options.customerRef);
-          const runtimeHint = contextValue(options.runtimeHint);
+          const { sessionRef, accountRef, userRef, anonymousRef, customerRef, runtimeHint } =
+            contextValues();
           const prepared = runtime.prepare({ customerRef, consentState: "unavailable" });
           runtime.record(prepared, {
             surface: "mcp",
@@ -290,12 +333,8 @@ function instrumentServer(
       if (!runtime.enabled || !observed) return result;
       // MCP transport sessions are not product-session proof. Only an
       // explicit application-level extractor may group interactions.
-      const sessionRef = contextValue(options.sessionRef, result);
-      const accountRef = contextValue(options.accountRef, result);
-      const userRef = contextValue(options.userRef, result);
-      const anonymousRef = contextValue(options.anonymousRef, result);
-      const customerRef = contextValue(options.customerRef, result);
-      const runtimeHint = contextValue(options.runtimeHint, result);
+      const { sessionRef, accountRef, userRef, anonymousRef, customerRef, runtimeHint } =
+        contextValues(result);
       const feedbackTool =
         options.feedbackTools === undefined || matchesTool(name, options.feedbackTools, undefined);
       let shouldRequestFeedback = feedbackTool;

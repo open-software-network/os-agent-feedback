@@ -255,7 +255,8 @@ test("Node MCP setup authenticates before dispatch and keeps hosted installs rep
     'userRef: (_args, context) => verifiedField(context, "userId")',
     'anonymousRef: (_args, context) => verifiedField(context, "visitorId")',
     'customerRef: (_args, context) => verifiedField(context, "accountId")',
-    'sessionRef: (_args, context) => verifiedField(context, "journeyId")',
+    "sessionRef: (args, context, result) => resolveJourney(args, context, result)",
+    "journeyRegistry.resolve(accountId, candidate)",
     "standalone JSON text block",
     "outputSchema",
     ".epode/artifacts/agent-feedback-node-0.4.0.tgz",
@@ -267,7 +268,9 @@ test("Node MCP setup authenticates before dispatch and keeps hosted installs rep
     content.indexOf('app.use("/mcp", requireBearerAuth') < content.indexOf('app.all("/mcp"'),
     "Node MCP docs must authenticate before forwarding /mcp",
   );
-  assert.doesNotMatch(content, /sessionRef:[\s\S]{0,160}\bargs\.[A-Za-z_$]/);
+  assert.doesNotMatch(content, /sessionRef:\s*\([^)]*\)\s*=>\s*(?:args|result)(?:\.|\[)/);
+  assert.doesNotMatch(content, /Mcp-Session-Id[\s\S]{0,80}(?:fallback|sessionRef)/i);
+  assert.doesNotMatch(content, /recordCompletion|raw telemetry/i);
   assert.match(content, /npm ci.*cache is cleared/i);
 
   assert.match(

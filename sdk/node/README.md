@@ -208,8 +208,11 @@ const feedback = createMcpInstrumentation({
   includeTools: ["browser_*"],
   feedbackTools: ["browser_close"],
   customerRef: (_args, context) => context.http?.authInfo?.extra?.accountId,
-  sessionRef: (args, _context, result) =>
-    args.sessionId || result?.structuredContent?.sessionId,
+  sessionRef: (args, context, result) => {
+    const accountId = verifiedAccountId(context);
+    const candidate = result?.structuredContent?.journeyId ?? args.journeyId;
+    return journeyRegistry.resolve(accountId, candidate);
+  },
 });
 
 const mcp = createMcpHandler(() => {
@@ -228,6 +231,14 @@ app.all("/mcp", (req, res) => handleMcp(req, res, req.body));
 The official handler implements `server/discover`, per-request protocol metadata, `Mcp-Method`/`Mcp-Name` validation, cache hints, and the required `resultType` field. Its legacy fallback keeps 2025-era clients working without transport-session state. Business-tool results are decorated automatically and both feedback tools are registered for the customer agent. Schema-less object results use `structuredContent._agentFeedback`; tools with `outputSchema` keep their business `structuredContent` untouched and receive the same envelope in a standalone JSON `TextContent` block. MCP tool use is a confirmed agent interaction.
 
 `includeTools` controls which business tools become interactions. `feedbackTools` narrows feedback requests to meaningful outcome boundaries while retaining the whole journey in Sessions. `shouldRequestFeedback` can make that decision from the completed result. Extractors receive `(arguments, context, result?)`, which supports grouping a session-creation call by the ID it returns.
+
+Treat IDs in typed arguments and results as candidates only. Resolve them through durable, authenticated,
+account-scoped product state before returning a `sessionRef`; never return a candidate directly. The create call
+can register and return a canonical journey, and follow-ups, cache hits, and deduplicated calls then reuse it.
+Each completed call still receives a fresh telemetry interaction UUID. A failed call may remain linked when the
+registry proves ownership; missing, malformed, unknown, or cross-account proof stays unlinked. An MCP transport
+session ID is never a fallback. `createMcpInstrumentation` is the recommended public completion path;
+instrumentation creates telemetry internally rather than exposing a manual recorder or raw telemetry API.
 
 Background telemetry uses a bounded queue, a 30-second background-only timeout, and bounded exponential retry. The MCP report tool uses a 10-second timeout and tells the agent to retry exactly once when a transient failure is safe to retry. Neither path delays or fails the normal product result.
 

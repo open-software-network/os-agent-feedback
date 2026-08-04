@@ -282,6 +282,8 @@ class TelemetryQueue {
   #warned = false;
   #warnedDrop = false;
   #shuttingDown = false;
+  #shutdownComplete = false;
+  #shutdownPromise?: Promise<void>;
   #shutdownDeadline = 0;
 
   constructor(options: {
@@ -307,6 +309,7 @@ class TelemetryQueue {
   }
 
   push(event: TelemetryEvent): void {
+    if (this.#shuttingDown || this.#shutdownComplete) return;
     if (this.#events.length >= this.#maxQueueSize) {
       this.#events.shift();
       if (!this.#warnedDrop) {
@@ -333,7 +336,7 @@ class TelemetryQueue {
     if (!this.#events.length) return;
     this.#flushing = this.#flushOnce().finally(() => {
       this.#flushing = undefined;
-      if (this.#events.length && !this.#timer) {
+      if (this.#events.length && !this.#timer && !this.#shuttingDown && !this.#shutdownComplete) {
         this.#timer = setTimeout(() => {
           this.#timer = undefined;
           void this.flush();
@@ -380,6 +383,7 @@ class TelemetryQueue {
         entry.retryAt = Date.now() + Math.min(30_000, 500 * 2 ** (entry.attempts - 1));
         if (
           entry.attempts < this.#maxTelemetryAttempts &&
+          !this.#shutdownComplete &&
           (!this.#shuttingDown || Date.now() < this.#shutdownDeadline) &&
           this.#events.length < this.#maxQueueSize
         ) {
@@ -395,20 +399,37 @@ class TelemetryQueue {
     }
   }
 
-  async shutdown(): Promise<void> {
+  shutdown(): Promise<void> {
+    if (this.#shutdownPromise) return this.#shutdownPromise;
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = undefined;
     this.#shuttingDown = true;
     this.#shutdownDeadline = Date.now() + this.#shutdownTimeoutMs;
+    this.#shutdownPromise = this.#finishShutdown();
+    return this.#shutdownPromise;
+  }
+
+  async #finishShutdown(): Promise<void> {
     for (
       let pass = 0;
-      this.#events.length &&
+      (this.#flushing || this.#events.length) &&
       pass < this.#maxTelemetryAttempts + 1 &&
       Date.now() < this.#shutdownDeadline;
       pass += 1
     ) {
-      await this.flush();
+      const flushing = this.#flushing ?? this.flush();
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        flushing,
+        new Promise<void>((resolve) => {
+          timeout = setTimeout(resolve, Math.max(1, this.#shutdownDeadline - Date.now()));
+        }),
+      ]);
+      if (timeout) clearTimeout(timeout);
     }
+    this.#shutdownComplete = true;
+    if (this.#timer) clearTimeout(this.#timer);
+    this.#timer = undefined;
     if (this.#events.length) {
       this.#logger.warn(
         `[agent-feedback] Graceful shutdown ended with ${this.#events.length} undelivered telemetry event(s); product shutdown was not delayed further.`,
@@ -440,6 +461,7 @@ export class AgentFeedbackRuntime<Request = unknown> {
   #warnedSharedCache = false;
   #warnedMissingCustomerRef = false;
   #warnedConsentLookup = false;
+  #shuttingDown = false;
   #sequence = 0;
 
   constructor(options: AgentFeedbackOptions<Request>) {
@@ -459,7 +481,11 @@ export class AgentFeedbackRuntime<Request = unknown> {
   }
 
   get enabled(): boolean {
-    return this.feedbackMode !== "off" && process.env.AGENT_FEEDBACK_ENABLED !== "false";
+    return (
+      !this.#shuttingDown &&
+      this.feedbackMode !== "off" &&
+      process.env.AGENT_FEEDBACK_ENABLED !== "false"
+    );
   }
 
   matches(path: string): boolean {
@@ -849,6 +875,7 @@ export class AgentFeedbackRuntime<Request = unknown> {
   }
 
   shutdown(): Promise<void> {
+    this.#shuttingDown = true;
     return this.#queue.shutdown();
   }
 

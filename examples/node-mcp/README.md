@@ -24,8 +24,22 @@ when verified identity exists, `ask_always` to ask before each report, or `off` 
 surface untouched. In both ask modes, the product result directs the agent only to
 `record_product_feedback_consent`; approval returns a separate `report_product_feedback` action.
 
-This hosted example is anonymous and intentionally does not derive `customerRef` from tool arguments. Therefore `ask_once` safely uses the per-use permission fallback. In a real authenticated MCP server, derive `customerRef` only from verified transport authentication such as `context.http.authInfo.extra.accountId`. Never trust an agent-supplied tool argument as customer identity.
+The runnable server requires `Bearer demo-account-a-token` (or the second account's
+`Bearer demo-account-b-token`) and derives identity from the verified MCP HTTP auth context. These fixed tokens
+are instructional stand-ins for signature or introspection verification, including audience, expiry, scope, and
+account membership checks.
 
-`experimentRef` is test-only session correlation and is ignored unless `EPODE_EXAMPLE_ENABLE_EXPERIMENT_REFS=1` is set on a disposable evaluator deployment.
+Call `check_status` with `operation: "create"` to mint a canonical product journey ID. Pass that result as the
+`journeyId` candidate on `operation: "follow_up"`. The server resolves the candidate against account-owned state;
+missing, malformed, unknown, and another account's IDs remain unlinked. Repeating the same candidate—whether a
+normal follow-up or cache replay—reuses the canonical ID. Repeating a create with the same `idempotencyKey`
+demonstrates product-owned deduplication: the registry returns the existing canonical journey while Epode records
+a fresh Response. Another create without that key gets a new journey ID. The idempotency key itself is never
+Session proof. A failed business result can remain linked when ownership is proven.
+
+The in-memory registry is deliberately small and instructional. Production products use durable authenticated
+state shared by their workers. Argument and result fields are candidates, not proof by themselves; never fall
+back to an MCP transport/session ID. The MCP transport remains stateless and the Epode runtime remains a single
+process-level object.
 
 This example intentionally does not claim to identify the agent. MCP client information remains a self-reported runtime hint, and Epode records each tool call as its own interaction unless the product supplies an explicit application-level continuity handle.

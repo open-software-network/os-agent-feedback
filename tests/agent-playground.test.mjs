@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+import {
+  createJourneyRegistry,
+  resolveJourney,
+} from "../examples/node-mcp/src/journey-registry.js";
+
 const source = await readFile(
   new URL("../examples/node-express/src/index.js", import.meta.url),
   "utf8",
@@ -48,11 +53,51 @@ test("hosted HTTP and MCP examples support every feedback mode", () => {
   assert.match(mcpSource, /Epode—not this client—remembers the decision/);
   assert.match(mcpSource, /Ask the exact returned question before each report/);
   assert.doesNotMatch(mcpSource, /customerRef: \(arguments_\) => arguments_\?\.experimentRef/);
-  assert.match(mcpSource, /EPODE_EXAMPLE_ENABLE_EXPERIMENT_REFS/);
-  assert.match(mcpSource, /sessionRef: experimentRefsEnabled/);
-  assert.match(mcpSource, /verified MCP authentication/);
+  assert.match(mcpSource, /sessionRef: \(arguments_, context, result\) => resolveJourney/);
+  assert.match(mcpSource, /request\.auth =/);
+  assert.doesNotMatch(mcpSource, /Mcp-Session-Id|recordCompletion/);
   assert.match(mcpSource, /scope: "regional"/);
   assert.match(mcpSource, /checkedAt: new Date\(\)\.toISOString\(\)/);
+});
+
+test("Node MCP example resolves only canonical account-owned journeys", () => {
+  const registry = createJourneyRegistry();
+  const accountA = { http: { authInfo: { extra: { accountId: "account-a" } } } };
+  const accountB = { http: { authInfo: { extra: { accountId: "account-b" } } } };
+  const first = registry.create("account-a");
+  const second = registry.create("account-a");
+  const idempotent = registry.create("account-a", "stable-create");
+
+  assert.notEqual(first, second);
+  assert.equal(registry.create("account-a", "stable-create"), idempotent);
+  assert.notEqual(registry.create("account-b", "stable-create"), idempotent);
+  assert.notEqual(registry.create("account:a", "shared"), registry.create("account", "a:shared"));
+  assert.equal(resolveJourney(registry, { journeyId: first }, accountA), first);
+  assert.equal(
+    resolveJourney(registry, { journeyId: first }, accountA),
+    first,
+    "cache/dedup reuse",
+  );
+  assert.equal(
+    resolveJourney(registry, {}, accountA, { structuredContent: { journeyId: first } }),
+    first,
+  );
+  assert.equal(
+    resolveJourney(registry, { journeyId: second }, accountA, {
+      structuredContent: { journeyId: first },
+    }),
+    first,
+    "a product-owned completed result wins over a caller candidate",
+  );
+  for (const [candidate, context] of [
+    [undefined, accountA],
+    ["not-a-journey", accountA],
+    ["journey_00000000-0000-0000-0000-000000000000", accountA],
+    [first, accountB],
+    [first, {}],
+  ]) {
+    assert.equal(resolveJourney(registry, { journeyId: candidate }, context), undefined);
+  }
 });
 
 test("public examples use verified or deliberately anonymous customer identity", () => {
