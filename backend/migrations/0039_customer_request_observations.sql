@@ -1,4 +1,5 @@
 -- Bounded, request-derived facts observed by company-side HTTP adapters.
+-- Production expansion marker: apply only through the attested additive-migration workflow.
 -- These records deliberately exclude credentials, cookies, request bodies,
 -- full referrer URLs, and arbitrary headers. They follow interaction retention
 -- through the cascading interaction foreign key.
