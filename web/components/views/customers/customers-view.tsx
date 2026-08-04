@@ -184,7 +184,6 @@ export function CustomersView({
           { label: "Customers", value: rollup.customers.toLocaleString(), accent: true },
           { label: "Known", value: rollup.verified.toLocaleString() },
           { label: "Anonymous", value: rollup.pseudonymous.toLocaleString() },
-          { label: "Active", value: rollup.active.toLocaleString() },
         ]}
       />
       <div className="flex shrink-0 flex-col gap-2 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
