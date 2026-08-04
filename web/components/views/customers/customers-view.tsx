@@ -473,7 +473,7 @@ function CustomerInspector({
     <DetailRail open onClose={close} label="Customer detail">
       <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-4">
         <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
-          {detail?.customer.displayName ?? requestedId}
+          {detail ? "Customer" : requestedId}
         </span>
         <Button variant="ghost" size="icon-sm" aria-label="Close customer detail" onClick={close}>
           <IconCrossSmall />
@@ -527,17 +527,11 @@ function signalValue(signal: CustomerSignal) {
   return null;
 }
 
-function contextValue(value: unknown) {
-  if (typeof value === "string" || typeof value === "number") return String(value);
-  if (typeof value === "boolean") return value ? "Yes" : "No";
-  if (Array.isArray(value)) {
-    return value
-      .filter((item) => ["string", "number", "boolean"].includes(typeof item))
-      .map(String)
-      .join(", ");
-  }
-  return "Structured value";
+function rawAddsInfo(summary: string, raw: string) {
+  const normalize = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return !normalize(summary).includes(normalize(raw));
 }
+
 function CustomerDetailContent({
   detail,
   openSession,
@@ -546,13 +540,15 @@ function CustomerDetailContent({
   openSession: (sessionId: string) => void;
 }) {
   const customer = detail.customer;
+  const usedSignalIds = new Set(
+    detail.contextReturns.flatMap((retrieval) =>
+      retrieval.decisions.flatMap((decision) => decision.signalIds),
+    ),
+  );
 
   return (
     <>
-      <p className="text-xs text-muted-foreground">
-        {identityLabel(customer.identityLevel)} customer
-      </p>
-      <h2 className="mt-2 text-balance text-lg font-medium leading-6">{customer.displayName}</h2>
+      <h2 className="text-balance text-lg font-medium leading-6">{customer.displayName}</h2>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <IdentityBadge level={customer.identityLevel} />
       </div>
@@ -589,6 +585,7 @@ function CustomerDetailContent({
           <ol className="mt-3 divide-y">
             {detail.signals.map((signal) => {
               const value = signalValue(signal);
+              const raw = [signal.signalKey, value].filter(Boolean).join(" · ");
               const sourceSession = signal.sessionId
                 ? detail.sessions.find((session) => session.id === signal.sessionId)
                 : undefined;
@@ -597,13 +594,18 @@ function CustomerDetailContent({
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <p className="text-xs font-medium leading-5">{signal.summary}</p>
-                      {signal.signalKey || value ? (
+                      {raw && rawAddsInfo(signal.summary, raw) ? (
                         <p className="mt-1 break-words font-mono text-[11px] text-muted-foreground">
-                          {[signal.signalKey, value].filter(Boolean).join(" · ")}
+                          {raw}
                         </p>
                       ) : null}
                     </div>
-                    <Badge variant="secondary">{titleCase(signal.type)}</Badge>
+                    <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+                      <Badge variant="secondary">{titleCase(signal.type)}</Badge>
+                      {usedSignalIds.has(signal.id) ? (
+                        <Badge variant="secondary">Used</Badge>
+                      ) : null}
+                    </div>
                   </div>
                   <div className="mt-2 flex items-center justify-between gap-3">
                     <p className="text-[11px] text-muted-foreground">
@@ -653,12 +655,6 @@ function CustomerDetailContent({
                 observation.clientIp ? `IP ${observation.clientIp}` : null,
                 observation.method,
                 observation.acceptLanguage,
-                observation.secChUaPlatform,
-                observation.secChUaMobile === "?1"
-                  ? "Mobile"
-                  : observation.secChUaMobile === "?0"
-                    ? "Not mobile"
-                    : null,
               ].filter(Boolean);
               return (
                 <li key={observation.id} className="py-3 first:pt-0">
@@ -745,9 +741,6 @@ function CustomerContextReturns({
       {returns.length ? (
         <ol className="mt-3 divide-y">
           {returns.map((retrieval) => {
-            const usedSignalIds = new Set(
-              retrieval.decisions.flatMap((decision) => decision.signalIds),
-            );
             return (
               <li key={retrieval.retrievalId} className="py-3 first:pt-0">
                 <div className="flex items-start justify-between gap-3">
@@ -769,39 +762,30 @@ function CustomerContextReturns({
                     </Button>
                   ) : null}
                 </div>
-                <dl className="mt-2 space-y-1 font-mono text-[10px] leading-4 text-muted-foreground">
-                  <div>
-                    <dt className="inline font-sans">Context version: </dt>
-                    <dd className="inline break-all">{retrieval.contextVersion}</dd>
-                  </div>
-                  <div>
-                    <dt className="inline font-sans">Retrieval: </dt>
-                    <dd className="inline break-all">{retrieval.retrievalId}</dd>
-                  </div>
-                </dl>
                 {retrieval.items.length ? (
-                  <ul className="mt-3 space-y-2 rounded-md border bg-muted/20 p-3">
-                    {retrieval.items.map((item) => (
-                      <li key={item.signalId}>
-                        <div className="flex items-start justify-between gap-3">
-                          <p className="break-words font-mono text-[11px] font-medium">
-                            {item.key} · {contextValue(item.value)}
-                          </p>
-                          {usedSignalIds.has(item.signalId) ? (
-                            <Badge variant="secondary">Used</Badge>
-                          ) : null}
-                        </div>
-                        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-                          {item.summary} · {signalSource(item.provenance)}
-                        </p>
-                      </li>
-                    ))}
-                  </ul>
+                  <p className="mt-2 break-words font-mono text-[11px] text-muted-foreground">
+                    {retrieval.items.map((item) => item.key).join(" · ")}
+                  </p>
                 ) : (
                   <p className="mt-2 text-[11px] text-muted-foreground">
                     No saved context fields were returned.
                   </p>
                 )}
+                <details className="mt-2">
+                  <summary className="cursor-pointer text-[11px] text-muted-foreground">
+                    Retrieval details
+                  </summary>
+                  <dl className="mt-2 space-y-1 font-mono text-[10px] leading-4 text-muted-foreground">
+                    <div>
+                      <dt className="inline font-sans">Context version: </dt>
+                      <dd className="inline break-all">{retrieval.contextVersion}</dd>
+                    </div>
+                    <div>
+                      <dt className="inline font-sans">Retrieval: </dt>
+                      <dd className="inline break-all">{retrieval.retrievalId}</dd>
+                    </div>
+                  </dl>
+                </details>
                 {retrieval.decisions.length ? (
                   <div className="mt-3 space-y-2">
                     {retrieval.decisions.map((decision) => (
@@ -813,8 +797,7 @@ function CustomerContextReturns({
                         </p>
                         <p className="mt-1 text-[11px] text-muted-foreground">
                           {decision.signalIds.length} returned{" "}
-                          {decision.signalIds.length === 1 ? "field" : "fields"} used ·{" "}
-                          {formatDate(decision.createdAt)}
+                          {decision.signalIds.length === 1 ? "field" : "fields"} used
                         </p>
                         {decision.outcomes.length ? (
                           <p className="mt-1 text-[11px] text-muted-foreground">
