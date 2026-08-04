@@ -1,6 +1,7 @@
 mod api_types;
 mod code_match;
 mod customer_features;
+mod destinations;
 mod dev_auth;
 mod error;
 mod github;
@@ -71,6 +72,14 @@ use crate::{
     customer_features::{
         DashboardFeatureDetail, DashboardFeatureFilters, DashboardFeaturesPage,
         dashboard_feature_by_key, dashboard_features_page,
+    },
+    destinations::{
+        CreateDataDestinationInput, DataDestinationResponse, DataDestinationRunsResponse,
+        DataDestinationSyncTriggeredResponse, DataDestinationTestResponse,
+        DataDestinationsResponse, TestDataDestinationInput, UpdateDataDestinationInput,
+        claim_data_destination_now, claim_due_data_destination, create_data_destination,
+        delete_data_destination, drain_data_destination, list_data_destination_runs,
+        list_data_destinations, test_data_destination, update_data_destination,
     },
     error::{ApiError, ApiErrorEnvelope},
     github::{
@@ -272,6 +281,19 @@ fn build_app_router(dev_auth_enabled: bool) -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(product_groups_handler))
         .routes(routes!(merge_report_groups_handler))
         .routes(routes!(file_group_github_issue_handler))
+        .routes(routes!(
+            list_data_destinations_handler,
+            create_data_destination_handler
+        ))
+        .routes(routes!(test_data_destination_handler))
+        .routes(routes!(
+            update_data_destination_handler,
+            delete_data_destination_handler
+        ))
+        .routes(routes!(
+            data_destination_runs_handler,
+            sync_data_destination_handler
+        ))
         .routes(routes!(join_team_handler))
         .routes(routes!(logout_handler))
         .routes(routes!(dashboard_handler))
@@ -606,6 +628,7 @@ async fn main() -> anyhow::Result<()> {
     });
     spawn_retention_worker(state.pool.clone());
     spawn_code_match_worker(state.pool.clone(), state.github.clone());
+    spawn_data_destination_worker(state.pool.clone(), state.identity_hmac_secret.clone());
 
     let (app, _openapi) = build_app_router(dev_auth.is_some()).split_for_parts();
     let app = app.with_state(state);
@@ -638,6 +661,49 @@ fn spawn_retention_worker(pool: PgPool) {
                         break;
                     }
                 }
+            }
+        }
+    });
+}
+
+/// How often the worker looks for destinations whose sync has come due. A
+/// destination's own `sync_interval_seconds` governs its cadence; this poll
+/// only bounds how late a due sync can start.
+const DATA_DESTINATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+fn spawn_data_destination_worker(pool: PgPool, identity_hmac_secret: Vec<u8>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(DATA_DESTINATION_POLL_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let job = match claim_due_data_destination(
+                &pool,
+                Utc::now() - destinations::DESTINATION_STALE_CLAIM_AGE,
+            )
+            .await
+            {
+                Ok(job) => job,
+                Err(error) => {
+                    tracing::warn!(error = %error.message, "data destination claim failed");
+                    continue;
+                }
+            };
+            let Some(job) = job else {
+                continue;
+            };
+            // One drain per task, mirroring the code-match worker: a panic in
+            // delivery is contained, and the abandoned claim is reclaimed by
+            // the stale-claim sweep on a later pass.
+            let drain_pool = pool.clone();
+            let drain_secret = identity_hmac_secret.clone();
+            let drain =
+                tokio::spawn(
+                    async move { drain_data_destination(drain_pool, drain_secret, job).await },
+                )
+                .await;
+            if let Err(error) = drain {
+                tracing::warn!(%error, "data destination drain task failed");
             }
         }
     });
@@ -3071,6 +3137,326 @@ async fn clear_product_github_repo_handler(
     require_workspace_editor(&context)?;
     let removed = clear_product_github_repo(&state.pool, context.workspace.id, product_id).await?;
     dashboard_response(&state, Json(RemovedResponse { removed }), tokens)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/data-destinations",
+    tag = "data-destinations",
+    params(
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team whose data destinations are listed; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Data destinations with their most recent sync run", body = DataDestinationsResponse),
+        (
+            status = 400,
+            description = "Invalid team header",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "Data destinations could not be loaded", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn list_data_destinations_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let destinations = list_data_destinations(&state.pool, context.workspace.id).await?;
+    dashboard_response(
+        &state,
+        Json(DataDestinationsResponse { destinations }),
+        tokens,
+    )
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/data-destinations",
+    tag = "data-destinations",
+    params(
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    request_body = CreateDataDestinationInput,
+    responses(
+        (status = 200, description = "Data destination created", body = DataDestinationResponse),
+        (
+            status = 400,
+            description = "Invalid team header, destination configuration, or malformed JSON body",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 413, description = "Request body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "Request body is not JSON", body = String, content_type = "text/plain"),
+        (status = 422, description = "JSON body does not match the data destination schema", body = String, content_type = "text/plain"),
+        (status = 500, description = "Data destination could not be created", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn create_data_destination_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(input): Json<CreateDataDestinationInput>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let destination = create_data_destination(
+        &state.pool,
+        &state.identity_hmac_secret,
+        context.workspace.id,
+        &input,
+    )
+    .await?;
+    dashboard_response(
+        &state,
+        Json(DataDestinationResponse { destination }),
+        tokens,
+    )
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/data-destinations/test",
+    tag = "data-destinations",
+    params(
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to test against; defaults to the caller's personal team")
+    ),
+    request_body = TestDataDestinationInput,
+    responses(
+        (status = 200, description = "The destination accepted a test connection", body = DataDestinationTestResponse),
+        (
+            status = 400,
+            description = "Invalid team header, destination configuration, unreachable destination, or malformed JSON body",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 413, description = "Request body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "Request body is not JSON", body = String, content_type = "text/plain"),
+        (status = 422, description = "JSON body does not match the data destination test schema", body = String, content_type = "text/plain"),
+        (status = 500, description = "Data destination test could not be performed", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn test_data_destination_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(input): Json<TestDataDestinationInput>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let result = test_data_destination(&input).await?;
+    dashboard_response(&state, Json(result), tokens)
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/data-destinations/{destination_id}",
+    tag = "data-destinations",
+    params(
+        ("destination_id" = Uuid, Path, description = "Data destination to update"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    request_body = UpdateDataDestinationInput,
+    responses(
+        (status = 200, description = "Data destination updated", body = DataDestinationResponse),
+        (
+            status = 400,
+            description = "Invalid destination path, team header, update, or malformed JSON body",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Data destination not found for this team", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 413, description = "Request body exceeds the configured limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "Request body is not JSON", body = String, content_type = "text/plain"),
+        (status = 422, description = "JSON body does not match the data destination update schema", body = String, content_type = "text/plain"),
+        (status = 500, description = "Data destination could not be updated", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn update_data_destination_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(destination_id): Path<Uuid>,
+    Json(input): Json<UpdateDataDestinationInput>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let destination =
+        update_data_destination(&state.pool, context.workspace.id, destination_id, &input).await?;
+    dashboard_response(
+        &state,
+        Json(DataDestinationResponse { destination }),
+        tokens,
+    )
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/data-destinations/{destination_id}",
+    tag = "data-destinations",
+    params(
+        ("destination_id" = Uuid, Path, description = "Data destination to remove"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Data destination removed when present", body = RemovedResponse),
+        (
+            status = 400,
+            description = "Invalid destination path or team header",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Data destination not found for this team", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "Data destination could not be removed", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn delete_data_destination_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(destination_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let removed =
+        delete_data_destination(&state.pool, context.workspace.id, destination_id).await?;
+    if !removed {
+        return Err(ApiError::not_found(
+            "Data destination not found for this team",
+        ));
+    }
+    dashboard_response(&state, Json(RemovedResponse { removed }), tokens)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/data-destinations/{destination_id}/runs",
+    tag = "data-destinations",
+    params(
+        ("destination_id" = Uuid, Path, description = "Data destination whose sync runs are listed"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Most recent sync runs, newest first", body = DataDestinationRunsResponse),
+        (
+            status = 400,
+            description = "Invalid destination path or team header",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Data destination not found for this team", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "Sync runs could not be loaded", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn data_destination_runs_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(destination_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let runs =
+        list_data_destination_runs(&state.pool, context.workspace.id, destination_id, 25).await?;
+    dashboard_response(&state, Json(DataDestinationRunsResponse { runs }), tokens)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/data-destinations/{destination_id}/sync",
+    tag = "data-destinations",
+    params(
+        ("destination_id" = Uuid, Path, description = "Data destination to sync immediately"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Manual sync claimed and started", body = DataDestinationSyncTriggeredResponse),
+        (
+            status = 400,
+            description = "Invalid destination path or team header",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Data destination not found for this team", body = ApiErrorEnvelope),
+        (status = 409, description = "A sync is already in progress for this destination", body = ApiErrorEnvelope),
+        (status = 410, description = "A pending team invitation changed while team membership was refreshed", body = ApiErrorEnvelope),
+        (status = 500, description = "Sync could not be started", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn sync_data_destination_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(destination_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let job = claim_data_destination_now(
+        &state.pool,
+        context.workspace.id,
+        destination_id,
+        Utc::now() - destinations::DESTINATION_STALE_CLAIM_AGE,
+    )
+    .await?;
+    let run_id = job.run_id;
+    // The manual sync runs detached: the claim already serializes against the
+    // scheduled worker, and the run row reports progress to the dashboard.
+    let drain_pool = state.pool.clone();
+    let drain_secret = state.identity_hmac_secret.clone();
+    tokio::spawn(async move {
+        drain_data_destination(drain_pool, drain_secret, job).await;
+    });
+    dashboard_response(
+        &state,
+        Json(DataDestinationSyncTriggeredResponse {
+            triggered: true,
+            run_id,
+        }),
+        tokens,
+    )
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]

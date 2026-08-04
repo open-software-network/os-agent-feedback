@@ -30,6 +30,8 @@ import {
 import type { Product } from "@/lib/api/dashboard";
 import { formatDate, isEditor } from "@/lib/dashboard/format";
 
+import { DataDestinationsPanel } from "./data-destinations-panel";
+
 const PLANNED_CONNECTORS = ["Slack", "Linear", "OS Platform"] as const;
 
 export function ConnectorsView({ data }: Pick<ViewBaseProps, "data">) {
@@ -44,6 +46,8 @@ export function ConnectorsView({ data }: Pick<ViewBaseProps, "data">) {
 
   return (
     <div className="space-y-6">
+      <DataDestinationsPanel workspaceId={data.workspace.id} editable={editable} />
+
       <div className="space-y-3">
         <Panel>
           <div className="flex flex-wrap items-center justify-between gap-3">

@@ -6,6 +6,8 @@ edition = "2024"
 rust-version = "1.95"
 
 [dependencies]
+# Credential sealing for data destinations (AES-256-GCM, RustCrypto).
+aes-gcm = "0.10"
 anyhow = "1"
 axum = "0.8"
 base64 = "0.22"
