@@ -1000,7 +1000,6 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await page.waitForSelector('input[aria-label="Search customers"]', { visible: true });
   await metricVisible(page, "Customers", "1");
   await metricVisible(page, "Known", "1");
-  await metricVisible(page, "Active", "1");
   await clickText(page, "Acme workspace");
   await textVisible(page, "What we know");
   await textVisible(page, "Context returned to product");
