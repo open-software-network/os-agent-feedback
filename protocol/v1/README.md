@@ -180,6 +180,106 @@ behavioral similarity. A request may co-supply `anonymousRef` and a verified ref
 deterministic progressive link. These fields must never be copied into capabilities, response envelopes,
 or report bodies.
 
+### Completed MCP interaction contract
+
+SDKs that support customer-owned MCP integrations expose an idiomatic, framework-neutral operation for
+recording exactly one completed product-tool invocation. This constrained operation is the fallback when
+first-class MCP instrumentation is unavailable. It is not a generic telemetry API and does not represent
+MCP initialization, discovery, transport requests, consent decisions, or feedback reports.
+
+The caller supplies only:
+
+- `operation`: a required, already-normalized tool name;
+- `outcome`: required `success` or `error` completion state;
+- optional opaque `accountRef`, `userRef`, `anonymousRef`, legacy `customerRef`, and `sessionRef`
+  values selected by the product; and
+- an optional diagnostic `runtimeHint`.
+
+APIs should express these inputs idiomatically in each language. They must not accept a raw telemetry
+object. In particular, callers cannot choose an interaction ID, timestamp, sequence, surface,
+classification, confirmation method, status code, session source, or runtime-hint source.
+
+`operation` is emitted unchanged and is not passed through HTTP route normalization. It must contain 1–160
+ASCII characters, match `^[A-Za-z0-9/_:.*{}-]+$`, contain no query, fragment, whitespace, or `@`, and not
+contain `://` as a raw-URL marker. Product authors must also ensure that normalized operation names contain
+no customer values; that data-safety rule cannot be inferred from a valid opaque string. An invalid
+operation or outcome is a caller programming error: the SDK reports an idiomatic synchronous validation
+error and does not enqueue an event. Automatic adapters contain or log that validation error without
+changing the original product result or exception. Disabled instrumentation, or a runtime whose shutdown
+has begun, no-ops before per-call validation.
+
+The SDK maps `success` to status code `200` and `error` to `500`. These synthetic statuses describe MCP
+tool completion, not HTTP transport or the user's assessment of the product. An ordinary completed MCP
+result is successful, while a result marked `isError` or a thrown/rejected handler call is an error. A
+thrown call is recorded before the adapter rethrows the original error unchanged. Arguments, results,
+exception text, prompts, transcripts, credentials, raw identity data, and raw product data never enter
+telemetry.
+
+The SDK trims optional identity references and `sessionRef` once, removing ASCII whitespace
+U+0009–U+000D and U+0020 from both ends. A reference is valid only when the trimmed value contains 1–160
+ASCII characters matching `^[A-Za-z0-9_.:-]+$`. Empty or invalid references, including extractor failures,
+are omitted rather than truncated and do not suppress the interaction. `accountRef` and `userRef` require
+authenticated product context; `anonymousRef` requires a stable, first-party, product-scoped identifier and
+may accompany verified identity to authorize a deterministic progressive link. `customerRef` is retained
+for legacy compatibility and is never synthesized from a richer identity field. When valid `customerRef`
+conflicts with retained richer identity, the SDK omits only `customerRef`; it keeps the typed references and
+the interaction. A matching `accountRef` and `customerRef` may be retained together. Identity references
+never group sessions.
+
+A valid `sessionRef` is explicit product-workflow continuity evidence and causes the SDK to emit
+`sessionSource: "mcp"`; otherwise both fields are omitted and the interaction remains unlinked. A canonical
+product session handle that becomes available in the completed result, including after a cache or dedup hit,
+is valid session evidence. MCP transport session IDs are not product-workflow evidence and adapters must
+never use them as a fallback.
+
+The SDK applies the same ASCII-whitespace trimming to `runtimeHint`, omits empty values or values longer
+than 200 Unicode code points, and emits `runtimeHintSource: "mcp"` only with a retained hint. A runtime hint
+is diagnostic context, not correlation or identity evidence, and must not contain private product or user
+data.
+
+For every valid completion while instrumentation is enabled, the SDK owns and enqueues:
+
+```json
+{
+  "interactionId": "<fresh UUID v4>",
+  "sequence": "<positive monotonic integer owned by this runtime>",
+  "surface": "mcp",
+  "operation": "<validated caller operation>",
+  "statusCode": 200,
+  "classification": "confirmed",
+  "confirmationMethod": "mcp",
+  "occurredAt": "<completion time in RFC 3339 UTC>"
+}
+```
+
+Valid optional identity values add `accountRef`, `userRef`, `anonymousRef`, or legacy `customerRef`; a valid
+`sessionRef` adds `sessionSource: "mcp"`; and a valid `runtimeHint` adds `runtimeHintSource: "mcp"`. Missing
+fields are omitted rather than serialized as null or empty strings.
+Sequence values increase for accepted completions owned by one runtime but need not be gap-free after
+validation failures or queue drops. Automatic adapters may also emit a nonnegative `durationMs` measured
+internally around the tool invocation. The constrained caller cannot supply duration, and a manual recorder
+does not need to synthesize it.
+
+Recording reuses the SDK's process-level bounded queue, retry policy, and shutdown owner. Validation and
+enqueueing are in-memory and no telemetry request is awaited before returning the product result. Queue
+saturation or delivery failure may drop telemetry but cannot become a completion error. Once shutdown
+begins, new completions may be ignored. Bounded shutdown is the shared lifecycle checkpoint; a public
+`flush` operation remains language-specific. Delivery retries reuse the exact queued event, including its
+`interactionId`, `sequence`, and `occurredAt`; they do not create another completion.
+
+Telemetry is independent of feedback consent and result decoration. Consent lookup or envelope preparation
+failure may omit feedback instructions but must not omit a valid interaction. First-class adapters that
+produce both telemetry and an `_agentFeedback` envelope for one invocation use the same SDK-generated
+interaction ID. The constrained completion input does not expose consent state, capabilities, envelope
+content, or feedback reports.
+
+The `mcpCompletion` vectors in `conformance.json` define the shared input and expected wire semantics.
+Language suites execute those vectors through their idiomatic APIs; generated IDs, timestamps, and sequence
+values are checked by predicate rather than compared literally. `expectedEvent` is an exact projection:
+remove generated `interactionId`, `sequence`, and `occurredAt` fields plus optional adapter-measured
+`durationMs` from an emitted event, then require exact equality. Omitted reference, hint, and source fields
+must therefore be absent, not merely ignored by subset matching.
+
 ## Feedback report submission
 
 The customer agent submits directly with the scoped capability—not the company key:
