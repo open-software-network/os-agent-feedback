@@ -215,6 +215,38 @@ describe("BFF request header policy", () => {
     );
     expect(lastRequest().headers.authorization).toBe("Bearer af_live_product-secret");
 
+    for (const path of [
+      ["v2", "enrichment", "requests"],
+      ["v2", "customer-context"],
+      ["v2", "personalization", "decisions"],
+      ["v2", "personalization", "outcomes"],
+    ]) {
+      await proxyApiPost(
+        new NextRequest(`https://app.epode.ai/api/${path.join("/")}`, {
+          method: "POST",
+          headers: { authorization: "Bearer af_live_product-secret" },
+          body: "{}",
+        }),
+        { params: Promise.resolve({ path }) },
+      );
+      expect(lastRequest().headers.authorization).toBe("Bearer af_live_product-secret");
+    }
+
+    for (const path of [
+      ["v2", "enrichment", "consent", "decisions"],
+      ["v2", "enrichment", "answers"],
+    ]) {
+      await proxyApiPost(
+        new NextRequest(`https://app.epode.ai/api/${path.join("/")}`, {
+          method: "POST",
+          headers: { authorization: "Bearer aqr1_capability" },
+          body: "{}",
+        }),
+        { params: Promise.resolve({ path }) },
+      );
+      expect(lastRequest().headers.authorization).toBe("Bearer aqr1_capability");
+    }
+
     await proxyApiPost(
       new NextRequest("https://app.epode.ai/api/v2/consent/state", {
         method: "POST",
