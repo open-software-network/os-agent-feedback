@@ -1,4 +1,5 @@
 -- Product-scoped customer-context fields and per-request field snapshots.
+-- Production expansion marker: apply only through the attested additive-migration workflow.
 --
 -- A product may define its own closed field catalog (key, label, type,
 -- allowed values, purpose and operation bindings). Once a product has at
