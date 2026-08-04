@@ -24,6 +24,9 @@ describe("dashboard view behavior", () => {
     const data = dashboardFixture();
     const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
       const path = String(input);
+      if (path === "/api/data-destinations") {
+        return Promise.resolve(json({ destinations: [] }));
+      }
       if (path === "/api/github/installations") {
         return Promise.resolve(
           json({
@@ -67,10 +70,10 @@ describe("dashboard view behavior", () => {
       "href",
       `/api/github/install?workspaceId=${encodeURIComponent(data.workspace.id)}`,
     );
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(new Headers(fetchMock.mock.calls[0][1].headers).get("x-workspace-id")).toBe(
-      data.workspace.id,
-    );
+    const githubCalls = () =>
+      fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/github/"));
+    expect(githubCalls()).toHaveLength(1);
+    expect(new Headers(githubCalls()[0][1].headers).get("x-workspace-id")).toBe(data.workspace.id);
 
     fireEvent.click(
       screen.getByRole("button", { name: "Show repositories for open-software-network" }),
@@ -79,16 +82,19 @@ describe("dashboard view behavior", () => {
     expect(await screen.findByText("open-software-network/os-epode")).toBeVisible();
     expect(screen.getByText("main · Private")).toBeVisible();
     expect(screen.getByText(/partial repository list/i)).toBeVisible();
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(new Headers(fetchMock.mock.calls[1][1].headers).get("x-workspace-id")).toBe(
-      data.workspace.id,
-    );
+    expect(githubCalls()).toHaveLength(2);
+    expect(new Headers(githubCalls()[1][1].headers).get("x-workspace-id")).toBe(data.workspace.id);
   });
 
   it("distinguishes an unconfigured GitHub App from an empty installation list", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(json({ configured: false, installations: [] })),
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        if (String(input) === "/api/data-destinations") {
+          return Promise.resolve(json({ destinations: [] }));
+        }
+        return Promise.resolve(json({ configured: false, installations: [] }));
+      }),
     );
 
     renderWithQuery(<ConnectorsView data={dashboardFixture()} />);
@@ -100,7 +106,12 @@ describe("dashboard view behavior", () => {
   it("marks planned connectors as disabled and non-interactive", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(json({ configured: true, installations: [] })),
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        if (String(input) === "/api/data-destinations") {
+          return Promise.resolve(json({ destinations: [] }));
+        }
+        return Promise.resolve(json({ configured: true, installations: [] }));
+      }),
     );
 
     renderWithQuery(<ConnectorsView data={dashboardFixture()} />);
@@ -120,6 +131,9 @@ describe("dashboard view behavior", () => {
     let mapping: Record<string, unknown> | null = null;
     const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
+      if (path === "/api/data-destinations") {
+        return Promise.resolve(json({ destinations: [] }));
+      }
       if (path === "/api/github/installations") {
         return Promise.resolve(
           json({
@@ -188,7 +202,10 @@ describe("dashboard view behavior", () => {
 
     expect(await screen.findByText("first-org")).toBeVisible();
     expect(screen.getByRole("heading", { name: "GitHub repository for Search API" })).toBeVisible();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // One GitHub request; the data-destinations listing loads alongside it.
+    expect(
+      fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/github/")),
+    ).toHaveLength(1);
     fireEvent.click(screen.getByRole("button", { name: "Configure repository" }));
 
     const repository = await screen.findByLabelText("Repository");
@@ -255,6 +272,9 @@ describe("dashboard view behavior", () => {
     });
     const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
       const path = String(input);
+      if (path === "/api/data-destinations") {
+        return Promise.resolve(json({ destinations: [] }));
+      }
       if (path === "/api/github/installations") {
         return Promise.resolve(
           json({
@@ -324,6 +344,9 @@ describe("dashboard view behavior", () => {
     const mappingPath = `/api/products/${data.currentProduct?.id ?? ""}/github-repo`;
     const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
       const path = String(input);
+      if (path === "/api/data-destinations") {
+        return Promise.resolve(json({ destinations: [] }));
+      }
       if (path === "/api/github/installations") {
         return Promise.resolve(json({ configured: true, installations: [] }));
       }
@@ -360,6 +383,9 @@ describe("dashboard view behavior", () => {
     };
     const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
+      if (path === "/api/data-destinations") {
+        return Promise.resolve(json({ destinations: [] }));
+      }
       if (path === "/api/github/installations") {
         return Promise.resolve(
           json({
@@ -476,6 +502,9 @@ describe("dashboard view behavior", () => {
     };
     const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
+      if (path === "/api/data-destinations") {
+        return Promise.resolve(json({ destinations: [] }));
+      }
       if (path === "/api/github/installations") {
         return Promise.resolve(
           json({
@@ -591,7 +620,12 @@ describe("dashboard view behavior", () => {
   });
 
   it("keeps the product mapping mutation unreachable for members", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(json({ configured: true, installations: [] }));
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      if (String(input) === "/api/data-destinations") {
+        return Promise.resolve(json({ destinations: [] }));
+      }
+      return Promise.resolve(json({ configured: true, installations: [] }));
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     renderWithQuery(<ConnectorsView data={dashboardFixture({ currentRole: "member" })} />);

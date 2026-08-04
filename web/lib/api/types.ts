@@ -214,6 +214,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/data-destinations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_data_destinations_handler"];
+        put?: never;
+        post: operations["create_data_destination_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/data-destinations/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["test_data_destination_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/data-destinations/{destination_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["delete_data_destination_handler"];
+        options?: never;
+        head?: never;
+        patch: operations["update_data_destination_handler"];
+        trace?: never;
+    };
+    "/api/data-destinations/{destination_id}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["data_destination_runs_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/data-destinations/{destination_id}/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["sync_data_destination_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/join/{invitation_id}": {
         parameters: {
             query?: never;
@@ -991,6 +1071,14 @@ export interface components {
             kind?: string | null;
             label?: string | null;
         };
+        CreateDataDestinationInput: {
+            config: components["schemas"]["DataDestinationConfigInput"];
+            credentials?: null | components["schemas"]["DataDestinationCredentialsInput"];
+            kind: string;
+            name: string;
+            /** Format: int32 */
+            syncIntervalSeconds?: number | null;
+        };
         CreateProductInput: {
             name: string;
         };
@@ -1451,6 +1539,86 @@ export interface components {
             signals: components["schemas"]["CustomerSignal"][];
             /** Format: int64 */
             total: number;
+        };
+        DataDestination: {
+            /** @description Normalized non-secret configuration. Credentials are never returned. */
+            config: unknown;
+            /** Format: date-time */
+            createdAt: string;
+            enabled: boolean;
+            /** Format: uuid */
+            id: string;
+            /** @description `postgres` | `http_ndjson` */
+            kind: string;
+            lastRun: null | components["schemas"]["DataDestinationSyncRun"];
+            name: string;
+            /** Format: date-time */
+            nextSyncAt: string;
+            /** Format: int32 */
+            syncIntervalSeconds: number;
+            /** @description True while a worker holds the sync claim. */
+            syncing: boolean;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        DataDestinationConfigInput: {
+            /**
+             * @description `postgres`: connection URL without an embedded password, e.g.
+             *     `postgres://user@host:5432/dbname?sslmode=require`.
+             */
+            connectionUrl?: string | null;
+            /**
+             * @description `http_ndjson`: extra request headers. Non-sensitive only: values are
+             *     stored in plaintext configuration, not in the sealed credential store.
+             */
+            headers?: {
+                [key: string]: string;
+            } | null;
+            /** @description `postgres`: schema that receives the export tables; defaults to `public`. */
+            schema?: string | null;
+            /** @description `http_ndjson`: collector URL that accepts NDJSON POST batches. */
+            url?: string | null;
+        };
+        DataDestinationCredentialsInput: {
+            /** @description `postgres`: database password (the URL never carries one). */
+            password?: string | null;
+            /** @description `http_ndjson`: sent as `Authorization: Bearer <token>`. */
+            token?: string | null;
+        };
+        DataDestinationResponse: {
+            destination: components["schemas"]["DataDestination"];
+        };
+        DataDestinationRunsResponse: {
+            runs: components["schemas"]["DataDestinationSyncRun"][];
+        };
+        DataDestinationSyncRun: {
+            /** Format: uuid */
+            destinationId: string;
+            error: string | null;
+            /** Format: date-time */
+            finishedAt: string | null;
+            /** Format: uuid */
+            id: string;
+            /** Format: int64 */
+            recordsExported: number;
+            /** Format: date-time */
+            startedAt: string;
+            /** @description 'running' | 'succeeded' | 'failed' */
+            status: string;
+            /** @description 'scheduled' | 'manual' */
+            trigger: string;
+        };
+        DataDestinationSyncTriggeredResponse: {
+            /** Format: uuid */
+            runId: string;
+            triggered: boolean;
+        };
+        DataDestinationTestResponse: {
+            detail: string;
+            ok: boolean;
+        };
+        DataDestinationsResponse: {
+            destinations: components["schemas"]["DataDestination"][];
         };
         DeleteProductInput: {
             confirmation: string;
@@ -2207,8 +2375,19 @@ export interface components {
             delivery: string;
             url: string;
         };
+        TestDataDestinationInput: {
+            config: components["schemas"]["DataDestinationConfigInput"];
+            credentials?: null | components["schemas"]["DataDestinationCredentialsInput"];
+            kind: string;
+        };
         TransferredResponse: {
             transferred: boolean;
+        };
+        UpdateDataDestinationInput: {
+            enabled?: boolean | null;
+            name?: string | null;
+            /** Format: int32 */
+            syncIntervalSeconds?: number | null;
         };
         UpdateFeedbackWorkflowInput: {
             assigneeOsUserId?: string | null;
@@ -3334,6 +3513,639 @@ export interface operations {
             };
             /** @description GitHub App integration is not configured */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    list_data_destinations_handler: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Team whose data destinations are listed; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Data destinations with their most recent sync run */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataDestinationsResponse"];
+                };
+            };
+            /** @description Invalid team header */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                    "text/plain": string;
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot configure the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description A pending team invitation changed while team membership was refreshed */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Data destinations could not be loaded */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    create_data_destination_handler: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Team to configure; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateDataDestinationInput"];
+            };
+        };
+        responses: {
+            /** @description Data destination created */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataDestinationResponse"];
+                };
+            };
+            /** @description Invalid team header, destination configuration, or malformed JSON body */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                    "text/plain": string;
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot configure the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description A pending team invitation changed while team membership was refreshed */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Request body exceeds the configured limit */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description Request body is not JSON */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description JSON body does not match the data destination schema */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description Data destination could not be created */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    test_data_destination_handler: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Team to test against; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TestDataDestinationInput"];
+            };
+        };
+        responses: {
+            /** @description The destination accepted a test connection */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataDestinationTestResponse"];
+                };
+            };
+            /** @description Invalid team header, destination configuration, unreachable destination, or malformed JSON body */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                    "text/plain": string;
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot configure the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description A pending team invitation changed while team membership was refreshed */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Request body exceeds the configured limit */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description Request body is not JSON */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description JSON body does not match the data destination test schema */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description Data destination test could not be performed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete_data_destination_handler: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Team to configure; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path: {
+                /** @description Data destination to remove */
+                destination_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Data destination removed when present */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RemovedResponse"];
+                };
+            };
+            /** @description Invalid destination path or team header */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                    "text/plain": string;
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot configure the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Data destination not found for this team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description A pending team invitation changed while team membership was refreshed */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Data destination could not be removed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    update_data_destination_handler: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Team to configure; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path: {
+                /** @description Data destination to update */
+                destination_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateDataDestinationInput"];
+            };
+        };
+        responses: {
+            /** @description Data destination updated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataDestinationResponse"];
+                };
+            };
+            /** @description Invalid destination path, team header, update, or malformed JSON body */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                    "text/plain": string;
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot configure the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Data destination not found for this team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description A pending team invitation changed while team membership was refreshed */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Request body exceeds the configured limit */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description Request body is not JSON */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description JSON body does not match the data destination update schema */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description Data destination could not be updated */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    data_destination_runs_handler: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Team to access; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path: {
+                /** @description Data destination whose sync runs are listed */
+                destination_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Most recent sync runs, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataDestinationRunsResponse"];
+                };
+            };
+            /** @description Invalid destination path or team header */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                    "text/plain": string;
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot configure the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Data destination not found for this team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description A pending team invitation changed while team membership was refreshed */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Sync runs could not be loaded */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    sync_data_destination_handler: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Team to configure; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path: {
+                /** @description Data destination to sync immediately */
+                destination_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Manual sync claimed and started */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataDestinationSyncTriggeredResponse"];
+                };
+            };
+            /** @description Invalid destination path or team header */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                    "text/plain": string;
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot configure the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Data destination not found for this team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description A sync is already in progress for this destination */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description A pending team invitation changed while team membership was refreshed */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Sync could not be started */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
