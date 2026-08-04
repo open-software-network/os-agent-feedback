@@ -26,6 +26,13 @@ export function InteractionDetail({
 }) {
   const productId = data.currentProduct?.id;
   const loadedInteraction = data.interactions.find((item) => item.id === interactionId);
+  const loadedReport = data.reports.find((report) => report.interactionId === interactionId);
+  const loadedSession = data.sessions.find((item) => item.id === loadedInteraction?.sessionId);
+  const needsExactDetail = Boolean(
+    interactionId &&
+      productId &&
+      (!loadedInteraction || !loadedReport || (loadedInteraction.sessionId && !loadedSession)),
+  );
   const detail = useQuery({
     queryKey: ["interaction", data.workspace.id, productId, interactionId],
     queryFn: () =>
@@ -33,11 +40,11 @@ export function InteractionDetail({
         `/api/dashboard/interactions/${interactionId}?productId=${productId}`,
         { workspaceId: data.workspace.id },
       ),
-    enabled: Boolean(interactionId && productId && !loadedInteraction),
+    enabled: needsExactDetail,
   });
   const interaction = loadedInteraction ?? detail.data?.interaction;
 
-  if (detail.isError) {
+  if (detail.isError && !loadedInteraction) {
     return (
       <Panel>
         <p role="alert" className="text-sm text-destructive">
@@ -51,8 +58,12 @@ export function InteractionDetail({
     return <p className="text-sm text-muted-foreground">Loading interaction…</p>;
   }
 
-  const linkedReport = data.reports.find((report) => report.interactionId === interaction.id);
-  const session = data.sessions.find((item) => item.id === interaction.sessionId);
+  const linkedReport = detail.data?.report ?? loadedReport;
+  const session = detail.data === undefined ? loadedSession : detail.data.session;
+  const isLoadingExactAssociations = Boolean(
+    loadedInteraction && needsExactDetail && detail.isLoading && !detail.data,
+  );
+  const exactAssociationError = loadedInteraction && detail.isError ? detail.error : null;
   const findingCount = linkedReport ? reportFindings(linkedReport).length : 0;
 
   return (
@@ -79,6 +90,17 @@ export function InteractionDetail({
           {interaction.customerRef ?? "Unknown customer"} · {formatDate(interaction.occurredAt)}
         </p>
       </header>
+
+      {exactAssociationError ? (
+        <Panel>
+          <p role="alert" className="text-sm text-destructive">
+            Could not load linked feedback and session. {exactAssociationError.message}
+          </p>
+          <Button variant="outline" size="sm" className="w-fit" onClick={() => detail.refetch()}>
+            Try again
+          </Button>
+        </Panel>
+      ) : null}
 
       <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_20rem]">
         <main className="flex min-w-0 flex-col gap-6">
@@ -117,7 +139,19 @@ export function InteractionDetail({
             <h2 id="attached-feedback-heading" className="text-base font-medium">
               Attached feedback
             </h2>
-            {linkedReport ? (
+            {isLoadingExactAssociations ? (
+              <Panel>
+                <p role="status" className="text-sm text-muted-foreground">
+                  Loading linked feedback and session…
+                </p>
+              </Panel>
+            ) : exactAssociationError && !linkedReport ? (
+              <Panel>
+                <p className="text-sm text-muted-foreground">
+                  Linked feedback status is unavailable.
+                </p>
+              </Panel>
+            ) : linkedReport ? (
               <Card size="sm">
                 <CardHeader className="border-b">
                   <CardTitle className="max-w-2xl text-base leading-6">

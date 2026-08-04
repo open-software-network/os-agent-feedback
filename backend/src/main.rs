@@ -132,7 +132,7 @@ use crate::{
         clear_product_github_repo, complete_code_match_job, complete_group_issue_filing,
         complete_group_issue_reconciliation, create_api_key, create_enrichment_request,
         create_product_with_default_key, create_team_invitation, dashboard_customer_by_id,
-        dashboard_customers_page, dashboard_feedback_page, dashboard_interaction_by_id,
+        dashboard_customers_page, dashboard_feedback_page, dashboard_interaction_detail_by_id,
         dashboard_report_by_id, dashboard_responses_page, dashboard_session_by_id,
         dashboard_sessions_page, dashboard_signals_page, dashboard_with_limits,
         dead_letter_code_match_job, decide_enrichment_consent, delete_enrichment_field,
@@ -5199,7 +5199,7 @@ async fn update_feedback_workflow_handler(
         ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
     ),
     responses(
-        (status = 200, description = "Product interaction", body = DashboardInteractionResponse),
+        (status = 200, description = "Product interaction with its linked feedback report and session", body = DashboardInteractionResponse),
         (
             status = 400,
             description = "Invalid path, query, or team header",
@@ -5224,7 +5224,7 @@ async fn dashboard_interaction_handler(
 ) -> Result<Response, ApiError> {
     let (context, tokens) =
         dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
-    let interaction = dashboard_interaction_by_id(
+    let detail = dashboard_interaction_detail_by_id(
         &state.pool,
         context.workspace.id,
         query.product_id,
@@ -5233,7 +5233,11 @@ async fn dashboard_interaction_handler(
     .await?;
     dashboard_response(
         &state,
-        Json(DashboardInteractionResponse { interaction }),
+        Json(DashboardInteractionResponse {
+            interaction: detail.interaction,
+            report: detail.report,
+            session: detail.session,
+        }),
         tokens,
     )
 }

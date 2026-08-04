@@ -53,12 +53,13 @@ describe("SetupView sections", () => {
 
   it("opens Install and replaces the hash when a write secret is shown", async () => {
     window.history.replaceState({}, "", "/?view=setup#setup-identify");
+    const data = dashboardFixture();
     const view = renderSetup();
 
     view.rerender(
       <SetupView
-        data={dashboardFixture()}
-        secrets={{ environmentId: "environment-1", write: "af_live_secret" }}
+        data={data}
+        secrets={{ environmentId: data.currentEnvironment?.id ?? "", write: "af_live_secret" }}
         rememberSecret={vi.fn()}
         refresh={vi.fn().mockResolvedValue(undefined)}
         setNotice={vi.fn()}
@@ -72,6 +73,49 @@ describe("SetupView sections", () => {
       );
       expect(window.location.hash).toBe("#setup-install");
     });
+  });
+
+  it("never renders a shown-once secret from a different environment", () => {
+    const secret = "af_live_other_product_secret";
+    window.history.replaceState({}, "", "/?view=setup#setup-identify");
+
+    render(
+      <SetupView
+        data={dashboardFixture()}
+        secrets={{ environmentId: "different-environment", write: secret }}
+        rememberSecret={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        setNotice={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText(secret)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "2. Identify customers when possible" }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(window.location.hash).toBe("#setup-identify");
+
+    fireEvent.click(screen.getByRole("button", { name: "1. Install Epode" }));
+    expect(screen.queryByText(secret)).not.toBeInTheDocument();
+    expect(screen.getByText("EPODE_API_KEY=paste_product_key_here")).toBeVisible();
+  });
+
+  it("scrolls a directly addressed section into view after Setup mounts", async () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    window.history.replaceState({}, "", "/?view=setup#setup-verify");
+
+    try {
+      renderSetup();
+
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ block: "start" }));
+      expect(scrollIntoView.mock.instances[0]).toBe(document.getElementById("setup-verify"));
+    } finally {
+      Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
+    }
   });
 
   it("opens the URL-addressed section and follows browser history", async () => {
@@ -94,6 +138,26 @@ describe("SetupView sections", () => {
       ).toHaveAttribute("aria-expanded", "true"),
     );
     expect(verify).toHaveAttribute("aria-expanded", "false");
+
+    window.history.pushState({}, "", "/?view=setup");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "1. Install Epode" })).toHaveAttribute(
+        "aria-expanded",
+        "true",
+      ),
+    );
+
+    window.history.pushState({}, "", "/?view=setup#setup-unknown");
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "1. Install Epode" })).toHaveAttribute(
+        "aria-expanded",
+        "true",
+      ),
+    );
   });
 });
 

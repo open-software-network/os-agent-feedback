@@ -70,6 +70,12 @@ export function ResponsesView({
 
   useEffect(() => writeLocation(query), [query]);
 
+  useEffect(() => {
+    const restoreSearch = () => setQuery(readLocation().query);
+    window.addEventListener("popstate", restoreSearch);
+    return () => window.removeEventListener("popstate", restoreSearch);
+  }, []);
+
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
       <div className="flex flex-wrap items-center gap-2 border-b px-4 py-3">
