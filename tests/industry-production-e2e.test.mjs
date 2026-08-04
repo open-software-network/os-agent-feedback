@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import { INDUSTRY_E2E_PRODUCTS } from "../experiments/agent-compliance/industry-e2e-config.mjs";
 import { runIndustryProductionE2E } from "../experiments/agent-compliance/industry-production-e2e.mjs";
@@ -72,4 +74,16 @@ test("production execution is explicit and never inferred from a key file", asyn
     runIndustryProductionE2E({ productKeys, endpoint: "https://api.epode.ai" }),
     /Production execution requires confirmProduction: true/,
   );
+});
+
+test("production runner can be imported by desktop harnesses without a process global", async () => {
+  const runnerUrl = new URL(
+    "../experiments/agent-compliance/industry-production-e2e.mjs",
+    import.meta.url,
+  ).href;
+  await promisify(execFile)(process.execPath, [
+    "--input-type=module",
+    "--eval",
+    `globalThis.process = undefined; await import(${JSON.stringify(runnerUrl)});`,
+  ]);
 });

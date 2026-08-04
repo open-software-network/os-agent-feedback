@@ -499,7 +499,10 @@ async function main() {
   console.log(JSON.stringify(result, null, 2));
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
+if (
+  typeof process !== "undefined" &&
+  import.meta.url === pathToFileURL(process.argv[1] || "").href
+) {
   main().catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
