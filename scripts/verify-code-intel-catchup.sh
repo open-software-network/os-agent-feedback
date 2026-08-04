@@ -65,8 +65,8 @@ validate_source_contract() {
 }
 
 case "$mode" in
-  lint | verify-before | apply | verify-after | rollback-empty) ;;
-  *) fail "mode must be lint, verify-before, apply, verify-after, or rollback-empty" ;;
+  lint | verify-before | apply | capture-after | verify-after | rollback-empty) ;;
+  *) fail "mode must be lint, verify-before, apply, capture-after, verify-after, or rollback-empty" ;;
 esac
 if [[ -n "$expected_schema_fingerprint" && ! "$expected_schema_fingerprint" =~ ^[0-9a-f]{64}$ ]]; then
   fail "EXPECTED_SCHEMA_FINGERPRINT must be lowercase SHA-256"
@@ -280,6 +280,7 @@ SQL
 case "$mode" in
   verify-before) verify_preflight ;;
   apply) apply_catchup ;;
+  capture-after) verify_after ;;
   verify-after) verify_after ;;
   rollback-empty) rollback_empty ;;
 esac

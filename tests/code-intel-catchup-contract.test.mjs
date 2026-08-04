@@ -56,7 +56,10 @@ test("code-intel catch-up lint fails closed on migration drift", async () => {
 test("code-intel catch-up source preserves atomic and rollback safety guards", async () => {
   const source = await readFile(script, "utf8");
 
-  assert.match(source, /lint \| verify-before \| apply \| verify-after \| rollback-empty/);
+  assert.match(
+    source,
+    /lint \| verify-before \| apply \| capture-after \| verify-after \| rollback-empty/,
+  );
   assert.match(source, /if \[\[ "\$mode" == "verify-after" \]\]/);
   assert.match(source, /EXPECTED_SCHEMA_FINGERPRINT is required for \$mode/);
   assert.match(source, /emit_output database_version "\$previous_version"/);
@@ -101,7 +104,7 @@ test("code-intel catch-up rejects unknown modes before database access", () => {
   assert.notEqual(result.status, 0);
   assert.match(
     result.stderr,
-    /mode must be lint, verify-before, apply, verify-after, or rollback-empty/,
+    /mode must be lint, verify-before, apply, capture-after, verify-after, or rollback-empty/,
   );
 });
 
@@ -113,6 +116,7 @@ test("catch-up workflow binds real recovery evidence to canary-first production 
   );
 
   assert.match(source, /volumeInstanceBackupList/);
+  assert.match(source, /verify-code-intel-catchup\.sh capture-after/);
   assert.match(recoverySource, /image: postgres:18/);
   assert.match(recoverySource, /docker exec "\$RESTORE_CONTAINER_ID"/);
   assert.match(recoverySource, /pg_dump "\$PRODUCTION_DATABASE_URL"/);
