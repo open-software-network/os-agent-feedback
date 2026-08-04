@@ -188,3 +188,12 @@ This is the CI-safe canary command. Keep one protected live smoke before a relea
 sign in through OS Accounts on `https://app.epode.ai`, verify one dashboard API
 response after the real cookie exchange, and sign out. That live check deliberately
 is not automated here because the fixture cookie must remain invalid in production.
+
+## OS Platform
+
+Agents and humans share product knowledge (memory, Issues, team timeline) through
+the OS Platform. Connect the MCP endpoint `https://platform-api.opensoftware.co/mcp`
+(OAuth via OS Accounts) in your agent client, or export an API key as
+`OS_PLATFORM_API_KEY` for REST access (`https://app.opensoftware.co/api`, keys
+under your platform profile → API keys). Conventions agents follow live in
+[`AGENTS.md`](AGENTS.md) → "OS Platform (shared brain)".
