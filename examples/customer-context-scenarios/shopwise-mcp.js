@@ -264,7 +264,7 @@ export class ShopwiseMcpExample {
 
   callTool(name, args, runtime = {}) {
     const sessionId = text(runtime.sessionId, "runtime.sessionId");
-    const identityMode = runtime.incognito ? "incognito" : "standard";
+    const identityMode = runtime.incognito === true ? "incognito" : "not_provided";
     this.#audit.push({ name, sessionId, identityMode });
 
     if (name === "search_catalog") {

@@ -64,7 +64,8 @@ context used for the result. The hardened example uses one atomic business call:
 3. Every accepted field participates in matching, and the response includes a per-product match
    trace. There is no opaque context handle or state to reuse across fresh or incognito sessions.
 4. Context exists only while the call executes, imports no assistant memory, and is never saved to
-   a profile. Standard versus incognito origin remains explicit in the receipt.
+   a profile. The receipt reports `incognito` only when the host explicitly signals it; otherwise
+   the identity mode is `not_provided` rather than inferred from missing transport metadata.
 
 The server deliberately does **not** require a `share_customer_context` call. Live harnesses did
 not reliably select that tool even when prompted, so correctness cannot depend on agent prose or
