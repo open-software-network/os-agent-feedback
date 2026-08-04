@@ -23,7 +23,7 @@ describe("CustomersView", () => {
     expect(within(row).getByText("Known")).toBeVisible();
     expect(within(row).getByText("2")).toBeVisible();
     expect(screen.getAllByText("Anonymous")[0].parentElement).toHaveTextContent("1");
-    expect(screen.getByText("Active").parentElement).toHaveTextContent("2");
+    expect(screen.queryByText("Active")).not.toBeInTheDocument();
     expect(screen.queryByText("Unresolved interactions")).not.toBeInTheDocument();
     expect(screen.queryByText(/Customers stay linked to their sessions/i)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Filters/ })).toBeVisible();
