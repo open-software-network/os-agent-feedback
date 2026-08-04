@@ -4655,21 +4655,30 @@ pub(crate) async fn dashboard_customer_by_id(
     .bind(customer_id)
     .fetch_all(pool)
     .await?;
-    let request_observations = sqlx::query_as::<_, CustomerRequestObservation>(
-        r"SELECT id, interaction_id, client_ip, request_method AS method, user_agent,
-          accept_language, referrer_origin, sec_ch_ua, sec_ch_ua_platform,
-          sec_ch_ua_mobile, observed_at
-        FROM customer_request_observations
-        WHERE workspace_id = $1 AND product_id = $2 AND customer_id = $3
-          AND observed_at >= $4
-        ORDER BY observed_at DESC, id DESC LIMIT 100",
+    let request_observations_available = sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('public.customer_request_observations') IS NOT NULL",
     )
-    .bind(workspace_id)
-    .bind(product_id)
-    .bind(customer_id)
-    .bind(retained_since)
-    .fetch_all(pool)
+    .fetch_one(pool)
     .await?;
+    let request_observations = if request_observations_available {
+        sqlx::query_as::<_, CustomerRequestObservation>(
+            r"SELECT id, interaction_id, client_ip, request_method AS method, user_agent,
+              accept_language, referrer_origin, sec_ch_ua, sec_ch_ua_platform,
+              sec_ch_ua_mobile, observed_at
+            FROM customer_request_observations
+            WHERE workspace_id = $1 AND product_id = $2 AND customer_id = $3
+              AND observed_at >= $4
+            ORDER BY observed_at DESC, id DESC LIMIT 100",
+        )
+        .bind(workspace_id)
+        .bind(product_id)
+        .bind(customer_id)
+        .bind(retained_since)
+        .fetch_all(pool)
+        .await?
+    } else {
+        Vec::new()
+    };
     let signal_page = dashboard_signals_page(
         pool,
         workspace_id,
@@ -4763,9 +4772,8 @@ pub(crate) async fn dashboard_customer_by_id(
     .bind(customer_id)
     .fetch_all(pool)
     .await?;
-    let (signal_count, session_count, feature_count, request_observation_count) =
-        sqlx::query_as::<_, (i64, i64, i64, i64)>(
-            r"SELECT
+    let (signal_count, session_count, feature_count) = sqlx::query_as::<_, (i64, i64, i64)>(
+        r"SELECT
               (SELECT COUNT(*) FROM customer_signals signal
                 WHERE signal.workspace_id = $1 AND signal.product_id = $2
                   AND signal.customer_id = $3 AND signal.collected_at >= $4
@@ -4779,17 +4787,29 @@ pub(crate) async fn dashboard_customer_by_id(
                 WHERE signal.workspace_id = $1 AND signal.product_id = $2
                   AND signal.customer_id = $3 AND signal.collected_at >= $4
                   AND signal.feature_key IS NOT NULL
-                  AND (signal.expires_at IS NULL OR signal.expires_at > NOW())),
-              (SELECT COUNT(*) FROM customer_request_observations observation
-                WHERE observation.workspace_id = $1 AND observation.product_id = $2
-                  AND observation.customer_id = $3 AND observation.observed_at >= $4)",
+                  AND (signal.expires_at IS NULL OR signal.expires_at > NOW()))",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(customer_id)
+    .bind(retained_since)
+    .fetch_one(pool)
+    .await?;
+    let request_observation_count = if request_observations_available {
+        sqlx::query_scalar::<_, i64>(
+            r"SELECT COUNT(*) FROM customer_request_observations
+            WHERE workspace_id = $1 AND product_id = $2 AND customer_id = $3
+              AND observed_at >= $4",
         )
         .bind(workspace_id)
         .bind(product_id)
         .bind(customer_id)
         .bind(retained_since)
         .fetch_one(pool)
-        .await?;
+        .await?
+    } else {
+        0
+    };
     Ok(DashboardCustomerDetail {
         counts: CustomerDetailCounts {
             signals: signal_count,
@@ -9622,31 +9642,38 @@ pub(crate) async fn create_enrichment_request(
         ));
     }
     if let Some(observation) = request_observation {
-        sqlx::query(
-            r"INSERT INTO customer_request_observations
+        let request_observations_available = sqlx::query_scalar::<_, bool>(
+            "SELECT to_regclass('public.customer_request_observations') IS NOT NULL",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if request_observations_available {
+            sqlx::query(
+                r"INSERT INTO customer_request_observations
             (id, workspace_id, product_id, environment_id, customer_id, interaction_id,
              client_ip, request_method, user_agent, accept_language, referrer_origin,
              sec_ch_ua, sec_ch_ua_platform, sec_ch_ua_mobile, observed_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             ON CONFLICT (interaction_id) DO NOTHING",
-        )
-        .bind(Uuid::new_v4())
-        .bind(auth.workspace.id)
-        .bind(auth.environment.product_id)
-        .bind(auth.environment.id)
-        .bind(customer_id)
-        .bind(input.interaction_id)
-        .bind(observation.client_ip)
-        .bind(observation.method)
-        .bind(observation.user_agent)
-        .bind(observation.accept_language)
-        .bind(observation.referrer_origin)
-        .bind(observation.sec_ch_ua)
-        .bind(observation.sec_ch_ua_platform)
-        .bind(observation.sec_ch_ua_mobile)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
+            )
+            .bind(Uuid::new_v4())
+            .bind(auth.workspace.id)
+            .bind(auth.environment.product_id)
+            .bind(auth.environment.id)
+            .bind(customer_id)
+            .bind(input.interaction_id)
+            .bind(observation.client_ip)
+            .bind(observation.method)
+            .bind(observation.user_agent)
+            .bind(observation.accept_language)
+            .bind(observation.referrer_origin)
+            .bind(observation.sec_ch_ua)
+            .bind(observation.sec_ch_ua_platform)
+            .bind(observation.sec_ch_ua_mobile)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
     let subject = enrichment_subject(
         identity_hmac_secret,
