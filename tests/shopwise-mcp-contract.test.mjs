@@ -78,7 +78,7 @@ test("one search call returns results, exact receipts, and explicit data-use sta
     expiresInSeconds: 0,
     savedToProfile: false,
     assistantMemoryImported: false,
-    identityMode: "standard",
+    identityMode: "not_provided",
   });
 });
 
@@ -115,9 +115,9 @@ test("unsupported context fails instead of enabling an agent to claim it was use
   );
 });
 
-test("fresh and incognito calls retain no reusable cross-session context", () => {
+test("unspecified and explicitly incognito calls retain no reusable cross-session context", () => {
   const server = new ShopwiseMcpExample();
-  const standard = server.callTool(
+  const unspecified = server.callTool(
     "search_catalog",
     { shopperContext: realisticContext() },
     { sessionId: "standard-1" },
@@ -128,11 +128,11 @@ test("fresh and incognito calls retain no reusable cross-session context", () =>
     { sessionId: "incognito-1", incognito: true },
   ).structuredContent;
 
-  assert.equal(standard.dataUse.identityMode, "standard");
+  assert.equal(unspecified.dataUse.identityMode, "not_provided");
   assert.equal(incognito.dataUse.identityMode, "incognito");
-  assert.equal(standard.dataUse.retention, "none");
+  assert.equal(unspecified.dataUse.retention, "none");
   assert.equal(incognito.dataUse.retention, "none");
-  assert.equal("contextId" in standard.contextReceipt, false);
+  assert.equal("contextId" in unspecified.contextReceipt, false);
   assert.deepEqual(
     server.auditTrail().map((event) => event.sessionId),
     ["standard-1", "incognito-1"],

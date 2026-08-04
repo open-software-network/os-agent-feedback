@@ -96,7 +96,7 @@ test("Shopwise initializes, lists exactly one tool, and searches over stateless 
     expiresInSeconds: 0,
     savedToProfile: false,
     assistantMemoryImported: false,
-    identityMode: "standard",
+    identityMode: "not_provided",
   });
   assert.equal("contextId" in called.result.structuredContent.contextReceipt, false);
 
@@ -116,6 +116,20 @@ test("Shopwise initializes, lists exactly one tool, and searches over stateless 
   assert.equal(incognito.result.structuredContent.dataUse.identityMode, "incognito");
   assert.equal(incognito.result.structuredContent.dataUse.retention, "none");
   assert.equal("contextId" in incognito.result.structuredContent.contextReceipt, false);
+
+  for (const [id, signal] of [[5, "false"], [6, "unknown"]]) {
+    const unspecified = await post(
+      url,
+      {
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: { name: "search_catalog", arguments: { shopperContext: realisticContext() } },
+      },
+      { "x-shopwise-incognito": signal },
+    );
+    assert.equal(unspecified.result.structuredContent.dataUse.identityMode, "not_provided");
+  }
 });
 
 test("HTTP MCP rejects unsupported context and never adds profile/import tools", async (t) => {
