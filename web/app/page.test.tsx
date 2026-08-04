@@ -327,6 +327,7 @@ describe("dashboard data flow", () => {
       "Connectors",
       "Team",
       "Data controls",
+      "Context fields",
     ]);
     expect(screen.getByRole("tab", { name: "Data controls" })).toHaveAttribute(
       "aria-selected",

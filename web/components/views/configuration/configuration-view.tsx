@@ -15,6 +15,7 @@ const sectionContent: Record<ConfigurationSection, { label: string }> = {
   connectors: { label: "Connectors" },
   team: { label: "Team" },
   policy: { label: "Data controls" },
+  "context-fields": { label: "Context fields" },
 };
 
 const MEMBER_CONFIGURATION_VIEWS: readonly ConfigurationSection[] = ["configuration", "team"];

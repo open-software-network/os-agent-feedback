@@ -7,6 +7,7 @@ export const DASHBOARD_CONFIGURATION_VIEWS = [
   "connectors",
   "team",
   "policy",
+  "context-fields",
 ] as const;
 export const DASHBOARD_VIEWS = [
   "home",
