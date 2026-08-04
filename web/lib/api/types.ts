@@ -1267,14 +1267,9 @@ export interface components {
             /** Format: double */
             identityConfidence: number | null;
             identityLevel: string;
-            kind: string;
             /** Format: date-time */
             lastActivityAt: string;
-            /** Format: int64 */
-            memberCount: number;
             outcomeHealth: string;
-            /** Format: uuid */
-            parentCustomerId: string | null;
             segments: string[];
             /** Format: int64 */
             sessionCount: number;

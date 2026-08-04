@@ -3693,6 +3693,20 @@ async fn customer_facets(
           FROM customers customer
           WHERE customer.workspace_id = $1
             AND customer.merged_into_customer_id IS NULL
+            AND NOT (
+              customer.kind = 'account' AND EXISTS (
+                SELECT 1 FROM customers member
+                WHERE member.workspace_id = customer.workspace_id
+                  AND member.parent_customer_id = customer.id
+                  AND member.merged_into_customer_id IS NULL
+                  AND EXISTS (
+                    SELECT 1 FROM customer_identifiers member_identifier
+                    WHERE member_identifier.workspace_id = $1
+                      AND member_identifier.product_id = $2
+                      AND member_identifier.customer_id = member.id
+                  )
+              )
+            )
             AND EXISTS (
               SELECT 1 FROM customer_identifiers identifier
               WHERE identifier.workspace_id = $1 AND identifier.product_id = $2
@@ -3797,11 +3811,7 @@ pub(crate) async fn dashboard_customers_page(
 
     let mut customers = sqlx::query_as::<_, CustomerSummary>(
         r"WITH summaries AS (
-          SELECT customer.id, customer.kind, customer.parent_customer_id,
-            (SELECT COUNT(*) FROM customers member
-              WHERE member.workspace_id = customer.workspace_id
-                AND member.parent_customer_id = customer.id
-                AND member.merged_into_customer_id IS NULL)::BIGINT AS member_count,
+          SELECT customer.id,
             COALESCE(customer.display_name, user_identifier.display_hint,
               account_identifier.display_hint, any_identifier.display_hint,
               CASE WHEN customer.identity_level = 'pseudonymous'
@@ -3828,7 +3838,8 @@ pub(crate) async fn dashboard_customers_page(
             SELECT identifier.display_hint
             FROM customer_identifiers identifier
             WHERE identifier.workspace_id = $1 AND identifier.product_id = $2
-              AND identifier.customer_id = customer.id AND identifier.kind = 'account_ref'
+              AND identifier.customer_id = COALESCE(customer.parent_customer_id, customer.id)
+              AND identifier.kind = 'account_ref'
             ORDER BY identifier.created_at, identifier.id LIMIT 1
           ) account_identifier ON TRUE
           LEFT JOIN LATERAL (
@@ -3894,6 +3905,20 @@ pub(crate) async fn dashboard_customers_page(
             ORDER BY grant_row.id LIMIT 1
           ) consent ON TRUE
           WHERE customer.workspace_id = $1 AND customer.merged_into_customer_id IS NULL
+            AND NOT (
+              customer.kind = 'account' AND EXISTS (
+                SELECT 1 FROM customers member
+                WHERE member.workspace_id = customer.workspace_id
+                  AND member.parent_customer_id = customer.id
+                  AND member.merged_into_customer_id IS NULL
+                  AND EXISTS (
+                    SELECT 1 FROM customer_identifiers member_identifier
+                    WHERE member_identifier.workspace_id = $1
+                      AND member_identifier.product_id = $2
+                      AND member_identifier.customer_id = member.id
+                  )
+              )
+            )
         )
         SELECT * FROM summaries
         WHERE last_activity_at IS NOT NULL
@@ -3957,6 +3982,20 @@ pub(crate) async fn dashboard_customers_page(
               ))
             FROM customers customer
             WHERE customer.workspace_id = $1 AND customer.merged_into_customer_id IS NULL
+              AND NOT (
+                customer.kind = 'account' AND EXISTS (
+                  SELECT 1 FROM customers member
+                  WHERE member.workspace_id = customer.workspace_id
+                    AND member.parent_customer_id = customer.id
+                    AND member.merged_into_customer_id IS NULL
+                    AND EXISTS (
+                      SELECT 1 FROM customer_identifiers member_identifier
+                      WHERE member_identifier.workspace_id = $1
+                        AND member_identifier.product_id = $2
+                        AND member_identifier.customer_id = member.id
+                    )
+                )
+              )
               AND EXISTS (SELECT 1 FROM customer_identifiers identifier
                 WHERE identifier.workspace_id = $1 AND identifier.product_id = $2
                   AND identifier.customer_id = customer.id)",
@@ -4398,11 +4437,7 @@ async fn dashboard_customer_summary_by_id(
     retained_since: DateTime<Utc>,
 ) -> Result<CustomerSummary, ApiError> {
     sqlx::query_as::<_, CustomerSummary>(
-        r"SELECT customer.id, customer.kind, customer.parent_customer_id,
-          (SELECT COUNT(*) FROM customers member
-            WHERE member.workspace_id = customer.workspace_id
-              AND member.parent_customer_id = customer.id
-              AND member.merged_into_customer_id IS NULL)::BIGINT AS member_count,
+        r"SELECT customer.id,
           COALESCE(customer.display_name, user_identifier.display_hint,
             account_identifier.display_hint, any_identifier.display_hint,
             CASE WHEN customer.identity_level = 'pseudonymous'
@@ -4423,7 +4458,8 @@ async fn dashboard_customer_summary_by_id(
           ORDER BY identifier.created_at, identifier.id LIMIT 1) any_identifier ON TRUE
         LEFT JOIN LATERAL (SELECT identifier.display_hint FROM customer_identifiers identifier
           WHERE identifier.workspace_id = $1 AND identifier.product_id = $2
-            AND identifier.customer_id = customer.id AND identifier.kind = 'account_ref'
+            AND identifier.customer_id = COALESCE(customer.parent_customer_id, customer.id)
+            AND identifier.kind = 'account_ref'
           ORDER BY identifier.created_at, identifier.id LIMIT 1) account_identifier ON TRUE
         LEFT JOIN LATERAL (SELECT identifier.display_hint FROM customer_identifiers identifier
           WHERE identifier.workspace_id = $1 AND identifier.product_id = $2
@@ -4469,7 +4505,21 @@ async fn dashboard_customer_summary_by_id(
             )
           ORDER BY grant_row.id LIMIT 1) consent ON TRUE
         WHERE customer.id = $3 AND customer.workspace_id = $1
-          AND customer.merged_into_customer_id IS NULL",
+          AND customer.merged_into_customer_id IS NULL
+          AND NOT (
+            customer.kind = 'account' AND EXISTS (
+              SELECT 1 FROM customers member
+              WHERE member.workspace_id = customer.workspace_id
+                AND member.parent_customer_id = customer.id
+                AND member.merged_into_customer_id IS NULL
+                AND EXISTS (
+                  SELECT 1 FROM customer_identifiers member_identifier
+                  WHERE member_identifier.workspace_id = $1
+                    AND member_identifier.product_id = $2
+                    AND member_identifier.customer_id = member.id
+                )
+            )
+          )",
     )
     .bind(workspace_id)
     .bind(product_id)
@@ -4669,7 +4719,13 @@ pub(crate) async fn dashboard_customer_by_id(
     let identifiers = sqlx::query_as::<_, CustomerIdentifier>(
         r"SELECT id, kind, display_hint, identity_level, provenance, verified_at
         FROM customer_identifiers WHERE workspace_id = $1 AND product_id = $2
-          AND customer_id = $3 ORDER BY created_at, id",
+          AND customer_id IN (
+            $3,
+            (SELECT parent_customer_id FROM customers
+              WHERE workspace_id = $1 AND id = $3)
+          )
+        ORDER BY CASE kind WHEN 'user_ref' THEN 0 WHEN 'account_ref' THEN 1 ELSE 2 END,
+          created_at, id",
     )
     .bind(workspace_id)
     .bind(product_id)
@@ -21713,6 +21769,8 @@ mod product_tests {
             .fetch_one(&pool)
             .await?;
             anyhow::ensure!(level == "verified" && parent_customer_id.is_some());
+            let account_customer_id = parent_customer_id
+                .ok_or_else(|| anyhow::anyhow!("verified customer should retain account linkage"))?;
             anyhow::ensure!(
                 sqlx::query_scalar::<_, i64>(
                     "SELECT COUNT(*) FROM customer_resolution_events WHERE from_customer_id = $1 AND to_customer_id = $2",
@@ -21758,7 +21816,11 @@ mod product_tests {
                     .iter()
                     .any(|customer| customer.id == verified_customer_id)
             );
-            anyhow::ensure!(customers.rollup.verified == 2);
+            anyhow::ensure!(customers.customers.len() == 1);
+            anyhow::ensure!(customers.rollup.customers == 1);
+            anyhow::ensure!(customers.rollup.verified == 1);
+            anyhow::ensure!(customers.customers[0].account_ref_hint.is_some());
+            anyhow::ensure!(customers.customers[0].user_ref_hint.is_some());
             dashboard_customers_page(
                 &pool,
                 workspace_a.id,
@@ -21779,10 +21841,21 @@ mod product_tests {
             .await
             .map_err(test_error)?;
             anyhow::ensure!(detail.customer.identity_level == "verified");
-            anyhow::ensure!(detail.customer.kind == "user");
-            anyhow::ensure!(detail.customer.parent_customer_id.is_some());
-            anyhow::ensure!(detail.customer.member_count == 0);
-            anyhow::ensure!(detail.identifiers.len() == 2);
+            anyhow::ensure!(detail.customer.account_ref_hint.is_some());
+            anyhow::ensure!(detail.customer.user_ref_hint.is_some());
+            anyhow::ensure!(detail.identifiers.len() == 3);
+            anyhow::ensure!(detail.identifiers.iter().any(|identifier| identifier.kind == "account_ref"));
+            anyhow::ensure!(detail.identifiers.iter().any(|identifier| identifier.kind == "user_ref"));
+            anyhow::ensure!(
+                dashboard_customer_by_id(
+                    &pool,
+                    workspace_a.id,
+                    product_a.id,
+                    account_customer_id,
+                )
+                .await
+                .is_err()
+            );
             anyhow::ensure!(
                 dashboard_customer_by_id(
                     &pool,

@@ -204,14 +204,11 @@ const secondSession = session({
 });
 const firstCustomer = {
   id: ids.customerOne,
-  kind: "account",
-  parentCustomerId: null,
-  memberCount: 1,
   displayName: "Acme workspace",
   identityLevel: "verified",
   identityConfidence: 1,
   accountRefHint: "acco…t-42",
-  userRefHint: null,
+  userRefHint: "user…r-42",
   segments: ["Enterprise"],
   lastActivityAt: now,
   outcomeHealth: "blocked",

@@ -30,9 +30,6 @@ export type SignalProvenance =
 
 export type CustomerSummary = {
   id: string;
-  kind: string;
-  parentCustomerId: string | null;
-  memberCount: number;
   displayName: string;
   identityLevel: IdentityLevel | string;
   identityConfidence: number | null;

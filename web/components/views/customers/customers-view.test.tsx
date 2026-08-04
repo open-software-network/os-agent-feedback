@@ -22,6 +22,8 @@ describe("CustomersView", () => {
     const row = await screen.findByRole("row", { name: "Open customer Acme workspace" });
     expect(within(row).getByText("Known")).toBeVisible();
     expect(within(row).getByText("2")).toBeVisible();
+    expect(within(row).getByText("Customer · user…0042 · acct…0042")).toBeVisible();
+    expect(within(row).queryByText(/linked user|linked to account/i)).not.toBeInTheDocument();
     expect(screen.getAllByText("Anonymous")[0].parentElement).toHaveTextContent("1");
     expect(screen.queryByText("Active")).not.toBeInTheDocument();
     expect(screen.queryByText("Unresolved interactions")).not.toBeInTheDocument();
@@ -69,6 +71,8 @@ describe("CustomersView", () => {
       selectedCustomerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     });
     expect(await screen.findByRole("heading", { name: "Acme workspace" })).toBeVisible();
+    expect(screen.getAllByText("Customer · user…0042 · acct…0042").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/linked user|linked to account/i)).not.toBeInTheDocument();
     expect(screen.queryByText("Known customer")).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "What we know" })).toBeVisible();
     expect(screen.getByText("Find the newest indexed policy")).toBeVisible();

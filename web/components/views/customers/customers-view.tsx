@@ -403,6 +403,8 @@ function CustomerRow({
   selected: boolean;
   open: () => void;
 }) {
+  const referenceHints = [customer.userRefHint, customer.accountRefHint].filter(Boolean);
+
   return (
     <TableRow
       data-state={selected ? "selected" : undefined}
@@ -430,13 +432,7 @@ function CustomerRow({
           {customer.displayName}
         </Button>
         <p className="mt-1 truncate text-xs text-muted-foreground">
-          {titleCase(customer.kind)}
-          {customer.memberCount > 0
-            ? ` · ${customer.memberCount} linked ${customer.memberCount === 1 ? "user" : "users"}`
-            : ""}
-          {customer.accountRefHint || customer.userRefHint
-            ? ` · ${customer.accountRefHint ?? customer.userRefHint}`
-            : ""}
+          Customer{referenceHints.length ? ` · ${referenceHints.join(" · ")}` : ""}
         </p>
       </TableCell>
       <TableCell>
@@ -539,6 +535,7 @@ function CustomerDetailContent({
   openSession: (sessionId: string) => void;
 }) {
   const customer = detail.customer;
+  const referenceHints = [customer.userRefHint, customer.accountRefHint].filter(Boolean);
   const usedSignalIds = new Set(
     detail.contextReturns.flatMap((retrieval) =>
       retrieval.decisions.flatMap((decision) => decision.signalIds),
@@ -552,12 +549,7 @@ function CustomerDetailContent({
         <IdentityBadge level={customer.identityLevel} />
       </div>
       <p className="mt-3 text-xs text-muted-foreground">
-        {titleCase(customer.kind)}
-        {customer.parentCustomerId
-          ? ` · linked to account ${customer.parentCustomerId.slice(0, 8)}`
-          : customer.memberCount > 0
-            ? ` · ${customer.memberCount} linked ${customer.memberCount === 1 ? "user" : "users"}`
-            : ""}
+        Customer{referenceHints.length ? ` · ${referenceHints.join(" · ")}` : ""}
       </p>
       {customer.segments.length ? (
         <div className="mt-3 flex flex-wrap gap-1">

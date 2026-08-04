@@ -9099,9 +9099,6 @@
         "type": "object",
         "required": [
           "id",
-          "kind",
-          "parentCustomerId",
-          "memberCount",
           "displayName",
           "identityLevel",
           "identityConfidence",
@@ -9146,26 +9143,12 @@
           "identityLevel": {
             "type": "string"
           },
-          "kind": {
-            "type": "string"
-          },
           "lastActivityAt": {
             "type": "string",
             "format": "date-time"
           },
-          "memberCount": {
-            "type": "integer",
-            "format": "int64"
-          },
           "outcomeHealth": {
             "type": "string"
-          },
-          "parentCustomerId": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
           },
           "segments": {
             "type": "array",

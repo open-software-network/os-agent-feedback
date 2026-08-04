@@ -290,14 +290,11 @@ export function customersPageFixture(): CustomersPage {
     customers: [
       {
         id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-        kind: "account",
-        parentCustomerId: null,
-        memberCount: 1,
         displayName: "Acme workspace",
         identityLevel: "verified",
         identityConfidence: 1,
         accountRefHint: "acct…0042",
-        userRefHint: null,
+        userRefHint: "user…0042",
         segments: ["Enterprise"],
         lastActivityAt: "2026-07-30T12:00:00Z",
         outcomeHealth: "blocked",
@@ -308,9 +305,6 @@ export function customersPageFixture(): CustomersPage {
       },
       {
         id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-        kind: "anonymous",
-        parentCustomerId: null,
-        memberCount: 0,
         displayName: "Anonymous actor B7D2",
         identityLevel: "pseudonymous",
         identityConfidence: null,
@@ -358,6 +352,14 @@ export function customerDetailFixture(): CustomerDetail {
   return {
     customer,
     identifiers: [
+      {
+        id: "identifier-user-1",
+        kind: "user_ref",
+        displayHint: "user…0042",
+        identityLevel: "verified",
+        provenance: "company_assertion",
+        verifiedAt: "2026-07-30T12:00:00Z",
+      },
       {
         id: "identifier-1",
         kind: "account_ref",

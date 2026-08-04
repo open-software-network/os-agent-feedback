@@ -1130,10 +1130,6 @@ pub(crate) struct CustomerSignal {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CustomerSummary {
     pub id: Uuid,
-    pub kind: String,
-    #[schema(required = true, nullable)]
-    pub parent_customer_id: Option<Uuid>,
-    pub member_count: i64,
     pub display_name: String,
     pub identity_level: String,
     #[schema(required = true, nullable)]
