@@ -60,7 +60,6 @@ type SessionConstraints = {
 
 type EnrichedSessionSummary = DashboardSessionSummary & {
   desiredOutcome?: string | null;
-  outcomeHealth?: string | null;
   signalCount?: number;
 };
 
@@ -402,12 +401,11 @@ export function SessionsView({
           <Table className="min-w-[760px] table-fixed">
             <TableHeader className="sticky top-0 z-[1] bg-background">
               <TableRow className="hover:bg-background">
-                <TableHead className="h-9 w-[20%] pl-5 text-xs">Session</TableHead>
-                <TableHead className="h-9 w-[20%] text-xs">Customer</TableHead>
-                <TableHead className="h-9 w-[25%] text-xs">Desired outcome</TableHead>
-                <TableHead className="h-9 w-[13%] text-xs">Result</TableHead>
+                <TableHead className="h-9 w-[22%] pl-5 text-xs">Session</TableHead>
+                <TableHead className="h-9 w-[22%] text-xs">Customer</TableHead>
+                <TableHead className="h-9 w-[32%] text-xs">Desired outcome</TableHead>
                 <TableHead className="h-9 w-[10%] text-xs">Steps</TableHead>
-                <TableHead className="h-9 w-[12%] pr-5 text-right text-xs">Last seen</TableHead>
+                <TableHead className="h-9 w-[14%] pr-5 text-right text-xs">Last seen</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -678,10 +676,6 @@ function SessionRow({
       </TableCell>
       <TableCell className="overflow-hidden">
         <p className="truncate text-xs">{session.desiredOutcome ?? sessionJourney(session)}</p>
-      </TableCell>
-      <TableCell className="text-xs">
-        {impactLabels[session.outcomeHealth ?? session.strongestImpact ?? "unknown"] ??
-          titleCase(session.outcomeHealth ?? session.strongestImpact ?? "unknown")}
       </TableCell>
       <TableCell className="text-xs">{session.interactionCount}</TableCell>
       <TableCell
