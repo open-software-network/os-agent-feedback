@@ -48,7 +48,7 @@ substitute; put durable learnings in the PR description. At handoff, state
 
 Issues live on the Open Software platform (os-platform), Product `epode` — not
 GitHub Issues. Primary interface is the OS Platform MCP
-(`mcp__claude_ai_OS_Platform__fellow_*`); the vendored `os-platform` skill
+(`mcp__claude_ai_OS_Platform__os_platform_*`); the vendored `os-platform` skill
 script is the shell fallback and cannot set labels, parents, or relations.
 Bodies are append-only, writes are probe-then-verify. See
 `docs/agents/issue-tracker.md`.

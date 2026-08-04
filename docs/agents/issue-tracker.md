@@ -6,7 +6,7 @@ legacy/watchdog surface, not the triage queue.
 
 ## Two interfaces
 
-**Primary: the OS Platform MCP** (`mcp__claude_ai_OS_Platform__fellow_*`). Use
+**Primary: the OS Platform MCP** (`mcp__claude_ai_OS_Platform__os_platform_*`). Use
 it whenever it is connected. It is strictly richer than the CLI — it is the
 only interface that can set labels, parents/children, and relations.
 
@@ -21,29 +21,29 @@ Every MCP tool takes `org` — pass the handle `epode`.
 
 ## Read conventions
 
-- **List issues**: `fellow_list_product_issues` with `org: "epode"`
+- **List issues**: `os_platform_list_product_issues` with `org: "epode"`
   (filters: `status`, `labels`, `assignee`, `priority`, `project`, `q`, `type`
   — all CSV where plural).
-- **Search**: `fellow_search_product_issues` with `q` (max 100 bytes,
+- **Search**: `os_platform_search_product_issues` with `q` (max 100 bytes,
   limit clamped to 25).
-- **Read an issue**: `fellow_get_issue`; comments via
-  `fellow_list_issue_comments`; children via `fellow_list_issue_children`.
+- **Read an issue**: `os_platform_get_issue`; comments via
+  `os_platform_list_issue_comments`; children via `os_platform_list_issue_children`.
 
 CLI equivalents: `issues list epode --status todo`,
 `issues search epode "<query>"`, `issues show epode <number>`.
 
 ## Write conventions
 
-- **Create**: `fellow_create_product_issue` (directly under the Product) or
-  `fellow_create_issue_child` (under a parent Issue). `title` required;
+- **Create**: `os_platform_create_product_issue` (directly under the Product) or
+  `os_platform_create_issue_child` (under a parent Issue). `title` required;
   optional `body_markdown`, `type`, `priority`, `status`, `assignee_user_id`,
   `project_id`.
-- **Update**: `fellow_update_issue` — including `body_markdown` for a full
+- **Update**: `os_platform_update_issue` — including `body_markdown` for a full
   body rewrite.
-- **Status**: `fellow_set_issue_status`.
-- **Comment**: `fellow_create_issue_comment`.
-- **Labels**: `fellow_set_issue_labels` — a **full replacement** list of slugs.
-- **Parent**: `fellow_set_issue_parent` (pass `parent_issue_ref: null` to
+- **Status**: `os_platform_set_issue_status`.
+- **Comment**: `os_platform_create_issue_comment`.
+- **Labels**: `os_platform_set_issue_labels` — a **full replacement** list of slugs.
+- **Parent**: `os_platform_set_issue_parent` (pass `parent_issue_ref: null` to
   detach).
 
 Pass `idempotency_key` on creates and status changes — there is no automatic
@@ -84,15 +84,15 @@ native; **blocking is not**.
 | Wayfinder primitive | This tracker |
 |---|---|
 | Map | Issue titled `Wayfinder map: …` + `<!-- wayfinder:map -->` marker |
-| Child ticket | **native** child (`fellow_create_issue_child`) |
+| Child ticket | **native** child (`os_platform_create_issue_child`) |
 | Ticket type | body `Type:` line |
 | Claim | **native** assignee |
 | Blocking | **body convention** — no native support |
 
-**Labels do not work for this.** Verified live: `fellow_set_issue_labels` with a
+**Labels do not work for this.** Verified live: `os_platform_set_issue_labels` with a
 fresh slug fails `4201 label(s) not found in project`. Label slugs must already
 exist **on an Initiative**, and the MCP only exposes label CRUD for Initiative
-labels (`fellow_*_initiative_label`). Since a Wayfinder map need not belong to
+labels (`os_platform_*_initiative_label`). Since a Wayfinder map need not belong to
 an Initiative, map and ticket type are carried by title and body instead. If
 this effort later gets an Initiative, revisit — labels would be nicer.
 
@@ -100,12 +100,12 @@ this effort later gets an Initiative, revisit — labels would be nicer.
 
 One Issue, `type: other`, titled `Wayfinder map: <destination name>`, with
 `<!-- wayfinder:map -->` as the first body line. Find every map with
-`fellow_search_product_issues` + `q: "Wayfinder map:"`.
+`os_platform_search_product_issues` + `q: "Wayfinder map:"`.
 
 Its body is the skill's Destination / Notes / Decisions so far / Not yet
 specified / Out of scope structure. The map is a **living index**, so it is the
 one Issue whose body is rewritten rather than appended — fog graduates *out* of
-"Not yet specified" as it becomes tickets. Rewrite with `fellow_update_issue`
+"Not yet specified" as it becomes tickets. Rewrite with `os_platform_update_issue`
 (`body_markdown`), then re-read to confirm.
 
 The map stays `todo`/`in_progress` until every ticket is closed, then
@@ -113,7 +113,7 @@ The map stays `todo`/`in_progress` until every ticket is closed, then
 
 ### Tickets
 
-Create with `fellow_create_issue_child` against the map's number — that sets
+Create with `os_platform_create_issue_child` against the map's number — that sets
 parentage natively, so the tracker UI shows the map's children without any
 convention. `type: other`. The body opens with the header lines, then the
 question:
@@ -132,8 +132,8 @@ Ticket bodies stay append-only; the resolution goes in a comment.
 
 ### Claiming
 
-Native. Set `assignee_user_id` (via `fellow_create_issue_child` at create or
-`fellow_update_issue` after). An open, **unassigned** ticket is unclaimed.
+Native. Set `assignee_user_id` (via `os_platform_create_issue_child` at create or
+`os_platform_update_issue` after). An open, **unassigned** ticket is unclaimed.
 Jakub is `usr_utEzdXaTSbeU`.
 
 ### Blocking — the one gap
@@ -147,7 +147,7 @@ Blocked by: EPD-<n>, EPD-<m>
 ```
 
 Omit the line entirely when nothing blocks it. Optionally also create a
-`related` relation (`fellow_create_issue_relation`) so the link is visible in
+`related` relation (`os_platform_create_issue_relation`) so the link is visible in
 the UI — but the body line stays authoritative, because `related` carries no
 direction.
 
@@ -163,20 +163,20 @@ A ticket is **unblocked** when every `EPD-<n>` on its `Blocked by:` line is
 
 No server-side query covers this. Compute it:
 
-1. `fellow_list_issue_children` on the map → the ticket set
+1. `os_platform_list_issue_children` on the map → the ticket set
 2. keep `status == "todo"` and `assignee == null`
 3. read each body's `Blocked by:` line and drop any with an unresolved blocker
 
 ### Resolving
 
-1. `fellow_create_issue_comment` — the answer.
-2. `fellow_set_issue_status` → `completed`.
+1. `os_platform_create_issue_comment` — the answer.
+2. `os_platform_set_issue_status` → `completed`.
 3. Rewrite the map body: append the one-line pointer to **Decisions so far**,
    and clear any fog the answer graduated from **Not yet specified**.
 
 ### Ruling out of scope
 
-`fellow_set_issue_status` → `cancelled` (not `completed`, so it never reads as
+`os_platform_set_issue_status` → `cancelled` (not `completed`, so it never reads as
 a step on the route), then add the line to the map's **Out of scope** section.
 
 ### Live maps
