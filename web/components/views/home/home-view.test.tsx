@@ -1,9 +1,8 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { customersPageFixture, dashboardFixture } from "@/components/dashboard/test-fixture";
-import type { DashboardData, DashboardResponsesPage } from "@/lib/api/dashboard";
+import { dashboardFixture } from "@/components/dashboard/test-fixture";
+import type { DashboardData } from "@/lib/api/dashboard";
 
 import { HomeView } from "./home-view";
 
@@ -13,11 +12,11 @@ describe("HomeView", () => {
     window.history.replaceState({}, "", "/?team=team-1&product=product-1");
   });
 
-  it("leads with the question-and-answer product model", async () => {
+  it("leads with the question-and-answer product model", () => {
     renderHome(dashboardFixture());
 
     expect(
-      await screen.findByRole("heading", {
+      screen.getByRole("heading", {
         name: "Epode asks customer agents questions and records their answers.",
       }),
     ).toBeVisible();
@@ -25,126 +24,31 @@ describe("HomeView", () => {
       "src",
       expect.stringContaining("epode-logo.svg"),
     );
-    const glance = screen.getByRole("region", { name: "At a glance" });
-    expect(within(glance).getByText("Customers")).toBeVisible();
-    expect(within(glance).getByText("Questions asked")).toBeVisible();
-    expect(within(glance).getByText("Answers received")).toBeVisible();
-    expect(within(glance).getByText("Sessions")).toBeVisible();
-    expect(within(glance).queryByRole("img")).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Recent responses" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "Recent customers" })).toBeVisible();
+    expect(screen.queryByRole("region", { name: "At a glance" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Recent responses" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Recent customers" })).not.toBeInTheDocument();
     expect(screen.queryByText(/signals|interactions|contexts|evidences/i)).not.toBeInTheDocument();
   });
 
-  it("opens linked customers and sessions", async () => {
-    const openCustomer = vi.fn();
-    const openSession = vi.fn();
-    renderHome(dashboardFixture(), { openCustomer, openSession });
+  it("routes to the core object screens", () => {
+    renderHome(dashboardFixture());
 
-    fireEvent.click(await screen.findByRole("button", { name: "Acme workspace" }));
-    fireEvent.click(screen.getByRole("button", { name: "session-42" }));
-
-    expect(openCustomer).toHaveBeenCalledWith("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
-    expect(openSession).toHaveBeenCalledWith("33333333-3333-4333-8333-333333333333");
-  });
-
-  it("routes to the core object screens without a redundant manual refresh action", async () => {
-    const fetchMock = mockHome();
-    renderHome(dashboardFixture(), {}, fetchMock);
-
-    await screen.findByText("Blue");
     fireEvent.click(screen.getByRole("button", { name: /view responses/i }));
     expect(new URL(window.location.href).searchParams.get("view")).toBe("responses");
-    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
-  });
 
-  it("uses quiet copy when a response has no answer content", async () => {
-    const page = responsesPage();
-    const response = page.responses[0];
-    renderHome(
-      dashboardFixture(),
-      {},
-      mockHome(customersPageFixture(), {
-        ...page,
-        responses: [{ ...response, answers: [] }],
-      }),
-    );
-
-    expect(await screen.findByText("No answer content was recorded.")).toBeVisible();
-    expect(screen.queryByText(/^Answered$/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /view customers/i }));
+    expect(new URL(window.location.href).searchParams.get("view")).toBe("customers");
   });
 });
 
-function renderHome(
-  data: DashboardData,
-  overrides: Partial<Parameters<typeof HomeView>[0]> = {},
-  fetchMock = mockHome(),
-) {
-  vi.stubGlobal("fetch", fetchMock);
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+function renderHome(data: DashboardData) {
   return render(
-    <QueryClientProvider client={client}>
-      <HomeView
-        data={data}
-        openCustomer={vi.fn()}
-        openSession={vi.fn()}
-        openFeedback={vi.fn()}
-        refresh={vi.fn().mockResolvedValue(undefined)}
-        {...overrides}
-      />
-    </QueryClientProvider>,
+    <HomeView
+      data={data}
+      openCustomer={vi.fn()}
+      openSession={vi.fn()}
+      openFeedback={vi.fn()}
+      refresh={vi.fn().mockResolvedValue(undefined)}
+    />,
   );
-}
-
-function responsesPage(): DashboardResponsesPage {
-  return {
-    responses: [
-      {
-        id: "response-1",
-        question: "What color does the user prefer?",
-        operation: "search_catalog",
-        status: "answered",
-        purpose: "product_personalization",
-        surface: "mcp",
-        customerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-        customerName: "Acme workspace",
-        sessionId: "33333333-3333-4333-8333-333333333333",
-        sessionRef: "session-42",
-        askedAt: "2026-08-02T12:00:00Z",
-        answeredAt: "2026-08-02T12:01:00Z",
-        answers: [
-          {
-            key: "preferred_color",
-            type: "preference",
-            value: "Blue",
-            summary: "The user prefers blue",
-            remembered: true,
-          },
-        ],
-      },
-    ],
-    rollup: { questions: 4, answered: 3, awaitingAnswer: 1, declined: 0 },
-    limit: 6,
-    nextCursor: null,
-  };
-}
-
-function mockHome(customerPage = customersPageFixture(), responsePage = responsesPage()) {
-  return vi.fn().mockImplementation((input: RequestInfo | URL) => {
-    const path = String(input);
-    if (path.startsWith("/api/dashboard/customers?")) {
-      return Promise.resolve(json(customerPage));
-    }
-    if (path.startsWith("/api/dashboard/responses?")) {
-      return Promise.resolve(json(responsePage));
-    }
-    throw new Error(`Unexpected request: ${path}`);
-  });
-}
-
-function json(value: unknown) {
-  return new Response(JSON.stringify(value), {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  });
 }
