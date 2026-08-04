@@ -10973,9 +10973,17 @@
         "type": "object",
         "required": [
           "fields",
-          "legacyCatalogActive"
+          "legacyCatalogActive",
+          "defaultCatalog"
         ],
         "properties": {
+          "defaultCatalog": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EnrichmentCatalogEntry"
+            },
+            "description": "The built-in default catalog every product may use until it enables at\nleast one of its own field definitions."
+          },
           "fields": {
             "type": "array",
             "items": {

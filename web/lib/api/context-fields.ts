@@ -15,6 +15,14 @@ export type ContextFieldDefinition = {
 export type ContextFieldList = {
   fields: ContextFieldDefinition[];
   legacyCatalogActive: boolean;
+  defaultCatalog: DefaultCatalogEntry[];
+};
+
+export type DefaultCatalogEntry = {
+  key: string;
+  type: string;
+  allowedValues: string[];
+  targetedAdvertisingSafe: boolean;
 };
 
 export type ContextFieldInput = {

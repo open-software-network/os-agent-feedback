@@ -35,6 +35,7 @@ import {
 import {
   type ContextFieldDefinition,
   type ContextFieldInput,
+  type DefaultCatalogEntry,
   deleteContextField,
   listContextFields,
   saveContextField,
@@ -119,6 +120,7 @@ export function ContextFieldsView({
   const editor = isEditor(data.currentRole);
   const [fields, setFields] = useState<ContextFieldDefinition[] | null>(null);
   const [legacyCatalogActive, setLegacyCatalogActive] = useState(false);
+  const [defaultCatalog, setDefaultCatalog] = useState<DefaultCatalogEntry[]>([]);
   const [error, setError] = useState("");
   const [sheetOpen, setSheetOpen] = useState(false);
   const [editing, setEditing] = useState<ContextFieldDefinition | null>(null);
@@ -133,6 +135,7 @@ export function ContextFieldsView({
       const result = await listContextFields(product.id, data.workspace.id);
       setFields(result.fields);
       setLegacyCatalogActive(result.legacyCatalogActive);
+      setDefaultCatalog(result.defaultCatalog);
       setError("");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Context fields could not be loaded.");
@@ -222,11 +225,11 @@ export function ContextFieldsView({
       />
       {error ? <StatusMessage tone="error">{error}</StatusMessage> : null}
       {legacyCatalogActive ? (
-        <Panel title="Built-in global catalog active">
+        <Panel title="Default fields in use">
           <p className="text-sm text-muted-foreground">
-            This product currently shares Epode&apos;s built-in field catalog. Add your first field
-            to define your own catalog — as soon as one field is enabled, it replaces the global
-            catalog for this product&apos;s requests.
+            This product currently asks for the built-in default fields listed below. Add a field
+            of your own to start a custom catalog — as soon as one of your fields is enabled, your
+            catalog replaces the default set for every new request.
           </p>
         </Panel>
       ) : null}
@@ -357,6 +360,58 @@ export function ContextFieldsView({
         <p className="text-sm text-muted-foreground">
           Only a team owner or admin can change context fields.
         </p>
+      ) : null}
+      {legacyCatalogActive && defaultCatalog.length > 0 ? (
+        <Panel title="Default fields (built in)">
+          <p className="mb-3 text-sm text-muted-foreground">
+            Shared defaults for products that have not defined their own fields. They cannot be
+            edited; enabling any field of your own replaces this entire set.
+          </p>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Field</TableHead>
+                <TableHead>Type</TableHead>
+                <TableHead>Allowed values</TableHead>
+                <TableHead>Ads</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {defaultCatalog.map((field) => (
+                <TableRow key={field.key}>
+                  <TableCell>
+                    <div className="flex flex-col">
+                      <code className="text-sm">{field.key}</code>
+                      <span className="text-xs text-muted-foreground">
+                        {field.key.replace(/[._]/g, " ")}
+                      </span>
+                    </div>
+                  </TableCell>
+                  <TableCell>{field.type}</TableCell>
+                  <TableCell>
+                    <div className="flex max-w-64 flex-wrap gap-1">
+                      {field.allowedValues.slice(0, 4).map((value) => (
+                        <Badge key={value} variant="secondary">
+                          {value}
+                        </Badge>
+                      ))}
+                      {field.allowedValues.length > 4 ? (
+                        <Badge variant="outline">+{field.allowedValues.length - 4}</Badge>
+                      ) : null}
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    {field.targetedAdvertisingSafe ? (
+                      <Badge variant="secondary">Eligible</Badge>
+                    ) : (
+                      <span className="text-muted-foreground">Off</span>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Panel>
       ) : null}
       <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
         <SheetContent className="overflow-y-auto">

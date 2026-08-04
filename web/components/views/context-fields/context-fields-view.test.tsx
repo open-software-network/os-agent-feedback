@@ -50,7 +50,24 @@ function mockApi(fields: ContextFieldDefinition[] = [occasion, delivery]) {
       body: init?.body ? JSON.parse(String(init.body)) : undefined,
     });
     if (method === "GET") {
-      return json({ fields, legacyCatalogActive: fields.every((field) => !field.enabled) });
+      return json({
+        fields,
+        legacyCatalogActive: fields.every((field) => !field.enabled),
+        defaultCatalog: [
+          {
+            key: "shopping.priority",
+            type: "preference",
+            allowedValues: ["price", "quality", "speed", "convenience", "sustainability"],
+            targetedAdvertisingSafe: true,
+          },
+          {
+            key: "b2b.primary_goal",
+            type: "intent",
+            allowedValues: ["evaluate", "integrate", "automate", "analyze", "collaborate"],
+            targetedAdvertisingSafe: false,
+          },
+        ],
+      });
     }
     if (method === "PUT") return json(occasion);
     if (method === "DELETE") return json(occasion);
@@ -99,15 +116,24 @@ describe("ContextFieldsView", () => {
       path: `/api/products/${productId}/context-fields`,
       method: "GET",
     });
-    expect(screen.queryByText(/Built-in global catalog active/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Default fields in use/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Default fields \(built in\)/)).not.toBeInTheDocument();
   });
 
-  it("explains the legacy catalog replacement rule when no fields exist", async () => {
+  it("shows the built-in default fields when no custom fields exist", async () => {
     const { fetchMock } = mockApi([]);
     renderView(fetchMock);
 
-    expect(await screen.findByText(/Built-in global catalog active/)).toBeVisible();
+    expect(await screen.findByText(/Default fields in use/)).toBeVisible();
+    expect(screen.getByText(/replaces the default set for every new request/)).toBeVisible();
     expect(screen.getByText(/No fields defined yet/)).toBeVisible();
+    expect(screen.getByText(/Default fields \(built in\)/)).toBeVisible();
+    const defaultRow = screen.getByRole("row", { name: /shopping\.priority/ });
+    expect(within(defaultRow).getByText("shopping priority")).toBeVisible();
+    expect(within(defaultRow).getByText("Eligible")).toBeVisible();
+    expect(
+      within(screen.getByRole("row", { name: /b2b\.primary_goal/ })).getByText("Off"),
+    ).toBeVisible();
   });
 
   it("creates a field with parsed values and operation bindings", async () => {

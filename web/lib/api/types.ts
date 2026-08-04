@@ -1754,6 +1754,11 @@ export interface components {
             updatedAt: string;
         };
         EnrichmentFieldListResponse: {
+            /**
+             * @description The built-in default catalog every product may use until it enables at
+             *     least one of its own field definitions.
+             */
+            defaultCatalog: components["schemas"]["EnrichmentCatalogEntry"][];
             fields: components["schemas"]["EnrichmentFieldDefinitionResponse"][];
             legacyCatalogActive: boolean;
         };
