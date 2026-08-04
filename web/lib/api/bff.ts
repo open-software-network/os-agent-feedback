@@ -81,6 +81,12 @@ function machineAuthorization(headers: Headers, upstreamPath: string): string | 
   const allowed =
     (upstreamPath === "/api/v2/telemetry/batches" && token.startsWith("af_live_")) ||
     (upstreamPath === "/api/v2/consent/state" && token.startsWith("af_live_")) ||
+    (upstreamPath === "/api/v2/enrichment/requests" && token.startsWith("af_live_")) ||
+    (upstreamPath === "/api/v2/customer-context" && token.startsWith("af_live_")) ||
+    (upstreamPath === "/api/v2/personalization/decisions" && token.startsWith("af_live_")) ||
+    (upstreamPath === "/api/v2/personalization/outcomes" && token.startsWith("af_live_")) ||
+    (upstreamPath === "/api/v2/enrichment/consent/decisions" && token.startsWith("aqr1_")) ||
+    (upstreamPath === "/api/v2/enrichment/answers" && token.startsWith("aqr1_")) ||
     (upstreamPath === "/api/v2/capabilities/introspect" && token.startsWith("afr2_")) ||
     (upstreamPath === "/api/v2/consent/decisions" && token.startsWith("afr2_")) ||
     (upstreamPath === "/api/v2/reports" && token.startsWith("afr2_")) ||
