@@ -137,6 +137,9 @@ function session({ id, refHint, operation, interactionCount, reportCount, custom
     firstOperation: operation,
     lastOperation: operation,
     customerRef,
+    customerId: ids.customerOne,
+    customerDisplayName: "Acme workspace",
+    identityLevel: "verified",
     strongestImpact: "blocked",
   };
 }

@@ -389,6 +389,12 @@ pub(crate) struct DashboardSessionSummary {
     #[schema(required = true, nullable)]
     pub customer_ref: Option<String>,
     #[schema(required = true, nullable)]
+    pub customer_id: Option<Uuid>,
+    #[schema(required = true, nullable)]
+    pub customer_display_name: Option<String>,
+    #[schema(required = true, nullable)]
+    pub identity_level: Option<String>,
+    #[schema(required = true, nullable)]
     pub strongest_impact: Option<String>,
 }
 

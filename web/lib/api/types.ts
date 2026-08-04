@@ -1345,12 +1345,16 @@ export interface components {
         DashboardSessionSummary: {
             /** Format: date-time */
             createdAt: string;
+            customerDisplayName: string | null;
+            /** Format: uuid */
+            customerId: string | null;
             customerRef: string | null;
             /** Format: uuid */
             environmentId: string;
             firstOperation: string | null;
             /** Format: uuid */
             id: string;
+            identityLevel: string | null;
             /** Format: int64 */
             interactionCount: number;
             lastOperation: string | null;

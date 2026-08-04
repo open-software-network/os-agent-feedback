@@ -556,6 +556,11 @@ pub(crate) async fn dashboard_feature_by_key(
           session.source, session.ref_hint, session.started_at, session.last_seen_at,
           session.created_at, activity.interaction_count, activity.report_count,
           activity.first_operation, activity.last_operation, activity.customer_ref,
+          customer.id AS customer_id,
+          COALESCE(customer.display_name, customer_identifier.display_hint,
+            CASE WHEN customer.identity_level = 'pseudonymous'
+              THEN 'Anonymous customer' ELSE 'Customer' END) AS customer_display_name,
+          customer.identity_level,
           activity.strongest_impact
         FROM sessions_v2 session
         CROSS JOIN LATERAL (SELECT COUNT(interaction.id)::BIGINT interaction_count,
@@ -566,6 +571,8 @@ pub(crate) async fn dashboard_feature_by_key(
             interaction.client_sequence DESC NULLS LAST, interaction.id DESC))[1] last_operation,
           (ARRAY_AGG(interaction.customer_ref ORDER BY interaction.occurred_at)
             FILTER (WHERE interaction.customer_ref IS NOT NULL))[1] customer_ref,
+          (ARRAY_AGG(interaction.customer_id ORDER BY interaction.occurred_at)
+            FILTER (WHERE interaction.customer_id IS NOT NULL))[1] customer_id,
           (ARRAY_AGG(report.impact ORDER BY CASE report.impact
             WHEN 'blocked' THEN 5 WHEN 'hindered' THEN 4
             WHEN 'helped_with_friction' THEN 3 WHEN 'neutral' THEN 2
@@ -580,6 +587,19 @@ pub(crate) async fn dashboard_feature_by_key(
               AND signal.collected_at >= $4
               AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
           )) activity
+        LEFT JOIN customers linked_customer ON linked_customer.id = activity.customer_id
+          AND linked_customer.workspace_id = session.workspace_id
+        LEFT JOIN customers customer ON customer.id = COALESCE(
+            linked_customer.merged_into_customer_id, linked_customer.id)
+          AND customer.workspace_id = session.workspace_id
+        LEFT JOIN LATERAL (
+          SELECT identifier.display_hint FROM customer_identifiers identifier
+          WHERE identifier.workspace_id = session.workspace_id
+            AND identifier.customer_id = customer.id
+          ORDER BY CASE identifier.kind WHEN 'user_ref' THEN 0
+            WHEN 'account_ref' THEN 1 ELSE 2 END,
+            identifier.created_at, identifier.id LIMIT 1
+        ) customer_identifier ON TRUE
         WHERE session.workspace_id = $1 AND session.environment_id IN (
           SELECT id FROM product_environments WHERE workspace_id = $1 AND product_id = $2)
           AND activity.interaction_count > 0
