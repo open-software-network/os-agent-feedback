@@ -93,10 +93,12 @@ use crate::{
         DashboardResponseFilters, DashboardResponsesPage, DashboardSessionDetail,
         DashboardSessionFilters, DashboardSessionsPage, DashboardSignalFilters,
         DashboardSignalsPage, DeleteProductInput, EnrichmentAnswerInput, EnrichmentAnswerResponse,
-        EnrichmentConsentDecisionInput, EnrichmentConsentDecisionResponse, EnrichmentRequestInput,
-        EnrichmentRequestResponse, FeedbackConsentDiscovery, FeedbackDiscoveryResponse,
-        FeedbackFindingShapeDiscovery, FeedbackListInteractionsInput, FeedbackListReportsInput,
-        FeedbackModesDiscovery, FeedbackRequiredFieldsDiscovery, FeedbackSubmissionDiscovery,
+        EnrichmentConsentDecisionInput, EnrichmentConsentDecisionResponse,
+        EnrichmentFieldDefinitionInput, EnrichmentFieldDefinitionResponse,
+        EnrichmentFieldListResponse, EnrichmentRequestInput, EnrichmentRequestResponse,
+        FeedbackConsentDiscovery, FeedbackDiscoveryResponse, FeedbackFindingShapeDiscovery,
+        FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackModesDiscovery,
+        FeedbackRequiredFieldsDiscovery, FeedbackSubmissionDiscovery,
         FeedbackWorkaroundShapeDiscovery, GithubIssueLink, HealthResponse, IntegrationsDiscovery,
         McpDiscovery, MergeReportGroupsInput, MergeReportGroupsResponse,
         PersonalizationDecisionInput, PersonalizationDecisionResponse, PersonalizationOutcomeInput,
@@ -124,13 +126,14 @@ use crate::{
         dashboard_customers_page, dashboard_feedback_page, dashboard_interaction_by_id,
         dashboard_report_by_id, dashboard_responses_page, dashboard_session_by_id,
         dashboard_sessions_page, dashboard_signals_page, dashboard_with_limits,
-        dead_letter_code_match_job, decide_enrichment_consent, delete_product,
-        feedback_consent_state, feedback_list_interactions, feedback_list_reports,
+        dead_letter_code_match_job, decide_enrichment_consent, delete_enrichment_field,
+        delete_product, feedback_consent_state, feedback_list_interactions, feedback_list_reports,
         get_group_github_issue, get_or_create_workspace, get_product_github_repo,
         github_installation_workspace, group_issue_context, group_issue_sync_context,
         ingest_telemetry_batch, inspect_enrichment_request, inspect_feedback_capability,
-        list_github_installations, list_product_groups, mark_group_issue_filing_for_reconciliation,
-        merge_report_groups, purge_expired_product_data, read_product_auth, record_code_match_call,
+        list_enrichment_fields, list_github_installations, list_product_groups,
+        mark_group_issue_filing_for_reconciliation, merge_report_groups,
+        purge_expired_product_data, read_product_auth, record_code_match_call,
         record_feedback_consent_decision, record_personalization_decision,
         record_personalization_outcome, regroup_report_groups, release_code_match_claim,
         release_code_match_for_verification_retry, release_code_match_job,
@@ -141,7 +144,7 @@ use crate::{
         set_product_github_repo, submit_enrichment_answer, submit_product_feedback,
         terminally_dead_letter_code_match_verification, transfer_team_ownership,
         update_feedback_workflow, update_group_issue_state, update_policy, update_team_member_role,
-        upsert_github_installation,
+        upsert_enrichment_field, upsert_github_installation,
     },
 };
 
@@ -309,6 +312,11 @@ fn build_app_router(dev_auth_enabled: bool) -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(enrichment_request_inspection_handler))
         .routes(routes!(enrichment_consent_decision_handler))
         .routes(routes!(enrichment_answer_handler))
+        .routes(routes!(enrichment_fields_handler))
+        .routes(routes!(
+            enrichment_field_upsert_handler,
+            enrichment_field_delete_handler
+        ))
         .routes(routes!(customer_context_handler))
         .routes(routes!(personalization_decision_handler))
         .routes(routes!(personalization_outcome_handler))
@@ -5877,6 +5885,104 @@ async fn enrichment_answer_handler(
     )
     .await?;
     let mut response = Json(result).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v2/enrichment/fields",
+    tag = "enrichment",
+    responses(
+        (status = 200, description = "Customer context fields defined for this product", body = EnrichmentFieldListResponse),
+        (status = 401, description = "Invalid product API key", body = ApiErrorEnvelope),
+        (status = 500, description = "Context fields could not be loaded", body = ApiErrorEnvelope)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn enrichment_fields_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let auth = agent_product_auth(&state.pool, &headers).await?;
+    let result = list_enrichment_fields(&state.pool, &auth).await?;
+    let mut response = Json(result).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v2/enrichment/fields/{fieldKey}",
+    tag = "enrichment",
+    params(
+        ("fieldKey" = String, Path, description = "Context field key in lowercase namespace.name form")
+    ),
+    request_body = EnrichmentFieldDefinitionInput,
+    responses(
+        (status = 200, description = "Context field definition created or replaced", body = EnrichmentFieldDefinitionResponse),
+        (status = 400, description = "Invalid field key, label, values, or operation binding", body = ApiErrorEnvelope),
+        (status = 401, description = "Invalid product API key", body = ApiErrorEnvelope),
+        (status = 409, description = "Context fields are unavailable until the latest migration is applied", body = ApiErrorEnvelope),
+        (status = 500, description = "Context field could not be saved", body = ApiErrorEnvelope)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn enrichment_field_upsert_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(field_key): Path<String>,
+    Json(value): Json<Value>,
+) -> Result<Response, ApiError> {
+    let auth = agent_product_auth(&state.pool, &headers).await?;
+    let result = upsert_enrichment_field(
+        &state.pool,
+        &auth,
+        &field_key,
+        safe_input::<EnrichmentFieldDefinitionInput>(value)?,
+    )
+    .await?;
+    let mut response = Json(result).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v2/enrichment/fields/{fieldKey}",
+    tag = "enrichment",
+    params(
+        ("fieldKey" = String, Path, description = "Context field key in lowercase namespace.name form")
+    ),
+    responses(
+        (status = 200, description = "Deleted context field definition", body = EnrichmentFieldDefinitionResponse),
+        (status = 400, description = "Invalid field key", body = ApiErrorEnvelope),
+        (status = 401, description = "Invalid product API key", body = ApiErrorEnvelope),
+        (status = 404, description = "Context field not defined for this product", body = ApiErrorEnvelope),
+        (status = 409, description = "Context fields are unavailable until the latest migration is applied", body = ApiErrorEnvelope),
+        (status = 500, description = "Context field could not be deleted", body = ApiErrorEnvelope)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn enrichment_field_delete_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(field_key): Path<String>,
+) -> Result<Response, ApiError> {
+    let auth = agent_product_auth(&state.pool, &headers).await?;
+    let deleted = delete_enrichment_field(&state.pool, &auth, &field_key)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Context field is not defined for this product"))?;
+    let mut response = Json(deleted).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, no-store"),

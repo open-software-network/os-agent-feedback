@@ -6169,6 +6169,221 @@
         ]
       }
     },
+    "/api/v2/enrichment/fields": {
+      "get": {
+        "tags": [
+          "enrichment"
+        ],
+        "operationId": "enrichment_fields_handler",
+        "responses": {
+          "200": {
+            "description": "Customer context fields defined for this product",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrichmentFieldListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid product API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Context fields could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v2/enrichment/fields/{fieldKey}": {
+      "put": {
+        "tags": [
+          "enrichment"
+        ],
+        "operationId": "enrichment_field_upsert_handler",
+        "parameters": [
+          {
+            "name": "fieldKey",
+            "in": "path",
+            "description": "Context field key in lowercase namespace.name form",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrichmentFieldDefinitionInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Context field definition created or replaced",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrichmentFieldDefinitionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid field key, label, values, or operation binding",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid product API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Context fields are unavailable until the latest migration is applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Context field could not be saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "enrichment"
+        ],
+        "operationId": "enrichment_field_delete_handler",
+        "parameters": [
+          {
+            "name": "fieldKey",
+            "in": "path",
+            "description": "Context field key in lowercase namespace.name form",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted context field definition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrichmentFieldDefinitionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid field key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid product API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Context field not defined for this product",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Context fields are unavailable until the latest migration is applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Context field could not be deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/api/v2/customer-context": {
       "post": {
         "tags": [
@@ -9153,6 +9368,117 @@
           }
         }
       },
+      "EnrichmentFieldDefinitionInput": {
+        "type": "object",
+        "required": [
+          "label",
+          "type",
+          "allowedValues"
+        ],
+        "properties": {
+          "allowedValues": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "label": {
+            "type": "string"
+          },
+          "operations": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "targetedAdvertisingSafe": {
+            "type": "boolean"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "EnrichmentFieldDefinitionResponse": {
+        "type": "object",
+        "required": [
+          "key",
+          "label",
+          "type",
+          "allowedValues",
+          "targetedAdvertisingSafe",
+          "operations",
+          "enabled",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "allowedValues": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "key": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "operations": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "targetedAdvertisingSafe": {
+            "type": "boolean"
+          },
+          "type": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "EnrichmentFieldListResponse": {
+        "type": "object",
+        "required": [
+          "fields",
+          "legacyCatalogActive"
+        ],
+        "properties": {
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EnrichmentFieldDefinitionResponse"
+            }
+          },
+          "legacyCatalogActive": {
+            "type": "boolean"
+          }
+        }
+      },
       "EnrichmentRequestInput": {
         "type": "object",
         "required": [
@@ -9186,6 +9512,15 @@
               "null"
             ],
             "format": "int64"
+          },
+          "fieldKeys": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
           },
           "interactionId": {
             "type": "string",

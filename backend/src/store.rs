@@ -43,12 +43,13 @@ use crate::{
         EnrichmentAnswerBodySchema, EnrichmentAnswerInput, EnrichmentAnswerItemsSchema,
         EnrichmentAnswerResponse, EnrichmentCatalogEntry, EnrichmentConsentAction,
         EnrichmentConsentBodySchema, EnrichmentConsentDecisionInput,
-        EnrichmentConsentDecisionResponse, EnrichmentRequestInput, EnrichmentRequestResponse,
-        FeedbackFindingInput, FeedbackInteractionItem, FeedbackInteractionsPage,
-        FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackOperationSummary,
-        FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse, FeedbackSummary,
-        FeedbackSurfaceSummary, FeedbackWindow, GithubIssueLink, InsightCount, Insights,
-        InteractionTelemetryInput, MergeReportGroupsResponse, PersonalizationDecision,
+        EnrichmentConsentDecisionResponse, EnrichmentFieldDefinitionInput,
+        EnrichmentFieldDefinitionResponse, EnrichmentFieldListResponse, EnrichmentRequestInput,
+        EnrichmentRequestResponse, FeedbackFindingInput, FeedbackInteractionItem,
+        FeedbackInteractionsPage, FeedbackListInteractionsInput, FeedbackListReportsInput,
+        FeedbackOperationSummary, FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse,
+        FeedbackSummary, FeedbackSurfaceSummary, FeedbackWindow, GithubIssueLink, InsightCount,
+        Insights, InteractionTelemetryInput, MergeReportGroupsResponse, PersonalizationDecision,
         PersonalizationDecisionInput, PersonalizationDecisionResponse, PersonalizationOutcome,
         PersonalizationOutcomeInput, PersonalizationOutcomeResponse, PolicyInput, Product,
         ProductActivationMilestones, ProductAuth, ProductEnvironment, ProductFeedbackReport,
@@ -9184,6 +9185,7 @@ fn enrichment_request_hash(
         "apiKeyId": auth.api_key_id,
         "interactionId": input.interaction_id,
         "operation": operation,
+        "fieldKeys": &input.field_keys,
         "surface": &input.surface,
         "statusCode": input.status_code,
         "durationMs": input.duration_ms,
@@ -9236,7 +9238,12 @@ fn enrichment_subject(
     )
 }
 
-fn enrichment_question(product_name: &str, purpose: &str, remember: bool) -> String {
+fn enrichment_question(
+    product_name: &str,
+    purpose: &str,
+    remember: bool,
+    field_labels: Option<&[String]>,
+) -> String {
     let use_text = if purpose == "targeted_advertising" {
         "personalize marketing and advertising"
     } else {
@@ -9247,6 +9254,25 @@ fn enrichment_question(product_name: &str, purpose: &str, remember: bool) -> Str
     } else {
         " for this interaction only"
     };
+    if let Some(labels) = field_labels
+        && (1..=4).contains(&labels.len())
+    {
+        let listed = match labels.len() {
+            1 => labels[0].clone(),
+            2 => format!("{} and {}", labels[0], labels[1]),
+            _ => format!(
+                "{}, and {}",
+                labels[..labels.len() - 1].join(", "),
+                labels[labels.len() - 1]
+            ),
+        };
+        let question = format!(
+            "May I share your {listed} with {product_name} so it can {use_text}{memory_text}?"
+        );
+        if question.len() <= 700 {
+            return question;
+        }
+    }
     format!(
         "May I share relevant, non-sensitive preferences, interests, intent, or constraints with {product_name} so it can {use_text}{memory_text}?"
     )
@@ -9280,7 +9306,29 @@ fn enrichment_consent_action(public_base_url: &str, token: &str) -> EnrichmentCo
     }
 }
 
-fn enrichment_answer_action(public_base_url: &str, token: &str) -> EnrichmentAnswerAction {
+fn enrichment_answer_action(
+    public_base_url: &str,
+    token: &str,
+    catalog: Option<&RequestFieldCatalog>,
+) -> EnrichmentAnswerAction {
+    let (catalog_version, entries) = catalog.map_or_else(
+        || ("v1".to_owned(), enrichment_catalog_schema()),
+        |catalog| {
+            (
+                catalog.version.clone(),
+                catalog
+                    .fields
+                    .iter()
+                    .map(|field| EnrichmentCatalogEntry {
+                        key: field.key.clone(),
+                        signal_type: field.signal_type.clone(),
+                        allowed_values: field.allowed_values.clone(),
+                        targeted_advertising_safe: field.targeted_advertising_safe,
+                    })
+                    .collect(),
+            )
+        },
+    );
     EnrichmentAnswerAction {
         url: format!("{public_base_url}/api/v2/enrichment/answers"),
         method: "POST".to_owned(),
@@ -9307,8 +9355,8 @@ fn enrichment_answer_action(public_base_url: &str, token: &str) -> EnrichmentAns
                 ]
                 .map(str::to_owned)
                 .to_vec(),
-                catalog_version: "v1".to_owned(),
-                catalog: enrichment_catalog_schema(),
+                catalog_version,
+                catalog: entries,
             },
         },
     }
@@ -9337,6 +9385,7 @@ fn enrichment_response(
     public_base_url: &str,
     request: &EnrichmentRequestRow,
     token: &str,
+    catalog: Option<&RequestFieldCatalog>,
 ) -> EnrichmentRequestResponse {
     let consent_required = request.state == "consent_required";
     let answer_ready = request.state == "answer_ready";
@@ -9353,7 +9402,7 @@ fn enrichment_response(
             .then(|| answer_instruction("this company", &request.purpose, request.remember)),
         expires_at: request.expires_at,
         consent: Some(enrichment_consent_action(public_base_url, token)),
-        submit: answer_ready.then(|| enrichment_answer_action(public_base_url, token)),
+        submit: answer_ready.then(|| enrichment_answer_action(public_base_url, token, catalog)),
     }
 }
 
@@ -9533,8 +9582,14 @@ pub(crate) async fn create_enrichment_request(
                 "This enrichment request cannot be retried with the current product key",
             ));
         }
+        let catalog = load_request_field_catalog(&mut tx, request.id, request.workspace_id).await?;
         tx.commit().await?;
-        return Ok(enrichment_response(public_base_url, &request, &token));
+        return Ok(enrichment_response(
+            public_base_url,
+            &request,
+            &token,
+            catalog.as_ref(),
+        ));
     }
     let customer_id =
         resolve_telemetry_customer(&mut tx, auth, identity_hmac_secret, &refs, now).await?;
@@ -9784,7 +9839,27 @@ pub(crate) async fn create_enrichment_request(
         now,
         expires_at,
     )?;
-    let question = enrichment_question(&product_name, &input.purpose, remember);
+    let field_catalog = resolve_enrichment_request_fields(
+        &mut tx,
+        auth,
+        &operation,
+        &input.purpose,
+        input.field_keys.as_deref(),
+    )
+    .await?;
+    let field_labels = field_catalog.as_ref().map(|catalog| {
+        catalog
+            .fields
+            .iter()
+            .map(|field| field.label.clone())
+            .collect::<Vec<_>>()
+    });
+    let question = enrichment_question(
+        &product_name,
+        &input.purpose,
+        remember,
+        field_labels.as_deref(),
+    );
     let request = sqlx::query_as::<_, EnrichmentRequestRow>(
         r"INSERT INTO enrichment_requests
         (id, workspace_id, product_id, environment_id, interaction_id, api_key_id,
@@ -9827,6 +9902,9 @@ pub(crate) async fn create_enrichment_request(
             "interactionId was already used with a different enrichment request",
         ));
     }
+    if let Some(catalog) = &field_catalog {
+        store_request_field_catalog(&mut tx, request.id, request.workspace_id, catalog).await?;
+    }
     let (token, expected_nonce_hash) = sign_deterministic_enrichment_capability(
         auth.api_key_id,
         &key_hash,
@@ -9841,7 +9919,12 @@ pub(crate) async fn create_enrichment_request(
         ));
     }
     tx.commit().await?;
-    Ok(enrichment_response(public_base_url, &request, &token))
+    Ok(enrichment_response(
+        public_base_url,
+        &request,
+        &token,
+        field_catalog.as_ref(),
+    ))
 }
 
 async fn verified_enrichment_request(
@@ -9885,8 +9968,14 @@ pub(crate) async fn inspect_enrichment_request(
 ) -> Result<EnrichmentRequestResponse, ApiError> {
     let mut tx = pool.begin().await?;
     let (request, _) = verified_enrichment_request(&mut tx, capability).await?;
+    let catalog = load_request_field_catalog(&mut tx, request.id, request.workspace_id).await?;
     tx.commit().await?;
-    Ok(enrichment_response(public_base_url, &request, capability))
+    Ok(enrichment_response(
+        public_base_url,
+        &request,
+        capability,
+        catalog.as_ref(),
+    ))
 }
 
 fn parsed_enrichment_key_id(capability: &str) -> Result<Uuid, ApiError> {
@@ -9999,6 +10088,8 @@ pub(crate) async fn decide_enrichment_consent(
     }
     let mut tx = pool.begin().await?;
     let (mut request, _) = verified_enrichment_request(&mut tx, capability).await?;
+    let field_catalog =
+        load_request_field_catalog(&mut tx, request.id, request.workspace_id).await?;
     let auth = ProductAuth {
         workspace: sqlx::query_as("SELECT * FROM workspaces WHERE id = $1")
             .bind(request.workspace_id)
@@ -10049,7 +10140,19 @@ pub(crate) async fn decide_enrichment_consent(
         request.consent_subject = subject;
         request.expected_consent_revision = revision;
         request.state = state;
-        request.question = enrichment_question(&product_name, &request.purpose, remember);
+        let field_labels = field_catalog.as_ref().map(|catalog| {
+            catalog
+                .fields
+                .iter()
+                .map(|field| field.label.clone())
+                .collect::<Vec<_>>()
+        });
+        request.question = enrichment_question(
+            &product_name,
+            &request.purpose,
+            remember,
+            field_labels.as_deref(),
+        );
         sqlx::query(
             r"UPDATE enrichment_requests
               SET remember = $2, consent_subject = $3, expected_consent_revision = $4,
@@ -10094,7 +10197,7 @@ pub(crate) async fn decide_enrichment_consent(
         answer_instruction: (request.state == "answer_ready")
             .then(|| answer_instruction("this company", &request.purpose, request.remember)),
         submit: (request.state == "answer_ready")
-            .then(|| enrichment_answer_action(public_base_url, capability)),
+            .then(|| enrichment_answer_action(public_base_url, capability, field_catalog.as_ref())),
     })
 }
 
@@ -10104,6 +10207,460 @@ struct EnrichmentCatalogDefinition {
     signal_type: &'static str,
     allowed_values: &'static [&'static str],
     targeted_advertising_safe: bool,
+}
+
+/// One field an enrichment request may collect, frozen at request creation.
+/// Product-defined fields carry a company-authored label; legacy global
+/// catalog fields derive their label from the key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnrichmentFieldSnapshot {
+    key: String,
+    label: String,
+    #[serde(rename = "type")]
+    signal_type: String,
+    allowed_values: Vec<String>,
+    targeted_advertising_safe: bool,
+}
+
+impl From<&'static EnrichmentCatalogDefinition> for EnrichmentFieldSnapshot {
+    fn from(definition: &'static EnrichmentCatalogDefinition) -> Self {
+        Self {
+            key: definition.key.to_owned(),
+            label: definition.key.replace(['.', '_'], " "),
+            signal_type: definition.signal_type.to_owned(),
+            allowed_values: definition
+                .allowed_values
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            targeted_advertising_safe: definition.targeted_advertising_safe,
+        }
+    }
+}
+
+/// The immutable field catalog one enrichment request may collect from.
+/// `version` is `v1` for the legacy global catalog and `product:v1` for a
+/// product-defined catalog.
+#[derive(Debug, Clone)]
+struct RequestFieldCatalog {
+    version: String,
+    fields: Vec<EnrichmentFieldSnapshot>,
+}
+
+fn legacy_field_catalog() -> Vec<EnrichmentFieldSnapshot> {
+    ENRICHMENT_CATALOG
+        .iter()
+        .map(EnrichmentFieldSnapshot::from)
+        .collect()
+}
+
+const MAX_REQUEST_FIELDS: usize = 8;
+
+#[derive(Debug, sqlx::FromRow)]
+struct EnrichmentFieldDefinitionRow {
+    field_key: String,
+    label: String,
+    signal_type: String,
+    allowed_values: Vec<String>,
+    targeted_advertising_safe: bool,
+    operations: Option<Vec<String>>,
+    enabled: bool,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+fn field_definition_response(
+    row: &EnrichmentFieldDefinitionRow,
+) -> EnrichmentFieldDefinitionResponse {
+    EnrichmentFieldDefinitionResponse {
+        key: row.field_key.clone(),
+        label: row.label.clone(),
+        signal_type: row.signal_type.clone(),
+        allowed_values: row.allowed_values.clone(),
+        targeted_advertising_safe: row.targeted_advertising_safe,
+        operations: row.operations.clone(),
+        enabled: row.enabled,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
+}
+
+fn snapshot_from_definition(row: &EnrichmentFieldDefinitionRow) -> EnrichmentFieldSnapshot {
+    EnrichmentFieldSnapshot {
+        key: row.field_key.clone(),
+        label: row.label.clone(),
+        signal_type: row.signal_type.clone(),
+        allowed_values: row.allowed_values.clone(),
+        targeted_advertising_safe: row.targeted_advertising_safe,
+    }
+}
+
+/// Product-defined context fields live in a table added by migration 0035.
+/// Rolling deploys must keep legacy behavior until the table exists.
+async fn enrichment_fields_available(tx: &mut Transaction<'_, Postgres>) -> Result<bool, ApiError> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('public.enrichment_field_definitions') IS NOT NULL",
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(Into::into)
+}
+
+async fn load_product_field_definitions(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    enabled_only: bool,
+) -> Result<Vec<EnrichmentFieldDefinitionRow>, ApiError> {
+    sqlx::query_as::<_, EnrichmentFieldDefinitionRow>(
+        r"SELECT field_key, label, signal_type, allowed_values,
+          targeted_advertising_safe, operations, enabled, created_at, updated_at
+        FROM enrichment_field_definitions
+        WHERE product_id = $1 AND workspace_id = $2
+          AND ($3::BOOLEAN = FALSE OR enabled)
+        ORDER BY field_key",
+    )
+    .bind(product_id)
+    .bind(workspace_id)
+    .bind(enabled_only)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(Into::into)
+}
+
+fn validate_enrichment_field_key(key: &str) -> Result<(), ApiError> {
+    let valid_shape = {
+        let mut parts = key.split('.');
+        matches!(
+            (parts.next(), parts.next(), parts.next()),
+            (Some(namespace), Some(name), None)
+                if !namespace.is_empty()
+                    && namespace.len() <= 31
+                    && namespace.starts_with(|c: char| c.is_ascii_lowercase())
+                    && namespace.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                    && !name.is_empty()
+                    && name.len() <= 47
+                    && name.starts_with(|c: char| c.is_ascii_lowercase())
+                    && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        )
+    };
+    if !valid_shape {
+        return Err(ApiError::bad_request(
+            "field key must be a lowercase namespace.name pair such as shopping.priority",
+        ));
+    }
+    if key.starts_with("epode.") {
+        return Err(ApiError::bad_request(
+            "the epode.* namespace is reserved for built-in context fields",
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve the immutable field catalog for one enrichment request.
+///
+/// Returns `None` when the product keeps the legacy behavior: the product
+/// defines no custom fields and the request does not select a field subset.
+/// A product with at least one enabled definition uses exactly those
+/// definitions as its closed catalog. Explicit field selection fails closed
+/// before the migration lands so a request never silently widens to the
+/// full legacy catalog.
+async fn resolve_enrichment_request_fields(
+    tx: &mut Transaction<'_, Postgres>,
+    auth: &ProductAuth,
+    operation: &str,
+    purpose: &str,
+    field_keys: Option<&[String]>,
+) -> Result<Option<RequestFieldCatalog>, ApiError> {
+    if !enrichment_fields_available(tx).await? {
+        return if field_keys.is_some() {
+            Err(ApiError::conflict(
+                "Customer context field selection is unavailable until the latest migration is applied",
+            ))
+        } else {
+            Ok(None)
+        };
+    }
+    let definitions =
+        load_product_field_definitions(tx, auth.workspace.id, auth.environment.product_id, true)
+            .await?;
+    let custom_catalog = !definitions.is_empty();
+    if !custom_catalog && field_keys.is_none() {
+        return Ok(None);
+    }
+    let version = if custom_catalog { "product:v1" } else { "v1" };
+    let mut selected = Vec::new();
+    if let Some(keys) = field_keys {
+        let mut unique = Vec::new();
+        let mut seen = BTreeSet::new();
+        for key in keys {
+            let key = key.trim();
+            validate_enrichment_field_key(key)?;
+            if seen.insert(key.to_owned()) {
+                unique.push(key.to_owned());
+            }
+        }
+        if unique.is_empty() || unique.len() > MAX_REQUEST_FIELDS {
+            return Err(ApiError::bad_request(
+                "fieldKeys must name 1 to 8 distinct customer context fields",
+            ));
+        }
+        for key in &unique {
+            if custom_catalog {
+                let definition = definitions
+                    .iter()
+                    .find(|definition| &definition.field_key == key)
+                    .ok_or_else(|| {
+                        ApiError::bad_request("Unknown customer context field key for this product")
+                    })?;
+                if let Some(operations) = &definition.operations
+                    && !operations.iter().any(|bound| bound == operation)
+                {
+                    return Err(ApiError::bad_request(
+                        "Customer context field is not bound to this operation",
+                    ));
+                }
+                if purpose == "targeted_advertising" && !definition.targeted_advertising_safe {
+                    return Err(ApiError::bad_request(
+                        "Customer context key is not approved for targeted advertising",
+                    ));
+                }
+                selected.push(snapshot_from_definition(definition));
+            } else {
+                let definition = ENRICHMENT_CATALOG
+                    .iter()
+                    .find(|definition| definition.key == key)
+                    .ok_or_else(|| ApiError::bad_request("Unknown customer context catalog key"))?;
+                if purpose == "targeted_advertising" && !definition.targeted_advertising_safe {
+                    return Err(ApiError::bad_request(
+                        "Customer context key is not approved for targeted advertising",
+                    ));
+                }
+                selected.push(EnrichmentFieldSnapshot::from(definition));
+            }
+        }
+    } else {
+        for definition in &definitions {
+            if purpose == "targeted_advertising" && !definition.targeted_advertising_safe {
+                continue;
+            }
+            if let Some(operations) = &definition.operations
+                && !operations.iter().any(|bound| bound == operation)
+            {
+                continue;
+            }
+            selected.push(snapshot_from_definition(definition));
+        }
+        if selected.is_empty() {
+            return Err(ApiError::bad_request(
+                "No customer context fields are eligible for this operation and purpose",
+            ));
+        }
+    }
+    Ok(Some(RequestFieldCatalog {
+        version: version.to_owned(),
+        fields: selected,
+    }))
+}
+
+async fn store_request_field_catalog(
+    tx: &mut Transaction<'_, Postgres>,
+    request_id: Uuid,
+    workspace_id: Uuid,
+    catalog: &RequestFieldCatalog,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        r"INSERT INTO enrichment_request_fields
+        (request_id, workspace_id, catalog_version, snapshot)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (request_id, workspace_id) DO NOTHING",
+    )
+    .bind(request_id)
+    .bind(workspace_id)
+    .bind(&catalog.version)
+    .bind(serde_json::to_value(&catalog.fields).map_err(ApiError::internal)?)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn load_request_field_catalog(
+    tx: &mut Transaction<'_, Postgres>,
+    request_id: Uuid,
+    workspace_id: Uuid,
+) -> Result<Option<RequestFieldCatalog>, ApiError> {
+    if !enrichment_fields_available(tx).await? {
+        return Ok(None);
+    }
+    sqlx::query_as::<_, (String, serde_json::Value)>(
+        r"SELECT catalog_version, snapshot FROM enrichment_request_fields
+        WHERE request_id = $1 AND workspace_id = $2",
+    )
+    .bind(request_id)
+    .bind(workspace_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .map(|(version, snapshot)| {
+        serde_json::from_value::<Vec<EnrichmentFieldSnapshot>>(snapshot)
+            .map(|fields| RequestFieldCatalog { version, fields })
+            .map_err(ApiError::internal)
+    })
+    .transpose()
+}
+
+fn validate_field_definition_input(
+    input: &EnrichmentFieldDefinitionInput,
+) -> Result<Option<Vec<String>>, ApiError> {
+    let label = input.label.trim();
+    if !(3..=120).contains(&label.chars().count()) {
+        return Err(ApiError::bad_request(
+            "label must be between 3 and 120 characters",
+        ));
+    }
+    if !["intent", "preference", "constraint"].contains(&input.signal_type.as_str()) {
+        return Err(ApiError::bad_request(
+            "type must be intent, preference, or constraint",
+        ));
+    }
+    if input.allowed_values.is_empty() || input.allowed_values.len() > 32 {
+        return Err(ApiError::bad_request(
+            "allowedValues must contain 1 to 32 values",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for value in &input.allowed_values {
+        let valid = !value.is_empty()
+            && value.len() <= 48
+            && value.starts_with(|c: char| c.is_ascii_lowercase())
+            && value
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+        if !valid || !seen.insert(value.as_str()) {
+            return Err(ApiError::bad_request(
+                "allowedValues entries must be distinct lowercase snake_case values",
+            ));
+        }
+    }
+    let operations = input
+        .operations
+        .as_ref()
+        .map(|operations| {
+            let mut unique = Vec::new();
+            let mut seen = BTreeSet::new();
+            for operation in operations {
+                let normalized = validate_enrichment_operation(operation)?;
+                if seen.insert(normalized.clone()) {
+                    unique.push(normalized);
+                }
+            }
+            if unique.is_empty() || unique.len() > 32 {
+                return Err(ApiError::bad_request(
+                    "operations must bind the field to 1 to 32 operations",
+                ));
+            }
+            Ok(unique)
+        })
+        .transpose()?;
+    Ok(operations)
+}
+
+pub(crate) async fn list_enrichment_fields(
+    pool: &PgPool,
+    auth: &ProductAuth,
+) -> Result<EnrichmentFieldListResponse, ApiError> {
+    let mut tx = pool.begin().await?;
+    let definitions = if enrichment_fields_available(&mut tx).await? {
+        load_product_field_definitions(
+            &mut tx,
+            auth.workspace.id,
+            auth.environment.product_id,
+            false,
+        )
+        .await?
+    } else {
+        Vec::new()
+    };
+    let legacy_catalog_active = !definitions.iter().any(|row| row.enabled);
+    let fields = definitions.iter().map(field_definition_response).collect();
+    tx.commit().await?;
+    Ok(EnrichmentFieldListResponse {
+        fields,
+        legacy_catalog_active,
+    })
+}
+
+pub(crate) async fn upsert_enrichment_field(
+    pool: &PgPool,
+    auth: &ProductAuth,
+    field_key: &str,
+    input: EnrichmentFieldDefinitionInput,
+) -> Result<EnrichmentFieldDefinitionResponse, ApiError> {
+    validate_enrichment_field_key(field_key)?;
+    let operations = validate_field_definition_input(&input)?;
+    let mut tx = pool.begin().await?;
+    if !enrichment_fields_available(&mut tx).await? {
+        return Err(ApiError::conflict(
+            "Product context fields are unavailable until the latest migration is applied",
+        ));
+    }
+    let row = sqlx::query_as::<_, EnrichmentFieldDefinitionRow>(
+        r"INSERT INTO enrichment_field_definitions
+        (id, workspace_id, product_id, field_key, label, signal_type, allowed_values,
+         targeted_advertising_safe, operations, enabled, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+        ON CONFLICT (product_id, workspace_id, field_key) DO UPDATE SET
+          label = EXCLUDED.label,
+          signal_type = EXCLUDED.signal_type,
+          allowed_values = EXCLUDED.allowed_values,
+          targeted_advertising_safe = EXCLUDED.targeted_advertising_safe,
+          operations = EXCLUDED.operations,
+          enabled = EXCLUDED.enabled,
+          updated_at = NOW()
+        RETURNING field_key, label, signal_type, allowed_values,
+          targeted_advertising_safe, operations, enabled, created_at, updated_at",
+    )
+    .bind(Uuid::new_v4())
+    .bind(auth.workspace.id)
+    .bind(auth.environment.product_id)
+    .bind(field_key)
+    .bind(input.label.trim())
+    .bind(&input.signal_type)
+    .bind(&input.allowed_values)
+    .bind(input.targeted_advertising_safe)
+    .bind(&operations)
+    .bind(input.enabled)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(field_definition_response(&row))
+}
+
+pub(crate) async fn delete_enrichment_field(
+    pool: &PgPool,
+    auth: &ProductAuth,
+    field_key: &str,
+) -> Result<Option<EnrichmentFieldDefinitionResponse>, ApiError> {
+    validate_enrichment_field_key(field_key)?;
+    let mut tx = pool.begin().await?;
+    if !enrichment_fields_available(&mut tx).await? {
+        return Err(ApiError::conflict(
+            "Product context fields are unavailable until the latest migration is applied",
+        ));
+    }
+    let deleted = sqlx::query_as::<_, EnrichmentFieldDefinitionRow>(
+        r"DELETE FROM enrichment_field_definitions
+        WHERE product_id = $1 AND workspace_id = $2 AND field_key = $3
+        RETURNING field_key, label, signal_type, allowed_values,
+          targeted_advertising_safe, operations, enabled, created_at, updated_at",
+    )
+    .bind(auth.environment.product_id)
+    .bind(auth.workspace.id)
+    .bind(field_key)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(deleted.as_ref().map(field_definition_response))
 }
 
 const ENRICHMENT_CATALOG: &[EnrichmentCatalogDefinition] = &[
@@ -10287,22 +10844,22 @@ fn enrichment_catalog_schema() -> Vec<EnrichmentCatalogEntry> {
         .collect()
 }
 
-fn catalog_summary(definition: &EnrichmentCatalogDefinition, value: &str) -> String {
-    let label = definition.key.replace(['.', '_'], " ");
+fn catalog_summary(definition: &EnrichmentFieldSnapshot, value: &str) -> String {
     let value = value.replace('_', " ");
-    format!("{label}: {value}")
+    format!("{}: {value}", definition.label)
 }
 
-fn validate_enrichment_item(
+fn validate_enrichment_item<'a>(
     item: &crate::models::EnrichmentAnswerItemInput,
     purpose: &str,
-) -> Result<&'static EnrichmentCatalogDefinition, ApiError> {
-    let definition = ENRICHMENT_CATALOG
+    catalog: &'a [EnrichmentFieldSnapshot],
+) -> Result<&'a EnrichmentFieldSnapshot, ApiError> {
+    let definition = catalog
         .iter()
         .find(|definition| definition.key == item.key)
         .ok_or_else(|| ApiError::bad_request("Unknown customer context catalog key"))?;
     if definition.signal_type != item.signal_type
-        || !definition.allowed_values.contains(&item.value.as_str())
+        || !definition.allowed_values.contains(&item.value)
     {
         return Err(ApiError::bad_request(
             "Customer context type or value is not allowed by the catalog",
@@ -10403,8 +10960,17 @@ pub(crate) async fn submit_enrichment_answer(
     }
     let mut tx = pool.begin().await?;
     let (request, _) = verified_enrichment_request(&mut tx, capability).await?;
+    let field_catalog =
+        load_request_field_catalog(&mut tx, request.id, request.workspace_id).await?;
+    let legacy_catalog;
+    let catalog_fields: &[EnrichmentFieldSnapshot] = if let Some(catalog) = &field_catalog {
+        &catalog.fields
+    } else {
+        legacy_catalog = legacy_field_catalog();
+        &legacy_catalog
+    };
     for item in &input.items {
-        validate_enrichment_item(item, &request.purpose)?;
+        validate_enrichment_item(item, &request.purpose, catalog_fields)?;
     }
     let payload_hash = sha256_bytes(&serde_json::to_vec(&input).map_err(ApiError::internal)?);
     let existing = sqlx::query_as::<_, (Uuid, String, Vec<u8>)>(
@@ -10476,7 +11042,7 @@ pub(crate) async fn submit_enrichment_answer(
             .await?,
         ));
     for (index, item) in input.items.iter().enumerate() {
-        let definition = validate_enrichment_item(item, &request.purpose)?;
+        let definition = validate_enrichment_item(item, &request.purpose, catalog_fields)?;
         let default_expiry = if item.remember {
             retained_until
         } else {
@@ -10510,13 +11076,15 @@ pub(crate) async fn submit_enrichment_answer(
         .bind(request.customer_id)
         .bind(request.interaction_id)
         .bind(format!("item:{}", index + 1))
-        .bind(definition.signal_type)
+        .bind(&definition.signal_type)
         .bind(catalog_summary(definition, &item.value))
         .bind(serde_json::json!({
             "remembered": item.remember,
             "purpose": request.purpose,
-            "enrichmentType": definition.signal_type,
-            "catalogVersion": "v1",
+            "enrichmentType": &definition.signal_type,
+            "catalogVersion": field_catalog
+                .as_ref()
+                .map_or("v1", |catalog| catalog.version.as_str()),
         }))
         .bind(&item.provenance)
         .bind(item.confidence)
@@ -10541,7 +11109,7 @@ pub(crate) async fn submit_enrichment_answer(
         .bind(request.customer_id)
         .bind(request.interaction_id)
         .bind(i16::try_from(index + 1).map_err(ApiError::internal)?)
-        .bind(definition.key)
+        .bind(&definition.key)
         .bind(&item.value)
         .bind(&request.purpose)
         .bind(&item.provenance)
@@ -18592,6 +19160,7 @@ mod product_tests {
 
     #[test]
     fn enrichment_contract_rejects_sensitive_or_unbounded_customer_context() -> anyhow::Result<()> {
+        let catalog = legacy_field_catalog();
         let valid = crate::models::EnrichmentAnswerItemInput {
             key: "shopping.budget_band".into(),
             signal_type: "constraint".into(),
@@ -18602,8 +19171,8 @@ mod product_tests {
             remember: true,
             expires_at: Some(Utc::now() + Duration::days(30)),
         };
-        let definition =
-            validate_enrichment_item(&valid, "product_personalization").map_err(test_error)?;
+        let definition = validate_enrichment_item(&valid, "product_personalization", &catalog)
+            .map_err(test_error)?;
         anyhow::ensure!(
             catalog_summary(definition, &valid.value) == "shopping budget band: 50 150"
         );
@@ -18648,13 +19217,16 @@ mod product_tests {
             unsafe_item.key = key.into();
             unsafe_item.value = value.into();
             anyhow::ensure!(
-                validate_enrichment_item(&unsafe_item, "product_personalization").is_err()
+                validate_enrichment_item(&unsafe_item, "product_personalization", &catalog)
+                    .is_err()
             );
         }
         let mut inference = valid.clone();
         inference.provenance = "user_explicit".into();
-        anyhow::ensure!(validate_enrichment_item(&inference, "product_personalization").is_err());
-        anyhow::ensure!(validate_enrichment_item(&valid, "targeted_advertising").is_ok());
+        anyhow::ensure!(
+            validate_enrichment_item(&inference, "product_personalization", &catalog).is_err()
+        );
+        anyhow::ensure!(validate_enrichment_item(&valid, "targeted_advertising", &catalog).is_ok());
         let advertising_interest = crate::models::EnrichmentAnswerItemInput {
             key: "interest.topic".into(),
             signal_type: "preference".into(),
@@ -18666,7 +19238,7 @@ mod product_tests {
             expires_at: Some(Utc::now() + Duration::days(30)),
         };
         let advertising_definition =
-            validate_enrichment_item(&advertising_interest, "targeted_advertising")
+            validate_enrichment_item(&advertising_interest, "targeted_advertising", &catalog)
                 .map_err(test_error)?;
         anyhow::ensure!(
             catalog_summary(advertising_definition, &advertising_interest.value)
@@ -18676,8 +19248,10 @@ mod product_tests {
         b2b.key = "b2b.company_size".into();
         b2b.signal_type = "constraint".into();
         b2b.value = "enterprise".into();
-        anyhow::ensure!(validate_enrichment_item(&b2b, "product_personalization").is_ok());
-        anyhow::ensure!(validate_enrichment_item(&b2b, "targeted_advertising").is_err());
+        anyhow::ensure!(
+            validate_enrichment_item(&b2b, "product_personalization", &catalog).is_ok()
+        );
+        anyhow::ensure!(validate_enrichment_item(&b2b, "targeted_advertising", &catalog).is_err());
         let default_surface: EnrichmentRequestInput = serde_json::from_value(serde_json::json!({
             "interactionId": Uuid::new_v4(),
             "operation": "/search",
@@ -18696,6 +19270,7 @@ mod product_tests {
     #[test]
     fn enrichment_catalog_accepts_bounded_industry_context_and_blocks_sensitive_data()
     -> anyhow::Result<()> {
+        let catalog = legacy_field_catalog();
         for (key, signal_type, value) in [
             ("travel.stay_style", "preference", "quiet_boutique"),
             ("travel.location_priority", "preference", "central_walkable"),
@@ -18722,21 +19297,25 @@ mod product_tests {
                 remember: true,
                 expires_at: Some(Utc::now() + Duration::days(30)),
             };
-            let definition =
-                validate_enrichment_item(&item, "product_personalization").map_err(test_error)?;
+            let definition = validate_enrichment_item(&item, "product_personalization", &catalog)
+                .map_err(test_error)?;
             anyhow::ensure!(!definition.targeted_advertising_safe);
-            anyhow::ensure!(validate_enrichment_item(&item, "targeted_advertising").is_err());
+            anyhow::ensure!(
+                validate_enrichment_item(&item, "targeted_advertising", &catalog).is_err()
+            );
 
             let mut invalid_value = item.clone();
             invalid_value.value = "free_form_or_unbounded".into();
             anyhow::ensure!(
-                validate_enrichment_item(&invalid_value, "product_personalization").is_err()
+                validate_enrichment_item(&invalid_value, "product_personalization", &catalog)
+                    .is_err()
             );
 
             let mut invalid_type = item;
             invalid_type.signal_type = "constraint".into();
             anyhow::ensure!(
-                validate_enrichment_item(&invalid_type, "product_personalization").is_err()
+                validate_enrichment_item(&invalid_type, "product_personalization", &catalog)
+                    .is_err()
             );
         }
 
@@ -18764,9 +19343,127 @@ mod product_tests {
                 expires_at: Some(Utc::now() + Duration::days(30)),
             };
             anyhow::ensure!(
-                validate_enrichment_item(&sensitive_or_unknown, "product_personalization").is_err()
+                validate_enrichment_item(
+                    &sensitive_or_unknown,
+                    "product_personalization",
+                    &catalog
+                )
+                .is_err()
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn enrichment_question_names_selected_fields_and_falls_back_safely() -> anyhow::Result<()> {
+        let one = enrichment_question(
+            "Aurora Retail",
+            "product_personalization",
+            false,
+            Some(&["shopping priority".to_owned()]),
+        );
+        anyhow::ensure!(
+            one == "May I share your shopping priority with Aurora Retail so it can personalize your product experience for this interaction only?"
+        );
+        let three = enrichment_question(
+            "Aurora Retail",
+            "product_personalization",
+            true,
+            Some(&[
+                "shopping priority".to_owned(),
+                "budget band".to_owned(),
+                "delivery window".to_owned(),
+            ]),
+        );
+        anyhow::ensure!(
+            three
+                == "May I share your shopping priority, budget band, and delivery window with Aurora Retail so it can personalize your product experience and remember them for future visits?"
+        );
+        let five = vec![
+            "a".to_owned(),
+            "b".to_owned(),
+            "c".to_owned(),
+            "d".to_owned(),
+            "e".to_owned(),
+        ];
+        let many = enrichment_question(
+            "Aurora Retail",
+            "product_personalization",
+            false,
+            Some(&five),
+        );
+        anyhow::ensure!(many.contains("relevant, non-sensitive preferences"));
+        let long = vec!["x".repeat(680)];
+        let fallback = enrichment_question(
+            "Aurora Retail",
+            "product_personalization",
+            false,
+            Some(&long),
+        );
+        anyhow::ensure!(fallback.len() <= 700);
+        anyhow::ensure!(fallback.contains("relevant, non-sensitive preferences"));
+        let legacy = enrichment_question("Aurora Retail", "product_personalization", false, None);
+        anyhow::ensure!(legacy.contains("relevant, non-sensitive preferences"));
+        Ok(())
+    }
+
+    #[test]
+    fn enrichment_field_keys_and_definitions_are_closed_and_bounded() -> anyhow::Result<()> {
+        for key in [
+            "shopping.priority",
+            "journey.goal_v2",
+            "b2b.primary_goal",
+            "a.b",
+        ] {
+            validate_enrichment_field_key(key).map_err(test_error)?;
+        }
+        for key in [
+            "Shopping.priority",
+            "shopping",
+            "shopping.Priority",
+            "shopping.priority.extra",
+            "shopping..priority",
+            ".priority",
+            "shopping.",
+            "epode.internal",
+            "shopping priority",
+            "shopping/priority",
+        ] {
+            anyhow::ensure!(validate_enrichment_field_key(key).is_err(), "{key}");
+        }
+        let valid = EnrichmentFieldDefinitionInput {
+            label: "Shopping occasion".into(),
+            signal_type: "goal".into(),
+            allowed_values: vec!["gift".into(), "self_purchase".into()],
+            targeted_advertising_safe: false,
+            operations: None,
+            enabled: true,
+        };
+        anyhow::ensure!(validate_field_definition_input(&valid).is_err());
+        let mut valid_typed = valid;
+        valid_typed.signal_type = "preference".into();
+        anyhow::ensure!(validate_field_definition_input(&valid_typed).is_ok());
+        let mut duplicate_values = valid_typed.clone();
+        duplicate_values.allowed_values = vec!["gift".into(), "gift".into()];
+        anyhow::ensure!(validate_field_definition_input(&duplicate_values).is_err());
+        let mut freeform_values = valid_typed.clone();
+        freeform_values.allowed_values = vec!["any text".into()];
+        anyhow::ensure!(validate_field_definition_input(&freeform_values).is_err());
+        let mut no_values = valid_typed.clone();
+        no_values.allowed_values = Vec::new();
+        anyhow::ensure!(validate_field_definition_input(&no_values).is_err());
+        let mut short_label = valid_typed.clone();
+        short_label.label = "ab".into();
+        anyhow::ensure!(validate_field_definition_input(&short_label).is_err());
+        let mut empty_operations = valid_typed.clone();
+        empty_operations.operations = Some(Vec::new());
+        anyhow::ensure!(validate_field_definition_input(&empty_operations).is_err());
+        let mut bound = valid_typed;
+        bound.operations = Some(vec!["/search".into(), "search_catalog".into()]);
+        let normalized = validate_field_definition_input(&bound).map_err(test_error)?;
+        anyhow::ensure!(
+            normalized == Some(vec!["/search".to_owned(), "search_catalog".to_owned()])
+        );
         Ok(())
     }
 
@@ -18844,7 +19541,7 @@ mod product_tests {
             expires_at: Utc::now() + Duration::hours(2),
             created_at: Utc::now(),
         };
-        let response = enrichment_response("https://app.epode.ai", &row, "aqr1_test");
+        let response = enrichment_response("https://app.epode.ai", &row, "aqr1_test", None);
         let json = serde_json::to_value(response)?;
         anyhow::ensure!(
             json["consent"]["bodySchema"]["decision"]
@@ -18861,6 +19558,7 @@ mod product_tests {
             "https://app.epode.ai",
             &row,
             "aqr1_test",
+            None,
         ))?;
         anyhow::ensure!(
             answer_json["submit"]["bodySchema"]["status"]
@@ -18877,6 +19575,7 @@ mod product_tests {
             "https://app.epode.ai",
             &row,
             "aqr1_test",
+            None,
         ))?;
         anyhow::ensure!(
             declined_json["stageInstruction"]
@@ -18906,7 +19605,7 @@ mod product_tests {
         let result = Box::pin(async {
             let interaction_id = Uuid::new_v4();
             let request_input = EnrichmentRequestInput {
-                interaction_id,
+                interaction_id,                field_keys: None,
                 operation: "/search".into(),
                 surface: "html".into(),
                 status_code: Some(200),
@@ -19156,6 +19855,7 @@ mod product_tests {
                 "https://app.epode.ai",
                 EnrichmentRequestInput {
                     interaction_id: mcp_interaction_id,
+                    field_keys: None,
                     operation: "catalog_search".into(),
                     surface: "mcp".into(),
                     status_code: Some(200),
@@ -19269,6 +19969,7 @@ mod product_tests {
                 "https://app.epode.ai",
                 EnrichmentRequestInput {
                     interaction_id: resolved_interaction_id,
+                    field_keys: None,
                     operation: "/search".into(),
                     surface: "http_json".into(),
                     status_code: Some(200),
@@ -19460,6 +20161,7 @@ mod product_tests {
                 "https://app.epode.ai",
                 EnrichmentRequestInput {
                     interaction_id: Uuid::new_v4(),
+                    field_keys: None,
                     operation: "/recommend".into(),
                     surface: "mcp".into(),
                     status_code: Some(200),
@@ -19529,6 +20231,7 @@ mod product_tests {
                 "https://app.epode.ai",
                 EnrichmentRequestInput {
                     interaction_id: transient_known_interaction,
+                    field_keys: None,
                     operation: "/recommend".into(),
                     surface: "http_json".into(),
                     status_code: None,
@@ -19588,6 +20291,7 @@ mod product_tests {
                 "https://app.epode.ai",
                 EnrichmentRequestInput {
                     interaction_id: Uuid::new_v4(),
+                    field_keys: None,
                     operation: "/recommend".into(),
                     surface: "http_json".into(),
                     status_code: None,
@@ -19645,6 +20349,7 @@ mod product_tests {
                 "https://app.epode.ai",
                 EnrichmentRequestInput {
                     interaction_id: transient_anonymous_interaction,
+                    field_keys: None,
                     operation: "/recommend".into(),
                     surface: "http_json".into(),
                     status_code: None,
@@ -19713,6 +20418,7 @@ mod product_tests {
             preexisting_tx.commit().await?;
             let preexisting_input = EnrichmentRequestInput {
                 interaction_id: preexisting_interaction_id,
+                field_keys: None,
                 operation: "/preexisting".into(),
                 surface: "http_json".into(),
                 status_code: Some(200),
@@ -19772,6 +20478,7 @@ mod product_tests {
                 "https://app.epode.ai",
                 EnrichmentRequestInput {
                     interaction_id: Uuid::new_v4(),
+                    field_keys: None,
                     operation: "/consent-merge".into(),
                     surface: "http_json".into(),
                     status_code: Some(200),
@@ -19857,6 +20564,7 @@ mod product_tests {
                 "https://app.epode.ai",
                 EnrichmentRequestInput {
                     interaction_id: Uuid::new_v4(),
+                    field_keys: None,
                     operation: "/consent-merge".into(),
                     surface: "http_json".into(),
                     status_code: Some(200),
@@ -19898,6 +20606,7 @@ mod product_tests {
                 "https://app.epode.ai",
                 EnrichmentRequestInput {
                     interaction_id: Uuid::new_v4(),
+                    field_keys: None,
                     operation: "/consent-merge".into(),
                     surface: "http_json".into(),
                     status_code: Some(200),
@@ -19994,6 +20703,7 @@ mod product_tests {
             let conflicting_request_interaction = Uuid::new_v4();
             let conflicting_request = EnrichmentRequestInput {
                 interaction_id: conflicting_request_interaction,
+                field_keys: None,
                 operation: "/recommend".into(),
                 surface: "http_json".into(),
                 status_code: None,
@@ -20122,6 +20832,7 @@ mod product_tests {
                 "https://app.epode.ai",
                 EnrichmentRequestInput {
                     interaction_id: ephemeral_interaction_id,
+                    field_keys: None,
                     operation: "/recommend".into(),
                     surface: "http_json".into(),
                     status_code: None,
@@ -20248,6 +20959,460 @@ mod product_tests {
         })
         .await;
         for workspace in [&workspace_a, &workspace_b] {
+            sqlx::query("DELETE FROM workspaces WHERE id = $1")
+                .bind(workspace.id)
+                .execute(&pool)
+                .await?;
+        }
+        result
+    }
+
+    async fn enrichment_test_approve_and_answer(
+        pool: &PgPool,
+        request: &EnrichmentRequestResponse,
+        items: Vec<crate::models::EnrichmentAnswerItemInput>,
+    ) -> anyhow::Result<(
+        EnrichmentConsentDecisionResponse,
+        Result<EnrichmentAnswerResponse, ApiError>,
+    )> {
+        let capability = request
+            .consent
+            .as_ref()
+            .and_then(|action| action.authorization.strip_prefix("Bearer "))
+            .ok_or_else(|| anyhow::anyhow!("missing enrichment capability"))?
+            .to_owned();
+        let consent = decide_enrichment_consent(
+            pool,
+            TEST_IDENTITY_HMAC_SECRET,
+            "https://app.epode.ai",
+            &capability,
+            EnrichmentConsentDecisionInput {
+                decision: "approved".into(),
+                remember: None,
+            },
+        )
+        .await
+        .map_err(test_error)?;
+        let answer = submit_enrichment_answer(
+            pool,
+            &capability,
+            EnrichmentAnswerInput {
+                status: "answered".into(),
+                items,
+            },
+        )
+        .await;
+        Ok((consent, answer))
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn enrichment_product_fields_drive_requests_snapshots_and_answer_validation()
+    -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Enrichment fields").await?;
+        let (_product, auth) = telemetry_test_product(&pool, &workspace, "Journey Co").await?;
+        let workspace_legacy = telemetry_test_workspace(&pool, "Enrichment legacy").await?;
+        let (_legacy_product, legacy_auth) =
+            telemetry_test_product(&pool, &workspace_legacy, "Legacy Co").await?;
+        let answer_item =
+            |key: &str, signal_type: &str, value: &str| crate::models::EnrichmentAnswerItemInput {
+                key: key.into(),
+                signal_type: signal_type.into(),
+                value: value.into(),
+                _summary: None,
+                provenance: "agent_reports_user_statement".into(),
+                confidence: Some(1.0),
+                remember: false,
+                expires_at: None,
+            };
+        let request_input =
+            |operation: &str, field_keys: Option<Vec<String>>| EnrichmentRequestInput {
+                interaction_id: Uuid::new_v4(),
+                operation: operation.into(),
+                field_keys,
+                surface: "mcp".into(),
+                status_code: Some(200),
+                duration_ms: Some(12),
+                session_ref: None,
+                runtime_hint: None,
+                purpose: "product_personalization".into(),
+                remember: false,
+                customer_ref: None,
+                account_ref: None,
+                user_ref: None,
+                anonymous_ref: None,
+                request_observation: None,
+            };
+        let result = Box::pin(async {
+            // Field definition CRUD lifecycle.
+            let occasion = upsert_enrichment_field(
+                &pool,
+                &auth,
+                "journey.occasion",
+                EnrichmentFieldDefinitionInput {
+                    label: "Shopping occasion".into(),
+                    signal_type: "preference".into(),
+                    allowed_values: vec!["gift".into(), "self_purchase".into()],
+                    targeted_advertising_safe: false,
+                    operations: Some(vec!["/search".into(), "/checkout".into()]),
+                    enabled: true,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(occasion.key == "journey.occasion" && occasion.enabled);
+            upsert_enrichment_field(
+                &pool,
+                &auth,
+                "journey.delivery",
+                EnrichmentFieldDefinitionInput {
+                    label: "Delivery timing".into(),
+                    signal_type: "constraint".into(),
+                    allowed_values: vec!["fast".into(), "flexible".into()],
+                    targeted_advertising_safe: false,
+                    operations: Some(vec!["/checkout".into()]),
+                    enabled: true,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            upsert_enrichment_field(
+                &pool,
+                &auth,
+                "journey.temporary",
+                EnrichmentFieldDefinitionInput {
+                    label: "Temporary field".into(),
+                    signal_type: "preference".into(),
+                    allowed_values: vec!["one".into()],
+                    targeted_advertising_safe: false,
+                    operations: None,
+                    enabled: true,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let replaced = upsert_enrichment_field(
+                &pool,
+                &auth,
+                "journey.temporary",
+                EnrichmentFieldDefinitionInput {
+                    label: "Renamed temporary".into(),
+                    signal_type: "preference".into(),
+                    allowed_values: vec!["one".into(), "two".into()],
+                    targeted_advertising_safe: false,
+                    operations: None,
+                    enabled: true,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(replaced.label == "Renamed temporary");
+            let listed = list_enrichment_fields(&pool, &auth).await.map_err(test_error)?;
+            anyhow::ensure!(listed.fields.len() == 3 && !listed.legacy_catalog_active);
+            let deleted = delete_enrichment_field(&pool, &auth, "journey.temporary")
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(
+                deleted.is_some_and(|field| field.key == "journey.temporary")
+            );
+            anyhow::ensure!(
+                delete_enrichment_field(&pool, &auth, "journey.temporary")
+                    .await
+                    .map_err(test_error)?
+                    .is_none()
+            );
+            let listed = list_enrichment_fields(&pool, &auth).await.map_err(test_error)?;
+            anyhow::ensure!(listed.fields.len() == 2);
+            // Product isolation: the legacy product sees no custom fields.
+            let legacy_list = list_enrichment_fields(&pool, &legacy_auth)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(legacy_list.fields.is_empty() && legacy_list.legacy_catalog_active);
+
+            // Custom catalog: an eligible operation collects only bound fields.
+            let search_request = create_enrichment_request(
+                &pool,
+                &auth,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                request_input("/search", None),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                search_request.question.as_deref()
+                    == Some(
+                        "May I share your Shopping occasion with Journey Co so it can personalize your product experience for this interaction only?"
+                    )
+            );
+            let (version, snapshot) = sqlx::query_as::<_, (String, serde_json::Value)>(
+                "SELECT catalog_version, snapshot FROM enrichment_request_fields
+                WHERE request_id = $1",
+            )
+            .bind(search_request.request_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(version == "product:v1");
+            anyhow::ensure!(
+                snapshot.as_array().is_some_and(|fields| fields.len() == 1
+                    && fields[0]["key"] == "journey.occasion")
+            );
+            let (search_consent, search_answer) = enrichment_test_approve_and_answer(
+                &pool,
+                &search_request,
+                vec![answer_item("journey.occasion", "preference", "gift")],
+            )
+            .await?;
+            let submit_schema = search_consent
+                .submit
+                .as_ref()
+                .map(|action| &action.body_schema.items)
+                .ok_or_else(|| anyhow::anyhow!("missing submit schema"))?;
+            anyhow::ensure!(submit_schema.catalog_version == "product:v1");
+            anyhow::ensure!(
+                submit_schema.catalog.len() == 1
+                    && submit_schema.catalog[0].key == "journey.occasion"
+            );
+            let search_answer = search_answer.map_err(test_error)?;
+            anyhow::ensure!(search_answer.signals.len() == 1);
+            anyhow::ensure!(search_answer.signals[0].summary == "Shopping occasion: gift");
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, String>(
+                    "SELECT attributes->>'catalogVersion' FROM customer_signals
+                    WHERE id = $1 AND workspace_id = $2",
+                )
+                .bind(search_answer.signals[0].signal_id)
+                .bind(auth.workspace.id)
+                .fetch_one(&pool)
+                .await?
+                    == "product:v1"
+            );
+
+            // The closed custom catalog replaces the legacy global catalog.
+            let global_reject = create_enrichment_request(
+                &pool,
+                &auth,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                request_input("/search", None),
+            )
+            .await
+            .map_err(test_error)?;
+            let (_, global_answer) = enrichment_test_approve_and_answer(
+                &pool,
+                &global_reject,
+                vec![answer_item("shopping.priority", "preference", "price")],
+            )
+            .await?;
+            let global_answer = global_answer.expect_err("legacy key must be rejected");
+            anyhow::ensure!(global_answer.status == StatusCode::BAD_REQUEST);
+
+            // Operation binding: a checkout-bound field cannot be asked at search.
+            let unbound = create_enrichment_request(
+                &pool,
+                &auth,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                request_input("/search", Some(vec!["journey.delivery".into()])),
+            )
+            .await
+            .expect_err("operation binding must fail closed");
+            anyhow::ensure!(unbound.status == StatusCode::BAD_REQUEST);
+            // An operation with no eligible fields never creates a request.
+            let no_eligible = create_enrichment_request(
+                &pool,
+                &auth,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                request_input("/support", None),
+            )
+            .await
+            .expect_err("operations without eligible fields must fail closed");
+            anyhow::ensure!(no_eligible.status == StatusCode::BAD_REQUEST);
+
+            // Explicit selection freezes an immutable snapshot per request.
+            let checkout_request = create_enrichment_request(
+                &pool,
+                &auth,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                request_input(
+                    "/checkout",
+                    Some(vec!["journey.occasion".into(), "journey.delivery".into()]),
+                ),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                checkout_request.question.as_deref()
+                    == Some(
+                        "May I share your Shopping occasion and Delivery timing with Journey Co so it can personalize your product experience for this interaction only?"
+                    )
+            );
+            // Editing the definition must not change the in-flight request.
+            upsert_enrichment_field(
+                &pool,
+                &auth,
+                "journey.occasion",
+                EnrichmentFieldDefinitionInput {
+                    label: "Shopping occasion".into(),
+                    signal_type: "preference".into(),
+                    allowed_values: vec!["replacement".into()],
+                    targeted_advertising_safe: false,
+                    operations: Some(vec!["/search".into(), "/checkout".into()]),
+                    enabled: true,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let (_, frozen_answer) = enrichment_test_approve_and_answer(
+                &pool,
+                &checkout_request,
+                vec![
+                    answer_item("journey.occasion", "preference", "gift"),
+                    answer_item("journey.delivery", "constraint", "fast"),
+                ],
+            )
+            .await?;
+            let frozen_answer = frozen_answer.map_err(test_error)?;
+            anyhow::ensure!(frozen_answer.signals.len() == 2);
+            anyhow::ensure!(frozen_answer.signals[0].summary == "Shopping occasion: gift");
+            // Restore the shared definition for any later test orderings.
+            upsert_enrichment_field(
+                &pool,
+                &auth,
+                "journey.occasion",
+                EnrichmentFieldDefinitionInput {
+                    label: "Shopping occasion".into(),
+                    signal_type: "preference".into(),
+                    allowed_values: vec!["gift".into(), "self_purchase".into()],
+                    targeted_advertising_safe: false,
+                    operations: Some(vec!["/search".into(), "/checkout".into()]),
+                    enabled: true,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+
+            // Legacy product with an explicit field subset: snapshot at v1.
+            let subset_input = request_input(
+                "/search",
+                Some(vec![
+                    "shopping.priority".into(),
+                    "shopping.budget_band".into(),
+                ]),
+            );
+            let subset_request = create_enrichment_request(
+                &pool,
+                &legacy_auth,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                subset_input.clone(),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                subset_request.question.as_deref()
+                    == Some(
+                        "May I share your shopping priority and shopping budget band with Legacy Co so it can personalize your product experience for this interaction only?"
+                    )
+            );
+            let retry_request = create_enrichment_request(
+                &pool,
+                &legacy_auth,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                subset_input,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(retry_request.request_id == subset_request.request_id);
+            let mut conflicting_input = request_input(
+                "/search",
+                Some(vec!["shopping.priority".into()]),
+            );
+            conflicting_input.interaction_id = subset_request.interaction_id;
+            let conflict = create_enrichment_request(
+                &pool,
+                &legacy_auth,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                conflicting_input,
+            )
+            .await
+            .expect_err("changing the field selection must conflict");
+            anyhow::ensure!(conflict.status == StatusCode::CONFLICT);
+            let (subset_version, subset_snapshot) =
+                sqlx::query_as::<_, (String, serde_json::Value)>(
+                    "SELECT catalog_version, snapshot FROM enrichment_request_fields
+                    WHERE request_id = $1",
+                )
+                .bind(subset_request.request_id)
+                .fetch_one(&pool)
+                .await?;
+            anyhow::ensure!(subset_version == "v1");
+            anyhow::ensure!(
+                subset_snapshot
+                    .as_array()
+                    .is_some_and(|fields| fields.len() == 2)
+            );
+            let (_, subset_out_of_scope) = enrichment_test_approve_and_answer(
+                &pool,
+                &subset_request,
+                vec![answer_item("content.format", "preference", "short")],
+            )
+            .await?;
+            let subset_out_of_scope =
+                subset_out_of_scope.expect_err("fields outside the snapshot must be rejected");
+            anyhow::ensure!(subset_out_of_scope.status == StatusCode::BAD_REQUEST);
+
+            // Legacy product without a selection keeps the global catalog only.
+            let legacy_request = create_enrichment_request(
+                &pool,
+                &legacy_auth,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                request_input("/search", None),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                legacy_request.question.as_deref().is_some_and(|question| {
+                    question.contains("relevant, non-sensitive preferences")
+                })
+            );
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM enrichment_request_fields WHERE request_id = $1",
+                )
+                .bind(legacy_request.request_id)
+                .fetch_one(&pool)
+                .await?
+                    == 0
+            );
+            let (legacy_consent, _) = enrichment_test_approve_and_answer(
+                &pool,
+                &legacy_request,
+                vec![answer_item("shopping.priority", "preference", "price")],
+            )
+            .await?;
+            let legacy_schema = legacy_consent
+                .submit
+                .as_ref()
+                .map(|action| &action.body_schema.items)
+                .ok_or_else(|| anyhow::anyhow!("missing legacy submit schema"))?;
+            anyhow::ensure!(legacy_schema.catalog_version == "v1");
+            anyhow::ensure!(legacy_schema.catalog.len() == ENRICHMENT_CATALOG.len());
+            Ok::<(), anyhow::Error>(())
+        })
+        .await;
+        for workspace in [&workspace, &workspace_legacy] {
             sqlx::query("DELETE FROM workspaces WHERE id = $1")
                 .bind(workspace.id)
                 .execute(&pool)

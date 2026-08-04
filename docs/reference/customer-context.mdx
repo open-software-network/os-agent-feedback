@@ -6,6 +6,39 @@ description: "The exact company and agent contracts for enrichment, retrieval, p
 Company endpoints use `Authorization: Bearer $EPODE_API_KEY`. Agent answer endpoints use only the short-lived
 `aqr1_...` request handle returned for that interaction. The company key must never enter an agent response.
 
+## Define product context fields
+
+By default a product shares Epode's built-in global field catalog. A product can instead define its own closed
+catalog; as soon as one enabled definition exists, it replaces the global catalog for that product's requests.
+Every request stores an immutable snapshot of the fields it may collect, so editing or deleting a definition
+never changes an in-flight or historical request.
+
+`PUT /api/v2/enrichment/fields/{fieldKey}`
+
+```json
+{
+  "label": "Shopping occasion",
+  "type": "preference",
+  "allowedValues": ["gift", "self_purchase", "replacement"],
+  "targetedAdvertisingSafe": false,
+  "operations": ["/api/recommendations"],
+  "enabled": true
+}
+```
+
+- `fieldKey` is a lowercase `namespace.name` pair such as `journey.occasion`; the `epode.*` namespace is
+  reserved for built-in fields.
+- `type` is exactly `intent`, `preference`, or `constraint`.
+- `allowedValues` carries 1–32 distinct lowercase snake_case values. Free-form text, arbitrary numbers, and
+  sensitive categories are never accepted.
+- `operations` optionally binds the field to specific business operations. Omit it to allow every operation. A
+  request that names the field for an operation it is not bound to fails closed, and a request for an operation
+  with no eligible fields creates no question at all.
+
+`GET /api/v2/enrichment/fields` lists the product's definitions and whether the legacy global catalog is still
+active. `DELETE /api/v2/enrichment/fields/{fieldKey}` removes a definition; existing requests keep their
+snapshots.
+
 ## Request enrichment
 
 `POST /api/v2/enrichment/requests`
@@ -41,6 +74,11 @@ Identity references are optional; omit all of them for an ephemeral interaction.
 currently allowed next action.
 `targeted_advertising` is the other supported purpose and always requires its own separate permission; a
 `product_personalization` grant is never reused for it.
+
+`fieldKeys` optionally selects the exact fields this request may ask for: one to eight keys drawn from the
+product's effective catalog (its own definitions once it has any, otherwise the global catalog). The generated
+question then names the selected fields, the answer schema offers only them, and the backend rejects answers
+that name anything else. Retrying the same interaction with a different selection conflicts.
 
 `statusCode`, `durationMs`, `sessionRef`, and `runtimeHint` are optional same-call evidence. Framework adapters
 set status and duration automatically. A company may add only a product-issued `sessionRef` and a bounded,
