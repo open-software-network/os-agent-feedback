@@ -521,6 +521,47 @@ function createFixture() {
           },
         ],
         signals: [firstSignal],
+        contextReturns: [
+          {
+            retrievalId: "context-retrieval-release-e2e",
+            interactionId: ids.interactionOne,
+            sessionId: ids.sessionOne,
+            purpose: "product_personalization",
+            identityLevel: "verified",
+            contextVersion: "ctx1_release_e2e",
+            retrievedAt: now,
+            items: [
+              {
+                signalId: firstSignal.id,
+                key: firstSignal.signalKey,
+                type: firstSignal.type,
+                value: firstSignal.value,
+                summary: firstSignal.summary,
+                provenance: firstSignal.provenance,
+                confidence: firstSignal.confidence,
+                expiresAt: firstSignal.expiresAt,
+              },
+            ],
+            decisions: [
+              {
+                id: "context-decision-release-e2e",
+                externalDecisionId: "release-e2e-freshness-first",
+                variant: "freshness_first",
+                signalIds: [firstSignal.id],
+                createdAt: now,
+                outcomes: [
+                  {
+                    id: "context-outcome-release-e2e",
+                    externalOutcomeId: "release-e2e-complete",
+                    decisionId: "context-decision-release-e2e",
+                    outcome: "completion",
+                    occurredAt: now,
+                  },
+                ],
+              },
+            ],
+          },
+        ],
         sessions: [firstSession],
         consent: [
           {
@@ -668,6 +709,7 @@ function createFixture() {
         session: selected,
         interactions: [selectedInteraction],
         reports: [selectedReport],
+        responses: selected.id === ids.sessionTwo ? [] : [firstResponse],
       });
       return;
     }
@@ -952,6 +994,8 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await metricVisible(page, "Active", "1");
   await clickText(page, "Acme workspace");
   await textVisible(page, "What we know");
+  await textVisible(page, "Context returned to product");
+  await textVisible(page, "Freshness First");
   await textVisible(page, "Data use");
   await textVisible(page, "Sessions");
   const customerDetail = await fixtureRequest(
