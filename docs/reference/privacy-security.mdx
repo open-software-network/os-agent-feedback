@@ -7,7 +7,7 @@ description: "Keep product keys private and customer context purpose-bound, perm
 
 - prompts or transcripts;
 - credentials, tokens, cookies, or authentication payloads;
-- names, email addresses, or other personal data;
+- names, email addresses, or free-form personal data outside the request-observation allowlist;
 - raw customer content;
 - raw tool inputs or outputs;
 - full product responses;
@@ -16,6 +16,19 @@ description: "Keep product keys private and customer context purpose-bound, perm
 Customer enrichment accepts only bounded intent, preference, constraint, and interest items. Every item has an
 explicit provenance. Do not request or infer sensitive characteristics, and never treat
 `agent_reports_user_statement`, `agent_reports_current_task`, and `agent_inference` as equivalent evidence.
+
+## Automatic request observations
+
+The official Express and Fastify adapters record a bounded allowlist of facts the company server already sees:
+framework-resolved client IP, HTTP method, user agent, accepted language, referrer origin, and User-Agent Client
+Hints. These observations are audit facts, not proof of identity, and Epode never merges customers or constructs
+sessions from them. Cookies, authorization, request bodies, full referrer URLs, query strings, forwarding-header
+chains, and arbitrary headers are excluded. MAC addresses cannot cross a routed HTTP connection and are not
+available to collect.
+
+Request observations are linked to the exact interaction and are physically deleted when that interaction is
+purged under the product's 1–365 day retention policy. Configure Express `trust proxy` or Fastify `trustProxy`
+only for proxies you control; otherwise the framework's direct peer address is retained.
 
 ## Purpose separation
 
@@ -49,9 +62,9 @@ allowlisted consent or answer body, then forwards them to fixed Epode endpoints 
 
 Team owners and admins can set each product's retention period to any whole number from 1 to 365 days in
 **Collection policy**. A shorter period changes dashboard filtering immediately, so feedback reports,
-interactions, and sessions outside the retained window stop appearing right away. Physical deletion runs on a
+interactions, request observations, and sessions outside the retained window stop appearing right away. Physical deletion runs on a
 schedule and can take up to the scheduled purge interval. The purge permanently removes expired feedback,
-interactions, and sessions.
+interactions, request observations, and sessions.
 
 Durable Ask-once permission is a separate data control. It survives the telemetry retention window so a customer
 is not asked again merely because older product data expired. That permission remains until it is explicitly

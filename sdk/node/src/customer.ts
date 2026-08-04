@@ -45,6 +45,69 @@ export interface EnrichmentRequestInput extends CustomerIdentity {
   runtimeHint?: string;
   purpose: CustomerPurpose;
   remember: boolean;
+  requestObservation?: CustomerRequestObservationInput;
+}
+
+export interface CustomerRequestObservationInput {
+  /** Framework-resolved peer IP. Proxy headers are honored only when the host app trusts them. */
+  clientIp?: string;
+  method?: string;
+  userAgent?: string;
+  acceptLanguage?: string;
+  /** Origin only; path, query, fragment, and credentials are never copied. */
+  referrerOrigin?: string;
+  secChUa?: string;
+  secChUaPlatform?: string;
+  secChUaMobile?: "?0" | "?1";
+}
+
+function boundedHeader(value: string | undefined, maximum: number): string | undefined {
+  const trimmed = value?.trim();
+  if (
+    !trimmed ||
+    [...trimmed].some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint < 32 || codePoint === 127;
+    })
+  ) {
+    return undefined;
+  }
+  return [...trimmed].slice(0, maximum).join("");
+}
+
+function referrerOrigin(value: string | undefined): string | undefined {
+  try {
+    const url = new URL(value || "");
+    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Build the fixed request-derived allowlist used by official HTTP adapters. */
+export function automaticRequestObservation(
+  method: string,
+  clientIp: string | undefined,
+  header: (name: string) => string | undefined,
+): CustomerRequestObservationInput {
+  const observation: CustomerRequestObservationInput = {};
+  const ip = boundedHeader(clientIp, 45);
+  const normalizedMethod = boundedHeader(method.toUpperCase(), 16);
+  const userAgent = boundedHeader(header("user-agent"), 512);
+  const acceptLanguage = boundedHeader(header("accept-language"), 256);
+  const origin = referrerOrigin(header("referer") || header("referrer"));
+  const secChUa = boundedHeader(header("sec-ch-ua"), 512);
+  const platform = boundedHeader(header("sec-ch-ua-platform"), 80);
+  const mobile = boundedHeader(header("sec-ch-ua-mobile"), 2);
+  if (ip) observation.clientIp = ip;
+  if (normalizedMethod) observation.method = normalizedMethod;
+  if (userAgent) observation.userAgent = userAgent;
+  if (acceptLanguage) observation.acceptLanguage = acceptLanguage;
+  if (origin) observation.referrerOrigin = origin;
+  if (secChUa) observation.secChUa = secChUa;
+  if (platform) observation.secChUaPlatform = platform;
+  if (mobile === "?0" || mobile === "?1") observation.secChUaMobile = mobile;
+  return observation;
 }
 
 export interface AgentAction {
@@ -462,6 +525,7 @@ export class EpodeClient {
           ...(input.durationMs !== undefined ? { durationMs: input.durationMs } : {}),
           ...(input.sessionRef ? { sessionRef: input.sessionRef } : {}),
           ...(input.runtimeHint ? { runtimeHint: input.runtimeHint } : {}),
+          ...(input.requestObservation ? { requestObservation: input.requestObservation } : {}),
           purpose: input.purpose,
           remember: input.remember,
         });

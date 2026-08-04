@@ -559,6 +559,63 @@ function CustomerDetailContent({
       <CustomerContextReturns returns={detail.contextReturns} openSession={openSession} />
 
       <Separator className="my-5" />
+      <section aria-labelledby="customer-request-facts-heading">
+        <div className="flex items-center justify-between gap-3">
+          <h3 id="customer-request-facts-heading" className="text-xs font-medium">
+            Request facts
+          </h3>
+          <span className="text-[11px] text-muted-foreground">
+            {detail.counts.requestObservations.toLocaleString()} observed
+          </span>
+        </div>
+        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+          Automatically observed by the company&apos;s server. Cookies, credentials, full referrer
+          URLs, and arbitrary headers are excluded. MAC addresses are not exposed by routed HTTP.
+        </p>
+        {detail.requestObservations.length ? (
+          <ol className="mt-3 divide-y">
+            {detail.requestObservations.map((observation) => {
+              const facts = [
+                observation.clientIp ? `IP ${observation.clientIp}` : null,
+                observation.method,
+                observation.acceptLanguage,
+                observation.secChUaPlatform,
+                observation.secChUaMobile === "?1"
+                  ? "Mobile"
+                  : observation.secChUaMobile === "?0"
+                    ? "Not mobile"
+                    : null,
+              ].filter(Boolean);
+              return (
+                <li key={observation.id} className="py-3 first:pt-0">
+                  <p className="break-words font-mono text-[11px] text-foreground">
+                    {facts.join(" · ") || "HTTP request"}
+                  </p>
+                  {observation.userAgent ? (
+                    <p className="mt-1 break-words text-[11px] text-muted-foreground">
+                      {observation.userAgent}
+                    </p>
+                  ) : null}
+                  {observation.referrerOrigin ? (
+                    <p className="mt-1 break-words text-[11px] text-muted-foreground">
+                      Referrer origin: {observation.referrerOrigin}
+                    </p>
+                  ) : null}
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    Observed {formatDate(observation.observedAt)}
+                  </p>
+                </li>
+              );
+            })}
+          </ol>
+        ) : (
+          <p className="mt-2 text-sm text-muted-foreground">
+            No request facts have been observed for this customer yet.
+          </p>
+        )}
+      </section>
+
+      <Separator className="my-5" />
       <section aria-labelledby="customer-sessions-heading">
         <h3 id="customer-sessions-heading" className="text-xs font-medium">
           Sessions

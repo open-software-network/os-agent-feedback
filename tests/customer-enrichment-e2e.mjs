@@ -221,7 +221,16 @@ try {
     await waitFor(`${advertisingProductUrl}/health`, advertisingProduct, 30_000);
   }
 
-  const firstResponse = await fetch(`${productUrl}/api/recommendations`);
+  const firstResponse = await fetch(`${productUrl}/api/recommendations`, {
+    headers: {
+      "user-agent": "Epode-E2E-Browser/1.0",
+      "accept-language": "en-US,en;q=0.9",
+      referer: "https://shop.example.test/discover?private=discard-me",
+      "sec-ch-ua": '"Epode E2E";v="1"',
+      "sec-ch-ua-platform": '"macOS"',
+      "sec-ch-ua-mobile": "?0",
+    },
+  });
   const first = await json(firstResponse, "anonymous recommendations");
   const setCookies =
     typeof firstResponse.headers.getSetCookie === "function"
@@ -529,6 +538,18 @@ try {
   );
   assert.equal(stored.answers.length, 2);
   assert.equal(stored.signals.length, 4);
+  const observedRequest = stored.requestObservations.find(
+    (entry) => entry.userAgent === "Epode-E2E-Browser/1.0",
+  );
+  assert.ok(observedRequest, "company middleware must persist automatic request facts");
+  assert.match(observedRequest.clientIp, /^(?:\d{1,3}\.){3}\d{1,3}$|:/);
+  assert.equal(observedRequest.method, "GET");
+  assert.equal(observedRequest.acceptLanguage, "en-US,en;q=0.9");
+  assert.equal(observedRequest.referrerOrigin, "https://shop.example.test");
+  assert.equal(observedRequest.secChUa, '"Epode E2E";v="1"');
+  assert.equal(observedRequest.secChUaPlatform, '"macOS"');
+  assert.equal(observedRequest.secChUaMobile, "?0");
+  assert.doesNotMatch(JSON.stringify(observedRequest), /private=discard-me|cookie|authorization/i);
   assert.ok(stored.requests.some((entry) => entry.identityLevel === "pseudonymous"));
   assert.ok(stored.requests.some((entry) => entry.identityLevel === "verified"));
   assert.ok(
@@ -593,6 +614,7 @@ try {
       decisions: stored.decisions.length,
       outcomes: stored.outcomes.length,
       resolutions: stored.resolutions.length,
+      requestObservations: stored.requestObservations.length,
     }),
   );
 } catch (error) {
