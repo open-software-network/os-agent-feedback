@@ -227,8 +227,8 @@ export function ContextFieldsView({
       {legacyCatalogActive ? (
         <Panel title="Default fields in use">
           <p className="text-sm text-muted-foreground">
-            This product currently asks for the built-in default fields listed below. Add a field
-            of your own to start a custom catalog — as soon as one of your fields is enabled, your
+            This product currently asks for the built-in default fields listed below. Add a field of
+            your own to start a custom catalog — as soon as one of your fields is enabled, your
             catalog replaces the default set for every new request.
           </p>
         </Panel>
