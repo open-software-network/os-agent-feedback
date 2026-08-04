@@ -23,6 +23,7 @@ describe("ConfigurationView", () => {
       "Connectors",
       "Team",
       "Data controls",
+      "Context fields",
     ]);
     expect(screen.getByRole("tab", { name: "Setup" })).toHaveAttribute("aria-selected", "true");
 

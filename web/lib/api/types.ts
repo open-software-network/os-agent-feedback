@@ -870,6 +870,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/products/{product_id}/context-fields": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["dashboard_context_fields_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/products/{product_id}/context-fields/{field_key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["dashboard_context_field_upsert_handler"];
+        post?: never;
+        delete: operations["dashboard_context_field_delete_handler"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/customer-context": {
         parameters: {
             query?: never;
@@ -7360,6 +7392,228 @@ export interface operations {
                 };
             };
             /** @description Context field not defined for this product */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Context fields are unavailable until the latest migration is applied */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Context field could not be deleted */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    dashboard_context_fields_handler: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Team to read; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path: {
+                /** @description Product whose context fields are listed */
+                product_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Customer context fields defined for this product */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrichmentFieldListResponse"];
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Product not found for this team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Context fields could not be loaded */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    dashboard_context_field_upsert_handler: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Team to configure; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path: {
+                /** @description Product that owns the context field */
+                product_id: string;
+                /** @description Context field key in lowercase namespace.name form */
+                field_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EnrichmentFieldDefinitionInput"];
+            };
+        };
+        responses: {
+            /** @description Context field definition created or replaced */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrichmentFieldDefinitionResponse"];
+                };
+            };
+            /** @description Invalid field key, label, values, operation binding, or malformed JSON body */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                    "text/plain": string;
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot configure the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Product not found for this team */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Context fields are unavailable until the latest migration is applied */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Context field could not be saved */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    dashboard_context_field_delete_handler: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Team to configure; defaults to the caller's personal team */
+                "x-workspace-id"?: string | null;
+            };
+            path: {
+                /** @description Product that owns the context field */
+                product_id: string;
+                /** @description Context field key in lowercase namespace.name form */
+                field_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted context field definition */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrichmentFieldDefinitionResponse"];
+                };
+            };
+            /** @description Invalid field key */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Dashboard authentication is required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Caller cannot configure the requested team */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Product or context field not found for this team */
             404: {
                 headers: {
                     [name: string]: unknown;

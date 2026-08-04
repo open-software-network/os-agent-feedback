@@ -10619,19 +10619,34 @@ fn validate_field_definition_input(
     Ok(operations)
 }
 
+async fn require_product_in_workspace(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    product_id: Uuid,
+) -> Result<(), ApiError> {
+    let exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM products WHERE id = $1 AND workspace_id = $2)",
+    )
+    .bind(product_id)
+    .bind(workspace_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if exists {
+        Ok(())
+    } else {
+        Err(ApiError::not_found("Product not found for this team"))
+    }
+}
+
 pub(crate) async fn list_enrichment_fields(
     pool: &PgPool,
-    auth: &ProductAuth,
+    workspace_id: Uuid,
+    product_id: Uuid,
 ) -> Result<EnrichmentFieldListResponse, ApiError> {
     let mut tx = pool.begin().await?;
+    require_product_in_workspace(&mut tx, workspace_id, product_id).await?;
     let definitions = if enrichment_fields_available(&mut tx).await? {
-        load_product_field_definitions(
-            &mut tx,
-            auth.workspace.id,
-            auth.environment.product_id,
-            false,
-        )
-        .await?
+        load_product_field_definitions(&mut tx, workspace_id, product_id, false).await?
     } else {
         Vec::new()
     };
@@ -10646,13 +10661,15 @@ pub(crate) async fn list_enrichment_fields(
 
 pub(crate) async fn upsert_enrichment_field(
     pool: &PgPool,
-    auth: &ProductAuth,
+    workspace_id: Uuid,
+    product_id: Uuid,
     field_key: &str,
     input: EnrichmentFieldDefinitionInput,
 ) -> Result<EnrichmentFieldDefinitionResponse, ApiError> {
     validate_enrichment_field_key(field_key)?;
     let operations = validate_field_definition_input(&input)?;
     let mut tx = pool.begin().await?;
+    require_product_in_workspace(&mut tx, workspace_id, product_id).await?;
     if !enrichment_fields_available(&mut tx).await? {
         return Err(ApiError::conflict(
             "Product context fields are unavailable until the latest migration is applied",
@@ -10675,8 +10692,8 @@ pub(crate) async fn upsert_enrichment_field(
           targeted_advertising_safe, operations, enabled, created_at, updated_at",
     )
     .bind(Uuid::new_v4())
-    .bind(auth.workspace.id)
-    .bind(auth.environment.product_id)
+    .bind(workspace_id)
+    .bind(product_id)
     .bind(field_key)
     .bind(input.label.trim())
     .bind(&input.signal_type)
@@ -10692,11 +10709,13 @@ pub(crate) async fn upsert_enrichment_field(
 
 pub(crate) async fn delete_enrichment_field(
     pool: &PgPool,
-    auth: &ProductAuth,
+    workspace_id: Uuid,
+    product_id: Uuid,
     field_key: &str,
 ) -> Result<Option<EnrichmentFieldDefinitionResponse>, ApiError> {
     validate_enrichment_field_key(field_key)?;
     let mut tx = pool.begin().await?;
+    require_product_in_workspace(&mut tx, workspace_id, product_id).await?;
     if !enrichment_fields_available(&mut tx).await? {
         return Err(ApiError::conflict(
             "Product context fields are unavailable until the latest migration is applied",
@@ -10708,8 +10727,8 @@ pub(crate) async fn delete_enrichment_field(
         RETURNING field_key, label, signal_type, allowed_values,
           targeted_advertising_safe, operations, enabled, created_at, updated_at",
     )
-    .bind(auth.environment.product_id)
-    .bind(auth.workspace.id)
+    .bind(product_id)
+    .bind(workspace_id)
     .bind(field_key)
     .fetch_optional(&mut *tx)
     .await?;
@@ -21199,7 +21218,8 @@ mod product_tests {
             // Field definition CRUD lifecycle.
             let occasion = upsert_enrichment_field(
                 &pool,
-                &auth,
+                auth.workspace.id,
+                auth.environment.product_id,
                 "journey.occasion",
                 EnrichmentFieldDefinitionInput {
                     label: "Shopping occasion".into(),
@@ -21215,7 +21235,8 @@ mod product_tests {
             anyhow::ensure!(occasion.key == "journey.occasion" && occasion.enabled);
             upsert_enrichment_field(
                 &pool,
-                &auth,
+                auth.workspace.id,
+                auth.environment.product_id,
                 "journey.delivery",
                 EnrichmentFieldDefinitionInput {
                     label: "Delivery timing".into(),
@@ -21230,7 +21251,8 @@ mod product_tests {
             .map_err(test_error)?;
             upsert_enrichment_field(
                 &pool,
-                &auth,
+                auth.workspace.id,
+                auth.environment.product_id,
                 "journey.temporary",
                 EnrichmentFieldDefinitionInput {
                     label: "Temporary field".into(),
@@ -21245,7 +21267,8 @@ mod product_tests {
             .map_err(test_error)?;
             let replaced = upsert_enrichment_field(
                 &pool,
-                &auth,
+                auth.workspace.id,
+                auth.environment.product_id,
                 "journey.temporary",
                 EnrichmentFieldDefinitionInput {
                     label: "Renamed temporary".into(),
@@ -21259,26 +21282,30 @@ mod product_tests {
             .await
             .map_err(test_error)?;
             anyhow::ensure!(replaced.label == "Renamed temporary");
-            let listed = list_enrichment_fields(&pool, &auth).await.map_err(test_error)?;
+            let listed = list_enrichment_fields(&pool, auth.workspace.id, auth.environment.product_id).await.map_err(test_error)?;
             anyhow::ensure!(listed.fields.len() == 3 && !listed.legacy_catalog_active);
-            let deleted = delete_enrichment_field(&pool, &auth, "journey.temporary")
+            let deleted = delete_enrichment_field(&pool, auth.workspace.id, auth.environment.product_id, "journey.temporary")
                 .await
                 .map_err(test_error)?;
             anyhow::ensure!(
                 deleted.is_some_and(|field| field.key == "journey.temporary")
             );
             anyhow::ensure!(
-                delete_enrichment_field(&pool, &auth, "journey.temporary")
+                delete_enrichment_field(&pool, auth.workspace.id, auth.environment.product_id, "journey.temporary")
                     .await
                     .map_err(test_error)?
                     .is_none()
             );
-            let listed = list_enrichment_fields(&pool, &auth).await.map_err(test_error)?;
+            let listed = list_enrichment_fields(&pool, auth.workspace.id, auth.environment.product_id).await.map_err(test_error)?;
             anyhow::ensure!(listed.fields.len() == 2);
             // Product isolation: the legacy product sees no custom fields.
-            let legacy_list = list_enrichment_fields(&pool, &legacy_auth)
-                .await
-                .map_err(test_error)?;
+            let legacy_list = list_enrichment_fields(
+                &pool,
+                legacy_auth.workspace.id,
+                legacy_auth.environment.product_id,
+            )
+            .await
+            .map_err(test_error)?;
             anyhow::ensure!(legacy_list.fields.is_empty() && legacy_list.legacy_catalog_active);
 
             // Custom catalog: an eligible operation collects only bound fields.
@@ -21404,7 +21431,8 @@ mod product_tests {
             // Editing the definition must not change the in-flight request.
             upsert_enrichment_field(
                 &pool,
-                &auth,
+                auth.workspace.id,
+                auth.environment.product_id,
                 "journey.occasion",
                 EnrichmentFieldDefinitionInput {
                     label: "Shopping occasion".into(),
@@ -21432,7 +21460,8 @@ mod product_tests {
             // Restore the shared definition for any later test orderings.
             upsert_enrichment_field(
                 &pool,
-                &auth,
+                auth.workspace.id,
+                auth.environment.product_id,
                 "journey.occasion",
                 EnrichmentFieldDefinitionInput {
                     label: "Shopping occasion".into(),

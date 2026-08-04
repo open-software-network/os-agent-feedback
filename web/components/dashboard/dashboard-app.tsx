@@ -9,11 +9,13 @@ import type { DashboardView, ShownSecrets } from "@/components/dashboard/types";
 import { DASHBOARD_VIEWS } from "@/components/dashboard/types";
 import { EmptyState, ErrorState, StatusMessage } from "@/components/dashboard/view-primitives";
 import {
+  type ConfigurationSection,
   ConfigurationView,
   isConfigurationSection,
   ProductConfigurationView,
 } from "@/components/views/configuration/configuration-view";
 import { ConnectorsView } from "@/components/views/connectors/connectors-view";
+import { ContextFieldsView } from "@/components/views/context-fields/context-fields-view";
 import { CustomersView } from "@/components/views/customers/customers-view";
 import { FeedbackView } from "@/components/views/feedback/feedback-view";
 import { HomeView } from "@/components/views/home/home-view";
@@ -382,7 +384,7 @@ export function DashboardApp() {
 
   function configurationPage(
     currentData: DashboardData,
-    section: "setup" | "configuration" | "connectors" | "team" | "policy",
+    section: ConfigurationSection,
     content: ReactNode,
   ) {
     return (
@@ -493,6 +495,22 @@ export function DashboardApp() {
           currentData,
           "policy",
           <PolicyView data={currentData} refresh={refresh} setNotice={showNotice} />,
+        );
+      case "context-fields":
+        return isEditor(currentData.currentRole) ? (
+          configurationPage(
+            currentData,
+            "context-fields",
+            <ContextFieldsView data={currentData} refresh={refresh} setNotice={showNotice} />,
+          )
+        ) : (
+          <HomeView
+            data={currentData}
+            openCustomer={openCustomer}
+            openFeedback={openFeedback}
+            openSession={openSession}
+            refresh={refresh}
+          />
         );
       case "connectors":
         return isEditor(currentData.currentRole) ? (

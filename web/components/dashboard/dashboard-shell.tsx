@@ -330,6 +330,7 @@ export function DashboardShell({
     configuration: "Configurations",
     setup: "Configurations",
     policy: "Configurations",
+    "context-fields": "Configurations",
     connectors: "Configurations",
     team: "Configurations",
     interactions: "Interaction",

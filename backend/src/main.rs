@@ -339,6 +339,11 @@ fn build_app_router(dev_auth_enabled: bool) -> OpenApiRouter<Arc<AppState>> {
             enrichment_field_upsert_handler,
             enrichment_field_delete_handler
         ))
+        .routes(routes!(dashboard_context_fields_handler))
+        .routes(routes!(
+            dashboard_context_field_upsert_handler,
+            dashboard_context_field_delete_handler
+        ))
         .routes(routes!(customer_context_handler))
         .routes(routes!(personalization_decision_handler))
         .routes(routes!(personalization_outcome_handler))
@@ -6298,7 +6303,8 @@ async fn enrichment_fields_handler(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let auth = agent_product_auth(&state.pool, &headers).await?;
-    let result = list_enrichment_fields(&state.pool, &auth).await?;
+    let result =
+        list_enrichment_fields(&state.pool, auth.workspace.id, auth.environment.product_id).await?;
     let mut response = Json(result).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
@@ -6333,7 +6339,8 @@ async fn enrichment_field_upsert_handler(
     let auth = agent_product_auth(&state.pool, &headers).await?;
     let result = upsert_enrichment_field(
         &state.pool,
-        &auth,
+        auth.workspace.id,
+        auth.environment.product_id,
         &field_key,
         safe_input::<EnrichmentFieldDefinitionInput>(value)?,
     )
@@ -6369,15 +6376,130 @@ async fn enrichment_field_delete_handler(
     Path(field_key): Path<String>,
 ) -> Result<Response, ApiError> {
     let auth = agent_product_auth(&state.pool, &headers).await?;
-    let deleted = delete_enrichment_field(&state.pool, &auth, &field_key)
-        .await?
-        .ok_or_else(|| ApiError::not_found("Context field is not defined for this product"))?;
+    let deleted = delete_enrichment_field(
+        &state.pool,
+        auth.workspace.id,
+        auth.environment.product_id,
+        &field_key,
+    )
+    .await?
+    .ok_or_else(|| ApiError::not_found("Context field is not defined for this product"))?;
     let mut response = Json(deleted).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, no-store"),
     );
     Ok(response)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/products/{product_id}/context-fields",
+    tag = "products",
+    params(
+        ("product_id" = Uuid, Path, description = "Product whose context fields are listed"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to read; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Customer context fields defined for this product", body = EnrichmentFieldListResponse),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 404, description = "Product not found for this team", body = ApiErrorEnvelope),
+        (status = 500, description = "Context fields could not be loaded", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn dashboard_context_fields_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(product_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    let result = list_enrichment_fields(&state.pool, context.workspace.id, product_id).await?;
+    dashboard_response(&state, Json(result), tokens)
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/products/{product_id}/context-fields/{field_key}",
+    tag = "products",
+    params(
+        ("product_id" = Uuid, Path, description = "Product that owns the context field"),
+        ("field_key" = String, Path, description = "Context field key in lowercase namespace.name form"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    request_body = EnrichmentFieldDefinitionInput,
+    responses(
+        (status = 200, description = "Context field definition created or replaced", body = EnrichmentFieldDefinitionResponse),
+        (
+            status = 400,
+            description = "Invalid field key, label, values, operation binding, or malformed JSON body",
+            content(
+                (ApiErrorEnvelope = "application/json"),
+                (String = "text/plain")
+            )
+        ),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Product not found for this team", body = ApiErrorEnvelope),
+        (status = 409, description = "Context fields are unavailable until the latest migration is applied", body = ApiErrorEnvelope),
+        (status = 500, description = "Context field could not be saved", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn dashboard_context_field_upsert_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((product_id, field_key)): Path<(Uuid, String)>,
+    Json(value): Json<Value>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let result = upsert_enrichment_field(
+        &state.pool,
+        context.workspace.id,
+        product_id,
+        &field_key,
+        safe_input::<EnrichmentFieldDefinitionInput>(value)?,
+    )
+    .await?;
+    dashboard_response(&state, Json(result), tokens)
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/products/{product_id}/context-fields/{field_key}",
+    tag = "products",
+    params(
+        ("product_id" = Uuid, Path, description = "Product that owns the context field"),
+        ("field_key" = String, Path, description = "Context field key in lowercase namespace.name form"),
+        ("x-workspace-id" = Option<Uuid>, Header, description = "Team to configure; defaults to the caller's personal team")
+    ),
+    responses(
+        (status = 200, description = "Deleted context field definition", body = EnrichmentFieldDefinitionResponse),
+        (status = 400, description = "Invalid field key", body = ApiErrorEnvelope),
+        (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
+        (status = 403, description = "Caller cannot configure the requested team", body = ApiErrorEnvelope),
+        (status = 404, description = "Product or context field not found for this team", body = ApiErrorEnvelope),
+        (status = 409, description = "Context fields are unavailable until the latest migration is applied", body = ApiErrorEnvelope),
+        (status = 500, description = "Context field could not be deleted", body = ApiErrorEnvelope)
+    ),
+    security(("session_cookie" = []))
+)]
+async fn dashboard_context_field_delete_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((product_id, field_key)): Path<(Uuid, String)>,
+) -> Result<Response, ApiError> {
+    let (context, tokens) =
+        dashboard_auth(&state, &headers, requested_workspace_id(&headers)?).await?;
+    require_workspace_editor(&context)?;
+    let deleted =
+        delete_enrichment_field(&state.pool, context.workspace.id, product_id, &field_key)
+            .await?
+            .ok_or_else(|| ApiError::not_found("Context field is not defined for this product"))?;
+    dashboard_response(&state, Json(deleted), tokens)
 }
 
 #[utoipa::path(
