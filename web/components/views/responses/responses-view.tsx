@@ -100,7 +100,7 @@ export function ResponsesView({
     <div className="flex h-full min-h-0 flex-col bg-background">
       <MetricStrip
         items={[
-          { label: "Questions asked", value: rollup.questions.toLocaleString(), accent: true },
+          { label: "Responses", value: rollup.questions.toLocaleString(), accent: true },
           { label: "Answered", value: rollup.answered.toLocaleString() },
           { label: "Awaiting answer", value: rollup.awaitingAnswer.toLocaleString() },
           { label: "Declined", value: rollup.declined.toLocaleString() },
@@ -114,7 +114,7 @@ export function ResponsesView({
           </InputGroupAddon>
           <InputGroupInput
             aria-label="Search responses"
-            placeholder="Search questions or answers"
+            placeholder="Search answers or tools"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
@@ -141,14 +141,14 @@ export function ResponsesView({
           <p className="p-6 text-sm text-muted-foreground">Loading responses…</p>
         ) : responses.length ? (
           <>
-            <Table className="min-w-[900px]">
+            <Table className="min-w-[820px]">
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
-                  <TableHead className="w-[34%] pl-4">Question</TableHead>
-                  <TableHead className="w-[34%]">Answer</TableHead>
+                  <TableHead className="w-[42%] pl-4">Answer</TableHead>
+                  <TableHead className="w-[18%]">Tool called</TableHead>
                   <TableHead>Customer</TableHead>
                   <TableHead>Session</TableHead>
-                  <TableHead className="pr-4 text-right">Asked</TableHead>
+                  <TableHead className="pr-4 text-right">Recorded</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -181,7 +181,7 @@ export function ResponsesView({
               description={
                 query || status !== "all"
                   ? "Try a different search or status."
-                  : "Questions and answers will appear here after Epode asks a customer agent."
+                  : "Answers will appear here after a customer agent shares relevant context."
               }
             />
           </div>
@@ -203,13 +203,6 @@ function ResponseRow({
   return (
     <TableRow>
       <TableCell className="whitespace-normal py-4 pl-4 align-top">
-        <p className="font-medium leading-5">{response.question}</p>
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          <ResponseStatusBadge status={response.status} />
-          <span className="text-xs text-muted-foreground">{titleCase(response.purpose)}</span>
-        </div>
-      </TableCell>
-      <TableCell className="whitespace-normal py-4 align-top">
         {response.answers.length ? (
           <dl className="grid gap-2">
             {response.answers.map((answer) => (
@@ -222,6 +215,12 @@ function ResponseRow({
         ) : (
           <p className="text-sm text-muted-foreground">{statusLabels[response.status]}</p>
         )}
+        <div className="mt-2">
+          <ResponseStatusBadge status={response.status} />
+        </div>
+      </TableCell>
+      <TableCell className="whitespace-normal py-4 align-top">
+        <code className="break-all text-xs">{response.operation}</code>
       </TableCell>
       <TableCell className="align-top">
         {response.customerId ? (
