@@ -6045,7 +6045,8 @@ pub(crate) async fn dashboard_interaction_detail_by_id(
             s.started_at, s.last_seen_at, s.created_at
             FROM sessions_v2 s
             JOIN product_environments e ON e.id = s.environment_id
-            WHERE s.id = $1 AND s.workspace_id = $2 AND e.product_id = $3",
+            WHERE s.id = $1 AND s.workspace_id = $2 AND e.product_id = $3
+              AND s.last_seen_at >= NOW() - make_interval(days => e.retention_days)",
             )
             .bind(session_id)
             .bind(workspace_id)
@@ -16202,6 +16203,7 @@ mod product_tests {
             let checkout = Uuid::new_v4();
             let checkout_retry = Uuid::new_v4();
             let search = Uuid::new_v4();
+            let retained_interaction_expired_session = Uuid::new_v4();
             let expired_mixed_interaction = Uuid::new_v4();
             let expired_interaction = Uuid::new_v4();
             let sibling_interaction = Uuid::new_v4();
@@ -16210,6 +16212,7 @@ mod product_tests {
                 (checkout, workspace.id, environment.id, Some(checkout_session), "checkout", "tenant-a", now - Duration::minutes(5)),
                 (checkout_retry, workspace.id, environment.id, Some(checkout_session), "checkout_retry", "tenant-a", now - Duration::minutes(2)),
                 (search, workspace.id, environment.id, Some(search_session), "search", "tenant-b", now - Duration::minutes(3)),
+                (retained_interaction_expired_session, workspace.id, environment.id, Some(expired_session), "retained_interaction_expired_session", "tenant-old", now - Duration::minutes(1)),
                 (expired_mixed_interaction, workspace.id, environment.id, Some(checkout_session), "expired_checkout_history", "tenant-old", now - Duration::days(31)),
                 (expired_interaction, workspace.id, environment.id, Some(expired_session), "expired_operation", "tenant-old", now - Duration::days(31)),
                 (sibling_interaction, workspace.id, sibling_environment.id, None, "checkout", "tenant-a", now - Duration::minutes(1)),
@@ -16596,10 +16599,10 @@ mod product_tests {
             )
             .await
             .map_err(test_error)?;
-            anyhow::ensure!(bootstrap.list_state.interactions_total == 3);
+            anyhow::ensure!(bootstrap.list_state.interactions_total == 4);
             anyhow::ensure!(bootstrap.list_state.reports_total == 2);
             anyhow::ensure!(bootstrap.list_state.sessions_total == 2);
-            anyhow::ensure!(bootstrap.insights.opportunities == 3);
+            anyhow::ensure!(bootstrap.insights.opportunities == 4);
             anyhow::ensure!(bootstrap.insights.reports == 2);
             anyhow::ensure!(
                 bootstrap
@@ -16692,6 +16695,16 @@ mod product_tests {
                 exact_interaction.session.as_ref().map(|session| session.id)
                     == Some(checkout_session)
             );
+            let retained_interaction_detail = dashboard_interaction_detail_by_id(
+                &pool,
+                workspace.id,
+                product.id,
+                retained_interaction_expired_session,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(retained_interaction_detail.interaction.id == retained_interaction_expired_session);
+            anyhow::ensure!(retained_interaction_detail.session.is_none());
 
             let expired_report_error = dashboard_report_by_id(
                 &pool,
