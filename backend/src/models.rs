@@ -803,6 +803,8 @@ pub(crate) struct EnrichmentRequestResponse {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct EnrichmentConsentDecisionInput {
     pub decision: String,
+    #[serde(default)]
+    pub remember: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]

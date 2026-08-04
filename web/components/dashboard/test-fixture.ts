@@ -371,6 +371,7 @@ export function customerDetailFixture(): CustomerDetail {
         value: "newest_policy",
         type: "intent",
         summary: "Find the newest indexed policy",
+        provenance: "agent_reports_user_statement",
         consentScope: "share_preferences",
         allowedUses: ["product_personalization"],
       }),

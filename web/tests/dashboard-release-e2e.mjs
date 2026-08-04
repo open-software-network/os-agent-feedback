@@ -951,7 +951,8 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await metricVisible(page, "Known", "1");
   await metricVisible(page, "Active", "1");
   await clickText(page, "Acme workspace");
-  await textVisible(page, "Permission");
+  await textVisible(page, "What we know");
+  await textVisible(page, "Data use");
   await textVisible(page, "Sessions");
   const customerDetail = await fixtureRequest(
     state,

@@ -10,11 +10,13 @@ import {
   type EnrichmentRequest,
   type EpodeClient,
   type EpodeClientOptions,
+  type RelayResponse,
   sameOriginEnrichmentRequest,
 } from "./customer.js";
 
 export type EpodeMcpContext = Record<string, unknown> & {
   http?: { authInfo?: { extra?: Record<string, unknown> } };
+  mcpReq?: { inputResponses?: Record<string, unknown> };
 };
 
 type McpResult = {
@@ -77,6 +79,32 @@ function handle(action?: { authorization: string }): string | undefined {
   return action?.authorization.replace(/^Bearer\s+/, "");
 }
 
+function permissionChoice(request: EnrichmentRequest) {
+  return {
+    mode: "form" as const,
+    message:
+      request.question ||
+      "Choose whether this product may use relevant, non-sensitive context to personalize your experience.",
+    requestedSchema: {
+      type: "object" as const,
+      properties: {
+        choice: {
+          type: "string" as const,
+          title: "Optional personalization",
+          description:
+            "Choose whether this product may use relevant preferences, interests, intent, and constraints shared through your assistant.",
+          oneOf: [
+            { const: "always_allow", title: "Always allow" },
+            { const: "this_session_only", title: "This session only" },
+            { const: "dont_allow", title: "Don't allow" },
+          ],
+        },
+      },
+      required: ["choice"],
+    },
+  };
+}
+
 function mcpContract(request: EnrichmentRequest): Record<string, unknown> {
   const schema = sameOriginEnrichmentRequest(request);
   return {
@@ -91,9 +119,10 @@ function mcpContract(request: EnrichmentRequest): Record<string, unknown> {
     ...(request.answerInstruction ? { answerInstruction: request.answerInstruction } : {}),
     ...(request.state === "consent_required" && request.consent
       ? {
-          consentTool: "record_customer_context_consent",
+          answerTool: "share_customer_context",
           requestHandle: handle(request.consent),
-          decisionSchema: schema.consent?.bodySchema,
+          permissionMode: "mcp_elicitation",
+          answerSchema: schema.submit?.bodySchema,
         }
       : {}),
     ...(request.consent
@@ -116,9 +145,10 @@ function mcpContract(request: EnrichmentRequest): Record<string, unknown> {
 
 function attach(result: McpResult, request: EnrichmentRequest, schemaOwned: boolean): McpResult {
   const contract = mcpContract(request);
-  const instruction = [request.stageInstruction, request.answerInstruction]
-    .filter(Boolean)
-    .join(" ");
+  const instruction =
+    request.state === "consent_required"
+      ? "After finishing the product task, call share_customer_context once with only relevant, non-sensitive context. The tool will present the company's optional-personalization choice inside the MCP client; do not ask the user separately in chat."
+      : [request.stageInstruction, request.answerInstruction].filter(Boolean).join(" ");
   const content = Array.isArray(result.content) ? [...result.content] : [];
   if (
     schemaOwned ||
@@ -234,23 +264,26 @@ export function epode(options: EpodeMcpOptions): EpodeMcp {
       originalRegister(
         "record_customer_context_consent",
         {
-          title: "Record customer-context permission",
+          title: "Legacy customer-context permission fallback",
           description:
-            "Record only the customer's explicit answer to the exact company question returned by a product tool. Never infer permission from silence or an ambiguous reply.",
+            "Compatibility fallback only when share_customer_context reports that MCP elicitation is unavailable. Never call this before that fallback is returned, and never infer permission.",
           inputSchema: z.object({
             requestHandle: z.string().startsWith("aqr1_"),
             decision: z.enum(["approved", "declined"]),
+            remember: z.boolean().optional(),
           }),
           annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         },
         async ({
           requestHandle,
           decision,
+          remember,
         }: {
           requestHandle: string;
           decision: "approved" | "declined";
+          remember?: boolean;
         }) => {
-          const response = await client.submitConsent(requestHandle, decision);
+          const response = await client.submitConsent(requestHandle, decision, remember);
           const body = isPlainObject(response.body) ? response.body : {};
           const submit = isPlainObject(body.submit)
             ? (body.submit as unknown as { authorization: string })
@@ -282,9 +315,9 @@ export function epode(options: EpodeMcpOptions): EpodeMcp {
       originalRegister(
         "share_customer_context",
         {
-          title: "Share permitted customer context",
+          title: "Share customer context",
           description:
-            "Share up to eight relevant, non-sensitive customer context items after the customer has granted the returned permission. Distinguish explicit statements, current-task context, and inference.",
+            "Share up to eight relevant, non-sensitive context items. When a data-use choice is needed, this tool presents it once inside the MCP client, records the answer, and continues in the same call. Distinguish explicit statements, current-task context, and inference.",
           inputSchema: z.object({
             requestHandle: z.string().startsWith("aqr1_"),
             status: z.enum(["answered", "declined", "no_relevant_context"]),
@@ -309,8 +342,139 @@ export function epode(options: EpodeMcpOptions): EpodeMcp {
           }),
           annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         },
-        async ({ requestHandle, ...answer }: CustomerAnswerInput & { requestHandle: string }) => {
-          const response = await client.submitAnswer(requestHandle, answer);
+        async (
+          { requestHandle, ...answer }: CustomerAnswerInput & { requestHandle: string },
+          context: EpodeMcpContext,
+        ) => {
+          const inspection = await client.inspectEnrichment(requestHandle);
+          const inspected = isPlainObject(inspection.body)
+            ? (inspection.body as unknown as EnrichmentRequest)
+            : undefined;
+          if (inspection.status >= 400 || !inspected) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: "text",
+                  text: "The customer-context request could not be verified. Do not share context.",
+                },
+              ],
+              structuredContent: isPlainObject(inspection.body) ? inspection.body : {},
+            };
+          }
+          let response: RelayResponse;
+          if (inspected.state === "consent_required") {
+            const inputResponse = context.mcpReq?.inputResponses?.customer_context_permission;
+            if (inputResponse === undefined) {
+              if (!context.mcpReq) {
+                return {
+                  isError: true,
+                  content: [
+                    {
+                      type: "text",
+                      text: `This MCP server cannot resume inline personalization. Ask the exact question once, then use record_customer_context_consent as a compatibility fallback with requestHandle ${requestHandle}.`,
+                    },
+                  ],
+                  structuredContent: {
+                    fallbackTool: "record_customer_context_consent",
+                    requestHandle,
+                    question: inspected.question,
+                  },
+                };
+              }
+              return {
+                resultType: "input_required",
+                inputRequests: {
+                  customer_context_permission: {
+                    method: "elicitation/create",
+                    params: permissionChoice(inspected),
+                  },
+                },
+              };
+            }
+            if (!isPlainObject(inputResponse)) {
+              return {
+                isError: true,
+                content: [{ type: "text", text: "The personalization response was invalid." }],
+              };
+            }
+            const action = inputResponse.action;
+            if (action !== "accept" && action !== "decline" && action !== "cancel") {
+              return {
+                isError: true,
+                content: [{ type: "text", text: "The personalization response was invalid." }],
+              };
+            }
+            if (action === "cancel") {
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: "The customer dismissed optional personalization. Continue without sharing context.",
+                  },
+                ],
+                structuredContent: { accepted: false, state: "canceled" },
+              };
+            }
+            const content = isPlainObject(inputResponse.content) ? inputResponse.content : {};
+            const selected = action === "accept" ? content.choice : "dont_allow";
+            if (selected === "dont_allow" || action === "decline") {
+              const declined = await client.submitConsent(requestHandle, "declined");
+              return {
+                isError: declined.status >= 400,
+                content: [
+                  {
+                    type: "text",
+                    text: "The customer chose not to allow personalization. Continue without sharing context.",
+                  },
+                ],
+                structuredContent: isPlainObject(declined.body)
+                  ? declined.body
+                  : { accepted: false, state: "declined" },
+              };
+            }
+            if (selected !== "always_allow" && selected !== "this_session_only") {
+              return {
+                isError: true,
+                content: [{ type: "text", text: "The personalization choice was invalid." }],
+              };
+            }
+            const remember = selected === "always_allow";
+            const approved = await client.submitConsent(requestHandle, "approved", remember);
+            const approvedBody = isPlainObject(approved.body) ? approved.body : {};
+            const submit = isPlainObject(approvedBody.submit)
+              ? (approvedBody.submit as unknown as { authorization: string })
+              : undefined;
+            const nextHandle = handle(submit);
+            if (approved.status >= 400 || !nextHandle) {
+              return {
+                isError: true,
+                content: [
+                  {
+                    type: "text",
+                    text: "The customer's personalization choice could not be recorded.",
+                  },
+                ],
+                structuredContent: approvedBody,
+              };
+            }
+            const permittedAnswer = remember
+              ? answer
+              : { ...answer, items: answer.items.map((item) => ({ ...item, remember: false })) };
+            response = await client.submitAnswer(nextHandle, permittedAnswer);
+          } else if (inspected.state === "declined") {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "Personalization is not allowed for this request. Continue without sharing context.",
+                },
+              ],
+              structuredContent: { accepted: false, state: "declined" },
+            };
+          } else {
+            response = await client.submitAnswer(requestHandle, answer);
+          }
           const body = isPlainObject(response.body) ? response.body : {};
           return {
             isError: response.status >= 400,

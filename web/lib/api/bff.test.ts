@@ -233,6 +233,7 @@ describe("BFF request header policy", () => {
     }
 
     for (const path of [
+      ["v2", "enrichment", "requests", "inspect"],
       ["v2", "enrichment", "consent", "decisions"],
       ["v2", "enrichment", "answers"],
     ]) {

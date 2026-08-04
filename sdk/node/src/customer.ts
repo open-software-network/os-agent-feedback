@@ -254,11 +254,14 @@ function validOpaque(value: unknown, maximum = 160): value is string {
   );
 }
 
-function validateConsentBody(value: unknown): value is { decision: "approved" | "declined" } {
+function validateConsentBody(
+  value: unknown,
+): value is { decision: "approved" | "declined"; remember?: boolean } {
   return (
     isPlainObject(value) &&
-    exactKeys(value, ["decision"]) &&
-    (value.decision === "approved" || value.decision === "declined")
+    exactKeys(value, ["decision", "remember"]) &&
+    (value.decision === "approved" || value.decision === "declined") &&
+    (value.remember === undefined || typeof value.remember === "boolean")
   );
 }
 
@@ -566,12 +569,40 @@ export class EpodeClient {
   async submitConsent(
     requestHandle: string,
     decision: "approved" | "declined",
+    remember?: boolean,
   ): Promise<RelayResponse> {
     return this.relay({
       path: "/_epode/v1/enrichment/consent",
       authorization: `Bearer ${requestHandle}`,
-      body: { decision },
+      body: { decision, ...(remember === undefined ? {} : { remember }) },
     });
+  }
+
+  async inspectEnrichment(requestHandle: string): Promise<RelayResponse> {
+    const handle = agentHandle(`Bearer ${requestHandle}`);
+    if (!handle) return { status: 401, body: { error: "invalid_customer_context_handle" } };
+    try {
+      const response = await this.#fetch(`${this.endpoint}/api/v2/enrichment/requests/inspect`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${handle}`,
+          "content-type": "application/json",
+          "user-agent": USER_AGENT,
+        },
+        body: "{}",
+        redirect: "manual",
+        signal: AbortSignal.timeout(this.#relayTimeoutMs),
+      });
+      if (response.status >= 300 && response.status < 400) {
+        return { status: 502, body: { error: "epode_redirect_rejected" } };
+      }
+      return { status: response.status, body: sameOriginRelayBody(await responseBody(response)) };
+    } catch {
+      return {
+        status: 503,
+        body: { error: "customer_context_temporarily_unavailable", retryable: true },
+      };
+    }
   }
 
   async submitAnswer(requestHandle: string, answer: CustomerAnswerInput): Promise<RelayResponse> {

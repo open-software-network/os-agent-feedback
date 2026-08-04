@@ -27,7 +27,10 @@ import {
 } from "@/components/ui/table";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import {
+  type ConsentEvent,
+  type ConsentGrant,
   type CustomerDetail,
+  type CustomerSignal,
   type CustomerSummary,
   fetchCustomerDetail,
   fetchCustomersPage,
@@ -259,7 +262,7 @@ export function CustomersView({
                 <TableHead className="h-9 w-[34%] pl-5 text-xs">Customer</TableHead>
                 <TableHead className="h-9 w-[18%] text-xs">Type</TableHead>
                 <TableHead className="h-9 w-[16%] text-xs">Sessions</TableHead>
-                <TableHead className="h-9 w-[16%] text-xs">Permission</TableHead>
+                <TableHead className="h-9 w-[16%] text-xs">Data use</TableHead>
                 <TableHead className="h-9 w-[16%] pr-5 text-right text-xs">Updated</TableHead>
               </TableRow>
             </TableHeader>
@@ -441,6 +444,97 @@ function CustomerInspector({
   );
 }
 
+function signalSource(provenance: string) {
+  switch (provenance) {
+    case "agent_reports_user_statement":
+      return "Customer said";
+    case "agent_reports_current_task":
+      return "Current request";
+    case "agent_inference":
+      return "Assistant inference";
+    case "product_activity":
+      return "Product activity";
+    case "company_assertion":
+      return "Company record";
+    default:
+      return titleCase(provenance);
+  }
+}
+
+function signalValue(signal: CustomerSignal) {
+  if (typeof signal.value === "string" || typeof signal.value === "number") {
+    return String(signal.value);
+  }
+  if (typeof signal.value === "boolean") return signal.value ? "Yes" : "No";
+  if (Array.isArray(signal.value)) {
+    return signal.value
+      .filter((value) => ["string", "number", "boolean"].includes(typeof value))
+      .map(String)
+      .join(", ");
+  }
+  return null;
+}
+
+function dataUseScope(scope: string) {
+  switch (scope) {
+    case "share_preferences":
+      return "Use shared context";
+    case "personalize":
+      return "Personalize the experience";
+    case "remember_preferences":
+      return "Remember across visits";
+    case "share_outcome":
+      return "Use outcome feedback";
+    default:
+      return titleCase(scope);
+  }
+}
+
+type DataUseGrant = ConsentGrant & { scopes: string[] };
+type DataUseEvent = ConsentEvent & { scopes: string[] };
+
+function groupDataUseGrants(grants: ConsentGrant[]): DataUseGrant[] {
+  const grouped = new Map<string, DataUseGrant>();
+  for (const grant of grants) {
+    const key = grant.enrichmentPurpose
+      ? [
+          grant.enrichmentPurpose,
+          grant.state,
+          grant.basis,
+          grant.revision,
+          grant.decidedAt,
+          grant.expiresAt,
+          grant.revokedAt,
+        ].join("|")
+      : [grant.scope, grant.state, grant.revision, grant.decidedAt].join("|");
+    const existing = grouped.get(key);
+    if (existing) existing.scopes.push(grant.scope);
+    else grouped.set(key, { ...grant, scopes: [grant.scope] });
+  }
+  return [...grouped.values()];
+}
+
+function groupDataUseEvents(events: ConsentEvent[]): DataUseEvent[] {
+  const grouped = new Map<string, DataUseEvent>();
+  for (const event of events) {
+    const key = event.enrichmentPurpose
+      ? [
+          event.enrichmentPurpose,
+          event.priorState,
+          event.state,
+          event.basis,
+          event.revision,
+          event.source,
+          event.decidedAt,
+        ].join("|")
+      : [event.scope, event.state, event.revision, event.decidedAt].join("|");
+    const existing = grouped.get(key);
+    if (existing) existing.scopes.push(event.scope);
+    else grouped.set(key, { ...event, scopes: [event.scope] });
+  }
+  return [...grouped.values()];
+}
+
 function CustomerDetailContent({
   detail,
   openSession,
@@ -449,6 +543,8 @@ function CustomerDetailContent({
   openSession: (sessionId: string) => void;
 }) {
   const customer = detail.customer;
+  const dataUse = groupDataUseGrants(detail.consent);
+  const dataUseHistory = groupDataUseEvents(detail.consentHistory);
 
   return (
     <>
@@ -479,15 +575,74 @@ function CustomerDetailContent({
       ) : null}
 
       <Separator className="my-5" />
-      <section aria-labelledby="customer-consent-heading">
-        <h3 id="customer-consent-heading" className="text-xs font-medium">
-          Permission
-        </h3>
-        {detail.consent.length ? (
+      <section aria-labelledby="customer-knowledge-heading">
+        <div className="flex items-center justify-between gap-3">
+          <h3 id="customer-knowledge-heading" className="text-xs font-medium">
+            What we know
+          </h3>
+          <span className="text-[11px] text-muted-foreground">
+            {detail.signals.length.toLocaleString()}{" "}
+            {detail.signals.length === 1 ? "answer" : "answers"}
+          </span>
+        </div>
+        {detail.signals.length ? (
           <ol className="mt-3 divide-y">
-            {detail.consent.map((grant) => (
+            {detail.signals.map((signal) => {
+              const value = signalValue(signal);
+              const sourceSession = signal.sessionId
+                ? detail.sessions.find((session) => session.id === signal.sessionId)
+                : undefined;
+              return (
+                <li key={signal.id} className="py-3 first:pt-0">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium leading-5">{signal.summary}</p>
+                      {signal.signalKey || value ? (
+                        <p className="mt-1 break-words font-mono text-[11px] text-muted-foreground">
+                          {[signal.signalKey, value].filter(Boolean).join(" · ")}
+                        </p>
+                      ) : null}
+                    </div>
+                    <Badge variant="secondary">{titleCase(signal.type)}</Badge>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between gap-3">
+                    <p className="text-[11px] text-muted-foreground">
+                      {signalSource(signal.provenance)} · {relativeDate(signal.collectedAt)}
+                    </p>
+                    {sourceSession ? (
+                      <Button
+                        variant="link"
+                        size="xs"
+                        className="h-auto shrink-0 p-0"
+                        onClick={() => openSession(sourceSession.id)}
+                      >
+                        Open source session
+                      </Button>
+                    ) : null}
+                  </div>
+                </li>
+              );
+            })}
+          </ol>
+        ) : (
+          <p className="mt-2 text-sm text-muted-foreground">No customer answers are linked yet.</p>
+        )}
+      </section>
+
+      <Separator className="my-5" />
+      <section aria-labelledby="customer-data-use-heading">
+        <h3 id="customer-data-use-heading" className="text-xs font-medium">
+          Data use
+        </h3>
+        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+          Recorded from the customer&apos;s choice in their agent. Epode does not ask them again
+          here.
+        </p>
+        {dataUse.length ? (
+          <ol className="mt-3 divide-y">
+            {dataUse.map((grant) => (
               <li
-                key={`${grant.scope}-${grant.enrichmentPurpose ?? "legacy"}-${grant.revision}`}
+                key={`${grant.enrichmentPurpose ?? grant.scope}-${grant.state}-${grant.revision}`}
                 className="py-2"
               >
                 <div className="flex items-center justify-between gap-3">
@@ -497,7 +652,10 @@ function CustomerDetailContent({
                   <ConsentBadge state={grant.state} />
                 </div>
                 <p className="mt-1 text-[11px] text-muted-foreground">
-                  {titleCase(grant.basis)} · decided {formatDate(grant.decidedAt)}
+                  {grant.scopes.map(dataUseScope).join(" · ")}
+                </p>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  {titleCase(grant.basis)} · recorded {formatDate(grant.decidedAt)}
                   {grant.expiresAt ? ` · expires ${formatDate(grant.expiresAt)}` : ""}
                   {grant.revokedAt ? ` · revoked ${formatDate(grant.revokedAt)}` : ""}
                 </p>
@@ -505,23 +663,26 @@ function CustomerDetailContent({
             ))}
           </ol>
         ) : (
-          <p className="mt-2 text-sm text-muted-foreground">
-            No scoped permission decision is recorded.
-          </p>
+          <p className="mt-2 text-sm text-muted-foreground">No data-use choice is recorded.</p>
         )}
-        {detail.consentHistory.length ? (
+        {dataUseHistory.length ? (
           <details className="mt-3 border-t pt-3">
             <summary className="cursor-pointer text-xs font-medium">
-              Permission history ({detail.consentHistory.length})
+              Data-use history ({dataUseHistory.length})
             </summary>
             <ol className="mt-2 divide-y">
-              {detail.consentHistory.map((event) => (
-                <li key={event.id} className="py-2 text-[11px] text-muted-foreground">
+              {dataUseHistory.map((event) => (
+                <li
+                  key={`${event.enrichmentPurpose ?? event.scope}-${event.state}-${event.revision}-${event.decidedAt}`}
+                  className="py-2 text-[11px] text-muted-foreground"
+                >
                   <span className="font-medium text-foreground">
                     {titleCase(event.enrichmentPurpose ?? event.scope)}
                   </span>
                   {` · ${titleCase(event.priorState ?? "not set")} → ${titleCase(event.state)}`}
                   {` · ${titleCase(event.source)} · revision ${event.revision}`}
+                  <br />
+                  {event.scopes.map(dataUseScope).join(" · ")}
                   <br />
                   {formatDate(event.decidedAt)}
                 </li>
