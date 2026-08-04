@@ -118,6 +118,9 @@ test("catch-up workflow binds real recovery evidence to canary-first production 
   assert.match(recoverySource, /pg_dump "\$PRODUCTION_DATABASE_URL"/);
   assert.match(recoverySource, /docker exec -i "\$RESTORE_CONTAINER_ID"/);
   assert.match(recoverySource, /pg_restore --exit-on-error/);
+  assert.match(recoverySource, /restored_has_code_hints/);
+  assert.match(recoverySource, /to_regclass\('public\.report_code_hints'\) IS NOT NULL/);
+  assert.doesNotMatch(recoverySource, /1\/0/);
   assert.doesNotMatch(recoverySource, /apt-get install --yes postgresql-client/);
   assert.match(source, /needs: \[plan, recovery_test\]/);
   assert.match(source, /needs: \[plan, recovery_test, canary_schema\]/);
