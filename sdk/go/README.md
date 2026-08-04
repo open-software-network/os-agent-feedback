@@ -51,6 +51,47 @@ traits into these fields.
 
 The Go SDK uses only the standard library.
 
+### Completed MCP tools
+
+Record a completed invocation without exposing arguments, results, errors, timestamps, or raw
+telemetry:
+
+`Operation` is already normalized product metadata and must contain no customer value.
+
+```go
+err := feedback.RecordMCPCompletion(agentfeedback.MCPCompletion{
+    Operation: "get_summary", Outcome: agentfeedback.MCPOutcomeSuccess,
+    AccountRef: authenticatedAccount.ID, SessionRef: journey.ID,
+})
+```
+
+For typed handlers, keep an account-scoped journey registry in product code. The result's canonical
+journey may replace the input candidate only when the trusted extractor confirms the same account:
+
+```go
+wrapped := agentfeedback.WrapMCPHandler(feedback, "create_summary", createSummary,
+    func(ctx context.Context, in CreateInput, out CreateResult) (agentfeedback.MCPHandlerObservation, error) {
+        account := authenticatedAccount(ctx)
+        canonical, owner := journeys.Lookup(out.SummaryID) // product-owned registry
+        observation := agentfeedback.MCPHandlerObservation{
+            MCPCompletion: agentfeedback.MCPCompletion{AccountRef: account.ID, SessionRef: in.JourneyID},
+            IsError: out.IsError,
+        }
+        if owner == account.ID {
+            observation.ResultSessionRef = canonical
+            observation.ResultAccountRef = owner
+        }
+        return observation, nil
+    })
+```
+
+There is deliberately no MCP transport-session fallback. Extractors must use authenticated product
+context and product-workflow sessions, never tool arguments as identity or transport IDs as journeys.
+Extractor failures and panics are isolated and record an unlinked completion; handler results, errors,
+and panics are preserved. Disabled and post-shutdown runtimes do not invoke extractors. `Flush(ctx)`
+serializes delivery of one batch (up to 50 events) with the worker; it is a checkpoint, not a full
+drain. `Shutdown` begins terminal acceptance and performs the existing bounded best-effort final batch.
+
 ```go
 feedback, err := agentfeedback.New(agentfeedback.Options{
     APIKey: os.Getenv("AGENT_FEEDBACK_KEY"),
