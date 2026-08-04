@@ -23,11 +23,17 @@ const customer = epode({
 customer.instrument(server);
 ```
 
-Epode registers `record_customer_context_consent` and `share_customer_context` on the company's own MCP server,
-then decorates selected business-tool results with the exact allowed action. The customer needs no Epode account,
-plugin, or direct connection. Context retrieval, personalization decisions, and outcomes remain server-to-server.
-Failed (`isError`), canceled, incomplete, and `input_required` results are never decorated or counted as a
-completed enrichment opportunity.
+Epode registers `share_customer_context` on the company's own MCP server and decorates selected business-tool
+results with the exact allowed action. When the customer has not decided yet, that one tool call uses MCP form
+elicitation to show **Always allow**, **This session only**, and **Don't allow** inside the customer's agent. It
+records the choice and, when allowed, shares the bounded answer in the same tool call. Do not ask the customer a
+second time in chat. `record_customer_context_consent` remains registered only as a compatibility fallback for
+clients that do not support form elicitation.
+
+The customer needs no Epode account, plugin, or direct connection. Context retrieval, personalization decisions,
+and outcomes remain server-to-server. Failed (`isError`), canceled, incomplete, and `input_required` results are
+never decorated or counted as a completed enrichment opportunity. A session-only choice forces every submitted
+item to remain interaction-scoped even if the model marked it durable.
 
 The enrichment request itself carries `surface: "mcp"`, so the initial successful product-tool interaction is
 confirmed immediately. Do not add separate Epode telemetry instrumentation around the same MCP server.

@@ -28,7 +28,7 @@ describe("CustomersView", () => {
     expect(screen.queryByText("Unresolved interactions")).not.toBeInTheDocument();
     expect(screen.getByText(/Customers stay linked to their sessions/i)).toBeVisible();
     expect(screen.getByRole("columnheader", { name: "Sessions" })).toBeVisible();
-    expect(screen.queryByText(/context|evidence|signals/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Data use" })).toBeVisible();
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining("/api/dashboard/customers?productId="),
       expect.objectContaining({ headers: expect.any(Headers) }),
@@ -53,12 +53,19 @@ describe("CustomersView", () => {
       selectedCustomerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     });
     expect(await screen.findByRole("heading", { name: "Acme workspace" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "Permission" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "What we know" })).toBeVisible();
+    expect(screen.getByText("Find the newest indexed policy")).toBeVisible();
+    expect(screen.getByText(/search\.goal · newest_policy/)).toBeVisible();
+    expect(screen.getByText(/^Customer said ·/)).toBeVisible();
+    expect(screen.getAllByRole("button", { name: "Open source session" }).length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.getByRole("heading", { name: "Data use" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "Sessions" })).toBeVisible();
     expect(screen.getAllByText("Expired").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Targeted Advertising")[0]).toBeVisible();
-    expect(screen.getByText("Permission history (2)")).toBeVisible();
-    expect(screen.queryByText(/context|evidence|signals/i)).not.toBeInTheDocument();
+    expect(screen.getByText("Data-use history (2)")).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "Permission" })).not.toBeInTheDocument();
   });
 
   it("links a customer to the exact session", async () => {
@@ -72,6 +79,44 @@ describe("CustomersView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open session" }));
 
     expect(openSession).toHaveBeenCalled();
+  });
+
+  it("shows one data-use choice for the enrichment scopes recorded together", async () => {
+    const detail = customerDetailFixture();
+    const decidedAt = "2026-07-30T12:05:00Z";
+    detail.consent = ["share_preferences", "personalize", "remember_preferences"].map((scope) => ({
+      scope,
+      enrichmentPurpose: "product_personalization" as const,
+      state: "approved",
+      basis: "user_consent",
+      decidedAt,
+      expiresAt: null,
+      revokedAt: null,
+      revision: 1,
+    }));
+    detail.consentHistory = detail.consent.map((grant, index) => ({
+      id: `consent-event-${index}`,
+      scope: grant.scope,
+      enrichmentPurpose: grant.enrichmentPurpose,
+      priorState: null,
+      state: grant.state,
+      basis: grant.basis,
+      revision: grant.revision,
+      source: "enrichment",
+      decidedAt,
+      createdAt: decidedAt,
+    }));
+
+    renderCustomers(mockCustomers(detail), {
+      selectedCustomerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+
+    await screen.findByRole("heading", { name: "What we know" });
+    expect(screen.getAllByText("Product Personalization")).toHaveLength(2);
+    expect(
+      screen.getByText("Use shared context · Personalize the experience · Remember across visits"),
+    ).toBeVisible();
+    expect(screen.getByText("Data-use history (1)")).toBeVisible();
   });
 });
 
@@ -95,11 +140,11 @@ function renderCustomers(
   );
 }
 
-function mockCustomers() {
+function mockCustomers(detail = customerDetailFixture()) {
   return vi.fn().mockImplementation((input: RequestInfo | URL) => {
     const path = String(input);
     if (path.startsWith("/api/dashboard/customers/")) {
-      return Promise.resolve(json(customerDetailFixture()));
+      return Promise.resolve(json(detail));
     }
     if (path.startsWith("/api/dashboard/customers?")) {
       return Promise.resolve(json(customersPageFixture()));

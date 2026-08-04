@@ -9316,6 +9316,17 @@ async fn verified_enrichment_request(
     Ok((request, key_hash))
 }
 
+pub(crate) async fn inspect_enrichment_request(
+    pool: &PgPool,
+    public_base_url: &str,
+    capability: &str,
+) -> Result<EnrichmentRequestResponse, ApiError> {
+    let mut tx = pool.begin().await?;
+    let (request, _) = verified_enrichment_request(&mut tx, capability).await?;
+    tx.commit().await?;
+    Ok(enrichment_response(public_base_url, &request, capability))
+}
+
 fn parsed_enrichment_key_id(capability: &str) -> Result<Uuid, ApiError> {
     parse_enrichment_capability(capability).map(|parsed| parsed.key_id)
 }
@@ -9414,6 +9425,7 @@ async fn apply_enrichment_consent(
 
 pub(crate) async fn decide_enrichment_consent(
     pool: &PgPool,
+    identity_hmac_secret: &[u8],
     public_base_url: &str,
     capability: &str,
     input: EnrichmentConsentDecisionInput,
@@ -9425,9 +9437,6 @@ pub(crate) async fn decide_enrichment_consent(
     }
     let mut tx = pool.begin().await?;
     let (mut request, _) = verified_enrichment_request(&mut tx, capability).await?;
-    let decided_at = Utc::now();
-    let state = input.decision;
-    let changed = apply_enrichment_consent(&mut tx, &request, &state, decided_at).await?;
     let auth = ProductAuth {
         workspace: sqlx::query_as("SELECT * FROM workspaces WHERE id = $1")
             .bind(request.workspace_id)
@@ -9442,6 +9451,61 @@ pub(crate) async fn decide_enrichment_consent(
         .await?,
         api_key_id: parsed_enrichment_key_id(capability)?,
     };
+    if let Some(remember) = input.remember
+        && remember != request.remember
+    {
+        if request.state != "consent_required" {
+            return Err(ApiError::conflict(
+                "Retention cannot change after customer context is approved",
+            ));
+        }
+        let subject = enrichment_subject(
+            identity_hmac_secret,
+            &auth,
+            request.customer_id,
+            request.interaction_id,
+            &request.purpose,
+            remember,
+        )?;
+        let (state, revision, subject) = current_enrichment_consent(
+            &mut tx,
+            &auth,
+            &subject,
+            request.customer_id,
+            &request.purpose,
+            remember,
+        )
+        .await?;
+        let product_name = sqlx::query_scalar::<_, String>(
+            "SELECT name FROM products WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(request.product_id)
+        .bind(request.workspace_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        request.remember = remember;
+        request.consent_subject = subject;
+        request.expected_consent_revision = revision;
+        request.state = state;
+        request.question = enrichment_question(&product_name, &request.purpose, remember);
+        sqlx::query(
+            r"UPDATE enrichment_requests
+              SET remember = $2, consent_subject = $3, expected_consent_revision = $4,
+                  state = $5, question = $6, updated_at = NOW()
+              WHERE id = $1",
+        )
+        .bind(request.id)
+        .bind(request.remember)
+        .bind(&request.consent_subject)
+        .bind(request.expected_consent_revision)
+        .bind(&request.state)
+        .bind(&request.question)
+        .execute(&mut *tx)
+        .await?;
+    }
+    let decided_at = Utc::now();
+    let state = input.decision;
+    let changed = apply_enrichment_consent(&mut tx, &request, &state, decided_at).await?;
     let (resolved_state, _, _) = current_enrichment_consent(
         &mut tx,
         &auth,
@@ -18146,10 +18210,12 @@ mod product_tests {
                 .ok_or_else(|| anyhow::anyhow!("missing enrichment capability"))?;
             let consent = decide_enrichment_consent(
                 &pool,
+                TEST_IDENTITY_HMAC_SECRET,
                 "https://app.epode.ai",
                 capability,
                 EnrichmentConsentDecisionInput {
                     decision: "approved".into(),
+                    remember: None,
                 },
             )
             .await
@@ -18506,10 +18572,12 @@ mod product_tests {
                 .ok_or_else(|| anyhow::anyhow!("missing manage capability"))?;
             let revoked = decide_enrichment_consent(
                 &pool,
+                TEST_IDENTITY_HMAC_SECRET,
                 "https://app.epode.ai",
                 revoke_capability,
                 EnrichmentConsentDecisionInput {
                     decision: "declined".into(),
+                    remember: None,
                 },
             )
             .await
@@ -18552,6 +18620,73 @@ mod product_tests {
             .map_err(test_error)?;
             anyhow::ensure!(after_revoke.items.is_empty());
 
+            let session_choice = create_enrichment_request(
+                &pool,
+                &auth_a,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                EnrichmentRequestInput {
+                    interaction_id: Uuid::new_v4(),
+                    operation: "/recommend".into(),
+                    surface: "mcp".into(),
+                    status_code: Some(200),
+                    duration_ms: Some(10),
+                    session_ref: None,
+                    runtime_hint: Some("claude-desktop".into()),
+                    purpose: "product_personalization".into(),
+                    remember: true,
+                    customer_ref: None,
+                    account_ref: None,
+                    user_ref: Some("user_session_choice".into()),
+                    anonymous_ref: None,
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            let session_choice_capability = session_choice
+                .consent
+                .as_ref()
+                .and_then(|action| action.authorization.strip_prefix("Bearer "))
+                .ok_or_else(|| anyhow::anyhow!("missing session-choice capability"))?;
+            let session_choice_consent = decide_enrichment_consent(
+                &pool,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                session_choice_capability,
+                EnrichmentConsentDecisionInput {
+                    decision: "approved".into(),
+                    remember: Some(false),
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(session_choice_consent.state == "answer_ready");
+            anyhow::ensure!(
+                session_choice_consent
+                    .answer_instruction
+                    .as_deref()
+                    .is_some_and(|instruction| instruction.contains("interaction-scoped"))
+            );
+            let session_choice_row = sqlx::query_as::<_, (bool, String, String)>(
+                "SELECT remember, consent_subject, question FROM enrichment_requests WHERE id = $1",
+            )
+            .bind(session_choice.request_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(!session_choice_row.0);
+            anyhow::ensure!(session_choice_row.1.starts_with("afint1_"));
+            anyhow::ensure!(session_choice_row.2.contains("for this interaction only"));
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM consent_grants WHERE environment_id = $1 AND subject = $2",
+                )
+                .bind(auth_a.environment.id)
+                .bind(&session_choice_row.1)
+                .fetch_one(&pool)
+                .await?
+                    == 2
+            );
+
             let transient_known_interaction = Uuid::new_v4();
             let transient_known = create_enrichment_request(
                 &pool,
@@ -18591,10 +18726,12 @@ mod product_tests {
                 .ok_or_else(|| anyhow::anyhow!("missing transient capability"))?;
             decide_enrichment_consent(
                 &pool,
+                TEST_IDENTITY_HMAC_SECRET,
                 "https://app.epode.ai",
                 transient_capability,
                 EnrichmentConsentDecisionInput {
                     decision: "approved".into(),
+                    remember: None,
                 },
             )
             .await
@@ -18820,10 +18957,12 @@ mod product_tests {
                 .ok_or_else(|| anyhow::anyhow!("missing anonymous merge capability"))?;
             decide_enrichment_consent(
                 &pool,
+                TEST_IDENTITY_HMAC_SECRET,
                 "https://app.epode.ai",
                 merge_anonymous_capability,
                 EnrichmentConsentDecisionInput {
                     decision: "approved".into(),
+                    remember: None,
                 },
             )
             .await
@@ -18902,10 +19041,12 @@ mod product_tests {
                 .ok_or_else(|| anyhow::anyhow!("missing known merge capability"))?;
             decide_enrichment_consent(
                 &pool,
+                TEST_IDENTITY_HMAC_SECRET,
                 "https://app.epode.ai",
                 merge_known_capability,
                 EnrichmentConsentDecisionInput {
                     decision: "declined".into(),
+                    remember: None,
                 },
             )
             .await
@@ -18997,10 +19138,12 @@ mod product_tests {
             );
             let stale_replay = decide_enrichment_consent(
                 &pool,
+                TEST_IDENTITY_HMAC_SECRET,
                 "https://app.epode.ai",
                 merge_anonymous_capability,
                 EnrichmentConsentDecisionInput {
                     decision: "approved".into(),
+                    remember: None,
                 },
             )
             .await
@@ -19137,10 +19280,12 @@ mod product_tests {
                 .ok_or_else(|| anyhow::anyhow!("missing ephemeral capability"))?;
             decide_enrichment_consent(
                 &pool,
+                TEST_IDENTITY_HMAC_SECRET,
                 "https://app.epode.ai",
                 ephemeral_capability,
                 EnrichmentConsentDecisionInput {
                     decision: "approved".into(),
+                    remember: None,
                 },
             )
             .await

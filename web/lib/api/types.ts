@@ -710,6 +710,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/enrichment/requests/inspect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["enrichment_request_inspection_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/enrichment/consent/decisions": {
         parameters: {
             query?: never;
@@ -871,8 +887,8 @@ export interface components {
             line_start?: number | null;
             match_reason: string;
             /**
-             * @description Whether the hint was verified against `computed_at_sha`. Hints stored
-             *     before this field existed are read as unverified.
+             * @description Always true: stored hints are verified against `computed_at_sha`.
+             *     Retained for chunk-3/publication and generated-client compatibility.
              */
             verified: boolean;
         };
@@ -1362,6 +1378,7 @@ export interface components {
         };
         EnrichmentConsentDecisionInput: {
             decision: string;
+            remember?: boolean | null;
         };
         EnrichmentConsentDecisionResponse: {
             answerInstruction: string | null;
@@ -6052,6 +6069,44 @@ export interface operations {
                 };
             };
             /** @description Enrichment request could not be created */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    enrichment_request_inspection_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current enrichment request stage and safe user-facing question */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrichmentRequestResponse"];
+                };
+            };
+            /** @description Invalid or expired enrichment capability */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Enrichment request could not be inspected */
             500: {
                 headers: {
                     [name: string]: unknown;

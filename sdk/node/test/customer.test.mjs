@@ -64,10 +64,11 @@ async function serve(app) {
   };
 }
 
-function backend() {
+function backend({ enforceConsent = false } = {}) {
   const calls = [];
   let currentInteractionId;
   const answeredInteractions = new Set();
+  const approvedInteractions = new Set();
   const fetch = async (url, init) => {
     const path = new URL(String(url)).pathname;
     const body = JSON.parse(String(init.body || "{}"));
@@ -99,7 +100,39 @@ function backend() {
         submit: null,
       });
     }
+    if (path === "/api/v2/enrichment/requests/inspect") {
+      const approved = approvedInteractions.has(currentInteractionId);
+      return json({
+        requestId: ids.request,
+        interactionId: currentInteractionId,
+        state: approved ? "answer_ready" : "consent_required",
+        purpose: "product_personalization",
+        identityLevel: "verified",
+        stageInstruction: approved ? answerStageInstruction : consentStageInstruction,
+        question: approved ? null : "May Example Store remember these shopping preferences?",
+        answerInstruction: approved ? answerInstruction : null,
+        expiresAt: "2026-08-02T15:00:00Z",
+        consent: {
+          url: "https://app.epode.ai/api/v2/enrichment/consent/decisions",
+          method: "POST",
+          authorization: "Bearer aqr1_request-1",
+          contentType: "application/json",
+          bodySchema: consentBodySchema,
+        },
+        submit: approved
+          ? {
+              url: "https://app.epode.ai/api/v2/enrichment/answers",
+              method: "POST",
+              authorization: "Bearer aqr1_answer-1",
+              contentType: "application/json",
+              bodySchema: answerBodySchema,
+            }
+          : null,
+      });
+    }
     if (path === "/api/v2/enrichment/consent/decisions") {
+      if (body.decision === "approved") approvedInteractions.add(currentInteractionId);
+      else approvedInteractions.delete(currentInteractionId);
       return json({
         requestId: ids.request,
         state: body.decision === "approved" ? "answer_ready" : "declined",
@@ -120,6 +153,9 @@ function backend() {
       });
     }
     if (path === "/api/v2/enrichment/answers") {
+      if (enforceConsent && !approvedInteractions.has(currentInteractionId)) {
+        return json({ error: "customer_context_not_approved" }, 403);
+      }
       answeredInteractions.add(currentInteractionId);
       return json({
         accepted: true,
@@ -731,9 +767,11 @@ test("company-owned MCP registers context tools and decorates selected results",
   assert.equal(result.structuredContent.hotels, 3);
   assert.equal(result.structuredContent._epode.customerContext.state, "consent_required");
   assert.equal(
-    result.structuredContent._epode.customerContext.consentTool,
-    "record_customer_context_consent",
+    result.structuredContent._epode.customerContext.answerTool,
+    "share_customer_context",
   );
+  assert.equal(result.structuredContent._epode.customerContext.permissionMode, "mcp_elicitation");
+  assert.match(result.content.at(-1).text, /do not ask the user separately in chat/i);
   assert.equal(service.calls[0].body.surface, "mcp");
   assert.equal(service.calls[0].body.statusCode, 200);
   assert.ok(service.calls[0].body.durationMs >= 0);
@@ -749,4 +787,77 @@ test("company-owned MCP registers context tools and decorates selected results",
     assert.equal(skipped.structuredContent, undefined);
   }
   assert.equal(service.calls.length, callsAfterSuccess);
+});
+
+test("company-owned MCP elicits and records one session-only choice inside sharing", async () => {
+  const service = backend({ enforceConsent: true });
+  const tools = new Map();
+  const server = {
+    registerTool(name, configuration, handler) {
+      tools.set(name, { configuration, handler });
+    },
+  };
+  const epode = epodeMcp({
+    apiKey: key,
+    endpoint: "https://epode.test",
+    fetch: service.fetch,
+    includeTools: ["search_stays"],
+    identify: () => ({ userRef: "traveler_7" }),
+  });
+  epode.instrument(server);
+  server.registerTool("search_stays", { inputSchema: {} }, async () => ({
+    content: [{ type: "text", text: "Three hotels found." }],
+    structuredContent: { hotels: 3 },
+  }));
+
+  const search = await tools.get("search_stays").handler({}, {});
+  const requestHandle = search.structuredContent._epode.customerContext.requestHandle;
+  const answer = {
+    requestHandle,
+    status: "answered",
+    items: [
+      {
+        key: "travel.style",
+        type: "preference",
+        value: "outdoor_travel",
+        summary: "Customer prefers outdoor travel.",
+        provenance: "agent_reports_user_statement",
+        confidence: 1,
+        remember: true,
+      },
+    ],
+  };
+  const firstRound = await tools.get("share_customer_context").handler(answer, { mcpReq: {} });
+  assert.equal(firstRound.resultType, "input_required");
+  const elicitation = firstRound.inputRequests.customer_context_permission.params;
+  const shared = await tools.get("share_customer_context").handler(answer, {
+    mcpReq: {
+      inputResponses: {
+        customer_context_permission: {
+          action: "accept",
+          content: { choice: "this_session_only" },
+        },
+      },
+    },
+  });
+
+  assert.equal(shared.isError, false);
+  assert.equal(shared.structuredContent.accepted, true);
+  assert.match(elicitation.message, /Example Store/);
+  assert.deepEqual(
+    elicitation.requestedSchema.properties.choice.oneOf.map((option) => option.title),
+    ["Always allow", "This session only", "Don't allow"],
+  );
+  assert.deepEqual(
+    service.calls.map((call) => call.path),
+    [
+      "/api/v2/enrichment/requests",
+      "/api/v2/enrichment/requests/inspect",
+      "/api/v2/enrichment/requests/inspect",
+      "/api/v2/enrichment/consent/decisions",
+      "/api/v2/enrichment/answers",
+    ],
+  );
+  assert.deepEqual(service.calls[3].body, { decision: "approved", remember: false });
+  assert.equal(service.calls[4].body.items[0].remember, false);
 });

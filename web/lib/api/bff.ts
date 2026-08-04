@@ -85,6 +85,7 @@ function machineAuthorization(headers: Headers, upstreamPath: string): string | 
     (upstreamPath === "/api/v2/customer-context" && token.startsWith("af_live_")) ||
     (upstreamPath === "/api/v2/personalization/decisions" && token.startsWith("af_live_")) ||
     (upstreamPath === "/api/v2/personalization/outcomes" && token.startsWith("af_live_")) ||
+    (upstreamPath === "/api/v2/enrichment/requests/inspect" && token.startsWith("aqr1_")) ||
     (upstreamPath === "/api/v2/enrichment/consent/decisions" && token.startsWith("aqr1_")) ||
     (upstreamPath === "/api/v2/enrichment/answers" && token.startsWith("aqr1_")) ||
     (upstreamPath === "/api/v2/capabilities/introspect" && token.startsWith("afr2_")) ||

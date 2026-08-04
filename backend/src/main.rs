@@ -128,9 +128,9 @@ use crate::{
         feedback_consent_state, feedback_list_interactions, feedback_list_reports,
         get_group_github_issue, get_or_create_workspace, get_product_github_repo,
         github_installation_workspace, group_issue_context, group_issue_sync_context,
-        ingest_telemetry_batch, inspect_feedback_capability, list_github_installations,
-        list_product_groups, mark_group_issue_filing_for_reconciliation, merge_report_groups,
-        purge_expired_product_data, read_product_auth, record_code_match_call,
+        ingest_telemetry_batch, inspect_enrichment_request, inspect_feedback_capability,
+        list_github_installations, list_product_groups, mark_group_issue_filing_for_reconciliation,
+        merge_report_groups, purge_expired_product_data, read_product_auth, record_code_match_call,
         record_feedback_consent_decision, record_personalization_decision,
         record_personalization_outcome, regroup_report_groups, release_code_match_claim,
         release_code_match_for_verification_retry, release_code_match_job,
@@ -306,6 +306,7 @@ fn build_app_router(dev_auth_enabled: bool) -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(consent_decision_handler))
         .routes(routes!(product_feedback_handler))
         .routes(routes!(enrichment_request_handler))
+        .routes(routes!(enrichment_request_inspection_handler))
         .routes(routes!(enrichment_consent_decision_handler))
         .routes(routes!(enrichment_answer_handler))
         .routes(routes!(customer_context_handler))
@@ -5783,6 +5784,34 @@ async fn enrichment_request_handler(
 
 #[utoipa::path(
     post,
+    path = "/api/v2/enrichment/requests/inspect",
+    tag = "enrichment",
+    responses(
+        (status = 200, description = "Current enrichment request stage and safe user-facing question", body = EnrichmentRequestResponse),
+        (status = 401, description = "Invalid or expired enrichment capability", body = ApiErrorEnvelope),
+        (status = 500, description = "Enrichment request could not be inspected", body = ApiErrorEnvelope)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn enrichment_request_inspection_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let capability = bearer_token(&headers)
+        .filter(|token| token.starts_with("aqr1_"))
+        .ok_or_else(ApiError::unauthorized)?;
+    let result =
+        inspect_enrichment_request(&state.pool, &state.public_base_url, &capability).await?;
+    let mut response = Json(result).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
+}
+
+#[utoipa::path(
+    post,
     path = "/api/v2/enrichment/consent/decisions",
     tag = "enrichment",
     request_body = EnrichmentConsentDecisionInput,
@@ -5804,6 +5833,7 @@ async fn enrichment_consent_decision_handler(
         .ok_or_else(ApiError::unauthorized)?;
     let result = decide_enrichment_consent(
         &state.pool,
+        &state.identity_hmac_secret,
         &state.public_base_url,
         &capability,
         safe_input::<EnrichmentConsentDecisionInput>(value)?,

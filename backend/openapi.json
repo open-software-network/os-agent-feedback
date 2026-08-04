@@ -5974,6 +5974,51 @@
         ]
       }
     },
+    "/api/v2/enrichment/requests/inspect": {
+      "post": {
+        "tags": [
+          "enrichment"
+        ],
+        "operationId": "enrichment_request_inspection_handler",
+        "responses": {
+          "200": {
+            "description": "Current enrichment request stage and safe user-facing question",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrichmentRequestResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or expired enrichment capability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Enrichment request could not be inspected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/api/v2/enrichment/consent/decisions": {
       "post": {
         "tags": [
@@ -6784,7 +6829,7 @@
           },
           "verified": {
             "type": "boolean",
-            "description": "Whether the hint was verified against `computed_at_sha`. Hints stored\nbefore this field existed are read as unverified."
+            "description": "Always true: stored hints are verified against `computed_at_sha`.\nRetained for chunk-3/publication and generated-client compatibility."
           }
         }
       },
@@ -8625,6 +8670,12 @@
         "properties": {
           "decision": {
             "type": "string"
+          },
+          "remember": {
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "additionalProperties": false
