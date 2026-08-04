@@ -181,6 +181,15 @@ function verifiedField(context: McpInstrumentationContext, key: string) {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+// Use durable product storage in production. Typed fields carry candidates;
+// this account-scoped lookup supplies the ownership proof.
+const journeyRegistry = productJourneyRegistry();
+function resolveJourney(args, context, result) {
+  const accountId = verifiedField(context, "accountId");
+  const candidate = result?.structuredContent?.journeyId ?? args?.journeyId;
+  return journeyRegistry.resolve(accountId, candidate);
+}
+
 const feedback = createMcpInstrumentation({
   apiKey: process.env.AGENT_FEEDBACK_KEY,
   includeTools: ["search", "fetch_result"],
@@ -189,7 +198,7 @@ const feedback = createMcpInstrumentation({
   userRef: (_args, context) => verifiedField(context, "userId"),
   anonymousRef: (_args, context) => verifiedField(context, "visitorId"),
   customerRef: (_args, context) => verifiedField(context, "accountId"), // durable Ask once compatibility
-  sessionRef: (_args, context) => verifiedField(context, "journeyId"), // server-issued journey only
+  sessionRef: (args, context, result) => resolveJourney(args, context, result),
 });
 
 const feedbackInstructions =
@@ -232,6 +241,14 @@ product-owned first-party pre-login ID. When both are present, `customerRef` mus
 and exists only for durable Ask once consent compatibility. Never populate these values from a request header,
 query parameter, name, email, prompt, tool argument, or unverified JWT payload.
 
+For a journey-creation tool, create a canonical ID in the authenticated account's registry before returning it.
+On follow-up calls, resolve the argument candidate against that same account-owned registry. Repeated follow-ups,
+cache hits, and deduplicated calls reuse the canonical product journey; a separate create gets a different ID.
+Every completion nevertheless gets a fresh telemetry interaction UUID. A failed product result may remain linked
+when the lookup proves ownership. Missing, malformed, unknown, and cross-account candidates return `undefined`
+and remain unlinked. Typed argument and result schemas constrain candidates but do not prove ownership alone.
+Use durable shared product storage in production; an in-memory map is suitable only for an instructional example.
+
 <Warning>
 Do not create or depend on `Mcp-Session-Id` for modern requests. MCP 2026-07-28 is stateless. Use a
 server-issued application journey only after product state has established it.
@@ -248,7 +265,7 @@ const feedback = createMcpInstrumentation({
   feedbackTools: ["browser_close"],
   accountRef: (_args, context) => verifiedField(context, "accountId"),
   customerRef: (_args, context) => verifiedField(context, "accountId"),
-  sessionRef: (_args, context) => verifiedField(context, "journeyId"),
+  sessionRef: (args, context, result) => resolveJourney(args, context, result),
 });
 ```
 
@@ -257,8 +274,8 @@ const feedback = createMcpInstrumentation({
 - `feedbackTools` selects outcome boundaries that receive feedback instructions. An empty array records
   interactions without asking for feedback.
 - `shouldRequestFeedback` can inspect a completed result when the boundary is dynamic.
-- `sessionRef` must come from server/product state that already proves continuity. Tool arguments, caller
-  headers, and model-proposed IDs are not evidence of a shared journey.
+- `sessionRef` must come from server/product state that proves continuity. Typed tool arguments and result fields
+  may carry candidates, but caller headers and model-proposed IDs are not ownership evidence by themselves.
 - `accountRef`/`userRef` come from verified product authentication; `anonymousRef` comes from a product-owned
   first-party ID. `customerRef` is only the durable Ask once compatibility subject and, when paired with richer
   identity, must exactly equal `accountRef`. Without it, Ask once safely falls back to per-interaction permission.

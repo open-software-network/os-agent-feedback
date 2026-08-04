@@ -4,23 +4,26 @@ import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
+import { createJourneyRegistry, resolveJourney, verifiedAccountId } from "./journey-registry.js";
+
 const apiKey = process.env.AGENT_FEEDBACK_KEY;
 if (!apiKey) throw new Error("AGENT_FEEDBACK_KEY is required");
 const feedbackMode = process.env.AGENT_FEEDBACK_MODE || "never_ask";
-const experimentRefsEnabled = process.env.EPODE_EXAMPLE_ENABLE_EXPERIMENT_REFS === "1";
 if (!["never_ask", "ask_once", "ask_always", "off"].includes(feedbackMode)) {
   throw new Error("AGENT_FEEDBACK_MODE must be never_ask, ask_once, ask_always, or off");
 }
 
 const app = createMcpExpressApp({ host: "0.0.0.0", allowedOrigins: [] });
+const journeys = createJourneyRegistry();
 const feedback = createMcpInstrumentation({
   apiKey,
   endpoint: process.env.AGENT_FEEDBACK_URL,
   feedbackMode,
-  // A real product must derive customerRef from verified MCP authentication.
-  // This public anonymous example deliberately supplies none, so Ask once safely
-  // falls back to per-use permission instead of trusting an agent-controlled value.
-  sessionRef: experimentRefsEnabled ? (arguments_) => arguments_?.experimentRef : undefined,
+  accountRef: (_arguments, context) => verifiedAccountId(context),
+  customerRef: (_arguments, context) => verifiedAccountId(context),
+  // Arguments and results contain candidates, not proof. Only the account-owned
+  // registry can return the canonical product journey.
+  sessionRef: (arguments_, context, result) => resolveJourney(journeys, arguments_, context, result),
 });
 
 function createProductServer() {
@@ -44,14 +47,20 @@ function createProductServer() {
       description: "Return the example company's live checkout availability.",
       inputSchema: z.object({
         scenario: z.enum(["live", "simulated_failure"]).default("live"),
-        experimentRef: z
+        operation: z.enum(["create", "follow_up"]).default("create"),
+        journeyId: z.string().max(80).optional().describe("Candidate returned by an earlier call."),
+        idempotencyKey: z
           .string()
           .max(80)
           .optional()
-          .describe("Test-only correlation; ignored unless the example experiment flag is enabled."),
+          .describe("Product create/dedup key; never used directly as Session proof."),
       }),
     },
-    async ({ scenario }) => {
+    async ({ scenario, operation, journeyId, idempotencyKey }, context) => {
+      const accountId = verifiedAccountId(context);
+      const canonicalJourneyId = operation === "create"
+        ? journeys.create(accountId, idempotencyKey)
+        : journeys.resolve(accountId, journeyId);
       const available = scenario !== "simulated_failure";
       const output = {
         service: "checkout",
@@ -60,6 +69,7 @@ function createProductServer() {
         scope: "regional",
         checkedAt: new Date().toISOString(),
         status: available ? "operational" : "temporarily_unavailable",
+        ...(canonicalJourneyId ? { journeyId: canonicalJourneyId } : {}),
       };
       return {
         content: [{ type: "text", text: JSON.stringify(output) }],
@@ -86,6 +96,16 @@ const handleMcp = toNodeHandler(mcp);
 app.get("/health", (_request, response) => response.json({ status: "ok" }));
 app.get("/api/health", (_request, response) => response.json({ status: "ok" }));
 app.get("/", (_request, response) => response.type("text/plain").send("Connect an MCP client to POST /mcp."));
+app.use("/mcp", (request, response, next) => {
+  const accounts = {
+    "Bearer demo-account-a-token": { accountId: "acct_demo_a", userId: "user_demo_a" },
+    "Bearer demo-account-b-token": { accountId: "acct_demo_b", userId: "user_demo_b" },
+  };
+  const identity = accounts[request.get("authorization")];
+  if (!identity) return response.status(401).json({ error: "unauthorized" });
+  request.auth = { token: "verified-demo-token", clientId: "node-mcp-demo", scopes: ["mcp"], extra: identity };
+  next();
+});
 app.all("/mcp", (request, response) => handleMcp(request, response, request.body));
 
 const server = app.listen(Number(process.env.PORT || 3002), "0.0.0.0");
