@@ -148,7 +148,10 @@ export function SetupView({
   }, []);
 
   useEffect(() => {
-    if (secrets?.write) setExpandedSection("install");
+    if (secrets?.write) {
+      setExpandedSection("install");
+      replaceSetupSectionHash("install");
+    }
   }, [secrets?.write]);
 
   if (!environment || !data.currentProduct) return <Panel>No product is selected.</Panel>;
@@ -182,11 +185,8 @@ export function SetupView({
   function toggleSection(section: SetupSectionId) {
     const opening = expandedSection !== section;
     setExpandedSection(opening ? section : null);
-    if (opening) {
-      const url = new URL(window.location.href);
-      url.hash = `setup-${section}`;
-      window.history.replaceState(window.history.state, "", url);
-    }
+    if (opening) replaceSetupSectionHash(section);
+    else if (setupSectionFromLocation() === section) replaceSetupSectionHash(null);
   }
 
   const legacyKey = writeKey && !/^af_(live|read)_[0-9a-f]{8}$/.test(writeKey.prefix);
@@ -491,6 +491,12 @@ function setupSectionFromLocation(): SetupSectionId | null {
   return ["install", "identify", "personalize", "verify"].includes(section)
     ? (section as SetupSectionId)
     : null;
+}
+
+function replaceSetupSectionHash(section: SetupSectionId | null) {
+  const url = new URL(window.location.href);
+  url.hash = section ? `setup-${section}` : "";
+  window.history.replaceState(window.history.state, "", url);
 }
 
 function identityDescription(identity: IdentityExample) {

@@ -34,6 +34,46 @@ describe("SetupView sections", () => {
     expect(identify).toHaveAttribute("aria-expanded", "false");
   });
 
+  it("replaces the hash when a section opens", () => {
+    renderSetup();
+
+    fireEvent.click(screen.getByRole("button", { name: "2. Identify customers when possible" }));
+
+    expect(window.location.hash).toBe("#setup-identify");
+  });
+
+  it("clears a matching hash when the current section closes", () => {
+    window.history.replaceState({}, "", "/?view=setup#setup-identify");
+    renderSetup();
+
+    fireEvent.click(screen.getByRole("button", { name: "2. Identify customers when possible" }));
+
+    expect(window.location.hash).toBe("");
+  });
+
+  it("opens Install and replaces the hash when a write secret is shown", async () => {
+    window.history.replaceState({}, "", "/?view=setup#setup-identify");
+    const view = renderSetup();
+
+    view.rerender(
+      <SetupView
+        data={dashboardFixture()}
+        secrets={{ environmentId: "environment-1", write: "af_live_secret" }}
+        rememberSecret={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        setNotice={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "1. Install Epode" })).toHaveAttribute(
+        "aria-expanded",
+        "true",
+      );
+      expect(window.location.hash).toBe("#setup-install");
+    });
+  });
+
   it("opens the URL-addressed section and follows browser history", async () => {
     window.history.replaceState({}, "", "/?view=setup#setup-verify");
     renderSetup();
