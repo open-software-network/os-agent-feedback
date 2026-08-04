@@ -9,7 +9,7 @@ use utoipa::ToSchema;
 
 use crate::models::{
     ApiKeyPublic, Product, ProductEnvironment, ProductFeedbackReportWithInteraction,
-    ProductInteraction, TeamInvitation, TeamMember, Workspace,
+    ProductInteraction, ProductSession, TeamInvitation, TeamMember, Workspace,
 };
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -36,6 +36,10 @@ pub(crate) struct DashboardReportResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub(crate) struct DashboardInteractionResponse {
     pub interaction: ProductInteraction,
+    #[schema(required = true, nullable)]
+    pub report: Option<ProductFeedbackReportWithInteraction>,
+    #[schema(required = true, nullable)]
+    pub session: Option<ProductSession>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -222,6 +226,7 @@ mod tests {
     use super::*;
     use crate::models::{
         ProductActivationMilestones, ProductFeedbackReportWithInteraction, ProductInteraction,
+        ProductSession,
     };
 
     fn timestamp() -> DateTime<Utc> {
@@ -304,6 +309,19 @@ mod tests {
             occurred_at: timestamp(),
             created_at: timestamp(),
             updated_at: timestamp(),
+        }
+    }
+
+    fn session() -> ProductSession {
+        ProductSession {
+            id: Uuid::nil(),
+            workspace_id: Uuid::nil(),
+            environment_id: Uuid::nil(),
+            source: "sdk".to_owned(),
+            ref_hint: "session".to_owned(),
+            started_at: timestamp(),
+            last_seen_at: timestamp(),
+            created_at: timestamp(),
         }
     }
 
@@ -436,8 +454,10 @@ mod tests {
         let dashboard_interaction = assert_keys(
             DashboardInteractionResponse {
                 interaction: interaction(),
+                report: Some(report()),
+                session: Some(session()),
             },
-            &["interaction"],
+            &["interaction", "report", "session"],
         );
         assert_nested_keys(
             &dashboard_interaction,
@@ -461,6 +481,20 @@ mod tests {
                 "occurredAt",
                 "createdAt",
                 "updatedAt",
+            ],
+        );
+        assert_nested_keys(
+            &dashboard_interaction,
+            "session",
+            &[
+                "id",
+                "workspaceId",
+                "environmentId",
+                "source",
+                "refHint",
+                "startedAt",
+                "lastSeenAt",
+                "createdAt",
             ],
         );
         assert_keys(UpdatedResponse { updated: true }, &["updated"]);

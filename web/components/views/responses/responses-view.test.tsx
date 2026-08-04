@@ -58,6 +58,21 @@ describe("ResponsesView", () => {
     });
   });
 
+  it("restores search after same-view browser history navigation", async () => {
+    window.history.replaceState({}, "", "/?view=responses&responseQ=beta");
+    vi.stubGlobal("fetch", responseFetch());
+    renderResponses();
+
+    expect(screen.getByRole("textbox", { name: "Search responses" })).toHaveValue("beta");
+
+    window.history.replaceState({}, "", "/?view=responses&responseQ=alpha");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+
+    await waitFor(() => {
+      expect(screen.getByRole("textbox", { name: "Search responses" })).toHaveValue("alpha");
+    });
+  });
+
   it("describes exceptional outcomes once without status badges", async () => {
     const base = responsePage().responses[0];
     vi.stubGlobal(

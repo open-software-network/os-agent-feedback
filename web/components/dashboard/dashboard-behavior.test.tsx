@@ -768,8 +768,14 @@ describe("dashboard view behavior", () => {
   it("fetches an interaction outside the dashboard page and links its records", async () => {
     const complete = dashboardFixture();
     const interaction = complete.interactions[0];
-    const data = dashboardFixture({ interactions: [] });
-    const fetchMock = vi.fn().mockResolvedValue(json({ interaction }));
+    const data = dashboardFixture({ interactions: [], reports: [], sessions: [] });
+    const fetchMock = vi.fn().mockResolvedValue(
+      json({
+        interaction,
+        report: complete.reports[0],
+        session: complete.sessions[0],
+      }),
+    );
     vi.stubGlobal("fetch", fetchMock);
     const openFeedback = vi.fn();
     const openSession = vi.fn();
@@ -793,6 +799,74 @@ describe("dashboard view behavior", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open session" }));
     expect(openFeedback).toHaveBeenCalledWith(complete.reports[0].id);
     expect(openSession).toHaveBeenCalledWith(complete.sessions[0].id);
+  });
+
+  it("fetches exact associations when independently bounded lists omit them", async () => {
+    const complete = dashboardFixture();
+    const interaction = complete.interactions[0];
+    const data = dashboardFixture({ reports: [], sessions: [] });
+    let resolveFetch: ((response: Response) => void) | undefined;
+    const fetchMock = vi.fn().mockReturnValue(
+      new Promise<Response>((resolve) => {
+        resolveFetch = resolve;
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWithQuery(
+      <InteractionDetail
+        data={data}
+        interactionId={interaction.id}
+        back={vi.fn()}
+        openFeedback={vi.fn()}
+        openSession={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Loading linked feedback and session…")).toBeVisible();
+    expect(
+      screen.queryByText("No feedback was submitted for this interaction."),
+    ).not.toBeInTheDocument();
+    await act(async () => {
+      resolveFetch?.(
+        json({
+          interaction,
+          report: complete.reports[0],
+          session: complete.sessions[0],
+        }),
+      );
+    });
+    expect(await screen.findByRole("button", { name: "Open feedback" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Open session" })).toBeVisible();
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining(`/api/dashboard/interactions/${interaction.id}?productId=`),
+      expect.any(Object),
+    );
+  });
+
+  it("keeps exact association failures visible and retryable", async () => {
+    const complete = dashboardFixture();
+    const interaction = complete.interactions[0];
+    const data = dashboardFixture({ reports: [], sessions: [] });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(json({ error: "Lookup failed" }, 500)));
+
+    renderWithQuery(
+      <InteractionDetail
+        data={data}
+        interactionId={interaction.id}
+        back={vi.fn()}
+        openFeedback={vi.fn()}
+        openSession={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not load linked feedback and session. Lookup failed",
+    );
+    expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
+    expect(
+      screen.queryByText("No feedback was submitted for this interaction."),
+    ).not.toBeInTheDocument();
   });
 
   it("creates a missing write key and passes its shown-once secret to the controller", async () => {

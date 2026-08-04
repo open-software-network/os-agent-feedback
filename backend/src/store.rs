@@ -6010,6 +6010,59 @@ pub(crate) async fn dashboard_interaction_by_id(
     .ok_or_else(|| ApiError::not_found("Interaction not found"))
 }
 
+#[derive(Debug)]
+pub(crate) struct DashboardInteractionDetail {
+    pub interaction: ProductInteraction,
+    pub report: Option<ProductFeedbackReportWithInteraction>,
+    pub session: Option<ProductSession>,
+}
+
+pub(crate) async fn dashboard_interaction_detail_by_id(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    interaction_id: Uuid,
+) -> Result<DashboardInteractionDetail, ApiError> {
+    let interaction =
+        dashboard_interaction_by_id(pool, workspace_id, product_id, interaction_id).await?;
+    let report_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM feedback_reports WHERE interaction_id = $1 AND workspace_id = $2",
+    )
+    .bind(interaction_id)
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?;
+    let report = match report_id {
+        Some(report_id) => {
+            Some(dashboard_report_by_id(pool, workspace_id, product_id, report_id).await?)
+        }
+        None => None,
+    };
+    let session = match interaction.session_id {
+        Some(session_id) => {
+            sqlx::query_as::<_, ProductSession>(
+                r"SELECT s.id, s.workspace_id, s.environment_id, s.source, s.ref_hint,
+            s.started_at, s.last_seen_at, s.created_at
+            FROM sessions_v2 s
+            JOIN product_environments e ON e.id = s.environment_id
+            WHERE s.id = $1 AND s.workspace_id = $2 AND e.product_id = $3",
+            )
+            .bind(session_id)
+            .bind(workspace_id)
+            .bind(product_id)
+            .fetch_optional(pool)
+            .await?
+        }
+        None => None,
+    };
+
+    Ok(DashboardInteractionDetail {
+        interaction,
+        report,
+        session,
+    })
+}
+
 pub(crate) async fn dashboard_session_by_id(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -16569,6 +16622,77 @@ mod product_tests {
             anyhow::ensure!(bootstrap_checkout.interaction_count == 2);
             anyhow::ensure!(bootstrap_checkout.report_count == 1);
 
+            let newest_session = Uuid::new_v4();
+            sqlx::query(
+                r"INSERT INTO sessions_v2
+                (id, workspace_id, environment_id, source, ref_hash, ref_hint,
+                 started_at, last_seen_at)
+                VALUES ($1, $2, $3, 'mcp', $4, 'newest-session', $5, $5)",
+            )
+            .bind(newest_session)
+            .bind(workspace.id)
+            .bind(environment.id)
+            .bind(sha256("newest-session"))
+            .bind(now)
+            .execute(&pool)
+            .await?;
+            let bounded_bootstrap = dashboard_with_limits(
+                &pool,
+                DashboardContext {
+                    user: CurrentUser {
+                        id: "usr_dashboard_bounded".into(),
+                        handle: "dashboard-bounded".into(),
+                        email: None,
+                        display_name: "Dashboard Bounded".into(),
+                    },
+                    workspace: workspace.clone(),
+                    role: "owner".into(),
+                    workspace_memberships: vec![],
+                },
+                Some(product.id),
+                None,
+                1,
+                1,
+                1,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                bounded_bootstrap
+                    .interactions
+                    .iter()
+                    .all(|interaction| interaction.id != checkout)
+            );
+            anyhow::ensure!(
+                bounded_bootstrap
+                    .reports
+                    .iter()
+                    .all(|report| report.id != checkout_report)
+            );
+            anyhow::ensure!(
+                bounded_bootstrap
+                    .sessions
+                    .iter()
+                    .all(|session| session.id != checkout_session)
+            );
+            let exact_interaction = dashboard_interaction_detail_by_id(
+                &pool,
+                workspace.id,
+                product.id,
+                checkout,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(exact_interaction.interaction.id == checkout);
+            anyhow::ensure!(
+                exact_interaction.report.as_ref().map(|report| report.id)
+                    == Some(checkout_report)
+            );
+            anyhow::ensure!(
+                exact_interaction.session.as_ref().map(|session| session.id)
+                    == Some(checkout_session)
+            );
+
             let expired_report_error = dashboard_report_by_id(
                 &pool,
                 workspace.id,
@@ -16636,6 +16760,15 @@ mod product_tests {
             .await
             .expect_err("another workspace's product must not be queryable");
             anyhow::ensure!(isolation_error.status == StatusCode::NOT_FOUND);
+            let isolated_interaction_error = dashboard_interaction_detail_by_id(
+                &pool,
+                workspace.id,
+                isolated_product.id,
+                isolated_interaction,
+            )
+            .await
+            .expect_err("another workspace's interaction must not be queryable");
+            anyhow::ensure!(isolated_interaction_error.status == StatusCode::NOT_FOUND);
             Ok::<(), anyhow::Error>(())
         }
         .await;

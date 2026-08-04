@@ -3480,7 +3480,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Product interaction",
+            "description": "Product interaction with its linked feedback report and session",
             "content": {
               "application/json": {
                 "schema": {
@@ -8452,11 +8452,33 @@
       "DashboardInteractionResponse": {
         "type": "object",
         "required": [
-          "interaction"
+          "interaction",
+          "report",
+          "session"
         ],
         "properties": {
           "interaction": {
             "$ref": "#/components/schemas/ProductInteraction"
+          },
+          "report": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ProductFeedbackReportWithInteraction"
+              }
+            ]
+          },
+          "session": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ProductSession"
+              }
+            ]
           }
         }
       },

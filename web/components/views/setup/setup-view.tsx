@@ -64,6 +64,8 @@ export function SetupView({
   const [error, setError] = useState("");
   const [creatingWriteKey, setCreatingWriteKey] = useState(false);
   const environment = data.currentEnvironment;
+  const shownWriteSecret =
+    secrets && environment && secrets.environmentId === environment.id ? secrets.write : undefined;
   const writeKeys = data.apiKeys.filter((key) => key.kind !== "read");
   const writeKey = writeKeys[0];
   const origin = typeof window === "undefined" ? "https://app.epode.ai" : window.location.origin;
@@ -86,7 +88,7 @@ export function SetupView({
         ? "SDK connected"
         : "Not connected";
   const stacks = SETUP_SURFACES[surface].stacks as readonly SetupStack[];
-  const environmentSnippet = `EPODE_API_KEY=${secrets?.write ?? "paste_product_key_here"}`;
+  const environmentSnippet = `EPODE_API_KEY=${shownWriteSecret ?? "paste_product_key_here"}`;
 
   const createWriteKey = useCallback(
     async (allowCompletedEnsure: boolean) => {
@@ -136,9 +138,12 @@ export function SetupView({
   useEffect(() => {
     function syncSectionFromLocation() {
       const section = setupSectionFromLocation();
-      if (section) setExpandedSection(section);
+      setExpandedSection(section ?? "install");
+      if (section) scrollSetupSectionIntoView(section);
     }
 
+    const initialSection = setupSectionFromLocation();
+    if (initialSection) scrollSetupSectionIntoView(initialSection);
     window.addEventListener("hashchange", syncSectionFromLocation);
     window.addEventListener("popstate", syncSectionFromLocation);
     return () => {
@@ -148,11 +153,11 @@ export function SetupView({
   }, []);
 
   useEffect(() => {
-    if (secrets?.write) {
+    if (shownWriteSecret) {
       setExpandedSection("install");
       replaceSetupSectionHash("install");
     }
-  }, [secrets?.write]);
+  }, [shownWriteSecret]);
 
   if (!environment || !data.currentProduct) return <Panel>No product is selected.</Panel>;
   if (!editor) return <Panel>Only a team owner or admin can manage setup.</Panel>;
@@ -266,10 +271,10 @@ const result = answers.available
             </Button>
           ))}
         </div>
-        {secrets?.write ? (
+        {shownWriteSecret ? (
           <SecretCallout
             label="Save this server-side key now"
-            secret={secrets.write}
+            secret={shownWriteSecret}
             description="Move it directly into your deployment secret manager. Never put it in browser code, a mobile app, or an agent client."
             copy={copy}
           />
@@ -497,6 +502,10 @@ function replaceSetupSectionHash(section: SetupSectionId | null) {
   const url = new URL(window.location.href);
   url.hash = section ? `setup-${section}` : "";
   window.history.replaceState(window.history.state, "", url);
+}
+
+function scrollSetupSectionIntoView(section: SetupSectionId) {
+  document.getElementById(`setup-${section}`)?.scrollIntoView?.({ block: "start" });
 }
 
 function identityDescription(identity: IdentityExample) {

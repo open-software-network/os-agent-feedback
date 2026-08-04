@@ -1277,6 +1277,8 @@ export interface components {
         };
         DashboardInteractionResponse: {
             interaction: components["schemas"]["ProductInteraction"];
+            report: null | components["schemas"]["ProductFeedbackReportWithInteraction"];
+            session: null | components["schemas"]["ProductSession"];
         };
         DashboardListState: {
             interactionsLoaded: number;
@@ -4383,7 +4385,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Product interaction */
+            /** @description Product interaction with its linked feedback report and session */
             200: {
                 headers: {
                     [name: string]: unknown;
