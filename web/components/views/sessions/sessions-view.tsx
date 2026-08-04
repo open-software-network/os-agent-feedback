@@ -59,7 +59,6 @@ type SessionConstraints = {
 };
 
 type EnrichedSessionSummary = DashboardSessionSummary & {
-  desiredOutcome?: string | null;
   signalCount?: number;
 };
 
@@ -162,13 +161,6 @@ const impactLabels: Record<string, string> = {
   neutral: "Neutral",
   unknown: "Unknown",
 };
-
-function sessionJourney(session: DashboardSessionSummary) {
-  if (!session.interactionCount) return "No interactions";
-  if (session.interactionCount === 1) return session.firstOperation ?? "Single event";
-  if (session.interactionCount > 3) return `${session.interactionCount}-step journey`;
-  return `${session.firstOperation ?? "Unknown"} → ${session.lastOperation ?? "Unknown"}`;
-}
 
 function elapsedLabel(startedAt: string, occurredAt: string) {
   const elapsedSeconds = Math.max(
@@ -401,11 +393,10 @@ export function SessionsView({
           <Table className="min-w-[760px] table-fixed">
             <TableHeader className="sticky top-0 z-[1] bg-background">
               <TableRow className="hover:bg-background">
-                <TableHead className="h-9 w-[22%] pl-5 text-xs">Session</TableHead>
-                <TableHead className="h-9 w-[22%] text-xs">Customer</TableHead>
-                <TableHead className="h-9 w-[32%] text-xs">Desired outcome</TableHead>
-                <TableHead className="h-9 w-[10%] text-xs">Steps</TableHead>
-                <TableHead className="h-9 w-[14%] pr-5 text-right text-xs">Last seen</TableHead>
+                <TableHead className="h-9 w-[34%] pl-5 text-xs">Session</TableHead>
+                <TableHead className="h-9 w-[32%] text-xs">Customer</TableHead>
+                <TableHead className="h-9 w-[12%] text-xs">Steps</TableHead>
+                <TableHead className="h-9 w-[22%] pr-5 text-right text-xs">Last seen</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -673,9 +664,6 @@ function SessionRow({
         <p className="mt-1 truncate text-xs text-muted-foreground">
           {session.identityLevel ? titleCase(session.identityLevel) : "Identity not resolved"}
         </p>
-      </TableCell>
-      <TableCell className="overflow-hidden">
-        <p className="truncate text-xs">{session.desiredOutcome ?? sessionJourney(session)}</p>
       </TableCell>
       <TableCell className="text-xs">{session.interactionCount}</TableCell>
       <TableCell
