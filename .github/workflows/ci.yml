@@ -1,5 +1,12 @@
 name: CI
 
+# PR checks are local by default (gh-signoff; see docs/agents/local-ci-signoff.md):
+# each heavy job is replaced by a required signoff/* commit status posted by
+# `make local-ci` on the developer's machine. Add the matching run-*-ci label
+# to a PR to force the hosted job, and every job still runs on push to main.
+# The cheap Workflow lint job stays hosted on PRs because it guards this
+# file and the signoff scripts themselves.
+
 on:
   pull_request:
   push:
@@ -102,11 +109,16 @@ jobs:
               - "scripts/railway-deploy-image.sh"
               - "scripts/verify-migration-ledger.sh"
               - "scripts/verify-public-integration-surface.sh"
+              - "scripts/local-ci.sh"
+              - "scripts/signoff-*.sh"
 
   backend:
     name: Backend
     needs: changes
-    if: needs.changes.outputs.backend == 'true'
+    if: >-
+      needs.changes.outputs.backend == 'true' &&
+      (github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'run-backend-ci'))
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -153,9 +165,11 @@ jobs:
     name: Customer enrichment journey
     needs: changes
     if: >-
-      needs.changes.outputs.backend == 'true' ||
+      (needs.changes.outputs.backend == 'true' ||
       needs.changes.outputs.sdk-node == 'true' ||
-      needs.changes.outputs.examples == 'true'
+      needs.changes.outputs.examples == 'true') &&
+      (github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'run-e2e-ci'))
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -199,7 +213,10 @@ jobs:
   node:
     name: Node and Biome
     needs: changes
-    if: needs.changes.outputs.node == 'true'
+    if: >-
+      needs.changes.outputs.node == 'true' &&
+      (github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'run-node-ci'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -219,7 +236,10 @@ jobs:
   sdk-node:
     name: Node SDK
     needs: changes
-    if: needs.changes.outputs.sdk-node == 'true'
+    if: >-
+      needs.changes.outputs.sdk-node == 'true' &&
+      (github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'run-sdk-ci'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -237,7 +257,10 @@ jobs:
   sdk-packages:
     name: SDK package artifacts
     needs: changes
-    if: needs.changes.outputs.sdk-packages == 'true'
+    if: >-
+      needs.changes.outputs.sdk-packages == 'true' &&
+      (github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'run-sdk-ci'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -271,7 +294,10 @@ jobs:
   examples:
     name: Product examples
     needs: changes
-    if: needs.changes.outputs.examples == 'true'
+    if: >-
+      needs.changes.outputs.examples == 'true' &&
+      (github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'run-examples-ci'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -335,7 +361,10 @@ jobs:
   web:
     name: Web
     needs: changes
-    if: needs.changes.outputs.web == 'true'
+    if: >-
+      needs.changes.outputs.web == 'true' &&
+      (github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'run-web-ci'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -363,7 +392,10 @@ jobs:
   docs:
     name: Documentation
     needs: changes
-    if: needs.changes.outputs.docs == 'true'
+    if: >-
+      needs.changes.outputs.docs == 'true' &&
+      (github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'run-docs-ci'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -410,6 +442,18 @@ jobs:
           scripts/railway-deploy-image.sh
           scripts/verify-image-artifact-ledger.sh
           scripts/verify-public-integration-surface.sh
+      - name: Lint local signoff helpers
+        run: >-
+          shellcheck
+          scripts/local-ci.sh
+          scripts/signoff-common.sh
+          scripts/signoff-backend.sh
+          scripts/signoff-e2e.sh
+          scripts/signoff-node.sh
+          scripts/signoff-sdk.sh
+          scripts/signoff-examples.sh
+          scripts/signoff-web.sh
+          scripts/signoff-docs.sh
 
   ci-ok:
     name: CI

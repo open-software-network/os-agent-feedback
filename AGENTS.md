@@ -82,6 +82,9 @@ and narrated.
 ## Verification
 
 - `pnpm test` — runs `node --test tests/*.test.mjs`.
+- `make local-ci` — path-aware local PR checks that post the required
+  `signoff/*` commit statuses. PR CI is local by default; see
+  `docs/agents/local-ci-signoff.md`.
 
 The dashboard test suite asserts against the **source text** of
 `backend/public/app.js`, `app.html`, and `styles.css`, plus a DOM harness in
