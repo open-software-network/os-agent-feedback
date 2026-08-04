@@ -400,25 +400,49 @@ jobs:
             } >>"$GITHUB_OUTPUT"
           done
 
-          # sqlx refuses to run an image whose embedded migration ledger omits
-          # any migration already recorded in the database. Conversely, once
-          # a target applies a new migration, the old image is no longer an
-          # automatic recovery candidate. Until migrations have a separately
-          # attested expand/contract rollout, require identical ledgers before
-          # promising service-level compensation.
+          # A release may cross one additive migration boundary in either
+          # direction. Production must already contain exact, verified evidence
+          # for that migration so the old and new images remain restartable.
           git fetch --no-tags origin "$previous_api_revision" "$TARGET_API_REVISION"
-          previous_migrations="$(mktemp)"
-          target_migrations="$(mktemp)"
-          trap 'rm -f "$previous_migrations" "$target_migrations"' EXIT
-          git ls-tree -r --name-only "$previous_api_revision" -- backend/migrations \
-            | sed -nE 's#^backend/migrations/([0-9]+)_.*\.sql$#\1#p' \
-            | sort -nu >"$previous_migrations"
-          git ls-tree -r --name-only "$TARGET_API_REVISION" -- backend/migrations \
-            | sed -nE 's#^backend/migrations/([0-9]+)_.*\.sql$#\1#p' \
-            | sort -nu >"$target_migrations"
-          if ! diff --unified=0 "$previous_migrations" "$target_migrations"; then
-            echo "::error::The target API changes the SQL migration ledger, so the active API cannot be proven recoverable after startup. Use a separately attested migration rollout; no production mutation was started."
-            exit 1
+          mapfile -t migration_changes < <(
+            git diff --name-status "$previous_api_revision" "$TARGET_API_REVISION" -- backend/migrations
+          )
+          if [[ "${#migration_changes[@]}" -gt 0 ]]; then
+            if [[ "${#migration_changes[@]}" -ne 1 ]]; then
+              echo "::error::A release may cross at most one additive migration boundary."
+              exit 1
+            fi
+            read -r migration_change migration_path extra <<< "${migration_changes[0]}"
+            if [[ -n "${extra:-}" || ! "$migration_change" =~ ^[AD]$ \
+              || ! "$migration_path" =~ ^backend/migrations/[0-9]{4}_[A-Za-z0-9_]+\.sql$ ]]; then
+              echo "::error::Existing migrations are immutable; only one added or rollback-removed migration is allowed."
+              exit 1
+            fi
+            migration_revision="$TARGET_API_REVISION"
+            if [[ "$migration_change" == "D" ]]; then
+              migration_revision="$previous_api_revision"
+            fi
+            migration_sha256="$(git show "${migration_revision}:${migration_path}" | sha256sum | awk '{print $1}')"
+            migration_prefix="$(basename "$migration_path" | cut -d_ -f1)"
+            migration_version="$((10#$migration_prefix))"
+            production_variables="$(railway variable list \
+              --project "$RAILWAY_PROJECT_ID" \
+              --environment production \
+              --service "$API_SERVICE" \
+              --json)"
+            jq -e \
+              --arg path "$migration_path" \
+              --arg sha "$migration_sha256" \
+              --arg version "$migration_version" \
+              '.EPODE_PRODUCTION_MIGRATION_STATUS == "verified"
+                and .EPODE_PRODUCTION_MIGRATION_PATH == $path
+                and .EPODE_PRODUCTION_MIGRATION_SHA256 == $sha
+                and .EPODE_PRODUCTION_MIGRATION_VERSION == $version
+                and (((.EPODE_ADDITIVE_MIGRATION_MAX_VERSION // .EPODE_MIGRATION_BRIDGE_MAX_VERSION) | tonumber) >= ($version | tonumber))' \
+              <<< "$production_variables" >/dev/null || {
+                echo "::error::The migration ledger changed without matching verified production expansion evidence."
+                exit 1
+              }
           fi
 
       - name: Promote API

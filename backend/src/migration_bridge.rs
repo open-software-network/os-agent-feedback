@@ -36,13 +36,8 @@ fn verify_ledger(
     let embedded_max = embedded.keys().next_back().copied().unwrap_or_default();
     anyhow::ensure!(
         allowed_external_max >= embedded_max,
-        "migration bridge maximum cannot be below the embedded ledger"
+        "additive migration maximum cannot be below the embedded ledger"
     );
-    anyhow::ensure!(
-        allowed_external_max <= embedded_max + 1,
-        "migration bridge may tolerate at most one externally attested additive version"
-    );
-
     let mut previous = 0;
     for migration in applied {
         anyhow::ensure!(migration.success, "migration {} failed", migration.version);
@@ -72,7 +67,7 @@ fn verify_ledger(
         .unwrap_or_default();
     anyhow::ensure!(
         applied_max <= allowed_external_max,
-        "database migration {applied_max} exceeds the authorized bridge maximum {allowed_external_max}"
+        "database migration {applied_max} exceeds the authorized additive maximum {allowed_external_max}"
     );
     Ok(())
 }
@@ -190,12 +185,13 @@ pub(crate) async fn prepare_database(pool: &PgPool, production: bool) -> anyhow:
         .map(|migration| (migration.version, migration.checksum.to_vec()))
         .collect::<BTreeMap<_, _>>();
     let embedded_max = embedded.keys().next_back().copied().unwrap_or_default();
-    let allowed_external_max = std::env::var("EPODE_MIGRATION_BRIDGE_MAX_VERSION")
+    let allowed_external_max = std::env::var("EPODE_ADDITIVE_MIGRATION_MAX_VERSION")
+        .or_else(|_| std::env::var("EPODE_MIGRATION_BRIDGE_MAX_VERSION"))
         .ok()
         .map(|value| {
-            value.parse::<i64>().map_err(|_| {
-                anyhow::anyhow!("EPODE_MIGRATION_BRIDGE_MAX_VERSION must be an integer")
-            })
+            value
+                .parse::<i64>()
+                .map_err(|_| anyhow::anyhow!("the additive migration maximum must be an integer"))
         })
         .transpose()?
         .unwrap_or(embedded_max)
@@ -207,7 +203,7 @@ pub(crate) async fn prepare_database(pool: &PgPool, production: bool) -> anyhow:
         tracing::warn!(
             applied_max,
             embedded_max,
-            "running as an explicitly authorized additive migration bridge"
+            "running with an explicitly authorized additive migration suffix"
         );
     } else if applied_max < embedded_max {
         tracing::info!(
@@ -233,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_accepts_pending_or_one_authorized_future_version() {
+    fn compatibility_accepts_pending_or_an_authorized_additive_suffix() {
         verify_ledger(
             &embedded(),
             &[
@@ -269,6 +265,33 @@ mod tests {
                     checksum: vec![99],
                     success: true,
                 },
+                AppliedMigration {
+                    version: 34,
+                    checksum: vec![100],
+                    success: true,
+                },
+            ],
+            34,
+        )
+        .unwrap();
+        verify_ledger(
+            &embedded(),
+            &[
+                AppliedMigration {
+                    version: 31,
+                    checksum: vec![31],
+                    success: true,
+                },
+                AppliedMigration {
+                    version: 32,
+                    checksum: vec![32],
+                    success: true,
+                },
+                AppliedMigration {
+                    version: 33,
+                    checksum: vec![99],
+                    success: true,
+                },
             ],
             33,
         )
@@ -276,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_rejects_checksum_failure_and_unapproved_versions() {
+    fn compatibility_rejects_checksum_failure_and_unapproved_versions() {
         let wrong = [AppliedMigration {
             version: 31,
             checksum: vec![0],
@@ -307,7 +330,7 @@ mod tests {
             },
         ];
         assert!(verify_ledger(&embedded(), &future, 32).is_err());
-        assert!(verify_ledger(&embedded(), &future, 34).is_err());
+        assert!(verify_ledger(&embedded(), &future, 33).is_ok());
     }
 
     #[test]
