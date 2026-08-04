@@ -21,6 +21,8 @@
     "test:setup-matrix": "node tests/setup-matrix-e2e.mjs",
     "test:icp-loop": "node tests/icp-onboarding-e2e.mjs",
     "test:customer-enrichment-e2e": "node tests/customer-enrichment-e2e.mjs",
+    "test:customer-context-mcp-e2e": "node tests/customer-context-mcp-e2e.mjs",
+    "test:customer-context-scenarios": "node --test tests/customer-context-scenario-matrix.test.mjs",
     "test:agent-compliance": "node experiments/agent-compliance/run.mjs --runtime codex --suite placement-pilot --repetitions 3 --output .artifacts/agent-compliance/codex-placement.json",
     "test:agent-compliance:codex-ask-once": "node experiments/agent-compliance/codex-ask-once-matrix.mjs --cases smoke",
     "test:agent-compliance:codex-ask-once:all": "node experiments/agent-compliance/codex-ask-once-matrix.mjs --cases all",

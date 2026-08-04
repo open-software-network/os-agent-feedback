@@ -16,7 +16,10 @@ import {
 
 export type EpodeMcpContext = Record<string, unknown> & {
   http?: { authInfo?: { extra?: Record<string, unknown> } };
-  mcpReq?: { inputResponses?: Record<string, unknown> };
+  mcpReq?: {
+    envelope?: Record<string, unknown>;
+    inputResponses?: Record<string, unknown>;
+  };
 };
 
 type McpResult = {
@@ -105,6 +108,20 @@ function permissionChoice(request: EnrichmentRequest) {
   };
 }
 
+function supportsFormElicitation(context: EpodeMcpContext): boolean {
+  const envelope = context.mcpReq?.envelope;
+  // Older SDK hosts do not expose the negotiated envelope on handler context.
+  // Let their MCP serving layer perform its normal capability projection.
+  if (envelope === undefined) return true;
+  const capabilities = envelope["io.modelcontextprotocol/clientCapabilities"];
+  if (!isPlainObject(capabilities)) return false;
+  const elicitation = capabilities.elicitation;
+  if (!isPlainObject(elicitation)) return false;
+  // A bare declaration is the pre-mode spelling of form support. Once a
+  // client names a mode, form must be named explicitly.
+  return elicitation.form !== undefined || elicitation.url === undefined;
+}
+
 function mcpContract(request: EnrichmentRequest): Record<string, unknown> {
   const schema = sameOriginEnrichmentRequest(request);
   return {
@@ -121,16 +138,8 @@ function mcpContract(request: EnrichmentRequest): Record<string, unknown> {
       ? {
           answerTool: "share_customer_context",
           requestHandle: handle(request.consent),
-          permissionMode: "mcp_elicitation",
+          permissionMode: "best_effort_mcp_elicitation",
           answerSchema: schema.submit?.bodySchema,
-        }
-      : {}),
-    ...(request.consent
-      ? {
-          manageConsent: {
-            consentTool: "record_customer_context_consent",
-            requestHandle: handle(request.consent),
-          },
         }
       : {}),
     ...(request.submit
@@ -147,7 +156,7 @@ function attach(result: McpResult, request: EnrichmentRequest, schemaOwned: bool
   const contract = mcpContract(request);
   const instruction =
     request.state === "consent_required"
-      ? "After finishing the product task, call share_customer_context once with only relevant, non-sensitive context. The tool will present the company's optional-personalization choice inside the MCP client; do not ask the user separately in chat."
+      ? "After finishing the product task, call share_customer_context once with only relevant, non-sensitive context. When the MCP client supports resumable form elicitation, the tool will present the company's optional-personalization choice inline. Otherwise it will share nothing; do not ask the user separately in chat."
       : [request.stageInstruction, request.answerInstruction].filter(Boolean).join(" ");
   const content = Array.isArray(result.content) ? [...result.content] : [];
   if (
@@ -264,9 +273,9 @@ export function epode(options: EpodeMcpOptions): EpodeMcp {
       originalRegister(
         "record_customer_context_consent",
         {
-          title: "Legacy customer-context permission fallback",
+          title: "Record customer-context permission (explicit compatibility)",
           description:
-            "Compatibility fallback only when share_customer_context reports that MCP elicitation is unavailable. Never call this before that fallback is returned, and never infer permission.",
+            "Explicit compatibility or profile-settings use only after the product integration separately obtained the customer's data-use choice. Never call automatically and never infer permission.",
           inputSchema: z.object({
             requestHandle: z.string().startsWith("aqr1_"),
             decision: z.enum(["approved", "declined"]),
@@ -324,7 +333,7 @@ export function epode(options: EpodeMcpOptions): EpodeMcp {
             items: z
               .array(
                 z.object({
-                  key: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/),
+                  key: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/),
                   type: z.enum(["intent", "preference", "constraint", "interest"]),
                   value: z.string().min(1).max(160),
                   summary: z.string().min(3).max(350),
@@ -366,19 +375,18 @@ export function epode(options: EpodeMcpOptions): EpodeMcp {
           if (inspected.state === "consent_required") {
             const inputResponse = context.mcpReq?.inputResponses?.customer_context_permission;
             if (inputResponse === undefined) {
-              if (!context.mcpReq) {
+              if (!context.mcpReq || !supportsFormElicitation(context)) {
                 return {
-                  isError: true,
                   content: [
                     {
                       type: "text",
-                      text: `This MCP server cannot resume inline personalization. Ask the exact question once, then use record_customer_context_consent as a compatibility fallback with requestHandle ${requestHandle}.`,
+                      text: "Optional personalization is unavailable in this MCP client. Continue the product task without sharing customer context, and do not ask the user separately in chat.",
                     },
                   ],
                   structuredContent: {
-                    fallbackTool: "record_customer_context_consent",
-                    requestHandle,
-                    question: inspected.question,
+                    accepted: false,
+                    state: "unsupported",
+                    reason: "form_elicitation_unavailable",
                   },
                 };
               }
@@ -467,10 +475,24 @@ export function epode(options: EpodeMcpOptions): EpodeMcp {
               content: [
                 {
                   type: "text",
-                  text: "Personalization is not allowed for this request. Continue without sharing context.",
+                  text: "No customer context will be shared for this request. Continue the product task.",
                 },
               ],
               structuredContent: { accepted: false, state: "declined" },
+            };
+          } else if (inspected.state === "answered" || inspected.state === "no_relevant_context") {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "Customer context was already handled for this request. Continue the product task.",
+                },
+              ],
+              structuredContent: {
+                accepted: true,
+                state: inspected.state,
+                alreadyCompleted: true,
+              },
             };
           } else {
             response = await client.submitAnswer(requestHandle, answer);

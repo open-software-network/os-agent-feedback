@@ -3,7 +3,63 @@ title: "Node MCP"
 description: "Instrument a stateless MCP 2026-07-28 server and register structured feedback automatically."
 ---
 
-## Customer enrichment (recommended)
+## Current-request context (portable default)
+
+Put the bounded context needed for the current operation in the business tool's own input. This keeps the
+reliable path to one business-tool call and one host-owned approval. Do not require the model to call a setup,
+context-sharing, or consent tool before it can complete the customer's task.
+
+For example, a catalog tool can accept a closed `taskContext` object containing only fields it can really use:
+
+```json
+{
+  "query": "running shoes",
+  "taskContext": {
+    "size": "10",
+    "width": "wide",
+    "budget": { "currency": "USD", "max": 140 },
+    "excludedColors": ["neon"]
+  }
+}
+```
+
+Validate this object as product input: reject unknown or sensitive fields instead of silently ignoring them.
+The completed tool result should include an exact receipt so the agent and dashboard can distinguish what was
+sent from what actually affected the result:
+
+```json
+{
+  "receivedContext": { "size": "10", "width": "wide", "budget": { "currency": "USD", "max": 140 }, "excludedColors": ["neon"] },
+  "appliedContext": { "size": "10", "width": "wide", "budget": { "currency": "USD", "max": 140 }, "excludedColors": ["neon"] },
+  "rejectedContext": [],
+  "dataUse": {
+    "scope": "current_request",
+    "savedToProfile": false,
+    "assistantMemoryImported": false
+  }
+}
+```
+
+Only claim that a field reached or influenced the product when it appears in this receipt. A model may use
+saved host memory to construct the current tool arguments, but the MCP server cannot inspect that memory or
+verify where the model learned a value. Describe such values as assistant-supplied current-request context,
+not as a verified memory import or confirmed customer statement.
+
+MCP tool approvals belong to the host. A server can provide read-only and idempotence annotations, but cannot
+suppress, combine, or pre-approve the host's prompts. A denial normally happens before the server receives
+`tools/call`, so it must produce no context event. Splitting a search into `begin_task` and `search_catalog` can
+therefore produce two host approvals; prefer one bounded business operation when the task permits it.
+
+Previously approved profile context should be loaded by the company server using verified product identity,
+merged with current-request context under documented precedence rules, and passed to the business handler
+before it runs. Do not depend on the agent selecting a separate context tool. Derive customer and journey
+references from verified auth or product-owned state, never model-authored arguments. If no verified journey
+exists, use request scope rather than claiming that data lasts for the chat or MCP transport session.
+
+## Optional retained personalization
+
+Use Epode's customer-enrichment tools when the customer explicitly chooses to build a profile that survives the
+current request. This is separate from the portable current-request path:
 
 ```ts
 import { epode } from "@epode/node/mcp";
@@ -24,16 +80,34 @@ customer.instrument(server);
 ```
 
 Epode registers `share_customer_context` on the company's own MCP server and decorates selected business-tool
-results with the exact allowed action. When the customer has not decided yet, that one tool call uses MCP form
-elicitation to show **Always allow**, **This session only**, and **Don't allow** inside the customer's agent. It
-records the choice and, when allowed, shares the bounded answer in the same tool call. Do not ask the customer a
-second time in chat. `record_customer_context_consent` remains registered only as a compatibility fallback for
-clients that do not support form elicitation.
+results with the exact allowed action. On MCP 2026 clients that both advertise form elicitation and have been
+version-tested to surface and resume it, `share_customer_context` can return MRTR `input_required` with
+**Always allow**, **This session only**, and **Don't allow**. This is a best-effort enhancement, not a portable
+client guarantee.
+
+Do not make successful product use depend on MRTR or on the agent selecting this second tool. If a client cannot
+surface or resume input, continue without profile enrichment and never infer approval. Noninteractive Codex and
+Claude CLI runs may exhaust their configured `inputRequired.maxRounds` because there is no interactive user
+surface; treat that result as unsupported, not as consent or refusal. `record_customer_context_consent` is an
+explicit compatibility fallback, not an instruction to add an unsolicited second question after the host has
+already approved the business call.
+
+Test the exact host, version, transport, and interactive mode you support. Claude Desktop, Claude CLI, Codex CLI,
+and ChatGPT integrations have different approval and elicitation behavior. Capability metadata alone does not
+prove that the client will render a form, resume the original call, or choose `share_customer_context`.
 
 The customer needs no Epode account, plugin, or direct connection. Context retrieval, personalization decisions,
 and outcomes remain server-to-server. Failed (`isError`), canceled, incomplete, and `input_required` results are
 never decorated or counted as a completed enrichment opportunity. A session-only choice forces every submitted
-item to remain interaction-scoped even if the model marked it durable.
+item to remain interaction-scoped even if the model marked it durable. Here, session scope means a verified,
+product-issued journey reference; it does not mean an MCP transport session or whatever chat the host currently
+shows.
+
+Importing broader assistant memory is not part of first-use personalization. MCP has no portable operation that
+lets a company server autonomously read a host's full saved memory. Offer **Import more from your assistant...**
+only as an optional profile-settings flow: show a preview of the exact bounded items, their claimed provenance,
+purpose, and retention; let the customer remove items; then save only the approved selection. The normal product
+task must remain complete if the customer skips or cancels that flow.
 
 The enrichment request itself carries `surface: "mcp"`, so the initial successful product-tool interaction is
 confirmed immediately. Do not add separate Epode telemetry instrumentation around the same MCP server.

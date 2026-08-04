@@ -1,0 +1,18 @@
+{
+  "name": "epode-shopwise-context-mcp",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node mcp-server.js",
+    "test": "node --test mcp-transport.test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/express": "^2.0.0",
+    "@modelcontextprotocol/node": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "express": "^5.2.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

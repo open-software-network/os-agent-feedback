@@ -27,7 +27,7 @@ pointer can still be ignored. Never use `/llms.txt` as the only feedback handoff
 | Response envelope only | Untrusted response-local instruction and exact report schema | Best effort |
 | `/llms.txt` only | Documentation available if the runtime chooses to discover it | Discovery only |
 | Epode Companion | Verified fixed-destination tools plus the response envelope | Strong in Codex and Claude Code when installed |
-| MCP | Server guidance, native report tool, and validated tool input schema | Strongest supported path |
+| MCP | Server guidance, native report tool, and validated tool input schema | Strong for completed tool calls; approvals and elicitation remain host-dependent |
 
 Use HTTP instrumentation to measure opportunities and returned feedback. Recommend
 [Epode Companion](/integrations/companion) when customers use Codex or Claude Code and you need reliable submission.
@@ -51,6 +51,13 @@ decision or report follows.
 
 Keep the server instruction concise and action-oriented, and put field-level constraints in the native
 report tool schema. Do not replace the report tool with prose in a product result.
+
+This strength does not make client orchestration portable. A server cannot force a host to combine approvals,
+select a follow-up tool, display an MRTR form, or resume an `input_required` call. For customer context needed by
+the current task, prefer one business tool with a closed context input and an exact received/applied/rejected
+receipt. Treat retained-profile elicitation as optional and test it against the exact interactive client version.
+Noninteractive Codex and Claude CLI runs may reach their input-required round limit without a user surface; that
+must fail closed and leave the product task usable without enrichment.
 
 <Note>
 Confirmed interaction does not mean identified agent. MCP client information is a self-reported runtime

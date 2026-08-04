@@ -3,6 +3,7 @@ import { Buffer } from "node:buffer";
 import { once } from "node:events";
 import test from "node:test";
 
+import { McpServer } from "@modelcontextprotocol/server";
 import express from "express";
 import Fastify from "fastify";
 
@@ -233,6 +234,226 @@ function backend({ enforceConsent = false } = {}) {
     return json({ error: "not_found" }, 404);
   };
   return { calls, fetch };
+}
+
+function mcpMatrixBackend() {
+  const calls = [];
+  const records = new Map();
+  const rememberedIdentities = new Set();
+  const inspectionFailures = new Map();
+  const operationStates = new Map();
+  let sequence = 0;
+
+  const identityKey = (input) =>
+    input.accountRef || input.userRef || input.customerRef || input.anonymousRef || "ephemeral";
+  const action = (authorization, bodySchema) => ({
+    url: "https://app.epode.ai/api/v2/enrichment/answers",
+    method: "POST",
+    authorization: `Bearer ${authorization}`,
+    contentType: "application/json",
+    bodySchema,
+  });
+  const responseFor = (record) => ({
+    requestId: record.requestId,
+    interactionId: record.interactionId,
+    state: record.state,
+    purpose: "product_personalization",
+    identityLevel: record.identityKey === "ephemeral" ? "ephemeral" : "verified",
+    stageInstruction:
+      record.state === "consent_required"
+        ? consentStageInstruction
+        : record.state === "answer_ready"
+          ? answerStageInstruction
+          : noActionStageInstruction,
+    question:
+      record.state === "consent_required"
+        ? "May Example Store use relevant context to personalize your experience?"
+        : null,
+    answerInstruction: record.state === "answer_ready" ? answerInstruction : null,
+    expiresAt: record.expiresAt || "2026-08-05T15:00:00Z",
+    consent:
+      record.state === "consent_required"
+        ? {
+            ...action(record.requestHandle, consentBodySchema),
+            url: "https://app.epode.ai/api/v2/enrichment/consent/decisions",
+          }
+        : null,
+    submit: record.state === "answer_ready" ? action(record.answerHandle, answerBodySchema) : null,
+  });
+  const createRecord = (input = {}, state) => {
+    sequence += 1;
+    const key = identityKey(input);
+    const record = {
+      requestId: `request-${sequence}`,
+      interactionId: input.interactionId || `interaction-${sequence}`,
+      identityKey: key,
+      operation: input.operation || "seeded",
+      sessionRef: input.sessionRef,
+      requestHandle: `aqr1_request_${sequence}`,
+      answerHandle: `aqr1_answer_${sequence}`,
+      state:
+        state ||
+        operationStates.get(input.operation) ||
+        (rememberedIdentities.has(key) ? "answer_ready" : "consent_required"),
+      answerCount: 0,
+      consentCount: 0,
+    };
+    records.set(record.requestHandle, record);
+    records.set(record.answerHandle, record);
+    return record;
+  };
+  const fetch = async (url, init = {}) => {
+    const path = new URL(String(url)).pathname;
+    const headers = new Headers(init.headers);
+    const authorization = headers.get("authorization") || "";
+    const capability = authorization.replace(/^Bearer\s+/, "");
+    const body = JSON.parse(String(init.body || "{}"));
+    calls.push({ path, authorization, body });
+    if (path === "/api/v2/enrichment/requests") {
+      return json(responseFor(createRecord(body)));
+    }
+    if (path === "/api/v2/enrichment/requests/inspect") {
+      const failure = inspectionFailures.get(capability);
+      if (failure) return json(failure.body, failure.status);
+      const record = records.get(capability);
+      return record ? json(responseFor(record)) : json({ error: "invalid_handle" }, 401);
+    }
+    if (path === "/api/v2/enrichment/consent/decisions") {
+      const record = records.get(capability);
+      if (!record) return json({ error: "invalid_handle" }, 401);
+      if (record.state !== "consent_required") {
+        return json({ error: "request_already_decided" }, 409);
+      }
+      record.consentCount += 1;
+      if (body.decision === "declined") {
+        record.state = "declined";
+        return json({
+          requestId: record.requestId,
+          state: "declined",
+          changed: true,
+          stageInstruction: noActionStageInstruction,
+          answerInstruction: null,
+          submit: null,
+        });
+      }
+      record.state = "answer_ready";
+      if (body.remember === true) rememberedIdentities.add(record.identityKey);
+      return json({
+        requestId: record.requestId,
+        state: "answer_ready",
+        changed: true,
+        stageInstruction: answerStageInstruction,
+        answerInstruction,
+        submit: action(record.answerHandle, answerBodySchema),
+      });
+    }
+    if (path === "/api/v2/enrichment/answers") {
+      const record = records.get(capability);
+      if (!record) return json({ error: "invalid_handle" }, 401);
+      if (capability !== record.answerHandle || record.state !== "answer_ready") {
+        return json({ error: "request_not_answer_ready" }, 409);
+      }
+      record.answerCount += 1;
+      record.state = body.status;
+      return json({
+        accepted: true,
+        requestId: record.requestId,
+        interactionId: record.interactionId,
+        customerId: ids.customer,
+        signals: body.items || [],
+      });
+    }
+    return json({ error: "not_found" }, 404);
+  };
+  return {
+    calls,
+    fetch,
+    records,
+    rememberedIdentities,
+    operationStates,
+    inspectionFailures,
+    seed(state = "consent_required", input = {}) {
+      const record = createRecord(input, state);
+      return {
+        record,
+        requestHandle: state === "answer_ready" ? record.answerHandle : record.requestHandle,
+      };
+    },
+  };
+}
+
+function mcpTestServer(service, options = {}) {
+  const tools = new Map();
+  const server = {
+    registerTool(name, configuration, handler) {
+      tools.set(name, { configuration, handler });
+    },
+  };
+  const customer = epodeMcp({
+    apiKey: key,
+    endpoint: "https://epode.test",
+    fetch: service.fetch,
+    includeTools: ["search_*"],
+    ...options,
+  });
+  customer.instrument(server);
+  return { customer, server, tools };
+}
+
+function customerAnswer(requestHandle, remember = true) {
+  return {
+    requestHandle,
+    status: "answered",
+    items: [
+      {
+        key: "shopping.priority",
+        type: "preference",
+        value: "outdoor_travel",
+        summary: "Customer prefers outdoor travel.",
+        provenance: "agent_reports_user_statement",
+        confidence: 1,
+        remember,
+      },
+    ],
+  };
+}
+
+let customerMcpRequestId = 0;
+
+function realCustomerMcpContext(extra = {}) {
+  return {
+    mcpReq: {
+      id: ++customerMcpRequestId,
+      method: "tools/call",
+      requestState: () => undefined,
+      signal: new AbortController().signal,
+      envelope: {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": { elicitation: {} },
+      },
+      ...extra,
+    },
+  };
+}
+
+function callRealCustomerMcpTool(server, name, arguments_, context = realCustomerMcpContext()) {
+  const handler = server.server._requestHandlers.get("tools/call");
+  assert.equal(typeof handler, "function");
+  return handler(
+    {
+      method: "tools/call",
+      params: {
+        name,
+        arguments: arguments_ || {},
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientInfo": { name: "matrix-client", version: "1.0.0" },
+          "io.modelcontextprotocol/clientCapabilities": { elicitation: {} },
+        },
+      },
+    },
+    context,
+  );
 }
 
 test("company-side Express completes learn, retrieve, personalize, and measure", async () => {
@@ -770,7 +991,11 @@ test("company-owned MCP registers context tools and decorates selected results",
     result.structuredContent._epode.customerContext.answerTool,
     "share_customer_context",
   );
-  assert.equal(result.structuredContent._epode.customerContext.permissionMode, "mcp_elicitation");
+  assert.equal(
+    result.structuredContent._epode.customerContext.permissionMode,
+    "best_effort_mcp_elicitation",
+  );
+  assert.equal(result.structuredContent._epode.customerContext.manageConsent, undefined);
   assert.match(result.content.at(-1).text, /do not ask the user separately in chat/i);
   assert.equal(service.calls[0].body.surface, "mcp");
   assert.equal(service.calls[0].body.statusCode, 200);
@@ -860,4 +1085,448 @@ test("company-owned MCP elicits and records one session-only choice inside shari
   );
   assert.deepEqual(service.calls[3].body, { decision: "approved", remember: false });
   assert.equal(service.calls[4].body.items[0].remember, false);
+});
+
+test("MCP customer context enforces always and session-only retention choices", async (t) => {
+  for (const scenario of [
+    { choice: "always_allow", consentRemember: true, answerRemember: true },
+    { choice: "this_session_only", consentRemember: false, answerRemember: false },
+  ]) {
+    await t.test(scenario.choice, async () => {
+      const service = mcpMatrixBackend();
+      const { tools } = mcpTestServer(service);
+      const { requestHandle } = service.seed();
+      const answer = customerAnswer(requestHandle, true);
+
+      const first = await tools.get("share_customer_context").handler(answer, { mcpReq: {} });
+      assert.equal(first.resultType, "input_required");
+      assert.deepEqual(
+        first.inputRequests.customer_context_permission.params.requestedSchema.properties.choice
+          .oneOf,
+        [
+          { const: "always_allow", title: "Always allow" },
+          { const: "this_session_only", title: "This session only" },
+          { const: "dont_allow", title: "Don't allow" },
+        ],
+      );
+
+      const completed = await tools.get("share_customer_context").handler(answer, {
+        mcpReq: {
+          inputResponses: {
+            customer_context_permission: {
+              action: "accept",
+              content: { choice: scenario.choice },
+            },
+          },
+        },
+      });
+      assert.equal(completed.isError, false);
+      assert.equal(completed.structuredContent.accepted, true);
+      const consent = service.calls.find(
+        (call) => call.path === "/api/v2/enrichment/consent/decisions",
+      );
+      const submitted = service.calls.find((call) => call.path === "/api/v2/enrichment/answers");
+      assert.deepEqual(consent.body, {
+        decision: "approved",
+        remember: scenario.consentRemember,
+      });
+      assert.equal(submitted.body.items[0].remember, scenario.answerRemember);
+    });
+  }
+});
+
+test("MCP customer context handles denial and dismissal without sharing", async (t) => {
+  for (const scenario of [
+    {
+      name: "explicit don't allow choice",
+      response: { action: "accept", content: { choice: "dont_allow" } },
+      expectedState: "declined",
+      consentCalls: 1,
+    },
+    {
+      name: "client decline action",
+      response: { action: "decline" },
+      expectedState: "declined",
+      consentCalls: 1,
+    },
+    {
+      name: "client cancel action",
+      response: { action: "cancel" },
+      expectedState: "canceled",
+      consentCalls: 0,
+    },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const service = mcpMatrixBackend();
+      const { tools } = mcpTestServer(service);
+      const { requestHandle } = service.seed();
+      const result = await tools
+        .get("share_customer_context")
+        .handler(customerAnswer(requestHandle), {
+          mcpReq: {
+            inputResponses: { customer_context_permission: scenario.response },
+          },
+        });
+      assert.equal(result.isError, scenario.consentCalls === 0 ? undefined : false);
+      assert.equal(result.structuredContent.state, scenario.expectedState);
+      assert.equal(
+        service.calls.filter((call) => call.path === "/api/v2/enrichment/consent/decisions").length,
+        scenario.consentCalls,
+      );
+      assert.equal(
+        service.calls.filter((call) => call.path === "/api/v2/enrichment/answers").length,
+        0,
+      );
+    });
+  }
+});
+
+test("MCP customer context rejects malformed and unknown resumes without mutation", async (t) => {
+  const malformedResponses = [
+    "accept",
+    { action: "unexpected", content: { choice: "always_allow" } },
+    { action: "accept" },
+    { action: "accept", content: { choice: "share_everything" } },
+  ];
+  for (const [index, response] of malformedResponses.entries()) {
+    await t.test(`malformed response ${index + 1}`, async () => {
+      const service = mcpMatrixBackend();
+      const { tools } = mcpTestServer(service);
+      const { requestHandle, record } = service.seed();
+      const result = await tools
+        .get("share_customer_context")
+        .handler(customerAnswer(requestHandle), {
+          mcpReq: { inputResponses: { customer_context_permission: response } },
+        });
+      assert.equal(result.isError, true);
+      assert.equal(record.state, "consent_required");
+      assert.deepEqual(
+        service.calls.map((call) => call.path),
+        ["/api/v2/enrichment/requests/inspect"],
+      );
+    });
+  }
+});
+
+test("MCP customer context is idempotent for replayed and terminal requests", async (t) => {
+  await t.test("replayed accepted resume", async () => {
+    const service = mcpMatrixBackend();
+    const { tools } = mcpTestServer(service);
+    const { requestHandle, record } = service.seed();
+    const answer = customerAnswer(requestHandle);
+    const context = {
+      mcpReq: {
+        inputResponses: {
+          customer_context_permission: {
+            action: "accept",
+            content: { choice: "always_allow" },
+          },
+        },
+      },
+    };
+    const first = await tools.get("share_customer_context").handler(answer, context);
+    const replay = await tools.get("share_customer_context").handler(answer, context);
+    assert.equal(first.structuredContent.accepted, true);
+    assert.deepEqual(replay.structuredContent, {
+      accepted: true,
+      state: "answered",
+      alreadyCompleted: true,
+    });
+    assert.equal(record.consentCount, 1);
+    assert.equal(record.answerCount, 1);
+  });
+
+  await t.test("already declined request", async () => {
+    const service = mcpMatrixBackend();
+    const { tools } = mcpTestServer(service);
+    const { requestHandle, record } = service.seed("declined");
+    const result = await tools
+      .get("share_customer_context")
+      .handler(customerAnswer(requestHandle), { mcpReq: {} });
+    assert.deepEqual(result.structuredContent, { accepted: false, state: "declined" });
+    assert.equal(record.consentCount, 0);
+    assert.equal(record.answerCount, 0);
+  });
+
+  for (const state of ["answered", "no_relevant_context"]) {
+    await t.test(`already ${state}`, async () => {
+      const service = mcpMatrixBackend();
+      const { tools } = mcpTestServer(service);
+      const { requestHandle, record } = service.seed(state);
+      const result = await tools
+        .get("share_customer_context")
+        .handler(customerAnswer(requestHandle), { mcpReq: {} });
+      assert.deepEqual(result.structuredContent, {
+        accepted: true,
+        state,
+        alreadyCompleted: true,
+      });
+      assert.equal(record.answerCount, 0);
+    });
+  }
+});
+
+test("MCP customer context submits directly for an already-approved request", async () => {
+  const service = mcpMatrixBackend();
+  const { tools } = mcpTestServer(service);
+  const { requestHandle, record } = service.seed("answer_ready");
+  const result = await tools
+    .get("share_customer_context")
+    .handler(customerAnswer(requestHandle), { mcpReq: {} });
+  assert.equal(result.structuredContent.accepted, true);
+  assert.equal(record.answerCount, 1);
+  assert.deepEqual(
+    service.calls.map((call) => call.path),
+    ["/api/v2/enrichment/requests/inspect", "/api/v2/enrichment/answers"],
+  );
+});
+
+test("MCP customer context fails closed on expired, unavailable, and malformed inspection", async (t) => {
+  for (const scenario of [
+    { name: "expired capability", status: 401, body: { error: "expired_handle" } },
+    { name: "removed request", status: 410, body: { error: "request_expired" } },
+    { name: "temporary outage", status: 503, body: { error: "temporarily_unavailable" } },
+    { name: "malformed success", status: 200, body: [] },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const service = mcpMatrixBackend();
+      const { tools } = mcpTestServer(service);
+      const { requestHandle, record } = service.seed();
+      service.inspectionFailures.set(requestHandle, scenario);
+      const result = await tools
+        .get("share_customer_context")
+        .handler(customerAnswer(requestHandle), { mcpReq: {} });
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, /could not be verified/i);
+      assert.equal(record.state, "consent_required");
+      assert.equal(record.consentCount, 0);
+      assert.equal(record.answerCount, 0);
+    });
+  }
+});
+
+test("MCP customer context keeps identities and sessions isolated across queries", async () => {
+  const service = mcpMatrixBackend();
+  const { server, tools } = mcpTestServer(service, {
+    identify: (_arguments, context) => ({ userRef: context.authenticatedUser }),
+    sessionRef: (context) => context.productSession,
+    runtimeHint: (context) => context.harness,
+  });
+  server.registerTool("search_catalog", { inputSchema: {} }, async () => ({
+    content: [{ type: "text", text: "Results found." }],
+    structuredContent: { products: 2 },
+  }));
+  const search = (authenticatedUser, productSession, harness, arguments_ = {}) =>
+    tools.get("search_catalog").handler(arguments_, {
+      authenticatedUser,
+      productSession,
+      harness,
+    });
+  const resume = (requestHandle, choice) =>
+    tools.get("share_customer_context").handler(customerAnswer(requestHandle), {
+      mcpReq: {
+        inputResponses: {
+          customer_context_permission: { action: "accept", content: { choice } },
+        },
+      },
+    });
+
+  const firstA = await search("traveler-a", "session-a1", "claude-desktop");
+  assert.equal(firstA.structuredContent._epode.customerContext.state, "consent_required");
+  await resume(firstA.structuredContent._epode.customerContext.requestHandle, "always_allow");
+  const secondA = await search("traveler-a", "session-a2", "chatgpt-desktop");
+  assert.equal(secondA.structuredContent._epode.customerContext.state, "answer_ready");
+  await tools
+    .get("share_customer_context")
+    .handler(customerAnswer(secondA.structuredContent._epode.customerContext.requestHandle), {
+      mcpReq: {},
+    });
+
+  const firstB = await search("traveler-b", "session-b1", "chatgpt-desktop", {
+    userRef: "traveler-a",
+    sessionRef: "model-controlled-session",
+  });
+  assert.equal(firstB.structuredContent._epode.customerContext.state, "consent_required");
+
+  const firstC = await search("traveler-c", "session-c1", "claude-desktop");
+  await resume(firstC.structuredContent._epode.customerContext.requestHandle, "this_session_only");
+  const secondC = await search("traveler-c", "session-c2", "chatgpt-desktop");
+  assert.equal(secondC.structuredContent._epode.customerContext.state, "consent_required");
+
+  const requests = service.calls.filter((call) => call.path === "/api/v2/enrichment/requests");
+  assert.deepEqual(
+    requests.map(({ body }) => [body.userRef, body.sessionRef, body.runtimeHint]),
+    [
+      ["traveler-a", "session-a1", "claude-desktop"],
+      ["traveler-a", "session-a2", "chatgpt-desktop"],
+      ["traveler-b", "session-b1", "chatgpt-desktop"],
+      ["traveler-c", "session-c1", "claude-desktop"],
+      ["traveler-c", "session-c2", "chatgpt-desktop"],
+    ],
+  );
+  assert.equal(new Set(requests.map(({ body }) => body.interactionId)).size, requests.length);
+  assert.equal(service.rememberedIdentities.has("traveler-a"), true);
+  assert.equal(service.rememberedIdentities.has("traveler-b"), false);
+  assert.equal(service.rememberedIdentities.has("traveler-c"), false);
+});
+
+test("MCP customer instrumentation preserves a business tool's own input_required round", async () => {
+  const service = mcpMatrixBackend();
+  const { server, tools } = mcpTestServer(service, { identify: () => ({ userRef: "user-1" }) });
+  const intermediate = {
+    resultType: "input_required",
+    requestState: "business-signed-state",
+    inputRequests: {
+      hotel_dates: {
+        method: "elicitation/create",
+        params: { mode: "form", message: "Which dates?", requestedSchema: { type: "object" } },
+      },
+    },
+  };
+  let round = 0;
+  server.registerTool("search_stays", { inputSchema: {} }, async () => {
+    round += 1;
+    return round === 1
+      ? intermediate
+      : {
+          content: [{ type: "text", text: "Three hotels found." }],
+          structuredContent: { hotels: 3 },
+        };
+  });
+
+  const first = await tools.get("search_stays").handler({}, { mcpReq: {} });
+  assert.equal(first, intermediate);
+  assert.deepEqual(service.calls, []);
+  const second = await tools.get("search_stays").handler({}, { mcpReq: {} });
+  assert.equal(second.structuredContent.hotels, 3);
+  assert.equal(second.structuredContent._epode.customerContext.state, "consent_required");
+  assert.deepEqual(
+    service.calls.map((call) => call.path),
+    ["/api/v2/enrichment/requests"],
+  );
+});
+
+test("real stateless MCP 2026 server preserves customer-context MRTR and resumes safely", async () => {
+  const service = mcpMatrixBackend();
+  const server = new McpServer({ name: "customer-context-matrix", version: "1.0.0" });
+  server.server._negotiatedProtocolVersion = "2026-07-28";
+  const customer = epodeMcp({
+    apiKey: key,
+    endpoint: "https://epode.test",
+    fetch: service.fetch,
+    includeTools: ["search_catalog"],
+    identify: () => ({ userRef: "real-mcp-user" }),
+  });
+  customer.instrument(server);
+  server.registerTool("search_catalog", { inputSchema: {} }, async () => ({
+    content: [{ type: "text", text: "Two products found." }],
+    structuredContent: { products: 2 },
+  }));
+
+  const search = await callRealCustomerMcpTool(server, "search_catalog", {});
+  const requestHandle = search.structuredContent._epode.customerContext.requestHandle;
+  const answer = customerAnswer(requestHandle);
+  const intermediate = await callRealCustomerMcpTool(server, "share_customer_context", answer);
+  assert.equal(intermediate.resultType, "input_required");
+  assert.equal(intermediate.inputRequests.customer_context_permission.method, "elicitation/create");
+
+  const completed = await callRealCustomerMcpTool(
+    server,
+    "share_customer_context",
+    answer,
+    realCustomerMcpContext({
+      inputResponses: {
+        customer_context_permission: {
+          action: "accept",
+          content: { choice: "this_session_only" },
+        },
+      },
+    }),
+  );
+  assert.equal(completed.structuredContent.accepted, true);
+  assert.equal(
+    service.calls.filter((call) => call.path === "/api/v2/enrichment/answers").length,
+    1,
+  );
+  assert.equal(
+    service.calls.find((call) => call.path === "/api/v2/enrichment/answers").body.items[0].remember,
+    false,
+  );
+});
+
+test("real stateless MCP 2026 server shares nothing when the client lacks form elicitation", async (t) => {
+  for (const scenario of [
+    { name: "no elicitation", capabilities: {} },
+    { name: "URL-only elicitation", capabilities: { elicitation: { url: {} } } },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const service = mcpMatrixBackend();
+      const server = new McpServer({ name: "customer-context-fallback", version: "1.0.0" });
+      server.server._negotiatedProtocolVersion = "2026-07-28";
+      const customer = epodeMcp({
+        apiKey: key,
+        endpoint: "https://epode.test",
+        fetch: service.fetch,
+        includeTools: ["search_catalog"],
+        identify: () => ({ userRef: "fallback-user" }),
+      });
+      customer.instrument(server);
+      server.registerTool("search_catalog", { inputSchema: {} }, async () => ({
+        content: [{ type: "text", text: "Two products found." }],
+        structuredContent: { products: 2 },
+      }));
+      const context = realCustomerMcpContext({
+        envelope: {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientCapabilities": scenario.capabilities,
+        },
+      });
+      const search = await callRealCustomerMcpTool(server, "search_catalog", {}, context);
+      const requestHandle = search.structuredContent._epode.customerContext.requestHandle;
+      const result = await callRealCustomerMcpTool(
+        server,
+        "share_customer_context",
+        customerAnswer(requestHandle),
+        context,
+      );
+      assert.equal(result.isError, undefined);
+      assert.deepEqual(result.structuredContent, {
+        accepted: false,
+        state: "unsupported",
+        reason: "form_elicitation_unavailable",
+      });
+      assert.equal(JSON.stringify(result).includes("fallbackTool"), false);
+      assert.doesNotMatch(result.content[0].text, /\?/);
+      assert.doesNotMatch(result.content[0].text, /May Example Store/);
+      assert.equal(
+        service.calls.filter((call) => call.path === "/api/v2/enrichment/consent/decisions").length,
+        0,
+      );
+      assert.equal(
+        service.calls.filter((call) => call.path === "/api/v2/enrichment/answers").length,
+        0,
+      );
+    });
+  }
+});
+
+test("MCP customer context shares nothing when resumable form elicitation is unavailable", async () => {
+  const service = mcpMatrixBackend();
+  const { tools } = mcpTestServer(service);
+  const { requestHandle, record } = service.seed();
+  const result = await tools
+    .get("share_customer_context")
+    .handler(customerAnswer(requestHandle), {});
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(result.structuredContent, {
+    accepted: false,
+    state: "unsupported",
+    reason: "form_elicitation_unavailable",
+  });
+  assert.equal(JSON.stringify(result).includes("fallbackTool"), false);
+  assert.equal(JSON.stringify(result).includes(requestHandle), false);
+  assert.doesNotMatch(result.content[0].text, /\?/);
+  assert.doesNotMatch(result.content[0].text, /May Example Store/);
+  assert.equal(record.consentCount, 0);
+  assert.equal(record.answerCount, 0);
 });

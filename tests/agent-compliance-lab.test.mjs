@@ -1,8 +1,29 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { mcpClientArguments } from "../experiments/agent-compliance/runtime-config.mjs";
 import { startLabServer } from "../experiments/agent-compliance/server.mjs";
+
+test("agent evaluator preflights MCP dependencies and retains runtime diagnostics", async () => {
+  const source = await readFile(
+    new URL("../experiments/agent-compliance/run.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /npm ci --prefix examples\/node-mcp/);
+  assert.match(source, /await requireMcpRuntime\(\)/);
+  assert.match(source, /`\$\{outputFile\}\.jsonl`/);
+  assert.match(source, /`\$\{outputFile\}\.stderr\.txt`/);
+  assert.match(source, /native_input_unavailable/);
+  assert.match(source, /inputRequired\\\.maxRounds/);
+  assert.match(source, /suite === "mcp-product-control"/);
+  const server = await readFile(
+    new URL("../experiments/agent-compliance/mcp-server.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(server, /const reportInputSchema = mrtr/);
+  assert.match(server, /z\.object\(\{ feedbackHandle, summary, impact \}\)/);
+});
 
 test("agent evaluator preserves the exact MCP server across initial and resumed turns", () => {
   const run = {
