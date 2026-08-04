@@ -1113,12 +1113,67 @@ pub(crate) struct CustomerDetailCounts {
     pub features: i64,
 }
 
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardContextReturnedItem {
+    pub signal_id: Uuid,
+    pub key: String,
+    #[serde(rename = "type")]
+    pub signal_type: String,
+    pub value: Value,
+    pub summary: String,
+    pub provenance: String,
+    #[schema(required = true, nullable)]
+    pub confidence: Option<f64>,
+    #[schema(required = true, nullable)]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardPersonalizationOutcome {
+    pub id: Uuid,
+    pub external_outcome_id: String,
+    pub decision_id: Uuid,
+    pub outcome: String,
+    pub occurred_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardPersonalizationDecision {
+    pub id: Uuid,
+    pub external_decision_id: String,
+    #[schema(required = true, nullable)]
+    pub variant: Option<String>,
+    pub signal_ids: Vec<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub outcomes: Vec<DashboardPersonalizationOutcome>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardCustomerContextReturn {
+    pub retrieval_id: Uuid,
+    #[schema(required = true, nullable)]
+    pub interaction_id: Option<Uuid>,
+    #[schema(required = true, nullable)]
+    pub session_id: Option<Uuid>,
+    pub purpose: String,
+    pub identity_level: String,
+    pub context_version: String,
+    pub retrieved_at: DateTime<Utc>,
+    pub items: Vec<DashboardContextReturnedItem>,
+    pub decisions: Vec<DashboardPersonalizationDecision>,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DashboardCustomerDetail {
     pub customer: CustomerSummary,
     pub identifiers: Vec<CustomerIdentifier>,
     pub signals: Vec<CustomerSignal>,
+    pub context_returns: Vec<DashboardCustomerContextReturn>,
     pub sessions: Vec<DashboardSessionSummary>,
     pub consent: Vec<ConsentGrant>,
     pub consent_history: Vec<ConsentEventSummary>,
@@ -1168,6 +1223,30 @@ pub(crate) struct DashboardResponseAnswer {
     pub value: String,
     pub summary: String,
     pub remembered: bool,
+}
+
+/// A canonical Epode enrichment question associated with one session interaction.
+///
+/// This read model contains only the bounded, normalized answer items accepted by
+/// Epode. It deliberately does not expose an agent prompt, tool input, or query.
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardSessionResponse {
+    pub id: Uuid,
+    pub interaction_id: Uuid,
+    pub question: String,
+    pub status: String,
+    pub purpose: String,
+    pub surface: String,
+    #[schema(required = true, nullable)]
+    pub customer_id: Option<Uuid>,
+    #[schema(required = true, nullable)]
+    pub customer_name: Option<String>,
+    pub asked_at: DateTime<Utc>,
+    #[schema(required = true, nullable)]
+    pub answered_at: Option<DateTime<Utc>>,
+    #[sqlx(skip)]
+    pub answers: Vec<DashboardResponseAnswer>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
@@ -1422,6 +1501,7 @@ pub(crate) struct DashboardSessionDetail {
     pub session: ProductSession,
     pub interactions: Vec<ProductInteraction>,
     pub reports: Vec<ProductFeedbackReportWithInteraction>,
+    pub responses: Vec<DashboardSessionResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]

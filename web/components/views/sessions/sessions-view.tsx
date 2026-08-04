@@ -708,6 +708,7 @@ function SessionJourney({
   const interactions = [...detail.interactions].sort((left, right) =>
     left.occurredAt.localeCompare(right.occurredAt),
   );
+  const responses = detail.responses ?? [];
 
   return (
     <>
@@ -730,10 +731,73 @@ function SessionJourney({
         <dd>{interactions.length}</dd>
         <dt className="text-muted-foreground">Feedback reports</dt>
         <dd>{detail.reports.length}</dd>
+        <dt className="text-muted-foreground">Questions</dt>
+        <dd>{responses.length}</dd>
       </dl>
       <p className="mt-4 text-xs leading-5 text-muted-foreground">
         Epode groups this journey only because the product supplied a stable session reference.
       </p>
+
+      <Separator className="my-5" />
+
+      <section aria-labelledby="session-responses-heading">
+        <h3 id="session-responses-heading" className="text-xs font-medium">
+          Questions and answers
+        </h3>
+        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+          Canonical Epode questions and bounded answers associated with this session.
+        </p>
+        {responses.length ? (
+          <div className="mt-4 grid gap-3">
+            {responses.map((response) => (
+              <article key={response.id} className="border bg-muted/20 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <p className="text-xs font-medium leading-5">{response.question}</p>
+                  <Badge variant={response.status === "answered" ? "default" : "secondary"}>
+                    {sessionResponseStatus(response.status)}
+                  </Badge>
+                </div>
+                {response.answers.length ? (
+                  <dl className="mt-3 grid gap-2 border-t pt-3">
+                    {response.answers.map((answer) => (
+                      <div key={`${answer.key}-${answer.value}`}>
+                        <dt className="font-mono text-[10px] text-muted-foreground">
+                          {answer.key}
+                        </dt>
+                        <dd className="mt-0.5 break-words text-xs leading-5">{answer.value}</dd>
+                        <dd className="text-[10px] text-muted-foreground">
+                          {titleCase(answer.type)} ·{" "}
+                          {answer.remembered ? "Remembered" : "Session only"}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                ) : (
+                  <p className="mt-3 border-t pt-3 text-xs text-muted-foreground">
+                    {sessionResponseEmptyState(response.status)}
+                  </p>
+                )}
+                <div className="mt-3 flex items-center justify-between gap-3 border-t pt-3">
+                  <p className="min-w-0 truncate text-[10px] text-muted-foreground">
+                    {response.customerName ?? "Unresolved customer"} · {titleCase(response.purpose)}
+                  </p>
+                  <Button
+                    variant="link"
+                    className="h-auto shrink-0 p-0 text-[11px]"
+                    onClick={() => openInteraction(response.interactionId)}
+                  >
+                    Open interaction
+                  </Button>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="mt-4 text-xs text-muted-foreground">
+            No enrichment questions were associated with this session.
+          </p>
+        )}
+      </section>
 
       <Separator className="my-5" />
 
@@ -828,6 +892,25 @@ function SessionJourney({
       </section>
     </>
   );
+}
+
+function sessionResponseStatus(status: string): string {
+  const labels: Record<string, string> = {
+    answered: "Answered",
+    awaiting_answer: "Awaiting answer",
+    declined: "Declined",
+    no_relevant_context: "No relevant context",
+  };
+  return labels[status] ?? titleCase(status);
+}
+
+function sessionResponseEmptyState(status: string): string {
+  const labels: Record<string, string> = {
+    awaiting_answer: "The customer agent has not answered yet.",
+    declined: "The customer declined this question.",
+    no_relevant_context: "The customer agent had no relevant context to share.",
+  };
+  return labels[status] ?? "No answer items were returned.";
 }
 
 function JourneyCap({

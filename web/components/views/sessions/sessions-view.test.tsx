@@ -73,6 +73,78 @@ describe("SessionsView", () => {
     expect(selectSession).toHaveBeenCalledWith(null);
   });
 
+  it("links canonical questions and bounded answers to their session interaction", async () => {
+    const base = dashboardFixture();
+    const session = base.sessions[0];
+    const interaction = base.interactions[0];
+    const openInteraction = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      sessionFetch(base, {
+        session,
+        interactions: [interaction],
+        reports: [],
+        responses: [
+          {
+            id: "response-1",
+            interactionId: interaction.id,
+            question: "What should Tripwise prioritize for this traveler?",
+            status: "answered",
+            purpose: "product_personalization",
+            surface: "mcp",
+            customerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            customerName: "Traveler 1042",
+            askedAt: "2026-08-02T12:00:00Z",
+            answeredAt: "2026-08-02T12:01:00Z",
+            answers: [
+              {
+                key: "travel.cabin_preference",
+                type: "preference",
+                value: "premium_economy",
+                summary: "travel cabin preference: premium economy",
+                remembered: true,
+              },
+              {
+                key: "travel.max_stops",
+                type: "constraint",
+                value: "1",
+                summary: "travel maximum stops: 1",
+                remembered: false,
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    renderWithQuery(
+      <SessionsView
+        data={base}
+        selectedSessionId={session.id}
+        selectSession={vi.fn()}
+        openFeedback={vi.fn()}
+        openInteraction={openInteraction}
+        loadMore={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    const responses = await screen.findByRole("region", { name: "Questions and answers" });
+    expect(
+      within(responses).getByText("What should Tripwise prioritize for this traveler?"),
+    ).toBeVisible();
+    expect(within(responses).getByText("Answered")).toBeVisible();
+    expect(within(responses).getByText("travel.cabin_preference")).toBeVisible();
+    expect(within(responses).getByText("premium_economy")).toBeVisible();
+    expect(within(responses).getByText("travel.max_stops")).toBeVisible();
+    expect(within(responses).getByText("1")).toBeVisible();
+    expect(within(responses).getByText("Traveler 1042", { exact: false })).toBeVisible();
+    expect(within(responses).queryByText(/raw prompt|tool query/i)).not.toBeInTheDocument();
+
+    fireEvent.click(within(responses).getByRole("button", { name: "Open interaction" }));
+    expect(openInteraction).toHaveBeenCalledWith(interaction.id);
+  });
+
   it("opens a session from the full row or its explicit accessible control", () => {
     const data = dashboardFixture();
     const selectSession = vi.fn();

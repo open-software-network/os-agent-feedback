@@ -2259,7 +2259,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Customer identity, evidence, sessions, and scoped consent",
+            "description": "Customer identity, evidence, context returned to the product, linked personalization use, sessions, and scoped consent",
             "content": {
               "application/json": {
                 "schema": {
@@ -3605,7 +3605,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Session with its interactions and feedback reports",
+            "description": "Session with its interactions, enrichment questions and answers, and feedback reports",
             "content": {
               "application/json": {
                 "schema": {
@@ -7598,12 +7598,118 @@
           }
         }
       },
+      "DashboardContextReturnedItem": {
+        "type": "object",
+        "required": [
+          "signalId",
+          "key",
+          "type",
+          "value",
+          "summary",
+          "provenance",
+          "confidence",
+          "expiresAt"
+        ],
+        "properties": {
+          "confidence": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "key": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "string"
+          },
+          "signalId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "value": {}
+        }
+      },
+      "DashboardCustomerContextReturn": {
+        "type": "object",
+        "required": [
+          "retrievalId",
+          "interactionId",
+          "sessionId",
+          "purpose",
+          "identityLevel",
+          "contextVersion",
+          "retrievedAt",
+          "items",
+          "decisions"
+        ],
+        "properties": {
+          "contextVersion": {
+            "type": "string"
+          },
+          "decisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DashboardPersonalizationDecision"
+            }
+          },
+          "identityLevel": {
+            "type": "string"
+          },
+          "interactionId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DashboardContextReturnedItem"
+            }
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "retrievalId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "retrievedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
       "DashboardCustomerDetail": {
         "type": "object",
         "required": [
           "customer",
           "identifiers",
           "signals",
+          "contextReturns",
           "sessions",
           "consent",
           "consentHistory",
@@ -7620,6 +7726,12 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ConsentEventSummary"
+            }
+          },
+          "contextReturns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DashboardCustomerContextReturn"
             }
           },
           "counts": {
@@ -8026,6 +8138,79 @@
           }
         }
       },
+      "DashboardPersonalizationDecision": {
+        "type": "object",
+        "required": [
+          "id",
+          "externalDecisionId",
+          "variant",
+          "signalIds",
+          "createdAt",
+          "outcomes"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "externalDecisionId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "outcomes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DashboardPersonalizationOutcome"
+            }
+          },
+          "signalIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "variant": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "DashboardPersonalizationOutcome": {
+        "type": "object",
+        "required": [
+          "id",
+          "externalOutcomeId",
+          "decisionId",
+          "outcome",
+          "occurredAt"
+        ],
+        "properties": {
+          "decisionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "externalOutcomeId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "outcome": {
+            "type": "string"
+          }
+        }
+      },
       "DashboardReportResponse": {
         "type": "object",
         "required": [
@@ -8204,7 +8389,8 @@
         "required": [
           "session",
           "interactions",
-          "reports"
+          "reports",
+          "responses"
         ],
         "properties": {
           "interactions": {
@@ -8219,8 +8405,83 @@
               "$ref": "#/components/schemas/ProductFeedbackReportWithInteraction"
             }
           },
+          "responses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DashboardSessionResponse"
+            }
+          },
           "session": {
             "$ref": "#/components/schemas/ProductSession"
+          }
+        }
+      },
+      "DashboardSessionResponse": {
+        "type": "object",
+        "description": "A canonical Epode enrichment question associated with one session interaction.\n\nThis read model contains only the bounded, normalized answer items accepted by\nEpode. It deliberately does not expose an agent prompt, tool input, or query.",
+        "required": [
+          "id",
+          "interactionId",
+          "question",
+          "status",
+          "purpose",
+          "surface",
+          "customerId",
+          "customerName",
+          "askedAt",
+          "answeredAt",
+          "answers"
+        ],
+        "properties": {
+          "answeredAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "answers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DashboardResponseAnswer"
+            }
+          },
+          "askedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "customerId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "customerName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "interactionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "surface": {
+            "type": "string"
           }
         }
       },

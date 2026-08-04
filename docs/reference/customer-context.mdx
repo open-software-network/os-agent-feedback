@@ -81,6 +81,20 @@ vocabulary; unknown combinations fail closed. Epode generates the stored summary
 storing agent-written prose. Remembered items require the matching grant. Requested expiry is clamped to the
 product retention policy.
 
+The catalog includes bounded, non-sensitive preferences for several product categories. Current examples include:
+
+| Product category | Keys | Example values |
+| --- | --- | --- |
+| Travel | `travel.stay_style`, `travel.location_priority`, `travel.room_priority` | `quiet_boutique`, `central_walkable`, `reliable_wifi` |
+| Financial products | `finance.explanation_style`, `finance.liquidity_preference` | `comparison_table`, `few_days` |
+| Care navigation | `care.communication_style`, `care.visit_mode`, `care.appointment_timing` | `plain_language`, `telehealth`, `weekday_evening` |
+| Education | `education.learning_format`, `education.learning_level` | `project_based`, `intermediate` |
+
+These preferences describe how the product should serve the customer. They are not permission to collect travel
+documents, holdings, balances, income, creditworthiness, diagnoses, symptoms, medications, disabilities, or other
+sensitive or free-form facts. Those fields are absent from the catalog and fail closed. All four category-specific
+groups above are also marked `targetedAdvertisingSafe: false`.
+
 For `targeted_advertising`, the backend also requires the selected catalog entry's
 `targetedAdvertisingSafe` field to be `true`. For example, the bounded `interest.topic` preference accepts
 non-sensitive values such as `outdoor_travel`; B2B company size, purchase intent, unknown audience labels, and

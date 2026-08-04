@@ -27,12 +27,14 @@ use crate::{
         ConsentGrant, ConsentStateInput, ConsentStateResponse, CreateProductInput,
         CreateTeamInvitationInput, CustomerContextInput, CustomerContextItem,
         CustomerContextResponse, CustomerDetailCounts, CustomerFacets, CustomerIdentifier,
-        CustomerRollup, CustomerSignal, CustomerSummary, DashboardContext, DashboardCustomerDetail,
+        CustomerRollup, CustomerSignal, CustomerSummary, DashboardContext,
+        DashboardContextReturnedItem, DashboardCustomerContextReturn, DashboardCustomerDetail,
         DashboardCustomerFilters, DashboardCustomersPage, DashboardData, DashboardFeedbackFacets,
         DashboardFeedbackFilters, DashboardFeedbackPage, DashboardListState,
-        DashboardResponseAnswer, DashboardResponseFilters, DashboardResponseRollup,
-        DashboardResponseSummary, DashboardResponsesPage, DashboardSessionDetail,
-        DashboardSessionFilters, DashboardSessionRollup, DashboardSessionSummary,
+        DashboardPersonalizationDecision, DashboardPersonalizationOutcome, DashboardResponseAnswer,
+        DashboardResponseFilters, DashboardResponseRollup, DashboardResponseSummary,
+        DashboardResponsesPage, DashboardSessionDetail, DashboardSessionFilters,
+        DashboardSessionResponse, DashboardSessionRollup, DashboardSessionSummary,
         DashboardSessionsPage, DashboardSignalFilters, DashboardSignalsPage, DeleteProductInput,
         EnrichmentAnswerAction, EnrichmentAnswerBodySchema, EnrichmentAnswerInput,
         EnrichmentAnswerItemsSchema, EnrichmentAnswerResponse, EnrichmentCatalogEntry,
@@ -4204,6 +4206,9 @@ pub(crate) async fn dashboard_signals_page(
         r"SELECT COUNT(*) FROM customer_signals signal
         LEFT JOIN enrichment_signal_items enrichment ON enrichment.signal_id = signal.id
           AND enrichment.workspace_id = signal.workspace_id
+        LEFT JOIN interactions_v2 source_interaction
+          ON source_interaction.id = signal.interaction_id
+          AND source_interaction.workspace_id = signal.workspace_id
         WHERE signal.workspace_id = $1 AND signal.product_id = $2
           AND signal.collected_at >= $3
           AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
@@ -4214,7 +4219,8 @@ pub(crate) async fn dashboard_signals_page(
             OR COALESCE(enrichment.signal_value, '') ILIKE $5 ESCAPE '\')
           AND ($6::UUID IS NULL OR signal.customer_id = $6)
           AND ($7::TEXT IS NULL OR signal.feature_key = $7)
-          AND ($8::UUID IS NULL OR signal.session_id = $8)
+          AND ($8::UUID IS NULL OR
+            COALESCE(signal.session_id, source_interaction.session_id) = $8)
           AND ($9::TEXT[] IS NULL OR
             COALESCE(signal.attributes->>'enrichmentType', signal.signal_type) = ANY($9))
           AND ($10::TEXT[] IS NULL OR signal.provenance = ANY($10))",
@@ -4232,7 +4238,8 @@ pub(crate) async fn dashboard_signals_page(
     .fetch_one(pool)
     .await?;
     let mut signals = sqlx::query_as::<_, CustomerSignal>(
-        r"SELECT signal.id, signal.customer_id, signal.session_id,
+        r"SELECT signal.id, signal.customer_id,
+          COALESCE(signal.session_id, source_interaction.session_id) AS session_id,
           signal.interaction_id, signal.feedback_report_id, signal.feature_key,
           enrichment.signal_key, TO_JSONB(enrichment.signal_value) AS value,
           COALESCE(signal.attributes->>'enrichmentType', signal.signal_type) AS signal_type,
@@ -4260,6 +4267,9 @@ pub(crate) async fn dashboard_signals_page(
         FROM customer_signals signal
         LEFT JOIN enrichment_signal_items enrichment ON enrichment.signal_id = signal.id
           AND enrichment.workspace_id = signal.workspace_id
+        LEFT JOIN interactions_v2 source_interaction
+          ON source_interaction.id = signal.interaction_id
+          AND source_interaction.workspace_id = signal.workspace_id
         LEFT JOIN consent_grants grant_row
           ON grant_row.id = signal.consent_grant_id
           AND grant_row.workspace_id = signal.workspace_id
@@ -4307,7 +4317,8 @@ pub(crate) async fn dashboard_signals_page(
             OR COALESCE(enrichment.signal_value, '') ILIKE $5 ESCAPE '\')
           AND ($6::UUID IS NULL OR signal.customer_id = $6)
           AND ($7::TEXT IS NULL OR signal.feature_key = $7)
-          AND ($8::UUID IS NULL OR signal.session_id = $8)
+          AND ($8::UUID IS NULL OR
+            COALESCE(signal.session_id, source_interaction.session_id) = $8)
           AND ($9::TEXT[] IS NULL OR
             COALESCE(signal.attributes->>'enrichmentType', signal.signal_type) = ANY($9))
           AND ($10::TEXT[] IS NULL OR signal.provenance = ANY($10))
@@ -4435,6 +4446,176 @@ async fn dashboard_customer_summary_by_id(
     .ok_or_else(|| ApiError::not_found("Customer not found for product"))
 }
 
+async fn dashboard_customer_context_returns(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    customer_id: Uuid,
+    retained_since: DateTime<Utc>,
+) -> Result<Vec<DashboardCustomerContextReturn>, ApiError> {
+    let retrievals = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Option<Uuid>,
+            Option<Uuid>,
+            String,
+            String,
+            String,
+            DateTime<Utc>,
+        ),
+    >(
+        r"SELECT retrieval.id, retrieval.interaction_id, interaction.session_id,
+          retrieval.purpose, retrieval.identity_level, retrieval.context_version,
+          retrieval.created_at
+        FROM customer_context_retrievals retrieval
+        LEFT JOIN interactions_v2 interaction ON interaction.id = retrieval.interaction_id
+          AND interaction.workspace_id = retrieval.workspace_id
+        WHERE retrieval.workspace_id = $1 AND retrieval.product_id = $2
+          AND retrieval.created_at >= $4
+          AND (retrieval.customer_id = $3 OR interaction.customer_id = $3)
+        ORDER BY retrieval.created_at DESC, retrieval.id DESC LIMIT 100",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(customer_id)
+    .bind(retained_since)
+    .fetch_all(pool)
+    .await?;
+    if retrievals.is_empty() {
+        return Ok(Vec::new());
+    }
+    let retrieval_ids = retrievals.iter().map(|row| row.0).collect::<Vec<_>>();
+    let returned_items = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Uuid,
+            String,
+            String,
+            serde_json::Value,
+            String,
+            String,
+            Option<f64>,
+            Option<DateTime<Utc>>,
+        ),
+    >(
+        r"SELECT link.retrieval_id, signal.id, item.signal_key,
+          COALESCE(signal.attributes->>'enrichmentType', signal.signal_type),
+          TO_JSONB(item.signal_value), signal.summary, signal.provenance,
+          signal.confidence, item.expires_at
+        FROM customer_context_retrieval_signals link
+        JOIN customer_signals signal ON signal.id = link.signal_id
+          AND signal.workspace_id = link.workspace_id
+        JOIN enrichment_signal_items item ON item.signal_id = signal.id
+          AND item.workspace_id = signal.workspace_id
+        WHERE link.workspace_id = $1 AND link.retrieval_id = ANY($2)
+        ORDER BY link.retrieval_id, item.signal_key, signal.id",
+    )
+    .bind(workspace_id)
+    .bind(&retrieval_ids)
+    .fetch_all(pool)
+    .await?;
+    let mut items_by_retrieval = BTreeMap::<Uuid, Vec<DashboardContextReturnedItem>>::new();
+    for row in returned_items {
+        items_by_retrieval
+            .entry(row.0)
+            .or_default()
+            .push(DashboardContextReturnedItem {
+                signal_id: row.1,
+                key: row.2,
+                signal_type: row.3,
+                value: row.4,
+                summary: row.5,
+                provenance: row.6,
+                confidence: row.7,
+                expires_at: row.8,
+            });
+    }
+    let decision_rows = sqlx::query_as::<_, (Uuid, Uuid, String, Option<String>, DateTime<Utc>)>(
+        r"SELECT retrieval_id, id, external_decision_id, variant, created_at
+        FROM personalization_decisions
+        WHERE workspace_id = $1 AND product_id = $2 AND retrieval_id = ANY($3)
+        ORDER BY created_at DESC, id DESC",
+    )
+    .bind(workspace_id)
+    .bind(product_id)
+    .bind(&retrieval_ids)
+    .fetch_all(pool)
+    .await?;
+    let decision_ids = decision_rows.iter().map(|row| row.1).collect::<Vec<_>>();
+    let decision_signals = if decision_ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as::<_, (Uuid, Uuid)>(
+            r"SELECT decision_id, signal_id FROM personalization_decision_signals
+            WHERE workspace_id = $1 AND decision_id = ANY($2)
+            ORDER BY decision_id, signal_id",
+        )
+        .bind(workspace_id)
+        .bind(&decision_ids)
+        .fetch_all(pool)
+        .await?
+    };
+    let outcomes = if decision_ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as::<_, DashboardPersonalizationOutcome>(
+            r"SELECT id, external_outcome_id, decision_id, outcome, occurred_at
+            FROM personalization_outcomes
+            WHERE workspace_id = $1 AND product_id = $2 AND decision_id = ANY($3)
+            ORDER BY occurred_at DESC, id DESC",
+        )
+        .bind(workspace_id)
+        .bind(product_id)
+        .bind(&decision_ids)
+        .fetch_all(pool)
+        .await?
+    };
+    let mut signal_ids_by_decision = BTreeMap::<Uuid, Vec<Uuid>>::new();
+    for (decision_id, signal_id) in decision_signals {
+        signal_ids_by_decision
+            .entry(decision_id)
+            .or_default()
+            .push(signal_id);
+    }
+    let mut outcomes_by_decision = BTreeMap::<Uuid, Vec<DashboardPersonalizationOutcome>>::new();
+    for outcome in outcomes {
+        outcomes_by_decision
+            .entry(outcome.decision_id)
+            .or_default()
+            .push(outcome);
+    }
+    let mut decisions_by_retrieval = BTreeMap::<Uuid, Vec<DashboardPersonalizationDecision>>::new();
+    for row in decision_rows {
+        decisions_by_retrieval
+            .entry(row.0)
+            .or_default()
+            .push(DashboardPersonalizationDecision {
+                id: row.1,
+                external_decision_id: row.2,
+                variant: row.3,
+                signal_ids: signal_ids_by_decision.remove(&row.1).unwrap_or_default(),
+                created_at: row.4,
+                outcomes: outcomes_by_decision.remove(&row.1).unwrap_or_default(),
+            });
+    }
+    Ok(retrievals
+        .into_iter()
+        .map(|row| DashboardCustomerContextReturn {
+            retrieval_id: row.0,
+            interaction_id: row.1,
+            session_id: row.2,
+            purpose: row.3,
+            identity_level: row.4,
+            context_version: row.5,
+            retrieved_at: row.6,
+            items: items_by_retrieval.remove(&row.0).unwrap_or_default(),
+            decisions: decisions_by_retrieval.remove(&row.0).unwrap_or_default(),
+        })
+        .collect())
+}
+
 pub(crate) async fn dashboard_customer_by_id(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -4470,6 +4651,14 @@ pub(crate) async fn dashboard_customer_by_id(
             limit: Some(100),
             ..DashboardSignalFilters::default()
         },
+    )
+    .await?;
+    let context_returns = dashboard_customer_context_returns(
+        pool,
+        workspace_id,
+        product_id,
+        customer_id,
+        retained_since,
     )
     .await?;
     let sessions = sqlx::query_as::<_, DashboardSessionSummary>(
@@ -4578,6 +4767,7 @@ pub(crate) async fn dashboard_customer_by_id(
         customer,
         identifiers,
         signals: signal_page.signals,
+        context_returns,
         sessions,
         consent,
         consent_history,
@@ -5769,10 +5959,85 @@ pub(crate) async fn dashboard_session_by_id(
     .bind(session_id)
     .fetch_all(pool)
     .await?;
+    // Session inspectors are intentionally bounded. Enrichment answers contain at
+    // most eight normalized catalog items at write time; the request limit keeps a
+    // pathological session from producing an unbounded dashboard response.
+    let mut responses = sqlx::query_as::<_, DashboardSessionResponse>(
+        r"SELECT request.id, request.interaction_id, request.question,
+          CASE
+            WHEN answer.status = 'answered' THEN 'answered'
+            WHEN COALESCE(answer.status, request.state) = 'declined' THEN 'declined'
+            WHEN COALESCE(answer.status, request.state) = 'no_relevant_context'
+              THEN 'no_relevant_context'
+            ELSE 'awaiting_answer'
+          END AS status,
+          request.purpose, request.surface, request.customer_id,
+          COALESCE(customer.display_name, interaction.customer_ref) AS customer_name,
+          request.created_at AS asked_at,
+          COALESCE(answer.created_at, request.answered_at) AS answered_at
+        FROM enrichment_requests request
+        JOIN interactions_v2 interaction ON interaction.id = request.interaction_id
+          AND interaction.workspace_id = request.workspace_id
+        JOIN product_environments environment ON environment.id = interaction.environment_id
+          AND environment.workspace_id = interaction.workspace_id
+        LEFT JOIN enrichment_answers answer ON answer.request_id = request.id
+          AND answer.workspace_id = request.workspace_id
+        LEFT JOIN customers customer ON customer.id = request.customer_id
+          AND customer.workspace_id = request.workspace_id
+        WHERE interaction.session_id = $1 AND request.workspace_id = $2
+          AND request.product_id = $3
+          AND interaction.occurred_at >= NOW() - make_interval(days => environment.retention_days)
+        ORDER BY request.created_at, request.id
+        LIMIT 100",
+    )
+    .bind(session_id)
+    .bind(workspace_id)
+    .bind(product_id)
+    .fetch_all(pool)
+    .await?;
+    let request_ids = responses
+        .iter()
+        .map(|response| response.id)
+        .collect::<Vec<_>>();
+    if !request_ids.is_empty() {
+        let answer_items = sqlx::query_as::<_, (Uuid, String, String, String, String, bool)>(
+            r"SELECT answer.request_id, item.signal_key,
+              COALESCE(signal.attributes->>'enrichmentType', signal.signal_type),
+              item.signal_value, signal.summary, item.remembered
+            FROM enrichment_answers answer
+            JOIN enrichment_signal_items item ON item.enrichment_answer_id = answer.id
+              AND item.workspace_id = answer.workspace_id
+            JOIN customer_signals signal ON signal.id = item.signal_id
+              AND signal.workspace_id = answer.workspace_id
+            WHERE answer.workspace_id = $1 AND answer.request_id = ANY($2)
+              AND item.item_index BETWEEN 1 AND 8
+            ORDER BY answer.request_id, item.item_index
+            LIMIT 800",
+        )
+        .bind(workspace_id)
+        .bind(&request_ids)
+        .fetch_all(pool)
+        .await?;
+        for (request_id, key, answer_type, value, summary, remembered) in answer_items {
+            if let Some(response) = responses
+                .iter_mut()
+                .find(|response| response.id == request_id)
+            {
+                response.answers.push(DashboardResponseAnswer {
+                    key,
+                    answer_type,
+                    value,
+                    summary,
+                    remembered,
+                });
+            }
+        }
+    }
     Ok(DashboardSessionDetail {
         session,
         interactions,
         reports,
+        responses,
     })
 }
 
@@ -9598,6 +9863,77 @@ const ENRICHMENT_CATALOG: &[EnrichmentCatalogDefinition] = &[
             "entertainment",
         ],
         targeted_advertising_safe: true,
+    },
+    EnrichmentCatalogDefinition {
+        key: "travel.stay_style",
+        signal_type: "preference",
+        allowed_values: &["quiet_boutique", "full_service", "social", "business"],
+        targeted_advertising_safe: false,
+    },
+    EnrichmentCatalogDefinition {
+        key: "travel.location_priority",
+        signal_type: "preference",
+        allowed_values: &[
+            "central_walkable",
+            "transit_access",
+            "airport_access",
+            "flexible",
+        ],
+        targeted_advertising_safe: false,
+    },
+    EnrichmentCatalogDefinition {
+        key: "travel.room_priority",
+        signal_type: "preference",
+        allowed_values: &["reliable_wifi", "accessible_room", "family_space", "quiet"],
+        targeted_advertising_safe: false,
+    },
+    EnrichmentCatalogDefinition {
+        key: "finance.explanation_style",
+        signal_type: "preference",
+        allowed_values: &["concise", "step_by_step", "comparison_table", "detailed"],
+        targeted_advertising_safe: false,
+    },
+    EnrichmentCatalogDefinition {
+        key: "finance.liquidity_preference",
+        signal_type: "preference",
+        allowed_values: &["same_day", "few_days", "locked_term", "flexible"],
+        targeted_advertising_safe: false,
+    },
+    EnrichmentCatalogDefinition {
+        key: "care.communication_style",
+        signal_type: "preference",
+        allowed_values: &["concise", "step_by_step", "plain_language", "detailed"],
+        targeted_advertising_safe: false,
+    },
+    EnrichmentCatalogDefinition {
+        key: "care.visit_mode",
+        signal_type: "preference",
+        allowed_values: &["in_person", "telehealth", "either"],
+        targeted_advertising_safe: false,
+    },
+    EnrichmentCatalogDefinition {
+        key: "care.appointment_timing",
+        signal_type: "preference",
+        allowed_values: &["weekday_morning", "weekday_evening", "weekend", "flexible"],
+        targeted_advertising_safe: false,
+    },
+    EnrichmentCatalogDefinition {
+        key: "education.learning_format",
+        signal_type: "preference",
+        allowed_values: &[
+            "self_paced",
+            "live_online",
+            "in_person",
+            "blended",
+            "project_based",
+        ],
+        targeted_advertising_safe: false,
+    },
+    EnrichmentCatalogDefinition {
+        key: "education.learning_level",
+        signal_type: "preference",
+        allowed_values: &["beginner", "intermediate", "advanced", "mixed"],
+        targeted_advertising_safe: false,
     },
     EnrichmentCatalogDefinition {
         key: "b2b.company_size",
@@ -18017,6 +18353,83 @@ mod product_tests {
     }
 
     #[test]
+    fn enrichment_catalog_accepts_bounded_industry_context_and_blocks_sensitive_data()
+    -> anyhow::Result<()> {
+        for (key, signal_type, value) in [
+            ("travel.stay_style", "preference", "quiet_boutique"),
+            ("travel.location_priority", "preference", "central_walkable"),
+            ("travel.room_priority", "preference", "reliable_wifi"),
+            (
+                "finance.explanation_style",
+                "preference",
+                "comparison_table",
+            ),
+            ("finance.liquidity_preference", "preference", "few_days"),
+            ("care.communication_style", "preference", "plain_language"),
+            ("care.visit_mode", "preference", "telehealth"),
+            ("care.appointment_timing", "preference", "weekday_evening"),
+            ("education.learning_format", "preference", "project_based"),
+            ("education.learning_level", "preference", "intermediate"),
+        ] {
+            let item = crate::models::EnrichmentAnswerItemInput {
+                key: key.into(),
+                signal_type: signal_type.into(),
+                value: value.into(),
+                _summary: None,
+                provenance: "agent_reports_user_statement".into(),
+                confidence: Some(1.0),
+                remember: true,
+                expires_at: Some(Utc::now() + Duration::days(30)),
+            };
+            let definition =
+                validate_enrichment_item(&item, "product_personalization").map_err(test_error)?;
+            anyhow::ensure!(!definition.targeted_advertising_safe);
+            anyhow::ensure!(validate_enrichment_item(&item, "targeted_advertising").is_err());
+
+            let mut invalid_value = item.clone();
+            invalid_value.value = "free_form_or_unbounded".into();
+            anyhow::ensure!(
+                validate_enrichment_item(&invalid_value, "product_personalization").is_err()
+            );
+
+            let mut invalid_type = item;
+            invalid_type.signal_type = "constraint".into();
+            anyhow::ensure!(
+                validate_enrichment_item(&invalid_type, "product_personalization").is_err()
+            );
+        }
+
+        for key in [
+            "travel.passport_number",
+            "finance.holdings",
+            "finance.account_balance",
+            "finance.creditworthiness",
+            "finance.income",
+            "care.diagnosis",
+            "care.symptoms",
+            "care.medications",
+            "care.medical_condition",
+            "education.disability",
+            "unknown.context",
+        ] {
+            let sensitive_or_unknown = crate::models::EnrichmentAnswerItemInput {
+                key: key.into(),
+                signal_type: "preference".into(),
+                value: "anything".into(),
+                _summary: None,
+                provenance: "agent_reports_user_statement".into(),
+                confidence: Some(1.0),
+                remember: true,
+                expires_at: Some(Utc::now() + Duration::days(30)),
+            };
+            anyhow::ensure!(
+                validate_enrichment_item(&sensitive_or_unknown, "product_personalization").is_err()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn enrichment_contract_is_interaction_scoped_without_memory_and_has_exact_actions()
     -> anyhow::Result<()> {
         let workspace_id = Uuid::new_v4();
@@ -18344,6 +18757,41 @@ mod product_tests {
             anyhow::ensure!(answer.signals[0].allowed_uses == ["product_personalization"]);
             anyhow::ensure!(answer.signals[1].provenance == "agent_inference");
             anyhow::ensure!(answer.signals[1].allowed_uses.is_empty());
+            let session_id = interaction_session(&pool, interaction_id)
+                .await?
+                .expect("enrichment interaction should retain its proven session");
+            let session_detail = dashboard_session_by_id(
+                &pool,
+                workspace_a.id,
+                auth_a.environment.product_id,
+                session_id,
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(session_detail.responses.len() == 1);
+            let session_response = &session_detail.responses[0];
+            anyhow::ensure!(session_response.id == request.request_id);
+            anyhow::ensure!(session_response.interaction_id == interaction_id);
+            anyhow::ensure!(
+                request.question.as_deref() == Some(session_response.question.as_str())
+            );
+            anyhow::ensure!(session_response.status == "answered");
+            anyhow::ensure!(session_response.answers.len() == 2);
+            anyhow::ensure!(
+                session_response
+                    .answers
+                    .iter()
+                    .map(|item| (item.key.as_str(), item.value.as_str()))
+                    .collect::<Vec<_>>()
+                    == vec![
+                        ("shopping.budget_band", "50_150"),
+                        ("content.format", "short"),
+                    ]
+            );
+            anyhow::ensure!(
+                !serde_json::to_string(session_response)?.contains("Black community"),
+                "the session read model must expose canonical summaries, not submitted prose"
+            );
             anyhow::ensure!(
                 sqlx::query_scalar::<_, String>(
                     "SELECT method FROM enrichment_interaction_confirmations WHERE interaction_id = $1",
@@ -18552,6 +19000,36 @@ mod product_tests {
             anyhow::ensure!(customer_detail.consent_history.iter().any(|event| {
                 event.enrichment_purpose.as_deref() == Some("product_personalization")
             }));
+            let returned_context = customer_detail
+                .context_returns
+                .iter()
+                .find(|retrieval| retrieval.retrieval_id == context.retrieval_id)
+                .ok_or_else(|| anyhow::anyhow!("missing returned customer context"))?;
+            anyhow::ensure!(returned_context.purpose == "product_personalization");
+            anyhow::ensure!(returned_context.context_version == context.context_version);
+            anyhow::ensure!(returned_context.items.len() == 1);
+            anyhow::ensure!(
+                returned_context.items[0].key == "shopping.budget_band"
+                    && returned_context.items[0].value == serde_json::json!("50_150")
+                    && returned_context.items[0].provenance
+                        == "agent_reports_user_statement"
+            );
+            let returned_decision = returned_context
+                .decisions
+                .iter()
+                .find(|item| item.id == decision.decision.id)
+                .ok_or_else(|| anyhow::anyhow!("missing linked personalization decision"))?;
+            anyhow::ensure!(returned_decision.variant.as_deref() == Some("under_150_results"));
+            anyhow::ensure!(returned_decision.signal_ids == [context.items[0].signal_id]);
+            anyhow::ensure!(returned_decision.outcomes.iter().any(|item| {
+                item.id == outcome.outcome.id && item.outcome == "conversion"
+            }));
+            let source_signal = customer_detail
+                .signals
+                .iter()
+                .find(|signal| signal.id == answer.signals[0].signal_id)
+                .ok_or_else(|| anyhow::anyhow!("missing enrichment signal"))?;
+            anyhow::ensure!(source_signal.session_id == grouped_sessions.0);
             sqlx::query(
                 r"UPDATE consent_grants SET state = 'revoked', revoked_at = NOW(), updated_at = NOW()
                 WHERE environment_id = $1

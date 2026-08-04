@@ -1102,9 +1102,38 @@ export interface components {
             signalCount: number;
             userRefHint: string | null;
         };
+        DashboardContextReturnedItem: {
+            /** Format: double */
+            confidence: number | null;
+            /** Format: date-time */
+            expiresAt: string | null;
+            key: string;
+            provenance: string;
+            /** Format: uuid */
+            signalId: string;
+            summary: string;
+            type: string;
+            value: unknown;
+        };
+        DashboardCustomerContextReturn: {
+            contextVersion: string;
+            decisions: components["schemas"]["DashboardPersonalizationDecision"][];
+            identityLevel: string;
+            /** Format: uuid */
+            interactionId: string | null;
+            items: components["schemas"]["DashboardContextReturnedItem"][];
+            purpose: string;
+            /** Format: uuid */
+            retrievalId: string;
+            /** Format: date-time */
+            retrievedAt: string;
+            /** Format: uuid */
+            sessionId: string | null;
+        };
         DashboardCustomerDetail: {
             consent: components["schemas"]["ConsentGrant"][];
             consentHistory: components["schemas"]["ConsentEventSummary"][];
+            contextReturns: components["schemas"]["DashboardCustomerContextReturn"][];
             counts: components["schemas"]["CustomerDetailCounts"];
             customer: components["schemas"]["CustomerSummary"];
             identifiers: components["schemas"]["CustomerIdentifier"][];
@@ -1199,6 +1228,26 @@ export interface components {
             /** Format: int64 */
             sessionsTotal: number;
         };
+        DashboardPersonalizationDecision: {
+            /** Format: date-time */
+            createdAt: string;
+            externalDecisionId: string;
+            /** Format: uuid */
+            id: string;
+            outcomes: components["schemas"]["DashboardPersonalizationOutcome"][];
+            signalIds: string[];
+            variant: string | null;
+        };
+        DashboardPersonalizationOutcome: {
+            /** Format: uuid */
+            decisionId: string;
+            externalOutcomeId: string;
+            /** Format: uuid */
+            id: string;
+            /** Format: date-time */
+            occurredAt: string;
+            outcome: string;
+        };
         DashboardReportResponse: {
             report: components["schemas"]["ProductFeedbackReportWithInteraction"];
         };
@@ -1248,7 +1297,32 @@ export interface components {
         DashboardSessionDetail: {
             interactions: components["schemas"]["ProductInteraction"][];
             reports: components["schemas"]["ProductFeedbackReportWithInteraction"][];
+            responses: components["schemas"]["DashboardSessionResponse"][];
             session: components["schemas"]["ProductSession"];
+        };
+        /**
+         * @description A canonical Epode enrichment question associated with one session interaction.
+         *
+         *     This read model contains only the bounded, normalized answer items accepted by
+         *     Epode. It deliberately does not expose an agent prompt, tool input, or query.
+         */
+        DashboardSessionResponse: {
+            /** Format: date-time */
+            answeredAt: string | null;
+            answers: components["schemas"]["DashboardResponseAnswer"][];
+            /** Format: date-time */
+            askedAt: string;
+            /** Format: uuid */
+            customerId: string | null;
+            customerName: string | null;
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            interactionId: string;
+            purpose: string;
+            question: string;
+            status: string;
+            surface: string;
         };
         DashboardSessionRollup: {
             /** Format: double */
@@ -3530,7 +3604,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Customer identity, evidence, sessions, and scoped consent */
+            /** @description Customer identity, evidence, context returned to the product, linked personalization use, sessions, and scoped consent */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4299,7 +4373,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Session with its interactions and feedback reports */
+            /** @description Session with its interactions, enrichment questions and answers, and feedback reports */
             200: {
                 headers: {
                     [name: string]: unknown;

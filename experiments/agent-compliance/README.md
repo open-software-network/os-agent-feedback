@@ -9,6 +9,26 @@ This lab measures whether an independent coding agent discovers and follows Epod
 
 The local server records product retrieval, `/llms.txt` discovery, attempted reports, accepted reports, rejected reports, consent behavior, report shape, and task correctness. Synthetic data is used throughout.
 
+## Multi-industry production simulation
+
+`industry-production-e2e.mjs` runs the real MCP 2026 resumable-elicitation flow against separate
+Shopwise, Tripwise, Ledgerwise, Carewise, Learnwise, and Deploywise products. Every product gets
+synthetic remembered, session-only, declined, no-context, and rejected-sensitive journeys across
+Claude Desktop-, ChatGPT Desktop-, and Codex-like runtime projections. The projections exercise
+the protocol contract; they are not claims that those desktop applications made the calls.
+
+The runner sends only bounded catalog answers to Epode. Raw prompts, transcripts, tool arguments,
+credentials, medical facts, and financial account facts are never sent. Its output is a redacted
+manifest of product, synthetic customer/session references, exact Epode questions, accepted
+catalog values, states, and aggregate counts. Product keys must stay in a local secure file and
+are never printed:
+
+```bash
+pnpm --dir sdk/node build
+pnpm test:industries:production -- --keys=/secure/industry-product-keys.json \
+  --endpoint=https://api.epode.ai --confirm-production --run-id=review-001
+```
+
 ## Run
 
 ```bash

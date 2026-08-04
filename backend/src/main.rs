@@ -4390,7 +4390,7 @@ async fn dashboard_customers_list_handler(
         ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
     ),
     responses(
-        (status = 200, description = "Customer identity, evidence, sessions, and scoped consent", body = DashboardCustomerDetail),
+        (status = 200, description = "Customer identity, evidence, context returned to the product, linked personalization use, sessions, and scoped consent", body = DashboardCustomerDetail),
         (status = 400, description = "Invalid path, query, or team header", body = ApiErrorEnvelope),
         (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
         (status = 403, description = "Caller cannot access the requested team", body = ApiErrorEnvelope),
@@ -4854,7 +4854,7 @@ async fn dashboard_interaction_handler(
         ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
     ),
     responses(
-        (status = 200, description = "Session with its interactions and feedback reports", body = DashboardSessionDetail),
+        (status = 200, description = "Session with its interactions, enrichment questions and answers, and feedback reports", body = DashboardSessionDetail),
         (
             status = 400,
             description = "Invalid path, query, or team header",
