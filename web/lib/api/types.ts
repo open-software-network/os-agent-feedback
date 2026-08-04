@@ -1011,6 +1011,8 @@ export interface components {
             /** Format: int64 */
             features: number;
             /** Format: int64 */
+            requestObservations: number;
+            /** Format: int64 */
             sessions: number;
             /** Format: int64 */
             signals: number;
@@ -1031,6 +1033,32 @@ export interface components {
             provenance: string;
             /** Format: date-time */
             verifiedAt: string | null;
+        };
+        CustomerRequestObservation: {
+            acceptLanguage: string | null;
+            clientIp: string | null;
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            interactionId: string;
+            method: string | null;
+            /** Format: date-time */
+            observedAt: string;
+            referrerOrigin: string | null;
+            secChUa: string | null;
+            secChUaMobile: string | null;
+            secChUaPlatform: string | null;
+            userAgent: string | null;
+        };
+        CustomerRequestObservationInput: {
+            acceptLanguage?: string | null;
+            clientIp?: string | null;
+            method?: string | null;
+            referrerOrigin?: string | null;
+            secChUa?: string | null;
+            secChUaMobile?: string | null;
+            secChUaPlatform?: string | null;
+            userAgent?: string | null;
         };
         CustomerRollup: {
             /** Format: int64 */
@@ -1137,6 +1165,7 @@ export interface components {
             counts: components["schemas"]["CustomerDetailCounts"];
             customer: components["schemas"]["CustomerSummary"];
             identifiers: components["schemas"]["CustomerIdentifier"][];
+            requestObservations: components["schemas"]["CustomerRequestObservation"][];
             sessions: components["schemas"]["DashboardSessionSummary"][];
             signals: components["schemas"]["CustomerSignal"][];
         };
@@ -1479,6 +1508,7 @@ export interface components {
             operation: string;
             purpose: string;
             remember: boolean;
+            requestObservation?: null | components["schemas"]["CustomerRequestObservationInput"];
             runtimeHint?: string | null;
             sessionRef?: string | null;
             /** Format: int32 */

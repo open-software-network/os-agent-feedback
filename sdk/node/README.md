@@ -49,6 +49,13 @@ that the agent returns on the immediate retry. That handle does not persist acro
 The same enrichment call records response status and duration. `sessionRef` must be a product-issued journey;
 `runtimeHint` is an optional bounded label. Neither should come from an untrusted request parameter.
 
+Express and Fastify also record the framework-resolved peer IP, HTTP method, user agent, accepted language,
+referrer origin, and User-Agent Client Hints automatically. The allowlist excludes cookies, authorization,
+request bodies, full referrer URLs, query strings, forwarding chains, and arbitrary headers. MAC addresses are
+not visible across routed HTTP. Proxy-derived IPs are honored only when the host app explicitly configures the
+framework to trust that proxy. These request facts follow the product's interaction-retention period and are
+never used to merge customers or infer sessions.
+
 Retrieve and use context inside the company:
 
 ```ts

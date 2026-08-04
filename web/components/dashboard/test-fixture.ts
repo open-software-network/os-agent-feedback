@@ -367,6 +367,21 @@ export function customerDetailFixture(): CustomerDetail {
         verifiedAt: "2026-07-30T12:00:00Z",
       },
     ],
+    requestObservations: [
+      {
+        id: "request-observation-1",
+        interactionId: "interaction-1",
+        clientIp: "203.0.113.42",
+        method: "GET",
+        userAgent: "ExampleBrowser/1.0",
+        acceptLanguage: "en-US,en;q=0.9",
+        referrerOrigin: "https://example.test",
+        secChUa: '"ExampleBrowser";v="1"',
+        secChUaPlatform: '"macOS"',
+        secChUaMobile: "?0",
+        observedAt: "2026-07-30T12:00:00Z",
+      },
+    ],
     signals: [
       signalFixture({
         id: "signal-intent",
@@ -490,7 +505,7 @@ export function customerDetailFixture(): CustomerDetail {
         createdAt: "2026-07-30T12:05:01Z",
       },
     ],
-    counts: { signals: 3, sessions: 1, features: 1 },
+    counts: { signals: 3, sessions: 1, features: 1, requestObservations: 1 },
   };
 }
 

@@ -69,6 +69,10 @@ describe("CustomersView", () => {
     expect(screen.getByText("Used")).toBeVisible();
     expect(screen.getByText(/Customer prompts and searches are not included/i)).toBeVisible();
     expect(screen.queryByRole("heading", { name: "Data use" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Request facts" })).toBeVisible();
+    expect(screen.getByText(/IP 203\.0\.113\.42 · GET · en-US/)).toBeVisible();
+    expect(screen.getByText("ExampleBrowser/1.0")).toBeVisible();
+    expect(screen.getByText(/MAC addresses are not exposed by routed HTTP/i)).toBeVisible();
     expect(screen.getByRole("heading", { name: "Sessions" })).toBeVisible();
     expect(screen.queryByRole("heading", { name: "Permission" })).not.toBeInTheDocument();
   });

@@ -479,7 +479,18 @@ test("company-side Express completes learn, retrieve, personalize, and measure",
   );
   const server = await serve(app);
 
-  const first = await (await fetch(`${server.url}/api/recommendations`)).json();
+  const first = await (
+    await fetch(`${server.url}/api/recommendations`, {
+      headers: {
+        "user-agent": "Customer-Test-Browser/1.0",
+        "accept-language": "en-CA,en;q=0.8",
+        referer: "https://shop.example.test/private/path?discard=true",
+        "sec-ch-ua": '"Customer Test";v="1"',
+        "sec-ch-ua-platform": '"macOS"',
+        "sec-ch-ua-mobile": "?0",
+      },
+    })
+  ).json();
   assert.deepEqual(first.products, [{ id: "gift-1", price: 129 }]);
   assert.equal(first._epode.customerContext.state, "consent_required");
   assert.equal(first._epode.customerContext.consent.url, "/_epode/v1/enrichment/consent");
@@ -495,6 +506,18 @@ test("company-side Express completes learn, retrieve, personalize, and measure",
   assert.ok(service.calls[0].body.durationMs >= 0);
   assert.equal(service.calls[0].body.sessionRef, "shopping_anon_retail_42");
   assert.equal(service.calls[0].body.runtimeHint, "retail-api/v1");
+  assert.match(service.calls[0].body.requestObservation.clientIp, /^(?:\d{1,3}\.){3}\d{1,3}$|:/);
+  assert.deepEqual(service.calls[0].body.requestObservation, {
+    ...service.calls[0].body.requestObservation,
+    method: "GET",
+    userAgent: "Customer-Test-Browser/1.0",
+    acceptLanguage: "en-CA,en;q=0.8",
+    referrerOrigin: "https://shop.example.test",
+    secChUa: '"Customer Test";v="1"',
+    secChUaPlatform: '"macOS"',
+    secChUaMobile: "?0",
+  });
+  assert.doesNotMatch(JSON.stringify(service.calls[0].body.requestObservation), /discard=true/);
 
   const consent = await fetch(`${server.url}/_epode/v1/enrichment/consent`, {
     method: "POST",
@@ -630,7 +653,16 @@ test("Fastify mounts the same-origin relay and preserves the business shape", as
   });
   await app.register(customer);
   app.get("/api/feed", async () => ({ titles: ["documentary-1"] }));
-  const response = await app.inject({ method: "GET", url: "/api/feed" });
+  const response = await app.inject({
+    method: "GET",
+    url: "/api/feed",
+    remoteAddress: "198.51.100.17",
+    headers: {
+      "user-agent": "Fastify-Customer-Test/1.0",
+      "accept-language": "fr-CA",
+      referer: "https://media.example.test/watch/123",
+    },
+  });
   assert.equal(response.statusCode, 200);
   const payload = response.json();
   assert.deepEqual(payload.titles, ["documentary-1"]);
@@ -641,6 +673,13 @@ test("Fastify mounts the same-origin relay and preserves the business shape", as
   assert.ok(service.calls[0].body.durationMs >= 0);
   assert.equal(service.calls[0].body.sessionRef, "feed_subscriber_7");
   assert.equal(service.calls[0].body.runtimeHint, "fastify-feed/v1");
+  assert.deepEqual(service.calls[0].body.requestObservation, {
+    clientIp: "198.51.100.17",
+    method: "GET",
+    userAgent: "Fastify-Customer-Test/1.0",
+    acceptLanguage: "fr-CA",
+    referrerOrigin: "https://media.example.test",
+  });
 
   const consent = await app.inject({
     method: "POST",

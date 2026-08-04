@@ -3,7 +3,10 @@
     reason = "crate-restricted visibility satisfies unreachable_pub in this binary-only crate"
 )]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::IpAddr,
+};
 
 use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -27,18 +30,19 @@ use crate::{
         ConsentGrant, ConsentStateInput, ConsentStateResponse, CreateProductInput,
         CreateTeamInvitationInput, CustomerContextInput, CustomerContextItem,
         CustomerContextResponse, CustomerDetailCounts, CustomerFacets, CustomerIdentifier,
-        CustomerRollup, CustomerSignal, CustomerSummary, DashboardContext,
-        DashboardContextReturnedItem, DashboardCustomerContextReturn, DashboardCustomerDetail,
-        DashboardCustomerFilters, DashboardCustomersPage, DashboardData, DashboardFeedbackFacets,
-        DashboardFeedbackFilters, DashboardFeedbackPage, DashboardListState,
-        DashboardPersonalizationDecision, DashboardPersonalizationOutcome, DashboardResponseAnswer,
-        DashboardResponseFilters, DashboardResponseRollup, DashboardResponseSummary,
-        DashboardResponsesPage, DashboardSessionDetail, DashboardSessionFilters,
-        DashboardSessionResponse, DashboardSessionRollup, DashboardSessionSummary,
-        DashboardSessionsPage, DashboardSignalFilters, DashboardSignalsPage, DeleteProductInput,
-        EnrichmentAnswerAction, EnrichmentAnswerBodySchema, EnrichmentAnswerInput,
-        EnrichmentAnswerItemsSchema, EnrichmentAnswerResponse, EnrichmentCatalogEntry,
-        EnrichmentConsentAction, EnrichmentConsentBodySchema, EnrichmentConsentDecisionInput,
+        CustomerRequestObservation, CustomerRequestObservationInput, CustomerRollup,
+        CustomerSignal, CustomerSummary, DashboardContext, DashboardContextReturnedItem,
+        DashboardCustomerContextReturn, DashboardCustomerDetail, DashboardCustomerFilters,
+        DashboardCustomersPage, DashboardData, DashboardFeedbackFacets, DashboardFeedbackFilters,
+        DashboardFeedbackPage, DashboardListState, DashboardPersonalizationDecision,
+        DashboardPersonalizationOutcome, DashboardResponseAnswer, DashboardResponseFilters,
+        DashboardResponseRollup, DashboardResponseSummary, DashboardResponsesPage,
+        DashboardSessionDetail, DashboardSessionFilters, DashboardSessionResponse,
+        DashboardSessionRollup, DashboardSessionSummary, DashboardSessionsPage,
+        DashboardSignalFilters, DashboardSignalsPage, DeleteProductInput, EnrichmentAnswerAction,
+        EnrichmentAnswerBodySchema, EnrichmentAnswerInput, EnrichmentAnswerItemsSchema,
+        EnrichmentAnswerResponse, EnrichmentCatalogEntry, EnrichmentConsentAction,
+        EnrichmentConsentBodySchema, EnrichmentConsentDecisionInput,
         EnrichmentConsentDecisionResponse, EnrichmentRequestInput, EnrichmentRequestResponse,
         FeedbackFindingInput, FeedbackInteractionItem, FeedbackInteractionsPage,
         FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackOperationSummary,
@@ -4671,6 +4675,30 @@ pub(crate) async fn dashboard_customer_by_id(
     .bind(customer_id)
     .fetch_all(pool)
     .await?;
+    let request_observations_available = sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('public.customer_request_observations') IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await?;
+    let request_observations = if request_observations_available {
+        sqlx::query_as::<_, CustomerRequestObservation>(
+            r"SELECT id, interaction_id, client_ip, request_method AS method, user_agent,
+              accept_language, referrer_origin, sec_ch_ua, sec_ch_ua_platform,
+              sec_ch_ua_mobile, observed_at
+            FROM customer_request_observations
+            WHERE workspace_id = $1 AND product_id = $2 AND customer_id = $3
+              AND observed_at >= $4
+            ORDER BY observed_at DESC, id DESC LIMIT 100",
+        )
+        .bind(workspace_id)
+        .bind(product_id)
+        .bind(customer_id)
+        .bind(retained_since)
+        .fetch_all(pool)
+        .await?
+    } else {
+        Vec::new()
+    };
     let signal_page = dashboard_signals_page(
         pool,
         workspace_id,
@@ -4807,14 +4835,31 @@ pub(crate) async fn dashboard_customer_by_id(
     .bind(retained_since)
     .fetch_one(pool)
     .await?;
+    let request_observation_count = if request_observations_available {
+        sqlx::query_scalar::<_, i64>(
+            r"SELECT COUNT(*) FROM customer_request_observations
+            WHERE workspace_id = $1 AND product_id = $2 AND customer_id = $3
+              AND observed_at >= $4",
+        )
+        .bind(workspace_id)
+        .bind(product_id)
+        .bind(customer_id)
+        .bind(retained_since)
+        .fetch_one(pool)
+        .await?
+    } else {
+        0
+    };
     Ok(DashboardCustomerDetail {
         counts: CustomerDetailCounts {
             signals: signal_count,
             sessions: session_count,
             features: feature_count,
+            request_observations: request_observation_count,
         },
         customer,
         identifiers,
+        request_observations,
         signals: signal_page.signals,
         context_returns,
         sessions,
@@ -8938,6 +8983,134 @@ fn validate_enrichment_runtime_hint(value: Option<&str>) -> Result<Option<String
     Ok(Some(clean(value, 200)))
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ValidatedRequestObservation {
+    client_ip: Option<String>,
+    method: Option<String>,
+    user_agent: Option<String>,
+    accept_language: Option<String>,
+    referrer_origin: Option<String>,
+    sec_ch_ua: Option<String>,
+    sec_ch_ua_platform: Option<String>,
+    sec_ch_ua_mobile: Option<String>,
+}
+
+fn validate_observation_text(
+    value: Option<&str>,
+    field: &str,
+    maximum: usize,
+) -> Result<Option<String>, ApiError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() || value.chars().count() > maximum || value.chars().any(char::is_control) {
+        return Err(ApiError::bad_request(format!(
+            "requestObservation.{field} must be bounded header text"
+        )));
+    }
+    Ok(Some(value.to_owned()))
+}
+
+fn validate_request_observation(
+    surface: &str,
+    input: Option<&CustomerRequestObservationInput>,
+) -> Result<Option<ValidatedRequestObservation>, ApiError> {
+    let Some(input) = input else {
+        return Ok(None);
+    };
+    if surface == "mcp" {
+        return Err(ApiError::bad_request(
+            "requestObservation is available only for HTTP surfaces",
+        ));
+    }
+    let client_ip = input
+        .client_ip
+        .as_deref()
+        .map(|value| {
+            value
+                .trim()
+                .parse::<IpAddr>()
+                .map(|address| address.to_string())
+                .map_err(|_| {
+                    ApiError::bad_request("requestObservation.clientIp must be an IP address")
+                })
+        })
+        .transpose()?;
+    let method = input
+        .method
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_uppercase)
+        .filter(|value| !value.is_empty());
+    if method.as_ref().is_some_and(|value| {
+        value.len() > 16
+            || !value
+                .chars()
+                .all(|character| character.is_ascii_alphabetic())
+    }) {
+        return Err(ApiError::bad_request(
+            "requestObservation.method must be a bounded HTTP method",
+        ));
+    }
+    let referrer_origin =
+        validate_observation_text(input.referrer_origin.as_deref(), "referrerOrigin", 300)?;
+    if referrer_origin.as_ref().is_some_and(|value| {
+        let Some((scheme, authority)) = value.split_once("://") else {
+            return true;
+        };
+        !matches!(scheme, "http" | "https")
+            || authority.is_empty()
+            || authority.contains(['/', '?', '#', '@'])
+    }) {
+        return Err(ApiError::bad_request(
+            "requestObservation.referrerOrigin must be an HTTP origin without credentials or a path",
+        ));
+    }
+    let sec_ch_ua_mobile =
+        validate_observation_text(input.sec_ch_ua_mobile.as_deref(), "secChUaMobile", 2)?;
+    if sec_ch_ua_mobile
+        .as_deref()
+        .is_some_and(|value| !matches!(value, "?0" | "?1"))
+    {
+        return Err(ApiError::bad_request(
+            "requestObservation.secChUaMobile must be ?0 or ?1",
+        ));
+    }
+    let observation = ValidatedRequestObservation {
+        client_ip,
+        method,
+        user_agent: validate_observation_text(input.user_agent.as_deref(), "userAgent", 512)?,
+        accept_language: validate_observation_text(
+            input.accept_language.as_deref(),
+            "acceptLanguage",
+            256,
+        )?,
+        referrer_origin,
+        sec_ch_ua: validate_observation_text(input.sec_ch_ua.as_deref(), "secChUa", 512)?,
+        sec_ch_ua_platform: validate_observation_text(
+            input.sec_ch_ua_platform.as_deref(),
+            "secChUaPlatform",
+            80,
+        )?,
+        sec_ch_ua_mobile,
+    };
+    if observation.client_ip.is_none()
+        && observation.method.is_none()
+        && observation.user_agent.is_none()
+        && observation.accept_language.is_none()
+        && observation.referrer_origin.is_none()
+        && observation.sec_ch_ua.is_none()
+        && observation.sec_ch_ua_platform.is_none()
+        && observation.sec_ch_ua_mobile.is_none()
+    {
+        Ok(None)
+    } else {
+        Ok(Some(observation))
+    }
+}
+
 fn validate_opaque_event_id(value: &str, field: &str) -> Result<String, ApiError> {
     if value.is_empty()
         || value.len() > 100
@@ -8987,6 +9160,7 @@ fn enrichment_request_hash(
     session_ref_hash: Option<&[u8]>,
     refs: &ValidatedIdentityRefs,
     remember: bool,
+    request_observation: Option<&ValidatedRequestObservation>,
 ) -> Result<Vec<u8>, ApiError> {
     let hash_ref = |kind: &str, value: Option<&str>| -> Result<Option<String>, ApiError> {
         value
@@ -9021,6 +9195,7 @@ fn enrichment_request_hash(
         "accountRefHash": hash_ref("account_ref", refs.account_ref.as_deref())?,
         "userRefHash": hash_ref("user_ref", refs.user_ref.as_deref())?,
         "anonymousRefHash": hash_ref("anonymous_ref", refs.anonymous_ref.as_deref())?,
+        "requestObservation": request_observation,
     });
     Ok(sha256_bytes(
         &serde_json::to_vec(&material).map_err(ApiError::internal)?,
@@ -9279,6 +9454,8 @@ pub(crate) async fn create_enrichment_request(
     }
     let session_ref = validate_identity_ref(input.session_ref.as_deref(), "sessionRef")?;
     let runtime_hint = validate_enrichment_runtime_hint(input.runtime_hint.as_deref())?;
+    let request_observation =
+        validate_request_observation(&input.surface, input.request_observation.as_ref())?;
     let operation = validate_enrichment_operation(&input.operation)?;
     let refs = validated_identity_refs(
         input.customer_ref.as_deref(),
@@ -9312,6 +9489,7 @@ pub(crate) async fn create_enrichment_request(
         session_ref_hash.as_deref(),
         &refs,
         remember,
+        request_observation.as_ref(),
     )?;
     let now = Utc::now();
     let expires_at = now + Duration::hours(2);
@@ -9538,6 +9716,40 @@ pub(crate) async fn create_enrichment_request(
         return Err(ApiError::conflict(
             "interactionId is already linked to a different product surface",
         ));
+    }
+    if let Some(observation) = request_observation {
+        let request_observations_available = sqlx::query_scalar::<_, bool>(
+            "SELECT to_regclass('public.customer_request_observations') IS NOT NULL",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if request_observations_available {
+            sqlx::query(
+                r"INSERT INTO customer_request_observations
+            (id, workspace_id, product_id, environment_id, customer_id, interaction_id,
+             client_ip, request_method, user_agent, accept_language, referrer_origin,
+             sec_ch_ua, sec_ch_ua_platform, sec_ch_ua_mobile, observed_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            ON CONFLICT (interaction_id) DO NOTHING",
+            )
+            .bind(Uuid::new_v4())
+            .bind(auth.workspace.id)
+            .bind(auth.environment.product_id)
+            .bind(auth.environment.id)
+            .bind(customer_id)
+            .bind(input.interaction_id)
+            .bind(observation.client_ip)
+            .bind(observation.method)
+            .bind(observation.user_agent)
+            .bind(observation.accept_language)
+            .bind(observation.referrer_origin)
+            .bind(observation.sec_ch_ua)
+            .bind(observation.sec_ch_ua_platform)
+            .bind(observation.sec_ch_ua_mobile)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
     let subject = enrichment_subject(
         identity_hmac_secret,
@@ -18707,6 +18919,7 @@ mod product_tests {
                 account_ref: None,
                 user_ref: None,
                 anonymous_ref: Some("anon_retail_1".into()),
+                request_observation: None,
             };
             let (first_request, retry_request) = tokio::join!(
                 create_enrichment_request(
@@ -18955,6 +19168,7 @@ mod product_tests {
                     account_ref: None,
                     user_ref: None,
                     anonymous_ref: Some("anon_retail_1".into()),
+                    request_observation: None,
                 },
             )
             .await
@@ -19067,6 +19281,7 @@ mod product_tests {
                     account_ref: None,
                     user_ref: Some("user_retail_1".into()),
                     anonymous_ref: Some("anon_retail_1".into()),
+                    request_observation: None,
                 },
             )
             .await
@@ -19257,6 +19472,7 @@ mod product_tests {
                     account_ref: None,
                     user_ref: Some("user_session_choice".into()),
                     anonymous_ref: None,
+                    request_observation: None,
                 },
             )
             .await
@@ -19325,6 +19541,7 @@ mod product_tests {
                     account_ref: None,
                     user_ref: Some("user_retail_1".into()),
                     anonymous_ref: None,
+                    request_observation: None,
                 },
             )
             .await
@@ -19383,6 +19600,7 @@ mod product_tests {
                     account_ref: None,
                     user_ref: Some("user_retail_1".into()),
                     anonymous_ref: None,
+                    request_observation: None,
                 },
             )
             .await
@@ -19439,6 +19657,7 @@ mod product_tests {
                     account_ref: None,
                     user_ref: None,
                     anonymous_ref: Some("anon_transient".into()),
+                    request_observation: None,
                 },
             )
             .await
@@ -19506,6 +19725,7 @@ mod product_tests {
                 account_ref: None,
                 user_ref: Some("user_retail_1".into()),
                 anonymous_ref: None,
+                request_observation: None,
             };
             create_enrichment_request(
                 &pool,
@@ -19564,6 +19784,7 @@ mod product_tests {
                     account_ref: None,
                     user_ref: None,
                     anonymous_ref: Some("consent_merge_anon".into()),
+                    request_observation: None,
                 },
             )
             .await
@@ -19648,6 +19869,7 @@ mod product_tests {
                     account_ref: None,
                     user_ref: Some("consent_merge_user".into()),
                     anonymous_ref: None,
+                    request_observation: None,
                 },
             )
             .await
@@ -19688,6 +19910,7 @@ mod product_tests {
                     account_ref: None,
                     user_ref: Some("consent_merge_user".into()),
                     anonymous_ref: Some("consent_merge_anon".into()),
+                    request_observation: None,
                 },
             )
             .await
@@ -19783,6 +20006,7 @@ mod product_tests {
                 account_ref: None,
                 user_ref: Some("user_retail_1".into()),
                 anonymous_ref: None,
+                request_observation: None,
             };
             let mut different_payload = conflicting_request.clone();
             different_payload.operation = "/different-operation".into();
@@ -19910,6 +20134,7 @@ mod product_tests {
                     account_ref: None,
                     user_ref: None,
                     anonymous_ref: None,
+                    request_observation: None,
                 },
             )
             .await

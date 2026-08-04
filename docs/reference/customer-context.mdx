@@ -19,6 +19,15 @@ Company endpoints use `Authorization: Bearer $EPODE_API_KEY`. Agent answer endpo
   "durationMs": 18,
   "sessionRef": "journey_42",
   "runtimeHint": "shopping-agent/1.2",
+  "requestObservation": {
+    "clientIp": "203.0.113.42",
+    "method": "GET",
+    "userAgent": "ExampleBrowser/1.0",
+    "acceptLanguage": "en-US,en;q=0.9",
+    "referrerOrigin": "https://shop.example",
+    "secChUaPlatform": "\"macOS\"",
+    "secChUaMobile": "?0"
+  },
   "purpose": "product_personalization",
   "remember": true,
   "accountRef": "account_42",
@@ -36,6 +45,12 @@ currently allowed next action.
 `statusCode`, `durationMs`, `sessionRef`, and `runtimeHint` are optional same-call evidence. Framework adapters
 set status and duration automatically. A company may add only a product-issued `sessionRef` and a bounded,
 non-sensitive runtime label; agent/model arguments are not evidence.
+
+Express and Fastify also populate `requestObservation` automatically from a fixed allowlist: the framework's
+resolved peer IP, HTTP method, user agent, accepted language, referrer **origin**, and User-Agent Client Hints.
+Proxy forwarding is used only when the host application has configured that framework to trust the proxy. The
+adapter never copies cookies, credentials, bodies, full referrer URLs, query strings, or arbitrary headers.
+MAC addresses are link-layer identifiers and are not available to an internet-facing HTTP server.
 
 `surface` is exactly `http_json`, `html`, or `mcp`. Node adapters set it automatically. JSON and HTML begin as
 unclassified opportunities; an MCP business-tool result is confirmed immediately by the same enrichment request,

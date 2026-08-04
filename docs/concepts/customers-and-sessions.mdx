@@ -65,6 +65,10 @@ they are separately authorized. Ask-once decisions keep their monotonic revision
 Sessions exist only when your product or MCP integration supplies a stable, application-level reference.
 Epode does not group requests by timing, IP address, user agent, or inferred identity.
 
+HTTP adapters may retain IP address, user agent, language, referrer origin, and client hints as request facts for
+an already resolved customer. Those observations remain evidence attached to the exact interaction; they never
+create, merge, verify, or link a customer and never establish session continuity.
+
 Use a session reference when your product already has a meaningful journey—such as a checkout attempt,
 support workflow, or research run. If no stable reference exists, leave it out and use interactions instead.
 

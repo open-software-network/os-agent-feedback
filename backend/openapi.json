@@ -7246,10 +7246,15 @@
         "required": [
           "signals",
           "sessions",
-          "features"
+          "features",
+          "requestObservations"
         ],
         "properties": {
           "features": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "requestObservations": {
             "type": "integer",
             "format": "int64"
           },
@@ -7340,6 +7345,138 @@
             "format": "date-time"
           }
         }
+      },
+      "CustomerRequestObservation": {
+        "type": "object",
+        "required": [
+          "id",
+          "interactionId",
+          "clientIp",
+          "method",
+          "userAgent",
+          "acceptLanguage",
+          "referrerOrigin",
+          "secChUa",
+          "secChUaPlatform",
+          "secChUaMobile",
+          "observedAt"
+        ],
+        "properties": {
+          "acceptLanguage": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "clientIp": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "interactionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "method": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "referrerOrigin": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "secChUa": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "secChUaMobile": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "secChUaPlatform": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "userAgent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "CustomerRequestObservationInput": {
+        "type": "object",
+        "properties": {
+          "acceptLanguage": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "clientIp": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "method": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "referrerOrigin": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "secChUa": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "secChUaMobile": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "secChUaPlatform": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "userAgent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
       },
       "CustomerRollup": {
         "type": "object",
@@ -7708,6 +7845,7 @@
         "required": [
           "customer",
           "identifiers",
+          "requestObservations",
           "signals",
           "contextReturns",
           "sessions",
@@ -7744,6 +7882,12 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/CustomerIdentifier"
+            }
+          },
+          "requestObservations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CustomerRequestObservation"
             }
           },
           "sessions": {
@@ -9055,6 +9199,16 @@
           },
           "remember": {
             "type": "boolean"
+          },
+          "requestObservation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CustomerRequestObservationInput"
+              }
+            ]
           },
           "runtimeHint": {
             "type": [

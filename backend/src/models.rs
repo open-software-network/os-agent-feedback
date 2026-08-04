@@ -723,6 +723,20 @@ pub(crate) struct EnrichmentRequestInput {
     pub account_ref: Option<String>,
     pub user_ref: Option<String>,
     pub anonymous_ref: Option<String>,
+    pub request_observation: Option<CustomerRequestObservationInput>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CustomerRequestObservationInput {
+    pub client_ip: Option<String>,
+    pub method: Option<String>,
+    pub user_agent: Option<String>,
+    pub accept_language: Option<String>,
+    pub referrer_origin: Option<String>,
+    pub sec_ch_ua: Option<String>,
+    pub sec_ch_ua_platform: Option<String>,
+    pub sec_ch_ua_mobile: Option<String>,
 }
 
 fn default_enrichment_surface() -> String {
@@ -968,6 +982,30 @@ pub(crate) struct CustomerIdentifier {
 
 #[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct CustomerRequestObservation {
+    pub id: Uuid,
+    pub interaction_id: Uuid,
+    #[schema(required = true, nullable)]
+    pub client_ip: Option<String>,
+    #[schema(required = true, nullable)]
+    pub method: Option<String>,
+    #[schema(required = true, nullable)]
+    pub user_agent: Option<String>,
+    #[schema(required = true, nullable)]
+    pub accept_language: Option<String>,
+    #[schema(required = true, nullable)]
+    pub referrer_origin: Option<String>,
+    #[schema(required = true, nullable)]
+    pub sec_ch_ua: Option<String>,
+    #[schema(required = true, nullable)]
+    pub sec_ch_ua_platform: Option<String>,
+    #[schema(required = true, nullable)]
+    pub sec_ch_ua_mobile: Option<String>,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ConsentGrant {
     pub id: Uuid,
     pub scope: String,
@@ -1117,6 +1155,7 @@ pub(crate) struct CustomerDetailCounts {
     pub signals: i64,
     pub sessions: i64,
     pub features: i64,
+    pub request_observations: i64,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
@@ -1178,6 +1217,7 @@ pub(crate) struct DashboardCustomerContextReturn {
 pub(crate) struct DashboardCustomerDetail {
     pub customer: CustomerSummary,
     pub identifiers: Vec<CustomerIdentifier>,
+    pub request_observations: Vec<CustomerRequestObservation>,
     pub signals: Vec<CustomerSignal>,
     pub context_returns: Vec<DashboardCustomerContextReturn>,
     pub sessions: Vec<DashboardSessionSummary>,

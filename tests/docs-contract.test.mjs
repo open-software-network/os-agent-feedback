@@ -507,11 +507,16 @@ test("public privacy docs explain operable retention and durable Ask-once permis
   for (const content of [privacy, customers]) {
     assert.match(content, /1 to 365 days/);
     assert.match(content, /dashboard (?:filtering|queries).*immediately/is);
-    assert.match(content, /feedback(?: reports)?,\s*interactions, and sessions/is);
+    assert.match(
+      content,
+      /feedback(?: reports)?,\s*interactions, (?:request observations, )?and sessions/is,
+    );
     assert.match(content, /scheduled purge|one purge interval/i);
     assert.match(content, /Ask-once permission/i);
     assert.match(content, /explicitly\s+changed or the product is deleted/i);
   }
+  assert.match(privacy, /request observations.*physically deleted/is);
+  assert.match(privacy, /MAC addresses cannot cross a routed HTTP connection/i);
 });
 
 test("the HTTP reference publishes the complete report shape", async () => {
