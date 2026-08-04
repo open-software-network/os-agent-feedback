@@ -1,0 +1,530 @@
+name: Catch up code-intelligence production schema
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: Exact protected-main API/web revision to deploy after the schema catch-up.
+        required: true
+        type: string
+      backup_reference:
+        description: Exact Railway volume-backup UUID verified by the recovery job.
+        required: true
+        type: string
+      confirm_production:
+        description: Explicit acknowledgement of the production schema and application rollout.
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  actions: read
+  contents: read
+  packages: read
+
+concurrency:
+  group: epode-release-mutation
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  RAILWAY_CLI_VERSION: 5.30.4
+
+jobs:
+  plan:
+    name: Resolve the exact reviewed catch-up
+    runs-on: ubuntu-latest
+    outputs:
+      api_ref: ${{ steps.images.outputs.api_ref }}
+      api_digest: ${{ steps.images.outputs.api_digest }}
+      web_ref: ${{ steps.images.outputs.web_ref }}
+      web_digest: ${{ steps.images.outputs.web_digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 0
+
+      - name: Require protected main, exact CI, and explicit confirmation
+        env:
+          TARGET_SHA: ${{ inputs.target_sha }}
+          CONFIRM_PRODUCTION: ${{ inputs.confirm_production }}
+          BACKUP_REFERENCE: ${{ inputs.backup_reference }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ || "$(git rev-parse HEAD)" != "$TARGET_SHA" ]]; then
+            echo "::error::target_sha must be the exact checked-out 40-character commit."
+            exit 1
+          fi
+          git fetch --no-tags origin "$DEFAULT_BRANCH"
+          if ! git merge-base --is-ancestor "$TARGET_SHA" "origin/$DEFAULT_BRANCH"; then
+            echo "::error::The catch-up revision is not on protected $DEFAULT_BRANCH."
+            exit 1
+          fi
+          ci_conclusion="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${TARGET_SHA}&status=completed&per_page=20" \
+            --jq '.workflow_runs | map(select(.head_branch == env.DEFAULT_BRANCH and .event == "push")) | max_by(.run_number, .run_attempt) | .conclusion // empty')"
+          [[ "$ci_conclusion" == "success" ]] || { echo "::error::The exact revision has no successful protected-main CI run."; exit 1; }
+          [[ "$CONFIRM_PRODUCTION" == "true" ]] || { echo "::error::confirm_production must be true."; exit 1; }
+          [[ "$BACKUP_REFERENCE" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || {
+            echo "::error::backup_reference must be an exact Railway backup UUID."
+            exit 1
+          }
+          scripts/verify-code-intel-catchup.sh lint
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve immutable target images
+        id: images
+        env:
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          for artifact in api web; do
+            ref="${REGISTRY}/open-software-network/os-epode-${artifact}:${TARGET_SHA:0:7}"
+            docker buildx imagetools inspect "$ref" --raw >/dev/null
+            digest="$(docker buildx imagetools inspect "$ref" --format '{{ json .Manifest }}' | jq -r '.digest // empty')"
+            revision="$(docker buildx imagetools inspect "$ref" --format '{{ json .Image }}' \
+              | jq -r 'first(.. | objects | select(.config?.Labels?["org.opencontainers.image.revision"] != null) | .config.Labels["org.opencontainers.image.revision"]) // empty')"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ && "$revision" == "$TARGET_SHA" ]] || {
+              echo "::error::$ref is not an immutable image from the exact target revision."
+              exit 1
+            }
+            echo "${artifact}_ref=$ref" >>"$GITHUB_OUTPUT"
+            echo "${artifact}_digest=$digest" >>"$GITHUB_OUTPUT"
+          done
+
+      - name: Preserve every previously published hosted artifact
+        env:
+          API_REF: ${{ steps.images.outputs.api_ref }}
+          API_DIGEST: ${{ steps.images.outputs.api_digest }}
+        run: bash scripts/verify-image-artifact-ledger.sh "${API_REF}@${API_DIGEST}"
+
+  recovery_test:
+    name: Verify Railway backup and isolated logical restore
+    needs: plan
+    runs-on: ubuntu-latest
+    environment: production
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: restore-test
+          POSTGRES_DB: restored
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d restored"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+      DATABASE_SERVICE: ${{ vars.RAILWAY_DATABASE_SERVICE || 'Postgres' }}
+      API_SERVICE: ${{ vars.RAILWAY_API_SERVICE || 'epode-api' }}
+      PRODUCTION_VOLUME_INSTANCE_ID: ${{ vars.RAILWAY_PRODUCTION_DATABASE_VOLUME_INSTANCE_ID || '9a6038ab-2566-47bd-9546-5fb87e913d61' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.target_sha }}
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      - name: Install pinned Railway and PostgreSQL clients
+        run: |
+          npm install --global "@railway/cli@${RAILWAY_CLI_VERSION}"
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-client
+
+      - name: Verify the exact Railway backup exists and is recent
+        id: backup
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          BACKUP_REFERENCE: ${{ inputs.backup_reference }}
+        run: |
+          set -euo pipefail
+          # GraphQL variables are intentionally literal here.
+          # shellcheck disable=SC2016
+          backups="$(railway api \
+            'query($id: String!) { volumeInstanceBackupList(volumeInstanceId: $id) { id name createdAt expiresAt referencedMB } }' \
+            --raw-var "id=$PRODUCTION_VOLUME_INSTANCE_ID" --compact)"
+          backup="$(jq -c --arg id "$BACKUP_REFERENCE" '.data.volumeInstanceBackupList | map(select(.id == $id)) | if length == 1 then .[0] else empty end' <<<"$backups")"
+          [[ -n "$backup" ]] || { echo "::error::The exact Railway backup was not found."; exit 1; }
+          created_at="$(jq -r '.createdAt' <<<"$backup")"
+          created_epoch="$(date -u -d "$created_at" +%s)"
+          now_epoch="$(date -u +%s)"
+          [[ "$created_epoch" -le $((now_epoch + 300)) && "$created_epoch" -ge $((now_epoch - 86400)) ]] || {
+            echo "::error::The Railway backup is older than 24 hours or has an invalid creation time."
+            exit 1
+          }
+          jq -e '.expiresAt == null or (.expiresAt | fromdateiso8601 > now)' <<<"$backup" >/dev/null || {
+            echo "::error::The Railway backup is expired."
+            exit 1
+          }
+          echo "created_at=$created_at" >>"$GITHUB_OUTPUT"
+          echo "reference=$BACKUP_REFERENCE" >>"$GITHUB_OUTPUT"
+
+      - name: Resolve the production database without printing credentials
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          set -euo pipefail
+          variables="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment production --service "$DATABASE_SERVICE" --json)"
+          database_url="$(jq -r '.DATABASE_PUBLIC_URL // empty' <<<"$variables")"
+          [[ "$database_url" =~ ^postgres(ql)?:// ]] || { echo "::error::Production Postgres has no DATABASE_PUBLIC_URL."; exit 1; }
+          echo "::add-mask::$database_url"
+          delimiter="db-url-$(openssl rand -hex 12)"
+          { echo "PRODUCTION_DATABASE_URL<<$delimiter"; echo "$database_url"; echo "$delimiter"; } >>"$GITHUB_ENV"
+
+      - name: Dump and restore production into the isolated runner database
+        env:
+          RESTORE_DATABASE_URL: postgres://postgres:restore-test@127.0.0.1:5432/restored
+        run: |
+          set -euo pipefail
+          dump_path="$RUNNER_TEMP/epode-production.dump"
+          trap 'rm -f "$dump_path"' EXIT
+          pg_dump "$PRODUCTION_DATABASE_URL" --format=custom --no-owner --no-privileges --file="$dump_path"
+          pg_restore --exit-on-error --no-owner --no-privileges --dbname="$RESTORE_DATABASE_URL" "$dump_path"
+          restored_version="$(psql "$RESTORE_DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 -c 'SELECT max(version) FROM _sqlx_migrations WHERE success')"
+          restored_checksum="$(psql "$RESTORE_DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 -c "SELECT encode(checksum, 'hex') FROM _sqlx_migrations WHERE version = 34 AND success")"
+          [[ "$restored_version" == "34" ]] || { echo "::error::The isolated restore does not contain exact production ledger version 34."; exit 1; }
+          [[ "$restored_checksum" == "e43ce57441739aeec57c7a013c5472aceb37aa57640b5aae856dfd3cd80f5b75cc4dae84068b02054c6816ef97110f53" ]] || {
+            echo "::error::The isolated restore has the wrong migration-34 checksum."
+            exit 1
+          }
+          psql "$RESTORE_DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 <<'SQL' >/dev/null
+          BEGIN READ ONLY;
+          SELECT 1 FROM feedback_reports LIMIT 1;
+          SELECT 1 FROM products LIMIT 1;
+          SELECT CASE WHEN to_regclass('public.report_code_hints') IS NULL THEN 1 ELSE 1/0 END;
+          ROLLBACK;
+          SQL
+
+      - name: Record exact recovery-test evidence without deploying
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          BACKUP_REFERENCE: ${{ steps.backup.outputs.reference }}
+          BACKUP_CREATED_AT: ${{ steps.backup.outputs.created_at }}
+        run: |
+          railway variable set \
+            "EPODE_CODE_INTEL_RECOVERY_STATUS=verified" \
+            "EPODE_CODE_INTEL_RECOVERY_REVISION=${{ inputs.target_sha }}" \
+            "EPODE_CODE_INTEL_BACKUP_REFERENCE=$BACKUP_REFERENCE" \
+            "EPODE_CODE_INTEL_BACKUP_CREATED_AT=$BACKUP_CREATED_AT" \
+            "EPODE_CODE_INTEL_RESTORE_TEST_REFERENCE=github-run-${{ github.run_id }}" \
+            --project "$RAILWAY_PROJECT_ID" --environment production --service "$API_SERVICE" \
+            --skip-deploys --json >/dev/null
+
+  canary_schema:
+    name: Apply and verify the atomic batch in canary
+    needs: [plan, recovery_test]
+    runs-on: ubuntu-latest
+    environment: v2-canary
+    outputs:
+      schema_fingerprint: ${{ steps.verify_after.outputs.schema_fingerprint }}
+    env:
+      RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+      DATABASE_SERVICE: ${{ vars.RAILWAY_DATABASE_SERVICE || 'Postgres' }}
+      API_SERVICE: ${{ vars.RAILWAY_API_SERVICE || 'epode-api' }}
+      API_ORIGIN: https://${{ vars.V2_CANARY_API_DOMAIN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.target_sha }}
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      - name: Install pinned Railway and PostgreSQL clients
+        run: |
+          npm install --global "@railway/cli@${RAILWAY_CLI_VERSION}"
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-client
+
+      - name: Require the exact active canary API image
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          EXPECTED_REF: ${{ needs.plan.outputs.api_ref }}
+          EXPECTED_DIGEST: ${{ needs.plan.outputs.api_digest }}
+        run: |
+          set -euo pipefail
+          services="$(railway service list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --json)"
+          active_id="$(jq -r --arg service "$API_SERVICE" 'first(.[] | select(.name == $service) | .deploymentId) // empty' <<<"$services")"
+          deployments="$(railway deployment list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$API_SERVICE" --limit 100 --json)"
+          jq -e --arg id "$active_id" --arg ref "$EXPECTED_REF" --arg digest "$EXPECTED_DIGEST" \
+            'first(.[] | select(.id == $id)) | .status == "SUCCESS" and .meta.image == $ref and .meta.imageDigest == $digest' \
+            <<<"$deployments" >/dev/null || { echo "::error::Canary is not running the exact reviewed API image."; exit 1; }
+
+      - name: Resolve the canary database without printing credentials
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          variables="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$DATABASE_SERVICE" --json)"
+          database_url="$(jq -r '.DATABASE_PUBLIC_URL // empty' <<<"$variables")"
+          [[ "$database_url" =~ ^postgres(ql)?:// ]] || { echo "::error::Canary Postgres has no DATABASE_PUBLIC_URL."; exit 1; }
+          echo "::add-mask::$database_url"
+          delimiter="db-url-$(openssl rand -hex 12)"
+          { echo "DATABASE_URL<<$delimiter"; echo "$database_url"; echo "$delimiter"; } >>"$GITHUB_ENV"
+
+      - name: Apply the reviewed atomic batch when canary is at version 34
+        env:
+          CATCHUP_MODE: apply
+        run: |
+          set -euo pipefail
+          version="$(psql "$DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 -c 'SELECT max(version) FROM _sqlx_migrations WHERE success')"
+          if [[ "$version" == "34" ]]; then
+            scripts/verify-code-intel-catchup.sh apply
+          elif [[ "$version" != "38" ]]; then
+            echo "::error::Canary ledger must be exactly 34 or 38, not $version."
+            exit 1
+          fi
+
+      - name: Verify the complete canary schema
+        id: verify_after
+        run: scripts/verify-code-intel-catchup.sh verify-after
+
+      - name: Restart and verify the exact canary API
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          bash scripts/railway-deploy-image.sh v2-canary "$API_SERVICE" \
+            "${{ needs.plan.outputs.api_ref }}" "${{ needs.plan.outputs.api_digest }}"
+          curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 5 "$API_ORIGIN/api/health" >/dev/null
+
+      - name: Record exact canary catch-up evidence
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          FINGERPRINT: ${{ steps.verify_after.outputs.schema_fingerprint }}
+        run: |
+          railway variable set \
+            "EPODE_CODE_INTEL_CATCHUP_STATUS=verified" \
+            "EPODE_CODE_INTEL_CATCHUP_REVISION=${{ inputs.target_sha }}" \
+            "EPODE_CODE_INTEL_CATCHUP_SCHEMA_FINGERPRINT=$FINGERPRINT" \
+            "EPODE_CODE_INTEL_CATCHUP_RUN_ID=${{ github.run_id }}" \
+            --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$API_SERVICE" \
+            --skip-deploys --json >/dev/null
+
+  production:
+    name: Apply the verified batch and deploy the exact pair
+    needs: [plan, recovery_test, canary_schema]
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      packages: write
+    env:
+      RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+      DATABASE_SERVICE: ${{ vars.RAILWAY_DATABASE_SERVICE || 'Postgres' }}
+      API_SERVICE: ${{ vars.RAILWAY_API_SERVICE || 'epode-api' }}
+      WEB_SERVICE: ${{ vars.RAILWAY_WEB_SERVICE || 'epode-web' }}
+      CANARY_API_SERVICE: ${{ vars.RAILWAY_CANARY_API_SERVICE || 'agent-feedback-api' }}
+      API_ORIGIN: ${{ vars.PRODUCTION_API_ORIGIN || 'https://api.epode.ai' }}
+      WEB_ORIGIN: ${{ vars.PRODUCTION_WEB_ORIGIN || 'https://app.epode.ai' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      - name: Install pinned Railway and PostgreSQL clients
+        run: |
+          npm install --global "@railway/cli@${RAILWAY_CLI_VERSION}"
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-client
+
+      - name: Verify recovery and canary attestations
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_CANARY_TOKEN: ${{ secrets.RAILWAY_CANARY_TOKEN }}
+          EXPECTED_FINGERPRINT: ${{ needs.canary_schema.outputs.schema_fingerprint }}
+        run: |
+          set -euo pipefail
+          production="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment production --service "$API_SERVICE" --json)"
+          jq -e --arg revision "${{ inputs.target_sha }}" --arg backup "${{ inputs.backup_reference }}" --arg restore "github-run-${{ github.run_id }}" \
+            '.EPODE_CODE_INTEL_RECOVERY_STATUS == "verified" and .EPODE_CODE_INTEL_RECOVERY_REVISION == $revision and .EPODE_CODE_INTEL_BACKUP_REFERENCE == $backup and .EPODE_CODE_INTEL_RESTORE_TEST_REFERENCE == $restore' \
+            <<<"$production" >/dev/null || { echo "::error::Production has no exact recovery-test attestation."; exit 1; }
+          canary="$(RAILWAY_TOKEN="$RAILWAY_CANARY_TOKEN" railway variable list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$CANARY_API_SERVICE" --json)"
+          jq -e --arg revision "${{ inputs.target_sha }}" --arg fingerprint "$EXPECTED_FINGERPRINT" \
+            '.EPODE_CODE_INTEL_CATCHUP_STATUS == "verified" and .EPODE_CODE_INTEL_CATCHUP_REVISION == $revision and .EPODE_CODE_INTEL_CATCHUP_SCHEMA_FINGERPRINT == $fingerprint' \
+            <<<"$canary" >/dev/null || { echo "::error::Canary has no exact schema catch-up attestation."; exit 1; }
+
+      - name: Resolve the production database without printing credentials
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          variables="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment production --service "$DATABASE_SERVICE" --json)"
+          database_url="$(jq -r '.DATABASE_PUBLIC_URL // empty' <<<"$variables")"
+          [[ "$database_url" =~ ^postgres(ql)?:// ]] || { echo "::error::Production Postgres has no DATABASE_PUBLIC_URL."; exit 1; }
+          echo "::add-mask::$database_url"
+          delimiter="db-url-$(openssl rand -hex 12)"
+          { echo "DATABASE_URL<<$delimiter"; echo "$database_url"; echo "$delimiter"; } >>"$GITHUB_ENV"
+
+      - name: Capture the currently active immutable pair
+        id: previous
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          set -euo pipefail
+          services="$(railway service list --project "$RAILWAY_PROJECT_ID" --environment production --json)"
+          for artifact in api web; do
+            [[ "$artifact" == api ]] && service="$API_SERVICE" || service="$WEB_SERVICE"
+            active_id="$(jq -r --arg service "$service" 'first(.[] | select(.name == $service) | .deploymentId) // empty' <<<"$services")"
+            deployments="$(railway deployment list --project "$RAILWAY_PROJECT_ID" --environment production --service "$service" --limit 100 --json)"
+            ref="$(jq -r --arg id "$active_id" 'first(.[] | select(.id == $id) | .meta.image) // empty' <<<"$deployments")"
+            digest="$(jq -r --arg id "$active_id" 'first(.[] | select(.id == $id) | .meta.imageDigest) // empty' <<<"$deployments")"
+            [[ "$ref" =~ ^ghcr\.io/open-software-network/os-epode-${artifact}:[0-9a-f]{7}$ && "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "::error::The active $service is not an immutable recoverable image."
+              exit 1
+            }
+            registry_digest="$(docker buildx imagetools inspect "$ref" --format '{{ json .Manifest }}' | jq -r '.digest // empty')"
+            [[ "$registry_digest" == "$digest" ]] || { echo "::error::The active $service digest is not recoverable from GHCR."; exit 1; }
+            {
+              echo "${artifact}_deployment_id=$active_id"
+              echo "${artifact}_ref=$ref"
+              echo "${artifact}_digest=$digest"
+            } >>"$GITHUB_OUTPUT"
+          done
+
+      - name: Apply or verify the exact production batch
+        id: production_schema
+        env:
+          EXPECTED_SCHEMA_FINGERPRINT: ${{ needs.canary_schema.outputs.schema_fingerprint }}
+        run: |
+          set -euo pipefail
+          version="$(psql "$DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 -c 'SELECT max(version) FROM _sqlx_migrations WHERE success')"
+          if [[ "$version" == "34" ]]; then
+            scripts/verify-code-intel-catchup.sh apply
+          elif [[ "$version" == "38" ]]; then
+            scripts/verify-code-intel-catchup.sh verify-after
+          else
+            echo "::error::Production ledger must be exactly 34 or 38, not $version."
+            exit 1
+          fi
+
+      - name: Deploy and verify the exact API image
+        id: deploy_api
+        continue-on-error: true
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          bash scripts/railway-deploy-image.sh production "$API_SERVICE" \
+            "${{ needs.plan.outputs.api_ref }}" "${{ needs.plan.outputs.api_digest }}"
+
+      - name: Roll the schema back only if the old API unquestionably remained active
+        id: rollback_empty
+        if: steps.deploy_api.outcome == 'failure'
+        continue-on-error: true
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          CONFIRM_EMPTY_ROLLBACK: rollback-code-intel-35-38
+        run: |
+          set -euo pipefail
+          services="$(railway service list --project "$RAILWAY_PROJECT_ID" --environment production --json)"
+          active_id="$(jq -r --arg service "$API_SERVICE" 'first(.[] | select(.name == $service) | .deploymentId) // empty' <<<"$services")"
+          [[ "$active_id" == "${{ steps.previous.outputs.api_deployment_id }}" ]] || {
+            echo "::error::The target API may have become active; schema rollback is forbidden."
+            exit 1
+          }
+          scripts/verify-code-intel-catchup.sh rollback-empty
+
+      - name: Fail an API deployment that did not complete
+        if: steps.deploy_api.outcome == 'failure'
+        run: |
+          if [[ "${{ steps.rollback_empty.outcome }}" == "success" ]]; then
+            echo "::error::Target API deployment failed; the empty schema batch was safely rolled back and the old API remained active."
+          else
+            echo "::error::Target API deployment failed after schema commit and automatic rollback was unsafe. Keep schema 38 and intervene immediately."
+          fi
+          exit 1
+
+      - name: Deploy and verify the exact web image
+        id: deploy_web
+        continue-on-error: true
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          bash scripts/railway-deploy-image.sh production "$WEB_SERVICE" \
+            "${{ needs.plan.outputs.web_ref }}" "${{ needs.plan.outputs.web_digest }}"
+
+      - name: Fail without reverting the schema-aware API when web deployment fails
+        if: steps.deploy_web.outcome == 'failure'
+        run: |
+          echo "::error::Web deployment failed. The verified schema-aware API remains active; retry this idempotent workflow."
+          exit 1
+
+      - name: Verify production HTTP, authentication, and schema
+        env:
+          EXPECTED_SCHEMA_FINGERPRINT: ${{ needs.canary_schema.outputs.schema_fingerprint }}
+        run: |
+          scripts/verify-code-intel-catchup.sh verify-after
+          curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 5 "$API_ORIGIN/api/health" >/dev/null
+          api_variables="$(RAILWAY_TOKEN="${{ secrets.RAILWAY_TOKEN }}" railway variable list --project "$RAILWAY_PROJECT_ID" --environment production --service "$API_SERVICE" --json)"
+          accounts_url="$(jq -r '.OS_ACCOUNTS_URL // empty' <<<"$api_variables")"
+          bash scripts/verify-public-integration-surface.sh "$WEB_ORIGIN" "${accounts_url%/}"
+
+      - name: Move and verify both production tags
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "${REGISTRY}/open-software-network/os-epode-api:production" \
+            "${REGISTRY}/open-software-network/os-epode-api@${{ needs.plan.outputs.api_digest }}"
+          docker buildx imagetools create --tag "${REGISTRY}/open-software-network/os-epode-web:production" \
+            "${REGISTRY}/open-software-network/os-epode-web@${{ needs.plan.outputs.web_digest }}"
+          for artifact in api web; do
+            [[ "$artifact" == api ]] && expected="${{ needs.plan.outputs.api_digest }}" || expected="${{ needs.plan.outputs.web_digest }}"
+            actual="$(docker buildx imagetools inspect "${REGISTRY}/open-software-network/os-epode-${artifact}:production" \
+              --format '{{ json .Manifest }}' | jq -r '.digest // empty')"
+            [[ "$actual" == "$expected" ]] || { echo "::error::The $artifact production tag did not converge to the reviewed digest."; exit 1; }
+          done
+
+      - name: Record the completed production catch-up
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          FINGERPRINT: ${{ needs.canary_schema.outputs.schema_fingerprint }}
+        run: |
+          railway variable set \
+            "EPODE_CODE_INTEL_CATCHUP_STATUS=verified" \
+            "EPODE_CODE_INTEL_CATCHUP_REVISION=${{ inputs.target_sha }}" \
+            "EPODE_CODE_INTEL_CATCHUP_SCHEMA_FINGERPRINT=$FINGERPRINT" \
+            "EPODE_CODE_INTEL_CATCHUP_BACKUP_REFERENCE=${{ inputs.backup_reference }}" \
+            "EPODE_CODE_INTEL_CATCHUP_RESTORE_TEST_REFERENCE=github-run-${{ github.run_id }}" \
+            "EPODE_CODE_INTEL_CATCHUP_RUN_ID=${{ github.run_id }}" \
+            --project "$RAILWAY_PROJECT_ID" --environment production --service "$API_SERVICE" \
+            --skip-deploys --json >/dev/null
+          {
+            echo "### Production code-intelligence catch-up completed"
+            echo "- **Revision:** \`${{ inputs.target_sha }}\`"
+            echo "- **Schema:** \`34 -> 38\` atomically"
+            echo "- **Fingerprint:** \`$FINGERPRINT\`"
+            echo "- **Backup:** \`${{ inputs.backup_reference }}\`"
+            echo "- **Restore test:** \`github-run-${{ github.run_id }}\`"
+            echo "- **API:** \`${{ needs.plan.outputs.api_ref }}@${{ needs.plan.outputs.api_digest }}\`"
+            echo "- **Web:** \`${{ needs.plan.outputs.web_ref }}@${{ needs.plan.outputs.web_digest }}\`"
+          } >>"$GITHUB_STEP_SUMMARY"
