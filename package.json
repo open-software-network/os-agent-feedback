@@ -35,6 +35,7 @@
     "test:agent-harness-inventory": "node experiments/agent-compliance/runtime-inventory.mjs",
     "test:agent-compliance:companion": "node experiments/agent-compliance/companion-production-run.mjs",
     "test:agent-compliance:production": "node experiments/agent-compliance/production-run.mjs",
+    "test:industries:production": "node experiments/agent-compliance/industry-production-e2e.mjs",
     "analyze:agent-compliance": "node experiments/agent-compliance/analyze.mjs .artifacts/agent-compliance/*.json",
     "docs:validate": "cd docs && pnpm exec mint validate",
     "docs:a11y": "cd docs && pnpm exec mint a11y",

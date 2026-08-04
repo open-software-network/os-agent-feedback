@@ -135,6 +135,46 @@ export type CustomerContextResponse = {
   items: CustomerContextTrait[];
 };
 
+export type CustomerContextReturnedItem = {
+  signalId: string;
+  key: string;
+  type: SignalType | string;
+  value: unknown;
+  summary: string;
+  provenance: SignalProvenance | string;
+  confidence: number | null;
+  expiresAt: string | null;
+};
+
+export type CustomerPersonalizationOutcome = {
+  id: string;
+  externalOutcomeId: string;
+  decisionId: string;
+  outcome: string;
+  occurredAt: string;
+};
+
+export type CustomerPersonalizationDecision = {
+  id: string;
+  externalDecisionId: string;
+  variant: string | null;
+  signalIds: string[];
+  createdAt: string;
+  outcomes: CustomerPersonalizationOutcome[];
+};
+
+export type CustomerContextReturn = {
+  retrievalId: string;
+  interactionId: string | null;
+  sessionId: string | null;
+  purpose: CustomerContextPurpose | string;
+  identityLevel: IdentityLevel | string;
+  contextVersion: string;
+  retrievedAt: string;
+  items: CustomerContextReturnedItem[];
+  decisions: CustomerPersonalizationDecision[];
+};
+
 export type CustomerRollup = {
   customers: number;
   verified: number;
@@ -167,6 +207,7 @@ export type CustomerDetail = {
   customer: CustomerSummary;
   identifiers: CustomerIdentifier[];
   signals: CustomerSignal[];
+  contextReturns: CustomerContextReturn[];
   sessions: DashboardSessionSummary[];
   consent: ConsentGrant[];
   consentHistory: ConsentEvent[];

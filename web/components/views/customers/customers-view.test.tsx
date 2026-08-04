@@ -55,11 +55,19 @@ describe("CustomersView", () => {
     expect(await screen.findByRole("heading", { name: "Acme workspace" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "What we know" })).toBeVisible();
     expect(screen.getByText("Find the newest indexed policy")).toBeVisible();
-    expect(screen.getByText(/search\.goal · newest_policy/)).toBeVisible();
+    expect(screen.getAllByText(/search\.goal · newest_policy/).length).toBeGreaterThan(0);
     expect(screen.getByText(/^Customer said ·/)).toBeVisible();
     expect(screen.getAllByRole("button", { name: "Open source session" }).length).toBeGreaterThan(
       0,
     );
+    expect(screen.getByRole("heading", { name: "Context returned to product" })).toBeVisible();
+    expect(screen.getByText("Context version:").parentElement).toHaveTextContent(
+      "ctx1_fixture_customer_context_version",
+    );
+    expect(screen.getByText("Applied variant: Freshness First")).toBeVisible();
+    expect(screen.getByText("Outcome: Completion")).toBeVisible();
+    expect(screen.getByText("Used")).toBeVisible();
+    expect(screen.getByText(/Customer prompts and searches are not included/i)).toBeVisible();
     expect(screen.queryByRole("heading", { name: "Data use" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Sessions" })).toBeVisible();
     expect(screen.queryByRole("heading", { name: "Permission" })).not.toBeInTheDocument();
@@ -73,7 +81,7 @@ describe("CustomersView", () => {
     });
 
     await screen.findByRole("heading", { name: "Acme workspace" });
-    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Open session" })[0]);
 
     expect(openSession).toHaveBeenCalled();
   });

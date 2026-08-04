@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/table";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import {
+  type CustomerContextReturn,
   type CustomerDetail,
   type CustomerSignal,
   type CustomerSummary,
@@ -452,6 +453,17 @@ function signalValue(signal: CustomerSignal) {
   return null;
 }
 
+function contextValue(value: unknown) {
+  if (typeof value === "string" || typeof value === "number") return String(value);
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (Array.isArray(value)) {
+    return value
+      .filter((item) => ["string", "number", "boolean"].includes(typeof item))
+      .map(String)
+      .join(", ");
+  }
+  return "Structured value";
+}
 function CustomerDetailContent({
   detail,
   openSession,
@@ -544,6 +556,9 @@ function CustomerDetailContent({
       </section>
 
       <Separator className="my-5" />
+      <CustomerContextReturns returns={detail.contextReturns} openSession={openSession} />
+
+      <Separator className="my-5" />
       <section aria-labelledby="customer-sessions-heading">
         <h3 id="customer-sessions-heading" className="text-xs font-medium">
           Sessions
@@ -569,5 +584,132 @@ function CustomerDetailContent({
         )}
       </section>
     </>
+  );
+}
+
+function CustomerContextReturns({
+  returns,
+  openSession,
+}: {
+  returns: CustomerContextReturn[];
+  openSession: (sessionId: string) => void;
+}) {
+  return (
+    <section aria-labelledby="customer-context-returned-heading">
+      <div className="flex items-center justify-between gap-3">
+        <h3 id="customer-context-returned-heading" className="text-xs font-medium">
+          Context returned to product
+        </h3>
+        <span className="text-[11px] text-muted-foreground">
+          {returns.length.toLocaleString()} {returns.length === 1 ? "retrieval" : "retrievals"}
+        </span>
+      </div>
+      <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+        Structured fields returned through Epode. Customer prompts and searches are not included.
+      </p>
+      {returns.length ? (
+        <ol className="mt-3 divide-y">
+          {returns.map((retrieval) => {
+            const usedSignalIds = new Set(
+              retrieval.decisions.flatMap((decision) => decision.signalIds),
+            );
+            return (
+              <li key={retrieval.retrievalId} className="py-3 first:pt-0">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium">{titleCase(retrieval.purpose)}</p>
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      Returned {formatDate(retrieval.retrievedAt)} · {retrieval.items.length}{" "}
+                      {retrieval.items.length === 1 ? "field" : "fields"}
+                    </p>
+                  </div>
+                  {retrieval.sessionId ? (
+                    <Button
+                      variant="link"
+                      size="xs"
+                      className="h-auto shrink-0 p-0"
+                      onClick={() => openSession(retrieval.sessionId ?? "")}
+                    >
+                      Open session
+                    </Button>
+                  ) : null}
+                </div>
+                <dl className="mt-2 space-y-1 font-mono text-[10px] leading-4 text-muted-foreground">
+                  <div>
+                    <dt className="inline font-sans">Context version: </dt>
+                    <dd className="inline break-all">{retrieval.contextVersion}</dd>
+                  </div>
+                  <div>
+                    <dt className="inline font-sans">Retrieval: </dt>
+                    <dd className="inline break-all">{retrieval.retrievalId}</dd>
+                  </div>
+                </dl>
+                {retrieval.items.length ? (
+                  <ul className="mt-3 space-y-2 rounded-md border bg-muted/20 p-3">
+                    {retrieval.items.map((item) => (
+                      <li key={item.signalId}>
+                        <div className="flex items-start justify-between gap-3">
+                          <p className="break-words font-mono text-[11px] font-medium">
+                            {item.key} · {contextValue(item.value)}
+                          </p>
+                          {usedSignalIds.has(item.signalId) ? (
+                            <Badge variant="secondary">Used</Badge>
+                          ) : null}
+                        </div>
+                        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                          {item.summary} · {signalSource(item.provenance)}
+                        </p>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="mt-2 text-[11px] text-muted-foreground">
+                    No saved context fields were returned.
+                  </p>
+                )}
+                {retrieval.decisions.length ? (
+                  <div className="mt-3 space-y-2">
+                    {retrieval.decisions.map((decision) => (
+                      <div key={decision.id} className="border-l-2 pl-3">
+                        <p className="text-xs font-medium">
+                          {decision.variant
+                            ? `Applied variant: ${titleCase(decision.variant)}`
+                            : "Personalization applied"}
+                        </p>
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          {decision.signalIds.length} returned{" "}
+                          {decision.signalIds.length === 1 ? "field" : "fields"} used ·{" "}
+                          {formatDate(decision.createdAt)}
+                        </p>
+                        {decision.outcomes.length ? (
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            Outcome:{" "}
+                            {decision.outcomes
+                              .map((outcome) => titleCase(outcome.outcome))
+                              .join(", ")}
+                          </p>
+                        ) : (
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            No outcome linked yet.
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-3 text-[11px] text-muted-foreground">
+                    No product decision has been linked to this retrieval.
+                  </p>
+                )}
+              </li>
+            );
+          })}
+        </ol>
+      ) : (
+        <p className="mt-2 text-sm text-muted-foreground">
+          No customer context has been returned to this product yet.
+        </p>
+      )}
+    </section>
   );
 }

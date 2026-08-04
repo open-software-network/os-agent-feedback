@@ -387,6 +387,47 @@ export function customerDetailFixture(): CustomerDetail {
         allowedUses: ["product_personalization"],
       }),
     ],
+    contextReturns: [
+      {
+        retrievalId: "88888888-8888-4888-8888-888888888888",
+        interactionId: dashboard.interactions[0].id,
+        sessionId: dashboard.sessions[0].id,
+        purpose: "product_personalization",
+        identityLevel: "verified",
+        contextVersion: "ctx1_fixture_customer_context_version",
+        retrievedAt: "2026-07-30T12:10:00Z",
+        items: [
+          {
+            signalId: "signal-intent",
+            key: "search.goal",
+            type: "intent",
+            value: "newest_policy",
+            summary: "Find the newest indexed policy",
+            provenance: "agent_reports_user_statement",
+            confidence: 0.98,
+            expiresAt: "2026-10-28T12:00:00Z",
+          },
+        ],
+        decisions: [
+          {
+            id: "99999999-9999-4999-8999-999999999999",
+            externalDecisionId: "decision_search_order",
+            variant: "freshness_first",
+            signalIds: ["signal-intent"],
+            createdAt: "2026-07-30T12:10:01Z",
+            outcomes: [
+              {
+                id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                externalOutcomeId: "outcome_search_complete",
+                decisionId: "99999999-9999-4999-8999-999999999999",
+                outcome: "completion",
+                occurredAt: "2026-07-30T12:11:00Z",
+              },
+            ],
+          },
+        ],
+      },
+    ],
     sessions: dashboard.sessions,
     consent: [
       {
