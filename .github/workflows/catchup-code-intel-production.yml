@@ -425,8 +425,10 @@ jobs:
           version="$(psql "$DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 -c 'SELECT max(version) FROM _sqlx_migrations WHERE success')"
           if [[ "$version" == "34" ]]; then
             scripts/verify-code-intel-catchup.sh apply
+            echo "applied_by_this_run=true" >>"$GITHUB_OUTPUT"
           elif [[ "$version" == "38" ]]; then
             scripts/verify-code-intel-catchup.sh verify-after
+            echo "applied_by_this_run=false" >>"$GITHUB_OUTPUT"
           else
             echo "::error::Production ledger must be exactly 34 or 38, not $version."
             exit 1
@@ -443,7 +445,7 @@ jobs:
 
       - name: Roll the schema back only if the old API unquestionably remained active
         id: rollback_empty
-        if: steps.deploy_api.outcome == 'failure'
+        if: steps.deploy_api.outcome == 'failure' && steps.production_schema.outputs.applied_by_this_run == 'true'
         continue-on-error: true
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
@@ -463,6 +465,8 @@ jobs:
         run: |
           if [[ "${{ steps.rollback_empty.outcome }}" == "success" ]]; then
             echo "::error::Target API deployment failed; the empty schema batch was safely rolled back and the old API remained active."
+          elif [[ "${{ steps.production_schema.outputs.applied_by_this_run }}" == "false" ]]; then
+            echo "::error::Target API deployment failed on a retry; the preexisting verified schema 38 was kept intact."
           else
             echo "::error::Target API deployment failed after schema commit and automatic rollback was unsafe. Keep schema 38 and intervene immediately."
           fi
