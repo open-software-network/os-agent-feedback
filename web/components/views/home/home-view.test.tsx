@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { customersPageFixture, dashboardFixture } from "@/components/dashboard/test-fixture";
@@ -21,11 +21,16 @@ describe("HomeView", () => {
         name: "Epode asks customer agents questions and records their answers.",
       }),
     ).toBeVisible();
+    expect(screen.getByRole("img", { name: "EPODE" })).toHaveAttribute(
+      "src",
+      expect.stringContaining("epode-logo.svg"),
+    );
     const glance = screen.getByRole("region", { name: "At a glance" });
     expect(within(glance).getByText("Customers")).toBeVisible();
     expect(within(glance).getByText("Questions asked")).toBeVisible();
     expect(within(glance).getByText("Answers received")).toBeVisible();
     expect(within(glance).getByText("Sessions")).toBeVisible();
+    expect(within(glance).queryByRole("img")).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Recent responses" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "Recent customers" })).toBeVisible();
     expect(screen.queryByText(/signals|interactions|contexts|evidences/i)).not.toBeInTheDocument();
@@ -43,27 +48,30 @@ describe("HomeView", () => {
     expect(openSession).toHaveBeenCalledWith("33333333-3333-4333-8333-333333333333");
   });
 
-  it("routes to the core object screens and refreshes both lists", async () => {
-    const refresh = vi.fn().mockResolvedValue(undefined);
+  it("routes to the core object screens without a redundant manual refresh action", async () => {
     const fetchMock = mockHome();
-    renderHome(dashboardFixture(), { refresh }, fetchMock);
+    renderHome(dashboardFixture(), {}, fetchMock);
 
     await screen.findByText("Blue");
     fireEvent.click(screen.getByRole("button", { name: /view responses/i }));
     expect(new URL(window.location.href).searchParams.get("view")).toBe("responses");
+    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
+  });
 
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-    await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
-    expect(
-      fetchMock.mock.calls.filter(([input]) =>
-        String(input).startsWith("/api/dashboard/customers?"),
-      ).length,
-    ).toBeGreaterThan(1);
-    expect(
-      fetchMock.mock.calls.filter(([input]) =>
-        String(input).startsWith("/api/dashboard/responses?"),
-      ).length,
-    ).toBeGreaterThan(1);
+  it("uses quiet copy when a response has no answer content", async () => {
+    const page = responsesPage();
+    const response = page.responses[0];
+    renderHome(
+      dashboardFixture(),
+      {},
+      mockHome(customersPageFixture(), {
+        ...page,
+        responses: [{ ...response, answers: [] }],
+      }),
+    );
+
+    expect(await screen.findByText("No answer content was recorded.")).toBeVisible();
+    expect(screen.queryByText(/^Answered$/)).not.toBeInTheDocument();
   });
 });
 
@@ -121,14 +129,14 @@ function responsesPage(): DashboardResponsesPage {
   };
 }
 
-function mockHome() {
+function mockHome(customerPage = customersPageFixture(), responsePage = responsesPage()) {
   return vi.fn().mockImplementation((input: RequestInfo | URL) => {
     const path = String(input);
     if (path.startsWith("/api/dashboard/customers?")) {
-      return Promise.resolve(json(customersPageFixture()));
+      return Promise.resolve(json(customerPage));
     }
     if (path.startsWith("/api/dashboard/responses?")) {
-      return Promise.resolve(json(responsesPage()));
+      return Promise.resolve(json(responsePage));
     }
     throw new Error(`Unexpected request: ${path}`);
   });

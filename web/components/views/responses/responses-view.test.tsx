@@ -22,7 +22,7 @@ describe("ResponsesView", () => {
     const row = await screen.findByRole("row", { name: /Blue.*search_catalog/i });
     expect(within(row).getByText("Blue")).toBeVisible();
     expect(within(row).getByText("search_catalog")).toBeVisible();
-    expect(within(row).getByText("Answered")).toBeVisible();
+    expect(within(row).queryByText("Answered")).not.toBeInTheDocument();
     expect(within(row).queryByText("What color does the user prefer?")).not.toBeInTheDocument();
     fireEvent.click(within(row).getByRole("button", { name: "Acme workspace" }));
     fireEvent.click(within(row).getByRole("button", { name: "session-42" }));
@@ -34,7 +34,8 @@ describe("ResponsesView", () => {
     expect(screen.queryByRole("columnheader", { name: "Question" })).not.toBeInTheDocument();
   });
 
-  it("persists search and status filters and sends both to the server", async () => {
+  it("persists search without promoting response protocol states into filters", async () => {
+    window.history.replaceState({}, "", "/?view=responses&responseStatus=answered");
     const fetchMock = responseFetch();
     vi.stubGlobal("fetch", fetchMock);
     renderResponses();
@@ -43,22 +44,41 @@ describe("ResponsesView", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "Search responses" }), {
       target: { value: "color" },
     });
-    fireEvent.change(screen.getByRole("combobox", { name: "Response status" }), {
-      target: { value: "answered" },
-    });
 
     await waitFor(() => {
       expect(window.location.search).toContain("responseQ=color");
-      expect(window.location.search).toContain("responseStatus=answered");
+      expect(window.location.search).not.toContain("responseStatus");
+      expect(screen.queryByRole("combobox", { name: "Response status" })).not.toBeInTheDocument();
       expect(
         fetchMock.mock.calls.some(([input]) => {
           const url = new URL(String(input), "https://epode.test");
-          return (
-            url.searchParams.get("q") === "color" && url.searchParams.get("status") === "answered"
-          );
+          return url.searchParams.get("q") === "color" && !url.searchParams.has("status");
         }),
       ).toBe(true);
     });
+  });
+
+  it("describes exceptional outcomes once without status badges", async () => {
+    const base = responsePage().responses[0];
+    vi.stubGlobal(
+      "fetch",
+      responseFetch({
+        responses: [
+          { ...base, id: "awaiting", status: "awaiting_answer", answers: [] },
+          { ...base, id: "declined", status: "declined", answers: [] },
+          { ...base, id: "unavailable", status: "no_relevant_context", answers: [] },
+          { ...base, id: "missing", status: "answered", answers: [] },
+        ],
+      }),
+    );
+    renderResponses();
+
+    expect(await screen.findByText("Waiting for shared context.")).toBeVisible();
+    expect(screen.getByText("The customer agent declined to share context.")).toBeVisible();
+    expect(screen.getByText("No relevant context was shared.")).toBeVisible();
+    expect(screen.getByText("No answer content was recorded.")).toBeVisible();
+    expect(screen.queryByText(/^Answered$/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Declined$/)).not.toBeInTheDocument();
   });
 
   it("shows an honest empty state before any question is asked", async () => {

@@ -81,6 +81,32 @@ describe("DashboardShell", () => {
     );
   });
 
+  it("uses the main-owned Response title for a linked record", () => {
+    const data = dashboardFixture();
+    const commonProps = {
+      data,
+      onNavigate: vi.fn(),
+      onWorkspaceChange: vi.fn(),
+      onProductChange: vi.fn(),
+      onLogout: vi.fn(),
+    };
+    const { rerender } = render(
+      <DashboardShell {...commonProps} view="responses">
+        <div>Response queue</div>
+      </DashboardShell>,
+    );
+
+    expect(screen.getByRole("heading", { name: "Responses" })).toBeVisible();
+
+    rerender(
+      <DashboardShell {...commonProps} view="feedback">
+        <div>Response detail</div>
+      </DashboardShell>,
+    );
+
+    expect(screen.getByRole("heading", { name: "Response" })).toBeVisible();
+  });
+
   it("routes members to the read-only Product configuration tab", () => {
     const onNavigate = vi.fn();
     render(
@@ -127,6 +153,9 @@ describe("DashboardShell", () => {
         name: `${data.currentProduct?.name}, ${data.workspace.name} - open product menu`,
       }),
     );
+    const productMenuChevron = document.querySelector('[data-icon="product-menu-chevron"]');
+    expect(productMenuChevron).toHaveAttribute("width", "16px");
+    expect(productMenuChevron).toHaveAttribute("height", "16px");
     fireEvent.click(await screen.findByRole("menuitem", { name: "New product" }));
 
     expect(onNavigate).toHaveBeenCalledWith("configuration");
@@ -148,5 +177,29 @@ describe("DashboardShell", () => {
     );
 
     expect(screen.queryByRole("button", { name: /open product menu/i })).not.toBeInTheDocument();
+  });
+
+  it("keeps the compact shell headers aligned and centers the collapsed trigger", () => {
+    render(
+      <DashboardShell
+        data={dashboardFixture()}
+        view="home"
+        onNavigate={vi.fn()}
+        onWorkspaceChange={vi.fn()}
+        onProductChange={vi.fn()}
+        onLogout={vi.fn()}
+      >
+        <div>Dashboard content</div>
+      </DashboardShell>,
+    );
+
+    expect(screen.getByRole("banner")).toHaveClass("h-10");
+    expect(document.querySelector('[data-slot="sidebar-header"]')).toHaveClass("h-10");
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+    expect(screen.getByRole("button", { name: "Expand sidebar" })).toHaveClass(
+      "left-1/2",
+      "-translate-x-1/2",
+    );
   });
 });

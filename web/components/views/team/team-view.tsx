@@ -209,12 +209,24 @@ export function TeamView({
       ) : null}
 
       {canInvite ? (
-        <Panel title="Invite teammates">
+        <Panel>
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-base font-medium">Invite teammates</h2>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="-mr-2"
+              onClick={() => void createMemberLink()}
+            >
+              Copy member invite link
+            </Button>
+          </div>
           <form
-            className="grid max-w-2xl gap-3 sm:grid-cols-[1fr_10rem_auto]"
+            className="grid max-w-2xl items-start gap-3 sm:grid-cols-[minmax(0,1fr)_10rem_auto]"
             onSubmit={inviteForm.handleSubmit(inviteByEmail)}
           >
-            <div className="flex flex-col gap-1">
+            <div className="grid gap-1.5">
               <Label htmlFor="invite-email">Email address</Label>
               <Input
                 id="invite-email"
@@ -228,20 +240,17 @@ export function TeamView({
                 </p>
               ) : null}
             </div>
-            <label className="flex flex-col gap-1 text-sm" htmlFor="invite-role">
-              <span>Role</span>
+            <div className="grid gap-1.5">
+              <Label htmlFor="invite-role">Role</Label>
               <NativeSelect id="invite-role" {...inviteForm.register("role")}>
                 <option value="member">Member</option>
                 {isOwner ? <option value="admin">Admin</option> : null}
               </NativeSelect>
-            </label>
-            <Button className="self-end" type="submit" disabled={inviteForm.formState.isSubmitting}>
+            </div>
+            <Button className="sm:mt-5" type="submit" disabled={inviteForm.formState.isSubmitting}>
               Open email draft
             </Button>
           </form>
-          <Button variant="link" className="px-0" onClick={() => void createMemberLink()}>
-            Copy member invite link
-          </Button>
         </Panel>
       ) : (
         <Panel>Your member role can view this team. An owner or admin manages membership.</Panel>

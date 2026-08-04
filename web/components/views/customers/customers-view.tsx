@@ -2,6 +2,7 @@
 
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
+import { IconFilterTimeline } from "central-icons/IconFilterTimeline";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { useEffect, useMemo, useState } from "react";
 import { DetailRail, DetailWorkspace } from "@/components/dashboard/detail-rail";
@@ -11,6 +12,14 @@ import { EmptyState, ErrorState, NativeSelect } from "@/components/dashboard/vie
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
+import { Label } from "@/components/ui/label";
+import {
+  Popover,
+  PopoverContent,
+  PopoverHeader,
+  PopoverTitle,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -25,6 +34,7 @@ import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import {
   type CustomerContextReturn,
   type CustomerDetail,
+  type CustomerFacets,
   type CustomerSignal,
   type CustomerSummary,
   fetchCustomerDetail,
@@ -177,11 +187,8 @@ export function CustomersView({
           { label: "Active", value: rollup.active.toLocaleString() },
         ]}
       />
-      <div className="border-b bg-muted/20 px-4 py-2 text-xs text-muted-foreground">
-        Customers stay linked to their sessions whenever the product supplies a stable reference.
-      </div>
-      <div className="flex shrink-0 flex-col gap-2 border-b px-4 py-3 xl:flex-row xl:items-center xl:justify-between">
-        <InputGroup className="max-w-xl bg-background">
+      <div className="flex shrink-0 flex-col gap-2 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <InputGroup className="w-full bg-background sm:w-80 sm:flex-none">
           <InputGroupAddon>
             <IconMagnifyingGlass />
           </InputGroupAddon>
@@ -192,25 +199,8 @@ export function CustomersView({
             placeholder="Search customers"
           />
         </InputGroup>
-        <div className="flex min-w-0 items-center gap-2 overflow-x-auto">
-          <CustomerSelect
-            label="Identity"
-            value={filters.identityLevel}
-            options={facets?.identityLevel ?? []}
-            onChange={(identityLevel) => applyFilters({ ...filters, identityLevel })}
-          />
-          <NativeSelect
-            aria-label="Customer activity range"
-            className="w-auto min-w-32"
-            value={filters.range}
-            onChange={(event) =>
-              applyFilters({ ...filters, range: event.target.value as CustomerFilters["range"] })
-            }
-          >
-            <option value="7d">Last 7 days</option>
-            <option value="30d">Last 30 days</option>
-            <option value="all">All retained</option>
-          </NativeSelect>
+        <div className="flex shrink-0 items-center gap-2">
+          <CustomerFilters filters={filters} facets={facets} onApply={applyFilters} />
           <Button
             variant="ghost"
             size="sm"
@@ -221,8 +211,15 @@ export function CustomersView({
         </div>
       </div>
       {customerFilterCount(filters) ? (
-        <div className="flex items-center justify-between gap-3 border-b bg-muted/20 px-4 py-2 text-xs text-muted-foreground">
-          <span>{customerFilterCount(filters)} active customer filters</span>
+        <div className="flex flex-wrap items-center gap-2 border-b bg-muted/20 px-4 py-2">
+          {filters.identityLevel ? (
+            <Badge variant="outline">Identity: {identityLabel(filters.identityLevel)}</Badge>
+          ) : null}
+          {filters.range !== "30d" ? (
+            <Badge variant="outline">
+              {filters.range === "7d" ? "Last 7 days" : "All retained"}
+            </Badge>
+          ) : null}
           <Button variant="ghost" size="xs" onClick={() => applyFilters(emptyFilters)}>
             Clear filters
           </Button>
@@ -242,7 +239,7 @@ export function CustomersView({
             <TableHeader className="sticky top-0 z-[1] bg-background">
               <TableRow className="hover:bg-background">
                 <TableHead className="h-9 w-[42%] pl-5 text-xs">Customer</TableHead>
-                <TableHead className="h-9 w-[22%] text-xs">Type</TableHead>
+                <TableHead className="h-9 w-[22%] text-xs">Identity</TableHead>
                 <TableHead className="h-9 w-[18%] text-xs">Sessions</TableHead>
                 <TableHead className="h-9 w-[18%] pr-5 text-right text-xs">Updated</TableHead>
               </TableRow>
@@ -292,12 +289,89 @@ export function CustomersView({
   );
 }
 
+function CustomerFilters({
+  filters,
+  facets,
+  onApply,
+}: {
+  filters: CustomerFilters;
+  facets?: CustomerFacets;
+  onApply: (filters: CustomerFilters) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(filters);
+  const activeCount = customerFilterCount(filters);
+
+  function change(nextOpen: boolean) {
+    setOpen(nextOpen);
+    if (nextOpen) setDraft(filters);
+  }
+
+  return (
+    <Popover open={open} onOpenChange={change}>
+      <PopoverTrigger render={<Button type="button" variant="outline" size="sm" />}>
+        <IconFilterTimeline data-icon="inline-start" />
+        Filters
+        {activeCount ? <Badge variant="secondary">{activeCount}</Badge> : null}
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-[min(22rem,calc(100vw-2rem))]">
+        <PopoverHeader>
+          <PopoverTitle>Filter customers</PopoverTitle>
+        </PopoverHeader>
+        <div className="grid gap-3">
+          <div className="grid gap-1.5">
+            <Label htmlFor="customer-identity-filter">Identity</Label>
+            <CustomerSelect
+              id="customer-identity-filter"
+              label="Identity"
+              value={draft.identityLevel}
+              options={facets?.identityLevel ?? []}
+              onChange={(identityLevel) => setDraft({ ...draft, identityLevel })}
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="customer-activity-filter">Last active</Label>
+            <NativeSelect
+              id="customer-activity-filter"
+              value={draft.range}
+              onChange={(event) =>
+                setDraft({ ...draft, range: event.target.value as CustomerFilters["range"] })
+              }
+            >
+              <option value="7d">Last 7 days</option>
+              <option value="30d">Last 30 days</option>
+              <option value="all">All retained</option>
+            </NativeSelect>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 border-t pt-2.5">
+          <Button type="button" variant="ghost" size="sm" onClick={() => setDraft(emptyFilters)}>
+            Reset
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => {
+              onApply(draft);
+              setOpen(false);
+            }}
+          >
+            Apply
+          </Button>
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function CustomerSelect({
+  id,
   label,
   value,
   options,
   onChange,
 }: {
+  id: string;
   label: string;
   value: string;
   options: { name: string; count: number }[];
@@ -305,8 +379,8 @@ function CustomerSelect({
 }) {
   return (
     <NativeSelect
+      id={id}
       aria-label={`${label} filter`}
-      className="w-auto min-w-28"
       value={value}
       onChange={(event) => onChange(event.target.value)}
     >
@@ -623,15 +697,19 @@ function CustomerDetailContent({
         {detail.sessions.length ? (
           <ol className="mt-3 divide-y">
             {detail.sessions.map((session) => (
-              <li key={session.id} className="flex items-center justify-between gap-3 py-2">
-                <div className="min-w-0">
-                  <p className="truncate font-mono text-xs">{session.refHint}</p>
-                  <p className="mt-1 text-[11px] text-muted-foreground">
-                    {session.interactionCount} interactions · {relativeDate(session.lastSeenAt)}
-                  </p>
-                </div>
-                <Button variant="outline" size="xs" onClick={() => openSession(session.id)}>
-                  Open session
+              <li key={session.id} className="-mx-2">
+                <Button
+                  variant="ghost"
+                  aria-label={`Open session ${session.refHint}`}
+                  className="h-auto w-full justify-start rounded-md px-2 py-2 text-left font-normal whitespace-normal hover:bg-muted/40"
+                  onClick={() => openSession(session.id)}
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate font-mono text-xs">{session.refHint}</span>
+                    <span className="mt-1 block text-[11px] text-muted-foreground">
+                      {session.interactionCount} interactions · {relativeDate(session.lastSeenAt)}
+                    </span>
+                  </span>
                 </Button>
               </li>
             ))}

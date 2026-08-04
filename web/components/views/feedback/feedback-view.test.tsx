@@ -260,8 +260,68 @@ describe("FeedbackView", () => {
     });
   });
 
-  it("keeps workflow editing in the rail's compact single-column layout", () => {
+  it("places source actions and compact team workflow directly below the feedback header", async () => {
     const data = dashboardFixture();
+    const openInteraction = vi.fn();
+    const openSession = vi.fn();
+    renderWithQuery(
+      <FeedbackView
+        data={data}
+        selectedReportId={data.reports[0].id}
+        selectReport={vi.fn()}
+        openInteraction={openInteraction}
+        openSession={openSession}
+        loadMore={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+        setNotice={vi.fn()}
+      />,
+    );
+
+    const summary = screen.getByRole("heading", { name: data.reports[0].summary });
+    const summarySection = summary.closest("section");
+    const sourceActions = screen.getByRole("navigation", { name: "Source actions" });
+    expect(summarySection).toContainElement(sourceActions);
+    fireEvent.click(within(sourceActions).getByRole("button", { name: "Open interaction" }));
+    fireEvent.click(within(sourceActions).getByRole("button", { name: "Open linked session" }));
+    expect(openInteraction).toHaveBeenCalledWith(data.reports[0].interactionId);
+    expect(openSession).toHaveBeenCalledWith(data.reports[0].sessionId);
+
+    const workflow = screen.getByRole("region", { name: "Team workflow" });
+    expect(within(workflow).getByText("Impact")).toBeVisible();
+    expect(within(workflow).getByText("Status")).toBeVisible();
+    expect(within(workflow).getByText("Assignee")).toBeVisible();
+    expect(within(workflow).getByText("Tags")).toBeVisible();
+    expect(
+      within(workflow).getByRole("button", {
+        name: "Change workflow status, currently New",
+      }),
+    ).toBeVisible();
+    expect(
+      within(workflow).getByRole("button", {
+        name: "Change assignee, currently Unassigned",
+      }),
+    ).toBeVisible();
+    expect(
+      within(workflow).getByRole("button", { name: "Edit tags, currently none" }),
+    ).toBeVisible();
+    expect(within(workflow).getByRole("button", { name: "Edit internal note" })).toBeVisible();
+    expect(screen.getByText("Response", { selector: "span" })).toBeVisible();
+    expect(screen.getByText("Report ID")).toBeVisible();
+    expect(screen.getByText(data.reports[0].id)).toBeVisible();
+    expect(screen.queryByText("Metadata")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save triage" })).not.toBeInTheDocument();
+
+    const dividers = screen.getAllByRole("separator");
+    expect(dividers).toHaveLength(data.reports[0].workaround ? 3 : 2);
+    for (const divider of dividers) expect(divider).toHaveClass("-mx-5", "w-auto");
+
+    fireEvent.click(within(workflow).getByRole("button", { name: "Edit internal note" }));
+    expect(await screen.findByRole("textbox", { name: "Internal note" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Save note" })).toBeVisible();
+  });
+
+  it("renders the same metadata as quiet read-only values for members", () => {
+    const data = dashboardFixture({ currentRole: "member" });
     renderWithQuery(
       <FeedbackView
         data={data}
@@ -275,10 +335,12 @@ describe("FeedbackView", () => {
       />,
     );
 
-    const form = screen.getByRole("combobox", { name: "Status" }).closest("form");
-    expect(form).toBeInTheDocument();
-    expect(form).not.toHaveClass("sm:grid-cols-2");
-    expect(screen.getByRole("button", { name: "Save triage" })).toBeVisible();
+    const workflow = screen.getByRole("region", { name: "Team workflow" });
+    expect(within(workflow).getByText("New")).toBeVisible();
+    expect(within(workflow).getByText("Unassigned")).toBeVisible();
+    expect(within(workflow).getByText("No tags")).toBeVisible();
+    expect(within(workflow).queryByRole("button")).not.toBeInTheDocument();
+    expect(within(workflow).queryByText("Internal note")).not.toBeInTheDocument();
   });
 
   it("opens a report from the full row or its explicit accessible control", () => {

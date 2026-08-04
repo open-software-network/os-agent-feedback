@@ -607,7 +607,35 @@ describe("dashboard view behavior", () => {
 
   it("sends workflow changes using the generated API shape", async () => {
     const data = dashboardFixture();
-    const fetchMock = vi.fn().mockResolvedValue(json({ updated: true }));
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (init?.method === "PATCH") return Promise.resolve(json({ updated: true }));
+      if (path.startsWith("/api/dashboard/feedback?")) {
+        return Promise.resolve(
+          json({
+            reports: data.reports,
+            total: data.reports.length,
+            facets: {
+              status: [{ name: "new", count: 1 }],
+              impact: [{ name: "degraded", count: 1 }],
+              surface: [{ name: "http", count: 1 }],
+              topic: [{ name: "freshness", count: 1 }],
+              findingKind: [{ name: "bug", count: 1 }],
+              severity: [{ name: "high", count: 1 }],
+              tag: [],
+              assignee: [{ name: "unassigned", count: 1 }],
+              workaround: [{ name: "used", count: 1 }],
+            },
+            limit: 50,
+            nextCursor: null,
+          }),
+        );
+      }
+      if (path.startsWith(`/api/dashboard/reports/${data.reports[0].id}?`)) {
+        return Promise.resolve(json({ report: data.reports[0] }));
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
     vi.stubGlobal("fetch", fetchMock);
     const refresh = vi.fn().mockResolvedValue(undefined);
 
@@ -624,34 +652,52 @@ describe("dashboard view behavior", () => {
       />,
     );
 
-    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "investigating" } });
-    fireEvent.change(screen.getByLabelText("Internal note"), {
+    fireEvent.click(screen.getByRole("button", { name: "Change workflow status, currently New" }));
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: "Investigating" }));
+
+    await waitFor(() => {
+      const workflowRequests = fetchMock.mock.calls.filter(
+        ([input, init]) =>
+          String(input) === `/api/dashboard/reports/${data.reports[0].id}` &&
+          init?.method === "PATCH",
+      );
+      expect(workflowRequests).toHaveLength(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit internal note" }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Internal note" }), {
       target: { value: "Reproduce against the fresh index" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Save triage" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save note" }));
 
-    await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith(
-        `/api/dashboard/reports/${data.reports[0].id}`,
-        expect.objectContaining({
-          method: "PATCH",
-          body: expect.stringContaining('"status":"investigating"'),
-        }),
-      ),
-    );
-    const workflowRequest = fetchMock.mock.calls.find(
+    await waitFor(() => {
+      const workflowRequests = fetchMock.mock.calls.filter(
+        ([input, init]) =>
+          String(input) === `/api/dashboard/reports/${data.reports[0].id}` &&
+          init?.method === "PATCH",
+      );
+      expect(workflowRequests).toHaveLength(2);
+    });
+    const workflowRequests = fetchMock.mock.calls.filter(
       ([input, init]) =>
         String(input) === `/api/dashboard/reports/${data.reports[0].id}` &&
         init?.method === "PATCH",
     );
-    expect(workflowRequest).toBeDefined();
-    expect(JSON.parse(workflowRequest?.[1]?.body as string)).toEqual(
-      expect.objectContaining({
-        productId: data.currentProduct?.id,
-        internalNote: "Reproduce against the fresh index",
-      }),
-    );
-    expect(refresh).toHaveBeenCalled();
+    expect(JSON.parse(workflowRequests[0]?.[1]?.body as string)).toEqual({
+      productId: data.currentProduct?.id,
+      status: "investigating",
+      assigneeOsUserId: null,
+      tags: [],
+      internalNote: null,
+    });
+    expect(JSON.parse(workflowRequests[1]?.[1]?.body as string)).toEqual({
+      productId: data.currentProduct?.id,
+      status: "investigating",
+      assigneeOsUserId: null,
+      tags: [],
+      internalNote: "Reproduce against the fresh index",
+    });
+    expect(refresh).toHaveBeenCalledTimes(2);
   });
 
   it("fetches complete session detail before rendering its timeline", async () => {
@@ -833,6 +879,7 @@ describe("dashboard view behavior", () => {
     expect(
       screen.getByText(/customers do not need an Epode account, app, plugin, or SDK/i),
     ).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /Identify customers when possible/ }));
     for (const identity of ["Known", "Anonymous", "No stable ID"]) {
       expect(screen.getByRole("tab", { name: identity })).toBeVisible();
     }
@@ -851,6 +898,7 @@ describe("dashboard view behavior", () => {
       />,
     );
 
+    fireEvent.click(screen.getByRole("button", { name: /Verify the complete loop/ }));
     expect(screen.getAllByText("Customer answers received").length).toBeGreaterThan(0);
     expect(screen.getAllByText("SDK connected").length).toBeGreaterThan(0);
     expect(screen.getByText(/3 answers are available/)).toBeVisible();
@@ -884,6 +932,7 @@ describe("dashboard view behavior", () => {
       />,
     );
 
+    fireEvent.click(screen.getByRole("button", { name: /Verify the complete loop/ }));
     expect(screen.getAllByText("Customer answers received").length).toBeGreaterThan(0);
     expect(screen.getAllByText("SDK connected").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByText("Advanced integration details"));
@@ -947,6 +996,7 @@ describe("dashboard view behavior", () => {
       />,
     );
 
+    fireEvent.click(screen.getByRole("button", { name: /Verify the complete loop/ }));
     expect(screen.getAllByText(description).length).toBeGreaterThan(0);
     expect(screen.getAllByText("SDK connected").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Customer answers received").length).toBeGreaterThan(0);
@@ -986,6 +1036,7 @@ describe("dashboard view behavior", () => {
       />,
     );
 
+    fireEvent.click(screen.getByRole("button", { name: /Verify the complete loop/ }));
     expect(screen.getAllByText("Customer answers received").length).toBeGreaterThan(0);
     expect(screen.getByText(/3 answers are available/i)).toBeVisible();
     expect(screen.getByText(/Answers are ready/i)).toBeVisible();
