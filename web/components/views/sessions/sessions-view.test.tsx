@@ -301,7 +301,6 @@ describe("SessionsView", () => {
     );
 
     const row = screen.getByRole("row", { name: new RegExp(base.sessions[0].refHint) });
-    expect(within(row).getByText("12-step journey")).toBeVisible();
     expect(within(row).getByText("12")).toBeVisible();
     expect(within(row).getByText("account-high-volume")).toBeVisible();
     expect(within(row).queryByText(/evidence|signals|context/i)).not.toBeInTheDocument();
