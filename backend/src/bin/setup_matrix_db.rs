@@ -310,6 +310,23 @@ async fn main() -> anyhow::Result<()> {
                     FROM enrichment_requests request
                     WHERE request.workspace_id = $1 AND request.product_id = $2
                   ), '[]'::JSONB),
+                  'requestObservations', COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id', observation.id,
+                      'interactionId', observation.interaction_id,
+                      'customerId', observation.customer_id,
+                      'clientIp', observation.client_ip,
+                      'method', observation.request_method,
+                      'userAgent', observation.user_agent,
+                      'acceptLanguage', observation.accept_language,
+                      'referrerOrigin', observation.referrer_origin,
+                      'secChUa', observation.sec_ch_ua,
+                      'secChUaPlatform', observation.sec_ch_ua_platform,
+                      'secChUaMobile', observation.sec_ch_ua_mobile
+                    ) ORDER BY observation.observed_at, observation.id)
+                    FROM customer_request_observations observation
+                    WHERE observation.workspace_id = $1 AND observation.product_id = $2
+                  ), '[]'::JSONB),
                   'interactions', COALESCE((
                     SELECT jsonb_agg(jsonb_build_object(
                       'id', interaction.id,

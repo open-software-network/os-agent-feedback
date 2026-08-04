@@ -4,6 +4,7 @@ import type { FastifyPluginCallback, FastifyReply, FastifyRequest } from "fastif
 import fastifyPlugin from "fastify-plugin";
 import { isPlainObject, matchPattern, normalizeOperation } from "./core.js";
 import {
+  automaticRequestObservation,
   type CustomerContext,
   type CustomerIdentity,
   type CustomerPurpose,
@@ -45,6 +46,13 @@ export type EpodeFastify = FastifyPluginCallback & {
 
 function pathOf(request: FastifyRequest): string {
   return request.url.split("?")[0] || "/";
+}
+
+function requestObservation(request: FastifyRequest) {
+  return automaticRequestObservation(request.method, request.ip, (name) => {
+    const value = request.headers[name];
+    return Array.isArray(value) ? value.join(", ") : value;
+  });
 }
 
 function matches(request: FastifyRequest, options: EpodeFastifyOptions): boolean {
@@ -180,6 +188,7 @@ export function epode(options: EpodeFastifyOptions): EpodeFastify {
         surface: "http_json",
         statusCode: reply.statusCode,
         durationMs: Math.min(Date.now() - (startedAt.get(request) ?? Date.now()), 86_400_000),
+        requestObservation: requestObservation(request),
         ...(sessionRef ? { sessionRef } : {}),
         ...(runtimeHint ? { runtimeHint } : {}),
         purpose: options.purpose || "product_personalization",
@@ -242,6 +251,7 @@ export function epode(options: EpodeFastifyOptions): EpodeFastify {
         surface: "html",
         statusCode: reply.statusCode,
         durationMs: Math.min(Date.now() - (startedAt.get(request) ?? Date.now()), 86_400_000),
+        requestObservation: requestObservation(request),
         ...(sessionRef ? { sessionRef } : {}),
         ...(runtimeHint ? { runtimeHint } : {}),
         purpose: options.purpose || "product_personalization",

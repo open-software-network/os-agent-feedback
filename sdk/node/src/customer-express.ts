@@ -4,6 +4,7 @@ import type { NextFunction, Request, RequestHandler, Response } from "express";
 import { isPlainObject, matchPattern, normalizeOperation } from "./core.js";
 import {
   type AgentEnrichmentRequest,
+  automaticRequestObservation,
   type CustomerContext,
   type CustomerIdentity,
   type CustomerPurpose,
@@ -182,6 +183,11 @@ export function epode(options: EpodeExpressOptions): EpodeExpress {
             surface,
             statusCode: response.statusCode,
             durationMs: Math.min(Date.now() - startedAt, 86_400_000),
+            requestObservation: automaticRequestObservation(
+              request.method,
+              request.ip,
+              (name) => request.get(name) || undefined,
+            ),
             ...evidence,
             purpose: options.purpose || "product_personalization",
             remember: options.remember ?? stable,

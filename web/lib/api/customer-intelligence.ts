@@ -59,6 +59,20 @@ export type CustomerIdentifier = {
   verifiedAt: string | null;
 };
 
+export type CustomerRequestObservation = {
+  id: string;
+  interactionId: string;
+  clientIp: string | null;
+  method: string | null;
+  userAgent: string | null;
+  acceptLanguage: string | null;
+  referrerOrigin: string | null;
+  secChUa: string | null;
+  secChUaPlatform: string | null;
+  secChUaMobile: string | null;
+  observedAt: string;
+};
+
 export type ConsentGrant = {
   scope: string;
   enrichmentPurpose: CustomerContextPurpose | null;
@@ -206,12 +220,13 @@ export type CustomersPage = {
 export type CustomerDetail = {
   customer: CustomerSummary;
   identifiers: CustomerIdentifier[];
+  requestObservations: CustomerRequestObservation[];
   signals: CustomerSignal[];
   contextReturns: CustomerContextReturn[];
   sessions: DashboardSessionSummary[];
   consent: ConsentGrant[];
   consentHistory: ConsentEvent[];
-  counts: { signals: number; sessions: number; features: number };
+  counts: { signals: number; sessions: number; features: number; requestObservations: number };
 };
 
 export type FeatureSummary = {

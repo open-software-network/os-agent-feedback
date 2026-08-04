@@ -521,6 +521,21 @@ function createFixture() {
             verifiedAt: now,
           },
         ],
+        requestObservations: [
+          {
+            id: "request-observation-1",
+            interactionId: firstSignal.interactionId,
+            clientIp: "203.0.113.42",
+            method: "GET",
+            userAgent: "Release-E2E-Browser/1.0",
+            acceptLanguage: "en-US",
+            referrerOrigin: "https://customer.example.test",
+            secChUa: null,
+            secChUaPlatform: '"macOS"',
+            secChUaMobile: "?0",
+            observedAt: now,
+          },
+        ],
         signals: [firstSignal],
         contextReturns: [
           {
@@ -577,7 +592,7 @@ function createFixture() {
           },
         ],
         consentHistory: [],
-        counts: { signals: 1, sessions: 1, features: 1 },
+        counts: { signals: 1, sessions: 1, features: 1, requestObservations: 1 },
       });
       return;
     }
@@ -997,6 +1012,9 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await textVisible(page, "What we know");
   await textVisible(page, "Context returned to product");
   await textVisible(page, "Freshness First");
+  await textVisible(page, "Request facts");
+  await textVisible(page, "IP 203.0.113.42");
+  await textVisible(page, "MAC addresses are not exposed by routed HTTP");
   await textVisible(page, "Sessions");
   const customerDetail = await fixtureRequest(
     state,
