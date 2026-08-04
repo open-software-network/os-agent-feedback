@@ -59,7 +59,7 @@ export function InteractionDetail({
   }
 
   const linkedReport = detail.data?.report ?? loadedReport;
-  const session = detail.data?.session ?? loadedSession;
+  const session = detail.data === undefined ? loadedSession : detail.data.session;
   const isLoadingExactAssociations = Boolean(
     loadedInteraction && needsExactDetail && detail.isLoading && !detail.data,
   );

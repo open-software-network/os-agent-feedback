@@ -844,6 +844,45 @@ describe("dashboard view behavior", () => {
     );
   });
 
+  it("removes a bootstrap session when exact interaction detail returns no session", async () => {
+    const complete = dashboardFixture();
+    const interaction = complete.interactions[0];
+    const data = dashboardFixture({ reports: [] });
+    let resolveFetch: ((response: Response) => void) | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockReturnValue(
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        }),
+      ),
+    );
+
+    renderWithQuery(
+      <InteractionDetail
+        data={data}
+        interactionId={interaction.id}
+        back={vi.fn()}
+        openFeedback={vi.fn()}
+        openSession={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Open session" })).toBeVisible();
+    await act(async () => {
+      resolveFetch?.(
+        json({
+          interaction,
+          report: complete.reports[0],
+          session: null,
+        }),
+      );
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Open session" })).not.toBeInTheDocument();
+    });
+  });
+
   it("keeps exact association failures visible and retryable", async () => {
     const complete = dashboardFixture();
     const interaction = complete.interactions[0];
