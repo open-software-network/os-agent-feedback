@@ -1053,6 +1053,105 @@ test("company-owned MCP registers context tools and decorates selected results",
   assert.equal(service.calls.length, callsAfterSuccess);
 });
 
+test("company-owned MCP sends planner-selected context fields and skips empty selections", async () => {
+  const service = backend();
+  const tools = new Map();
+  const server = {
+    registerTool(name, configuration, handler) {
+      tools.set(name, { configuration, handler });
+    },
+  };
+  const warnings = [];
+  const epode = epodeMcp({
+    apiKey: key,
+    endpoint: "https://epode.test",
+    fetch: service.fetch,
+    includeTools: ["*"],
+    identify: (_arguments, context) => ({ userRef: context.http.authInfo.extra.userId }),
+    logger: { debug() {}, warn: (message) => warnings.push(message) },
+    fields: async ({ name }) => {
+      if (name === "search_stays") return ["travel.stay_style", "travel.location_priority"];
+      if (name === "fully_known") return [];
+      if (name === "broken_planner") throw new Error("graph unavailable");
+      if (name === "invalid_planner") return ["travel.stay_style", 7];
+      return undefined;
+    },
+  });
+  epode.instrument(server);
+  for (const name of [
+    "search_stays",
+    "fully_known",
+    "broken_planner",
+    "invalid_planner",
+    "unplanned",
+  ]) {
+    server.registerTool(name, { inputSchema: {} }, async () => ({
+      content: [{ type: "text", text: "ok" }],
+      structuredContent: { status: "ok" },
+    }));
+  }
+  const context = { http: { authInfo: { extra: { userId: "traveler_7" } } } };
+
+  const selected = await tools.get("search_stays").handler({}, context);
+  assert.equal(selected.structuredContent._epode.customerContext.state, "consent_required");
+  const selectedCall = service.calls.find((call) => call.path === "/api/v2/enrichment/requests");
+  assert.deepEqual(selectedCall.body.fieldKeys, ["travel.stay_style", "travel.location_priority"]);
+
+  const callsAfterSelection = service.calls.length;
+  for (const name of ["fully_known", "broken_planner", "invalid_planner"]) {
+    const skipped = await tools.get(name).handler({}, context);
+    assert.equal(skipped.structuredContent._epode, undefined);
+    assert.equal(skipped.structuredContent.status, "ok");
+  }
+  assert.equal(service.calls.length, callsAfterSelection);
+  assert.ok(warnings.some((message) => /field planner failed/.test(message)));
+  assert.ok(warnings.some((message) => /invalid keys/.test(message)));
+
+  const unplanned = await tools.get("unplanned").handler({}, context);
+  assert.equal(unplanned.structuredContent._epode.customerContext.state, "consent_required");
+  assert.equal(service.calls.at(-1).body.fieldKeys, undefined);
+});
+
+test("company-owned MCP accepts a static context field list", async () => {
+  const service = backend();
+  const tools = new Map();
+  const server = {
+    registerTool(name, configuration, handler) {
+      tools.set(name, { configuration, handler });
+    },
+  };
+  const epode = epodeMcp({
+    apiKey: key,
+    endpoint: "https://epode.test",
+    fetch: service.fetch,
+    includeTools: ["search_catalog"],
+    fields: ["shopping.priority", "shopping.budget_band"],
+    identify: (_arguments, context) => ({ userRef: context.http.authInfo.extra.userId }),
+  });
+  epode.instrument(server);
+  server.registerTool("search_catalog", { inputSchema: {} }, async () => ({
+    content: [{ type: "text", text: "ok" }],
+    structuredContent: { status: "ok" },
+  }));
+  server.registerTool("checkout", { inputSchema: {} }, async () => ({
+    content: [{ type: "text", text: "ok" }],
+    structuredContent: { status: "ok" },
+  }));
+  const context = { http: { authInfo: { extra: { userId: "shopper_3" } } } };
+
+  const selected = await tools.get("search_catalog").handler({}, context);
+  assert.equal(selected.structuredContent._epode.customerContext.state, "consent_required");
+  const selectedCall = service.calls.find((call) => call.path === "/api/v2/enrichment/requests");
+  assert.deepEqual(selectedCall.body.fieldKeys, ["shopping.priority", "shopping.budget_band"]);
+
+  const excluded = await tools.get("checkout").handler({}, context);
+  assert.equal(excluded.structuredContent._epode, undefined);
+  assert.equal(
+    service.calls.filter((call) => call.path === "/api/v2/enrichment/requests").length,
+    1,
+  );
+});
+
 test("company-owned MCP elicits and records one session-only choice inside sharing", async () => {
   const service = backend({ enforceConsent: true });
   const tools = new Map();

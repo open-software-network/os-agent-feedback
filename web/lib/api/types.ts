@@ -758,6 +758,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/enrichment/fields": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["enrichment_fields_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/enrichment/fields/{fieldKey}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["enrichment_field_upsert_handler"];
+        post?: never;
+        delete: operations["enrichment_field_delete_handler"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/customer-context": {
         parameters: {
             query?: never;
@@ -1497,12 +1529,39 @@ export interface components {
             state: string;
             submit: null | components["schemas"]["EnrichmentAnswerAction"];
         };
+        EnrichmentFieldDefinitionInput: {
+            allowedValues: string[];
+            /** @default true */
+            enabled: boolean;
+            label: string;
+            operations?: string[] | null;
+            targetedAdvertisingSafe?: boolean;
+            type: string;
+        };
+        EnrichmentFieldDefinitionResponse: {
+            allowedValues: string[];
+            /** Format: date-time */
+            createdAt: string;
+            enabled: boolean;
+            key: string;
+            label: string;
+            operations: string[] | null;
+            targetedAdvertisingSafe: boolean;
+            type: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        EnrichmentFieldListResponse: {
+            fields: components["schemas"]["EnrichmentFieldDefinitionResponse"][];
+            legacyCatalogActive: boolean;
+        };
         EnrichmentRequestInput: {
             accountRef?: string | null;
             anonymousRef?: string | null;
             customerRef?: string | null;
             /** Format: int64 */
             durationMs?: number | null;
+            fieldKeys?: string[] | null;
             /** Format: uuid */
             interactionId: string;
             operation: string;
@@ -6336,6 +6395,175 @@ export interface operations {
                 };
             };
             /** @description Answer could not be stored */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    enrichment_fields_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Customer context fields defined for this product */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrichmentFieldListResponse"];
+                };
+            };
+            /** @description Invalid product API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Context fields could not be loaded */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    enrichment_field_upsert_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Context field key in lowercase namespace.name form */
+                fieldKey: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EnrichmentFieldDefinitionInput"];
+            };
+        };
+        responses: {
+            /** @description Context field definition created or replaced */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrichmentFieldDefinitionResponse"];
+                };
+            };
+            /** @description Invalid field key, label, values, or operation binding */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Invalid product API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Context fields are unavailable until the latest migration is applied */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Context field could not be saved */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    enrichment_field_delete_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Context field key in lowercase namespace.name form */
+                fieldKey: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted context field definition */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrichmentFieldDefinitionResponse"];
+                };
+            };
+            /** @description Invalid field key */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Invalid product API key */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Context field not defined for this product */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Context fields are unavailable until the latest migration is applied */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Context field could not be deleted */
             500: {
                 headers: {
                     [name: string]: unknown;

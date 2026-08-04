@@ -36,6 +36,8 @@ export interface EpodeClientOptions {
 export interface EnrichmentRequestInput extends CustomerIdentity {
   interactionId: string;
   operation: string;
+  /** Selected customer-context field keys for this request. Omit for the product's default catalog. */
+  fieldKeys?: string[];
   surface: "http_json" | "html" | "mcp";
   statusCode?: number;
   durationMs?: number;
@@ -520,6 +522,7 @@ export class EpodeClient {
           ...cleanIdentity(input),
           interactionId: input.interactionId,
           operation: input.operation,
+          ...(input.fieldKeys?.length ? { fieldKeys: input.fieldKeys } : {}),
           surface: input.surface,
           ...(input.statusCode !== undefined ? { statusCode: input.statusCode } : {}),
           ...(input.durationMs !== undefined ? { durationMs: input.durationMs } : {}),

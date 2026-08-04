@@ -710,6 +710,8 @@ pub(crate) struct InteractionTelemetryInput {
 pub(crate) struct EnrichmentRequestInput {
     pub interaction_id: Uuid,
     pub operation: String,
+    #[serde(default)]
+    pub field_keys: Option<Vec<String>>,
     #[serde(default = "default_enrichment_surface")]
     #[schema(default = "http_json")]
     pub surface: String,
@@ -741,6 +743,50 @@ pub(crate) struct CustomerRequestObservationInput {
 
 fn default_enrichment_surface() -> String {
     "http_json".to_owned()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct EnrichmentFieldDefinitionInput {
+    pub label: String,
+    #[serde(rename = "type")]
+    pub signal_type: String,
+    pub allowed_values: Vec<String>,
+    #[serde(default)]
+    pub targeted_advertising_safe: bool,
+    #[serde(default)]
+    #[schema(required = false, nullable)]
+    pub operations: Option<Vec<String>>,
+    #[serde(default = "default_field_enabled")]
+    #[schema(default = true)]
+    pub enabled: bool,
+}
+
+const fn default_field_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnrichmentFieldDefinitionResponse {
+    pub key: String,
+    pub label: String,
+    #[serde(rename = "type")]
+    pub signal_type: String,
+    pub allowed_values: Vec<String>,
+    pub targeted_advertising_safe: bool,
+    #[schema(required = true, nullable)]
+    pub operations: Option<Vec<String>>,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnrichmentFieldListResponse {
+    pub fields: Vec<EnrichmentFieldDefinitionResponse>,
+    pub legacy_catalog_active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]

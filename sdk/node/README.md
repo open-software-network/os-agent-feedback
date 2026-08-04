@@ -114,6 +114,24 @@ confirms that initial product interaction immediately; no second Epode instrumen
 never calls Epode directly.
 The session and runtime callbacks receive only the server context, never model-authored tool arguments or output.
 
+`fields` narrows what the product may ask for. Pass a static key list, or an async planner that reads company
+state and returns the missing field keys for the completed operation:
+
+```ts
+const customer = epode({
+  apiKey: process.env.EPODE_API_KEY,
+  includeTools: ["search_products"],
+  fields: async ({ name }) => {
+    const known = await customerGraph.contextKeys(currentIdentity());
+    return eligibleFields(name).filter((key) => !known.has(key));
+  },
+});
+```
+
+The planner runs only after a complete, successful result. Returning an empty array skips enrichment for that
+call; a planner error preserves the business result and skips enrichment. Keys are validated server-side against
+the product's field definitions and operation bindings, so an unknown or unbound key fails closed.
+
 ## Legacy structured outcome feedback
 
 The `agentFeedback`, `createMcpInstrumentation`, and feedback-agent helper exports remain available for the

@@ -44,6 +44,22 @@ type McpServer = { registerTool: (...arguments_: never[]) => unknown };
 export interface EpodeMcpOptions extends EpodeClientOptions {
   includeTools: string[];
   excludeTools?: string[];
+  /**
+   * Customer-context fields the product may request after a successful tool
+   * call. Either a static key list or a planner that reads company state and
+   * returns the missing field keys for this operation. An empty array skips
+   * enrichment for the call; a thrown planner error preserves the original
+   * result and skips enrichment. Keys are validated server-side against the
+   * product's field catalog and operation bindings.
+   */
+  fields?:
+    | string[]
+    | ((input: {
+        name: string;
+        arguments: unknown;
+        context: EpodeMcpContext;
+        result: McpResult;
+      }) => string[] | undefined | Promise<string[] | undefined>);
   purpose?: CustomerPurpose;
   remember?: boolean;
   identify?: (arguments_: unknown, context: EpodeMcpContext, result: McpResult) => CustomerIdentity;
@@ -221,6 +237,32 @@ export function epode(options: EpodeMcpOptions): EpodeMcp {
               return result;
             }
           }
+          let fieldKeys: string[] | undefined;
+          if (options.fields !== undefined) {
+            try {
+              fieldKeys =
+                typeof options.fields === "function"
+                  ? await options.fields({ name, arguments: arguments_, context, result })
+                  : options.fields;
+            } catch (error) {
+              client.logger.warn(
+                `[epode] MCP field planner failed; the original tool result was preserved and enrichment was skipped. ${String(error)}`,
+              );
+              return result;
+            }
+            if (fieldKeys !== undefined) {
+              if (
+                !Array.isArray(fieldKeys) ||
+                fieldKeys.some((key) => typeof key !== "string" || key.trim().length === 0)
+              ) {
+                client.logger.warn(
+                  "[epode] MCP field planner returned invalid keys; the original tool result was preserved and enrichment was skipped.",
+                );
+                return result;
+              }
+              if (fieldKeys.length === 0) return result;
+            }
+          }
           let identity: CustomerIdentity = {};
           let sessionRef: string | undefined;
           let runtimeHint: string | undefined;
@@ -247,6 +289,7 @@ export function epode(options: EpodeMcpOptions): EpodeMcp {
             ...identity,
             interactionId: randomUUID(),
             operation: name,
+            ...(fieldKeys?.length ? { fieldKeys } : {}),
             surface: "mcp",
             statusCode: 200,
             durationMs: Math.min(Date.now() - startedAt, 86_400_000),
