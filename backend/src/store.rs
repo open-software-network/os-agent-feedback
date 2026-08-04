@@ -10656,6 +10656,7 @@ pub(crate) async fn list_enrichment_fields(
     Ok(EnrichmentFieldListResponse {
         fields,
         legacy_catalog_active,
+        default_catalog: enrichment_catalog_schema(),
     })
 }
 

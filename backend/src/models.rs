@@ -787,6 +787,9 @@ pub(crate) struct EnrichmentFieldDefinitionResponse {
 pub(crate) struct EnrichmentFieldListResponse {
     pub fields: Vec<EnrichmentFieldDefinitionResponse>,
     pub legacy_catalog_active: bool,
+    /// The built-in default catalog every product may use until it enables at
+    /// least one of its own field definitions.
+    pub default_catalog: Vec<EnrichmentCatalogEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
