@@ -133,6 +133,12 @@ test("catch-up workflow binds real recovery evidence to canary-first production 
     /EXPECTED_SCHEMA_FINGERPRINT: \$\{\{ needs\.canary_schema\.outputs\.schema_fingerprint \}\}/,
   );
   assert.match(source, /active_id.*previous\.outputs\.api_deployment_id/);
+  assert.match(source, /applied_by_this_run=true/);
+  assert.match(source, /applied_by_this_run=false/);
+  assert.match(
+    source,
+    /steps\.deploy_api\.outcome == 'failure' && steps\.production_schema\.outputs\.applied_by_this_run == 'true'/,
+  );
   assert.match(source, /CONFIRM_EMPTY_ROLLBACK: rollback-code-intel-35-38/);
   assert.match(source, /The target API may have become active; schema rollback is forbidden/);
   assert.doesNotMatch(source, /restore_api_after_smoke/);
