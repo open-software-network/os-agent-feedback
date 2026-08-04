@@ -127,15 +127,19 @@ function AppSidebar({
         <span className="truncate text-xs text-muted-foreground">{data.workspace.name}</span>
       </div>
       {canOpenProductMenu ? (
-        <IconChevronGrabberVertical className="shrink-0 text-muted-foreground" />
+        <IconChevronGrabberVertical
+          size={16}
+          className="shrink-0 text-muted-foreground"
+          data-icon="product-menu-chevron"
+        />
       ) : null}
     </>
   );
 
   return (
     <Sidebar collapsible="icon" className="border-r-0">
-      <SidebarHeader className="h-12 shrink-0 justify-center border-b px-2 py-0">
-        <div className="relative flex h-7 items-center">
+      <SidebarHeader className="h-10 shrink-0 justify-center border-b px-2 py-0">
+        <div className="relative flex h-7 w-full items-center">
           {canOpenProductMenu ? (
             <DropdownMenu>
               <DropdownMenuTrigger

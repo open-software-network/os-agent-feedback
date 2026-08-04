@@ -5,6 +5,7 @@ import { IconSidebarSimpleLeftWide } from "central-icons/IconSidebarSimpleLeftWi
 
 import { Button } from "@/components/ui/button";
 import { useSidebar } from "@/components/ui/sidebar";
+import { cn } from "@/lib/utils";
 
 export function SidebarCollapseTrigger() {
   const { isMobile, state, toggleSidebar } = useSidebar();
@@ -17,7 +18,10 @@ export function SidebarCollapseTrigger() {
       size="icon-sm"
       onClick={toggleSidebar}
       aria-label={isMobile ? "Close sidebar" : isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-      className="absolute top-1/2 right-3 shrink-0 -translate-y-1/2"
+      className={cn(
+        "absolute top-1/2 shrink-0 -translate-y-1/2",
+        isCollapsed ? "left-1/2 -translate-x-1/2" : "right-3",
+      )}
     >
       {isCollapsed ? (
         <IconSidebarHiddenLeftWide size={18} aria-hidden="true" />

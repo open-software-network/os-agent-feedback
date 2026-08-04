@@ -71,6 +71,13 @@ const emptySessionConstraints: SessionConstraints = {
   range: "all",
 };
 
+const sessionFilterLabels: Record<SessionFilter, string> = {
+  all: "All sessions",
+  multi: "Multi-step",
+  response: "Has response",
+  no_response: "No response",
+};
+
 function isSessionFilter(value: string | null): value is SessionFilter {
   return value !== null && ["all", "multi", "response", "no_response"].includes(value);
 }
@@ -135,6 +142,10 @@ function sessionConstraintCount(constraints: SessionConstraints) {
     constraints.impact,
     constraints.range === "all" ? "" : constraints.range,
   ].filter(Boolean).length;
+}
+
+function sessionActiveFilterCount(filter: SessionFilter, constraints: SessionConstraints) {
+  return (filter === "all" ? 0 : 1) + sessionConstraintCount(constraints);
 }
 
 function sessionRangeStart(range: SessionRange): string | undefined {
@@ -316,8 +327,8 @@ export function SessionsView({
       <p className="border-b bg-muted/25 px-4 py-2 text-xs text-muted-foreground">
         Sessions exist only when the product supplies a stable reference.
       </p>
-      <div className="flex shrink-0 flex-col gap-2 border-b px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-        <InputGroup className="max-w-xl bg-background">
+      <div className="flex shrink-0 flex-col gap-2 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <InputGroup className="w-full bg-background sm:w-80 sm:flex-none">
           <InputGroupAddon>
             <IconMagnifyingGlass />
           </InputGroupAddon>
@@ -328,22 +339,15 @@ export function SessionsView({
             placeholder="Search session, customer, or operation"
           />
         </InputGroup>
-        <div className="flex min-w-0 items-center gap-2 overflow-x-auto">
-          <ToggleGroup
-            value={[filter]}
-            spacing={1}
-            aria-label="Filter sessions"
-            onValueChange={(value) => {
-              const next = value[0] as SessionFilter | undefined;
-              if (next) setFilter(next);
+        <div className="flex shrink-0 items-center gap-2">
+          <SessionFilters
+            filter={filter}
+            constraints={constraints}
+            onApply={(next) => {
+              setFilter(next.filter);
+              setConstraints(next.constraints);
             }}
-          >
-            <ToggleGroupItem value="all">All</ToggleGroupItem>
-            <ToggleGroupItem value="multi">Multi-step</ToggleGroupItem>
-            <ToggleGroupItem value="response">Has response</ToggleGroupItem>
-            <ToggleGroupItem value="no_response">No response</ToggleGroupItem>
-          </ToggleGroup>
-          <SessionConstraintFilters value={constraints} onApply={setConstraints} />
+          />
           <Button
             variant="ghost"
             size="sm"
@@ -353,8 +357,11 @@ export function SessionsView({
           </Button>
         </div>
       </div>
-      {sessionConstraintCount(constraints) ? (
+      {sessionActiveFilterCount(filter, constraints) ? (
         <div className="flex flex-wrap items-center gap-2 border-b bg-muted/20 px-4 py-2">
+          {filter !== "all" ? (
+            <Badge variant="outline">Type: {sessionFilterLabels[filter]}</Badge>
+          ) : null}
           {constraints.operation ? (
             <Badge variant="outline">Operation: {constraints.operation}</Badge>
           ) : null}
@@ -373,9 +380,12 @@ export function SessionsView({
             type="button"
             variant="ghost"
             size="xs"
-            onClick={() => setConstraints(emptySessionConstraints)}
+            onClick={() => {
+              setFilter("all");
+              setConstraints(emptySessionConstraints);
+            }}
           >
-            Clear constraints
+            Clear filters
           </Button>
         </div>
       ) : null}
@@ -467,27 +477,33 @@ export function SessionsView({
   );
 }
 
-function SessionConstraintFilters({
-  value,
+function SessionFilters({
+  filter,
+  constraints,
   onApply,
 }: {
-  value: SessionConstraints;
-  onApply: (constraints: SessionConstraints) => void;
+  filter: SessionFilter;
+  constraints: SessionConstraints;
+  onApply: (value: { filter: SessionFilter; constraints: SessionConstraints }) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState(value);
-  const activeCount = sessionConstraintCount(value);
+  const [draftFilter, setDraftFilter] = useState(filter);
+  const [draftConstraints, setDraftConstraints] = useState(constraints);
+  const activeCount = sessionActiveFilterCount(filter, constraints);
 
   function change(nextOpen: boolean) {
     setOpen(nextOpen);
-    if (nextOpen) setDraft(value);
+    if (nextOpen) {
+      setDraftFilter(filter);
+      setDraftConstraints(constraints);
+    }
   }
 
   return (
     <Popover open={open} onOpenChange={change}>
       <PopoverTrigger render={<Button type="button" variant="outline" size="sm" />}>
         <IconFilterTimeline data-icon="inline-start" />
-        Constraints
+        Filters
         {activeCount ? <Badge variant="secondary">{activeCount}</Badge> : null}
       </PopoverTrigger>
       <PopoverContent align="end" className="w-[min(22rem,calc(100vw-2rem))]">
@@ -495,24 +511,50 @@ function SessionConstraintFilters({
           <PopoverTitle>Filter proven sessions</PopoverTitle>
         </PopoverHeader>
         <div className="grid gap-3">
+          <fieldset className="grid gap-1.5">
+            <legend className="text-sm font-medium">Session type</legend>
+            <ToggleGroup
+              orientation="vertical"
+              size="sm"
+              value={[draftFilter]}
+              aria-label="Session type"
+              className="w-full items-stretch gap-1"
+              onValueChange={(value) => {
+                const next = value[0] as SessionFilter | undefined;
+                if (next) setDraftFilter(next);
+              }}
+            >
+              {(Object.entries(sessionFilterLabels) as [SessionFilter, string][]).map(
+                ([value, label]) => (
+                  <ToggleGroupItem key={value} value={value} className="w-full justify-start">
+                    {label}
+                  </ToggleGroupItem>
+                ),
+              )}
+            </ToggleGroup>
+          </fieldset>
           <div className="grid gap-1.5">
             <Label htmlFor="session-operation-filter">Operation</Label>
             <Input
               id="session-operation-filter"
-              value={draft.operation}
+              value={draftConstraints.operation}
               maxLength={160}
               placeholder="Exact operation"
-              onChange={(event) => setDraft({ ...draft, operation: event.target.value })}
+              onChange={(event) =>
+                setDraftConstraints({ ...draftConstraints, operation: event.target.value })
+              }
             />
           </div>
           <div className="grid gap-1.5">
             <Label htmlFor="session-customer-filter">Customer reference</Label>
             <Input
               id="session-customer-filter"
-              value={draft.customerRef}
+              value={draftConstraints.customerRef}
               maxLength={160}
               placeholder="Exact opaque reference"
-              onChange={(event) => setDraft({ ...draft, customerRef: event.target.value })}
+              onChange={(event) =>
+                setDraftConstraints({ ...draftConstraints, customerRef: event.target.value })
+              }
             />
           </div>
           <div className="grid gap-1.5 sm:grid-cols-2">
@@ -520,8 +562,10 @@ function SessionConstraintFilters({
               <span>Contains impact</span>
               <NativeSelect
                 id="session-impact-filter"
-                value={draft.impact}
-                onChange={(event) => setDraft({ ...draft, impact: event.target.value })}
+                value={draftConstraints.impact}
+                onChange={(event) =>
+                  setDraftConstraints({ ...draftConstraints, impact: event.target.value })
+                }
               >
                 <option value="">Any impact</option>
                 {Object.entries(impactLabels).map(([value, label]) => (
@@ -535,9 +579,12 @@ function SessionConstraintFilters({
               <span>Last seen</span>
               <NativeSelect
                 id="session-range-filter"
-                value={draft.range}
+                value={draftConstraints.range}
                 onChange={(event) =>
-                  setDraft({ ...draft, range: event.target.value as SessionRange })
+                  setDraftConstraints({
+                    ...draftConstraints,
+                    range: event.target.value as SessionRange,
+                  })
                 }
               >
                 <option value="all">All retained</option>
@@ -552,7 +599,10 @@ function SessionConstraintFilters({
             type="button"
             variant="ghost"
             size="sm"
-            onClick={() => setDraft(emptySessionConstraints)}
+            onClick={() => {
+              setDraftFilter("all");
+              setDraftConstraints(emptySessionConstraints);
+            }}
           >
             Reset
           </Button>
@@ -561,9 +611,12 @@ function SessionConstraintFilters({
             size="sm"
             onClick={() => {
               onApply({
-                ...draft,
-                operation: draft.operation.trim(),
-                customerRef: draft.customerRef.trim(),
+                filter: draftFilter,
+                constraints: {
+                  ...draftConstraints,
+                  operation: draftConstraints.operation.trim(),
+                  customerRef: draftConstraints.customerRef.trim(),
+                },
               });
               setOpen(false);
             }}
@@ -661,9 +714,7 @@ function SessionInspector({
   return (
     <DetailRail open onClose={close} label="Session detail">
       <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-4">
-        <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
-          {detail?.session?.refHint ?? requestedId}
-        </span>
+        <span className="text-sm font-medium">Session</span>
         <Button variant="ghost" size="icon-sm" aria-label="Close session detail" onClick={close}>
           <IconCrossSmall />
         </Button>
@@ -671,7 +722,12 @@ function SessionInspector({
       <ScrollArea className="min-h-0 flex-1">
         <div className="p-5">
           {error ? (
-            <ErrorState error={error} onRetry={() => void retry()} />
+            <div className="grid gap-3">
+              <p className="break-all font-mono text-xs text-muted-foreground">
+                Session {requestedId}
+              </p>
+              <ErrorState error={error} onRetry={() => void retry()} />
+            </div>
           ) : detail?.session ? (
             <SessionJourney
               detail={detail}
@@ -680,7 +736,7 @@ function SessionInspector({
             />
           ) : (
             <p className="text-sm text-muted-foreground" role="status">
-              Loading session…
+              Loading session <span className="font-mono">{requestedId}</span>…
             </p>
           )}
         </div>
@@ -708,19 +764,18 @@ function SessionJourney({
 
   return (
     <>
-      <p className="text-xs text-muted-foreground">Proven session</p>
-      <div className="mt-2 flex items-start justify-between gap-3">
-        <h2 className="min-w-0 break-words font-mono text-base font-medium">
-          {detail.session.refHint}
-        </h2>
-        <span className="shrink-0 text-xs text-muted-foreground">
-          {interfaceLabel(detail.session.source)}
-        </span>
-      </div>
+      <h2 className="min-w-0 break-words font-mono text-base font-medium">
+        {detail.session.refHint}
+      </h2>
+      <p className="mt-2 text-xs leading-5 text-muted-foreground">
+        Grouped from the stable session reference supplied by the product.
+      </p>
 
       <dl className="mt-5 grid grid-cols-[100px_1fr] gap-x-3 gap-y-3 text-xs">
         <dt className="text-muted-foreground">Started</dt>
         <dd>{formatDate(detail.session.startedAt)}</dd>
+        <dt className="text-muted-foreground">Source</dt>
+        <dd>{interfaceLabel(detail.session.source)}</dd>
         <dt className="text-muted-foreground">Observed for</dt>
         <dd>{sessionDuration(detail.session.startedAt, detail.session.lastSeenAt)}</dd>
         <dt className="text-muted-foreground">Interactions</dt>
@@ -730,70 +785,6 @@ function SessionJourney({
         <dt className="text-muted-foreground">Questions</dt>
         <dd>{responses.length}</dd>
       </dl>
-      <p className="mt-4 text-xs leading-5 text-muted-foreground">
-        Epode groups this journey only because the product supplied a stable session reference.
-      </p>
-
-      <Separator className="my-5" />
-
-      <section aria-labelledby="session-responses-heading">
-        <h3 id="session-responses-heading" className="text-xs font-medium">
-          Questions and answers
-        </h3>
-        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-          Canonical Epode questions and bounded answers associated with this session.
-        </p>
-        {responses.length ? (
-          <div className="mt-4 grid gap-3">
-            {responses.map((response) => (
-              <article key={response.id} className="border bg-muted/20 p-3">
-                <div className="flex items-start justify-between gap-3">
-                  <p className="text-xs font-medium leading-5">{response.question}</p>
-                  <Badge variant={response.status === "answered" ? "default" : "secondary"}>
-                    {sessionResponseStatus(response.status)}
-                  </Badge>
-                </div>
-                {response.answers.length ? (
-                  <dl className="mt-3 grid gap-2 border-t pt-3">
-                    {response.answers.map((answer) => (
-                      <div key={`${answer.key}-${answer.value}`}>
-                        <dt className="font-mono text-[10px] text-muted-foreground">
-                          {answer.key}
-                        </dt>
-                        <dd className="mt-0.5 break-words text-xs leading-5">{answer.value}</dd>
-                        <dd className="text-[10px] text-muted-foreground">
-                          {titleCase(answer.type)} ·{" "}
-                          {answer.remembered ? "Remembered" : "Session only"}
-                        </dd>
-                      </div>
-                    ))}
-                  </dl>
-                ) : (
-                  <p className="mt-3 border-t pt-3 text-xs text-muted-foreground">
-                    {sessionResponseEmptyState(response.status)}
-                  </p>
-                )}
-                <div className="mt-3 flex items-center justify-between gap-3 border-t pt-3">
-                  <p className="min-w-0 truncate text-[10px] text-muted-foreground">
-                    {response.customerName ?? "Unresolved customer"} · {titleCase(response.purpose)}
-                  </p>
-                  <Button
-                    variant="link"
-                    className="h-auto shrink-0 p-0 text-[11px]"
-                    onClick={() => openInteraction(response.interactionId)}
-                  >
-                    Open interaction
-                  </Button>
-                </div>
-              </article>
-            ))}
-          </div>
-        ) : (
-          <p className="mt-4 text-xs text-muted-foreground">
-            No enrichment questions were associated with this session.
-          </p>
-        )}
-      </section>
 
       <Separator className="my-5" />
 
@@ -886,27 +877,73 @@ function SessionJourney({
           <JourneyCap label="Last observed" timestamp={detail.session.lastSeenAt} last />
         </ol>
       </section>
+
+      <Separator className="my-5" />
+
+      <section aria-labelledby="session-responses-heading">
+        <h3 id="session-responses-heading" className="text-xs font-medium">
+          Questions and answers
+        </h3>
+        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+          Canonical Epode questions and bounded answers associated with this session.
+        </p>
+        {responses.length ? (
+          <div className="mt-4 grid gap-3">
+            {responses.map((response) => (
+              <article key={response.id} className="border bg-muted/20 p-3">
+                <p className="text-xs font-medium leading-5">{response.question}</p>
+                {response.answers.length ? (
+                  <dl className="mt-3 grid gap-2 border-t pt-3">
+                    {response.answers.map((answer) => (
+                      <div key={`${answer.key}-${answer.value}`}>
+                        <dt className="font-mono text-[10px] text-muted-foreground">
+                          {answer.key}
+                        </dt>
+                        <dd className="mt-0.5 break-words text-xs leading-5">{answer.value}</dd>
+                        <dd className="text-[10px] text-muted-foreground">
+                          {titleCase(answer.type)} ·{" "}
+                          {answer.remembered ? "Remembered" : "Session only"}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                ) : (
+                  <p className="mt-3 border-t pt-3 text-xs text-muted-foreground">
+                    {sessionResponseEmptyState(response.status)}
+                  </p>
+                )}
+                <div className="mt-3 flex items-center justify-between gap-3 border-t pt-3">
+                  <p className="min-w-0 truncate text-[10px] text-muted-foreground">
+                    {response.customerName ?? "Unresolved customer"} · {titleCase(response.purpose)}
+                  </p>
+                  <Button
+                    variant="link"
+                    className="h-auto shrink-0 p-0 text-[11px]"
+                    onClick={() => openInteraction(response.interactionId)}
+                  >
+                    Open interaction
+                  </Button>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="mt-4 text-xs text-muted-foreground">
+            No enrichment questions were associated with this session.
+          </p>
+        )}
+      </section>
     </>
   );
 }
 
-function sessionResponseStatus(status: string): string {
-  const labels: Record<string, string> = {
-    answered: "Answered",
-    awaiting_answer: "Awaiting answer",
-    declined: "Declined",
-    no_relevant_context: "No relevant context",
-  };
-  return labels[status] ?? titleCase(status);
-}
-
 function sessionResponseEmptyState(status: string): string {
   const labels: Record<string, string> = {
-    awaiting_answer: "The customer agent has not answered yet.",
-    declined: "The customer declined this question.",
-    no_relevant_context: "The customer agent had no relevant context to share.",
+    awaiting_answer: "Waiting for shared context.",
+    declined: "The customer agent declined to share context.",
+    no_relevant_context: "No relevant context was shared.",
   };
-  return labels[status] ?? "No answer items were returned.";
+  return labels[status] ?? "No answer content was recorded.";
 }
 
 function JourneyCap({

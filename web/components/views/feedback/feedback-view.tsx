@@ -2,15 +2,9 @@
 
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { IconArrowUpRight } from "central-icons/IconArrowUpRight";
-import { IconCalendarCheck } from "central-icons/IconCalendarCheck";
-import { IconCheckCircle2 } from "central-icons/IconCheckCircle2";
-import { IconCircle } from "central-icons/IconCircle";
-import { IconCircleMinus } from "central-icons/IconCircleMinus";
-import { IconCirclePlaceholderOn } from "central-icons/IconCirclePlaceholderOn";
 import { IconCircleQuestionmark } from "central-icons/IconCircleQuestionmark";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import { IconExclamationCircle } from "central-icons/IconExclamationCircle";
-import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { IconMathEqualsCircle } from "central-icons/IconMathEqualsCircle";
 import { IconStopCircle } from "central-icons/IconStopCircle";
 import { IconThumbUpCurved } from "central-icons/IconThumbUpCurved";
@@ -65,7 +59,7 @@ import {
   workflowLabels,
   workflowStatuses,
 } from "./feedback-filters";
-import { WorkflowForm } from "./workflow-form";
+import { WorkflowMetadata, workflowIcons } from "./workflow-form";
 
 const defaultRange = "30d";
 
@@ -83,14 +77,6 @@ type SemanticIcon = ComponentType<{
   "aria-hidden"?: boolean;
   "data-icon"?: string;
 }>;
-
-const workflowIcons: Record<WorkflowStatus, SemanticIcon> = {
-  new: IconCircle,
-  investigating: IconMagnifyingGlass,
-  planned: IconCalendarCheck,
-  resolved: IconCheckCircle2,
-  wont_act: IconCircleMinus,
-};
 
 const impactIcons: Record<string, SemanticIcon> = {
   blocked: IconStopCircle,
@@ -331,7 +317,6 @@ export function FeedbackView({
       inspector={
         <FeedbackInspector
           open={Boolean(selectedReportId)}
-          reportId={selectedReportId}
           report={selectedReport}
           loading={detail.isPending && !selectedReport}
           error={detail.isError ? detail.error : null}
@@ -559,7 +544,6 @@ function FeedbackTable({
 
 function FeedbackInspector({
   open,
-  reportId,
   report,
   loading,
   error,
@@ -572,7 +556,6 @@ function FeedbackInspector({
   setNotice,
 }: {
   open: boolean;
-  reportId: string | null;
   report: ProductFeedbackReport | null;
   loading: boolean;
   error: Error | null;
@@ -585,12 +568,9 @@ function FeedbackInspector({
   setNotice: (message: string) => void;
 }) {
   return (
-    <DetailRail open={open} onClose={onClose} label="Feedback detail">
+    <DetailRail open={open} onClose={onClose} label="Response detail">
       <div className="flex h-12 shrink-0 items-center justify-between border-b px-4">
-        <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-          <IconCirclePlaceholderOn size={14} />
-          <span className="truncate font-mono">{report?.id ?? reportId}</span>
-        </div>
+        <span className="text-sm font-medium">Response</span>
         <div className="flex items-center gap-1">
           <Button variant="ghost" size="icon-sm" aria-label="Close detail" onClick={onClose}>
             <IconCrossSmall />
@@ -648,18 +628,38 @@ function FeedbackDetailContent({
             {report.customerRef ?? "Customer not linked"} · {formatDate(report.createdAt)}
           </p>
           <h2 className="mt-2 text-balance text-lg font-medium leading-6">{report.summary}</h2>
-          <div className="mt-4 flex flex-wrap items-center gap-2">
-            <ImpactLabel impact={report.impact} />
-            <WorkflowBadge status={report.workflowStatus} />
-            {report.tags.map((tag) => (
-              <Badge key={tag} variant="secondary">
-                {tag}
-              </Badge>
-            ))}
-          </div>
+          <nav aria-label="Source actions" className="mt-3 flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => openInteraction(report.interactionId)}
+            >
+              Open interaction
+              <IconArrowUpRight data-icon="inline-end" />
+            </Button>
+            {report.sessionId ? (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => report.sessionId && openSession(report.sessionId)}
+              >
+                Open linked session
+              </Button>
+            ) : null}
+          </nav>
         </section>
 
-        <Separator className="my-5" />
+        <div className="mt-5">
+          <WorkflowMetadata
+            data={data}
+            report={report}
+            impact={<ImpactLabel impact={report.impact} className="h-7 px-2 text-sm" />}
+            refresh={refresh}
+            setNotice={setNotice}
+          />
+        </div>
+
+        <Separator className="-mx-5 my-5 w-auto" />
 
         <section>
           <h3 className="text-xs font-medium">Findings ({findings.length})</h3>
@@ -693,7 +693,7 @@ function FeedbackDetailContent({
 
         {report.workaround ? (
           <>
-            <Separator className="my-5" />
+            <Separator className="-mx-5 my-5 w-auto" />
             <section>
               <h3 className="text-xs font-medium">
                 {report.workaround.used ? "Workaround observed" : "No workaround used"}
@@ -707,7 +707,7 @@ function FeedbackDetailContent({
           </>
         ) : null}
 
-        <Separator className="my-5" />
+        <Separator className="-mx-5 my-5 w-auto" />
 
         <section>
           <h3 className="text-xs font-medium">Source interaction</h3>
@@ -721,47 +721,8 @@ function FeedbackDetailContent({
               label="Confirmed by"
               value={interfaceLabel(report.confirmationMethod ?? "unknown")}
             />
+            <Property label="Report ID" value={report.id} mono />
           </dl>
-          <div className="mt-4 flex flex-wrap gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => openInteraction(report.interactionId)}
-            >
-              Open interaction
-              <IconArrowUpRight data-icon="inline-end" />
-            </Button>
-            {report.sessionId ? (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => report.sessionId && openSession(report.sessionId)}
-              >
-                Open linked session
-              </Button>
-            ) : null}
-          </div>
-        </section>
-
-        <Separator className="my-5" />
-
-        <section>
-          <h3 className="text-xs font-medium">Team workflow</h3>
-          <div className="mt-3">
-            {isEditor(data.currentRole) ? (
-              <WorkflowForm
-                compact
-                data={data}
-                report={report}
-                refresh={refresh}
-                setNotice={setNotice}
-              />
-            ) : (
-              <p className="text-sm text-muted-foreground">
-                An owner or admin manages status, assignment, tags, and internal notes.
-              </p>
-            )}
-          </div>
         </section>
       </div>
     </ScrollArea>
@@ -781,11 +742,11 @@ function WorkflowBadge({ status }: { status: string }) {
   );
 }
 
-function ImpactLabel({ impact }: { impact: string | null }) {
+function ImpactLabel({ impact, className }: { impact: string | null; className?: string }) {
   const value = impact ?? "unknown";
   const ImpactIcon = impactIcons[value] ?? IconCircleQuestionmark;
   return (
-    <span className="inline-flex items-center gap-1.5 text-xs">
+    <span className={cn("inline-flex items-center gap-1.5 text-xs", className)}>
       <ImpactIcon size={14} className={impactTone[value] ?? "text-muted-foreground"} />
       <span>{impactLabels[value] ?? titleCase(value)}</span>
     </span>

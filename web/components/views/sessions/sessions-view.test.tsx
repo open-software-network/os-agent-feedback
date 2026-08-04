@@ -44,6 +44,7 @@ describe("SessionsView", () => {
     );
     const selectSession = vi.fn();
     const openFeedback = vi.fn();
+    const openInteraction = vi.fn();
 
     renderWithQuery(
       <SessionsView
@@ -51,24 +52,36 @@ describe("SessionsView", () => {
         selectedSessionId={session.id}
         selectSession={selectSession}
         openFeedback={openFeedback}
-        openInteraction={vi.fn()}
+        openInteraction={openInteraction}
         loadMore={vi.fn()}
         refresh={vi.fn().mockResolvedValue(undefined)}
       />,
     );
 
     expect(await screen.findByRole("heading", { name: "session-42" })).toBeVisible();
+    const closeButton = screen.getByRole("button", { name: "Close session detail" });
+    expect(closeButton.parentElement).toHaveTextContent("Session");
+    expect(closeButton.parentElement).not.toHaveTextContent(session.refHint);
+    expect(screen.queryByText("Proven session")).not.toBeInTheDocument();
     const journey = screen.getByRole("region", { name: "Observed journey" });
+    expect(screen.getAllByText("Started").some((element) => element.tagName === "DT")).toBe(true);
     expect(within(journey).getByText("Session started")).toBeVisible();
     expect(within(journey).getByText("Last observed")).toBeVisible();
     expect(within(journey).getByText("+00:00")).toBeVisible();
     expect(within(journey).getByText("+01:05")).toBeVisible();
-    expect(within(journey).getByText("Feedback attached")).toBeVisible();
+    expect(within(journey).getByText(/Feedback attached/)).toBeVisible();
     expect(within(journey).getByText("Error response")).toBeVisible();
     expect(within(journey).queryByText(/replay/i)).not.toBeInTheDocument();
+    expect(within(journey).getByRole("list")).toHaveClass("before:border-dotted");
 
-    fireEvent.click(within(journey).getByRole("button", { name: "Open feedback" }));
-    fireEvent.click(screen.getByRole("button", { name: "Close session detail" }));
+    const openFeedbackButton = within(journey).getByRole("button", { name: "Open feedback" });
+    expect(openFeedbackButton).toHaveClass("border-border", "bg-background");
+    expect(openFeedbackButton.closest("div")).toHaveClass("border", "bg-muted/30");
+
+    fireEvent.click(within(journey).getByRole("button", { name: "retry_search" }));
+    fireEvent.click(openFeedbackButton);
+    fireEvent.click(closeButton);
+    expect(openInteraction).toHaveBeenCalledWith(errorInteraction.id);
     expect(openFeedback).toHaveBeenCalledWith(base.reports[0].id);
     expect(selectSession).toHaveBeenCalledWith(null);
   });
@@ -130,10 +143,14 @@ describe("SessionsView", () => {
     );
 
     const responses = await screen.findByRole("region", { name: "Questions and answers" });
+    const journey = screen.getByRole("region", { name: "Observed journey" });
+    expect(journey.compareDocumentPosition(responses) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
     expect(
       within(responses).getByText("What should Tripwise prioritize for this traveler?"),
     ).toBeVisible();
-    expect(within(responses).getByText("Answered")).toBeVisible();
+    expect(within(responses).queryByText("Answered")).not.toBeInTheDocument();
     expect(within(responses).getByText("travel.cabin_preference")).toBeVisible();
     expect(within(responses).getByText("premium_economy")).toBeVisible();
     expect(within(responses).getByText("travel.max_stops")).toBeVisible();
@@ -143,6 +160,53 @@ describe("SessionsView", () => {
 
     fireEvent.click(within(responses).getByRole("button", { name: "Open interaction" }));
     expect(openInteraction).toHaveBeenCalledWith(interaction.id);
+  });
+
+  it("describes a response exception once without status chrome", async () => {
+    const base = dashboardFixture();
+    const session = base.sessions[0];
+    const interaction = base.interactions[0];
+    vi.stubGlobal(
+      "fetch",
+      sessionFetch(base, {
+        session,
+        interactions: [interaction],
+        reports: [],
+        responses: [
+          {
+            id: "response-1",
+            interactionId: interaction.id,
+            question: "What context can be shared?",
+            status: "declined",
+            purpose: "product_personalization",
+            surface: "mcp",
+            customerId: null,
+            customerName: null,
+            askedAt: "2026-08-02T12:00:00Z",
+            answeredAt: "2026-08-02T12:01:00Z",
+            answers: [],
+          },
+        ],
+      }),
+    );
+
+    renderWithQuery(
+      <SessionsView
+        data={base}
+        selectedSessionId={session.id}
+        selectSession={vi.fn()}
+        openFeedback={vi.fn()}
+        openInteraction={vi.fn()}
+        loadMore={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    const responses = await screen.findByRole("region", { name: "Questions and answers" });
+    expect(
+      within(responses).getByText("The customer agent declined to share context."),
+    ).toBeVisible();
+    expect(within(responses).queryByText(/^Declined$/)).not.toBeInTheDocument();
   });
 
   it("opens a session from the full row or its explicit accessible control", () => {
@@ -245,7 +309,9 @@ describe("SessionsView", () => {
     expect(within(row).queryByText(/evidence|signals|context/i)).not.toBeInTheDocument();
     expect(screen.getAllByText("Interactions")[0].parentElement).toHaveTextContent("12");
 
+    fireEvent.click(screen.getByRole("button", { name: /^Filters/ }));
     fireEvent.click(screen.getByRole("button", { name: "Has response" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
     expect(
       await screen.findByRole("row", { name: new RegExp(base.sessions[0].refHint) }),
     ).toBeVisible();
@@ -268,6 +334,7 @@ describe("SessionsView", () => {
     );
 
     expect(screen.getByRole("textbox", { name: "Search sessions" })).toHaveValue("checkout");
+    fireEvent.click(screen.getByRole("button", { name: /^Filters/ }));
     expect(screen.getByRole("button", { name: "Multi-step" })).toHaveAttribute(
       "aria-pressed",
       "true",
@@ -276,6 +343,7 @@ describe("SessionsView", () => {
       target: { value: "refund" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Has response" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
 
     await waitFor(() => {
       expect(window.location.search).toContain("sessionQ=refund");
@@ -299,6 +367,7 @@ describe("SessionsView", () => {
       />,
     );
 
+    fireEvent.click(screen.getByRole("button", { name: /^Filters/ }));
     expect(screen.getByRole("button", { name: "Has response" })).toHaveAttribute(
       "aria-pressed",
       "true",
@@ -341,7 +410,7 @@ describe("SessionsView", () => {
       expect(path).toContain("since=");
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /Constraints/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Filters/ }));
     fireEvent.change(screen.getByLabelText("Operation"), { target: { value: "refund" } });
     fireEvent.change(screen.getByLabelText("Customer reference"), {
       target: { value: "tenant-b" },

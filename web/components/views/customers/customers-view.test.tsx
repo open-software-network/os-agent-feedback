@@ -25,7 +25,11 @@ describe("CustomersView", () => {
     expect(screen.getAllByText("Anonymous")[0].parentElement).toHaveTextContent("1");
     expect(screen.getByText("Active").parentElement).toHaveTextContent("2");
     expect(screen.queryByText("Unresolved interactions")).not.toBeInTheDocument();
-    expect(screen.getByText(/Customers stay linked to their sessions/i)).toBeVisible();
+    expect(screen.queryByText(/Customers stay linked to their sessions/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Filters/ })).toBeVisible();
+    expect(screen.queryByLabelText("Identity filter")).not.toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Identity" })).toBeVisible();
+    expect(screen.queryByRole("columnheader", { name: "Type" })).not.toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "Sessions" })).toBeVisible();
     expect(screen.queryByRole("columnheader", { name: "Data use" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Sharing filter")).not.toBeInTheDocument();
@@ -40,11 +44,14 @@ describe("CustomersView", () => {
     const fetchMock = mockCustomers();
     renderCustomers(fetchMock, { selectCustomer });
 
+    fireEvent.click(await screen.findByRole("button", { name: /^Filters/ }));
     await screen.findByRole("option", { name: "Known (1)" });
     fireEvent.change(await screen.findByLabelText("Identity filter"), {
       target: { value: "verified" },
     });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
     await waitFor(() => expect(window.location.search).toContain("customerIdentity=verified"));
+    expect(screen.getByText("Identity: Known")).toBeVisible();
 
     fireEvent.click(await screen.findByRole("row", { name: "Open customer Acme workspace" }));
     expect(selectCustomer).toHaveBeenCalledWith("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
@@ -77,7 +84,7 @@ describe("CustomersView", () => {
     expect(screen.queryByRole("heading", { name: "Permission" })).not.toBeInTheDocument();
   });
 
-  it("links a customer to the exact session", async () => {
+  it("opens the exact session from the full inspector row", async () => {
     const openSession = vi.fn();
     renderCustomers(mockCustomers(), {
       selectedCustomerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -85,9 +92,17 @@ describe("CustomersView", () => {
     });
 
     await screen.findByRole("heading", { name: "Acme workspace" });
-    fireEvent.click(screen.getAllByRole("button", { name: "Open session" })[0]);
+    const sessions = screen.getByRole("region", { name: "Sessions" });
+    const sessionRow = within(sessions).getByRole("button", {
+      name: "Open session session-42",
+    });
+    expect(within(sessionRow).getByText("session-42")).toBeVisible();
+    expect(sessionRow).toHaveClass("px-2");
+    expect(sessionRow.parentElement).toHaveClass("-mx-2");
+    expect(within(sessions).queryByText("Open session")).not.toBeInTheDocument();
+    fireEvent.click(sessionRow);
 
-    expect(openSession).toHaveBeenCalled();
+    expect(openSession).toHaveBeenCalledWith("55555555-5555-4555-8555-555555555555");
   });
 });
 

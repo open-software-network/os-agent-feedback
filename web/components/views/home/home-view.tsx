@@ -2,6 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { IconArrowUpRight } from "central-icons/IconArrowUpRight";
+import Image from "next/image";
 import type { ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -25,7 +26,6 @@ export function HomeView({
   data,
   openCustomer = () => undefined,
   openSession = () => undefined,
-  refresh,
 }: {
   data: DashboardData;
   openCustomer?: (customerId: string) => void;
@@ -46,6 +46,7 @@ export function HomeView({
     enabled: Boolean(productId),
   });
   const customerRows = customers.data?.customers ?? [];
+  const customerCount = customers.data?.rollup?.customers ?? 0;
   const responseRows = responses.data?.responses ?? [];
   const responseRollup = responses.data?.rollup ?? {
     questions: 0,
@@ -55,23 +56,11 @@ export function HomeView({
   };
   const needsSetup = data.insights.opportunities === 0 && isEditor(data.currentRole);
 
-  async function refreshHome() {
-    await Promise.all([refresh(), customers.refetch(), responses.refetch()]);
-  }
-
   return (
     <div className="mx-auto grid max-w-6xl gap-5">
       <section aria-labelledby="home-title" className="border bg-background">
         <div className="p-5 md:p-6">
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <span aria-hidden="true" className="size-1.5 bg-attention" />
-              Question and answer
-            </div>
-            <Button variant="ghost" size="sm" onClick={() => void refreshHome()}>
-              Refresh
-            </Button>
-          </div>
+          <Image src="/epode-logo.svg" alt="EPODE" width={56} height={13} className="dark:invert" />
           <h2 id="home-title" className="mt-4 max-w-2xl text-2xl font-medium">
             Epode asks customer agents questions and records their answers.
           </h2>
@@ -98,7 +87,7 @@ export function HomeView({
       <section aria-labelledby="core-objects-title" className="border bg-background">
         <SectionHeader id="core-objects-title" title="At a glance" />
         <dl className="grid sm:grid-cols-2 lg:grid-cols-4">
-          <Metric label="Customers" value={customers.data?.rollup?.customers ?? 0} />
+          <Metric label="Customers" value={customerCount} />
           <Metric label="Questions asked" value={responseRollup.questions} />
           <Metric label="Answers received" value={responseRollup.answered} />
           <Metric label="Sessions" value={data.listState.sessionsTotal} />
@@ -224,10 +213,10 @@ function ResponseAnswer({ response }: { response: DashboardResponseSummary }) {
     return <>{response.answers.map((answer) => answer.value).join(" · ")}</>;
   }
   const labels: Record<DashboardResponseSummary["status"], string> = {
-    answered: "Answered",
-    awaiting_answer: "Awaiting answer",
-    declined: "Declined",
-    no_relevant_context: "No answer available",
+    answered: "No answer content was recorded.",
+    awaiting_answer: "Waiting for shared context.",
+    declined: "The customer agent declined to share context.",
+    no_relevant_context: "No relevant context was shared.",
   };
   return <span className="text-muted-foreground">{labels[response.status]}</span>;
 }

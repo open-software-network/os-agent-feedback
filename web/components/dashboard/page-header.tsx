@@ -12,7 +12,7 @@ export function PageHeader({
   actions?: ReactNode;
 }) {
   return (
-    <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-3 md:px-4">
+    <header className="flex h-10 shrink-0 items-center justify-between gap-3 border-b px-3 md:px-4">
       <div className="flex min-w-0 items-center gap-2">
         <SidebarTrigger className="md:hidden" />
         <h1 className="truncate text-sm font-medium">{title}</h1>

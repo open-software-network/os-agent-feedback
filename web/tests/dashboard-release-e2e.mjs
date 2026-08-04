@@ -1007,7 +1007,7 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await textVisible(page, "session-42");
 
   await clickText(page, "Customers");
-  await textVisible(page, "Customers stay linked to their sessions");
+  await page.waitForSelector('input[aria-label="Search customers"]', { visible: true });
   await metricVisible(page, "Customers", "1");
   await metricVisible(page, "Known", "1");
   await metricVisible(page, "Active", "1");
@@ -1036,9 +1036,11 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   );
 
   await clickText(page, "Sessions");
+  await clickText(page, "Filters");
   await textVisible(page, "Has response");
   await textVisible(page, "No response");
   await clickText(page, "Has response");
+  await clickText(page, "Apply");
   const responseFilteredSessions = await fixtureRequest(
     state,
     (request) =>
@@ -1060,6 +1062,7 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await textVisible(page, "1. Install Epode");
   await textVisible(page, "2. Identify customers when possible");
   await textVisible(page, "3. Use answers to personalize");
+  await clickText(page, "4. Verify the complete loop");
   await textVisible(
     page,
     "Setup complete: Epode received customer answers and your product retrieved them.",

@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 
 import type { ShownSecrets } from "@/components/dashboard/types";
 import { Metrics, PageHeader, Panel, StatusMessage } from "@/components/dashboard/view-primitives";
@@ -15,6 +16,7 @@ import type {
 } from "@/lib/api/dashboard";
 import { copyText } from "@/lib/dashboard/clipboard";
 import { formatDate, isEditor, titleCase } from "@/lib/dashboard/format";
+import { cn } from "@/lib/utils";
 
 import {
   SETUP_SURFACES,
@@ -29,6 +31,7 @@ const WRITE_KEY_ENSURE_PREFIX = "agent-feedback:write-key-ensured:";
 const fallbackWriteKeyEnsureState = new Map<string, "pending" | "done">();
 
 type IdentityExample = "known" | "anonymous" | "ephemeral";
+type SetupSectionId = "install" | "identify" | "personalize" | "verify";
 
 type EnrichmentInsights = {
   customerContextItems: number;
@@ -55,6 +58,9 @@ export function SetupView({
   const [surface, setSurface] = useState<SetupSurface>("api");
   const [stack, setStack] = useState<SetupStack>("node-express");
   const [identityExample, setIdentityExample] = useState<IdentityExample>("known");
+  const [expandedSection, setExpandedSection] = useState<SetupSectionId | null>(
+    () => setupSectionFromLocation() ?? "install",
+  );
   const [error, setError] = useState("");
   const [creatingWriteKey, setCreatingWriteKey] = useState(false);
   const environment = data.currentEnvironment;
@@ -127,6 +133,27 @@ export function SetupView({
     if (!stacks.includes(stack)) setStack(stacks[0]);
   }, [stack, stacks]);
 
+  useEffect(() => {
+    function syncSectionFromLocation() {
+      const section = setupSectionFromLocation();
+      if (section) setExpandedSection(section);
+    }
+
+    window.addEventListener("hashchange", syncSectionFromLocation);
+    window.addEventListener("popstate", syncSectionFromLocation);
+    return () => {
+      window.removeEventListener("hashchange", syncSectionFromLocation);
+      window.removeEventListener("popstate", syncSectionFromLocation);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (secrets?.write) {
+      setExpandedSection("install");
+      replaceSetupSectionHash("install");
+    }
+  }, [secrets?.write]);
+
   if (!environment || !data.currentProduct) return <Panel>No product is selected.</Panel>;
   if (!editor) return <Panel>Only a team owner or admin can manage setup.</Panel>;
 
@@ -153,6 +180,13 @@ export function SetupView({
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not copy");
     }
+  }
+
+  function toggleSection(section: SetupSectionId) {
+    const opening = expandedSection !== section;
+    setExpandedSection(opening ? section : null);
+    if (opening) replaceSetupSectionHash(section);
+    else if (setupSectionFromLocation() === section) replaceSetupSectionHash(null);
   }
 
   const legacyKey = writeKey && !/^af_(live|read)_[0-9a-f]{8}$/.test(writeKey.prefix);
@@ -196,7 +230,12 @@ const result = answers.available
         </StatusMessage>
       ) : null}
 
-      <Panel title="1. Install Epode">
+      <SetupSection
+        id="install"
+        title="1. Install Epode"
+        expanded={expandedSection === "install"}
+        onToggle={() => toggleSection("install")}
+      >
         <p className="max-w-3xl text-sm text-muted-foreground">
           Choose how customers&apos; agents reach your product, then add one server-side
           integration. If Epode is unavailable, the SDK preserves the normal product response.
@@ -255,9 +294,14 @@ const result = answers.available
         )}
         <CodeBlock label="Server environment" value={environmentSnippet} copy={copy} />
         <CodeBlock label="Install" value={integration.install} copy={copy} />
-      </Panel>
+      </SetupSection>
 
-      <Panel title="2. Identify customers when possible">
+      <SetupSection
+        id="identify"
+        title="2. Identify customers when possible"
+        expanded={expandedSection === "identify"}
+        onToggle={() => toggleSection("identify")}
+      >
         <p className="max-w-3xl text-sm text-muted-foreground">
           Use the identity your product already has. Known and anonymous customers are supported;
           requests without a stable reference remain interaction-only. Epode never tries to discover
@@ -289,9 +333,14 @@ const result = answers.available
           copy={copy}
         />
         <CodeBlock label="Configure once" value={integration.code} copy={copy} />
-      </Panel>
+      </SetupSection>
 
-      <Panel title="3. Use answers to personalize">
+      <SetupSection
+        id="personalize"
+        title="3. Use answers to personalize"
+        expanded={expandedSection === "personalize"}
+        onToggle={() => toggleSection("personalize")}
+      >
         <p className="max-w-3xl text-sm text-muted-foreground">
           Retrieve approved answers from your server. Epode returns only relevant, permissioned, and
           unexpired information for the requested purpose.
@@ -302,9 +351,14 @@ const result = answers.available
           offers. <code>targeted_advertising</code> is separate and returns no items unless that use
           was explicitly approved.
         </p>
-      </Panel>
+      </SetupSection>
 
-      <Panel title="4. Verify the complete loop">
+      <SetupSection
+        id="verify"
+        title="4. Verify the complete loop"
+        expanded={expandedSection === "verify"}
+        onToggle={() => toggleSection("verify")}
+      >
         <ol className="flex flex-col gap-3">
           <ActivationMilestone
             complete={opportunityActivated}
@@ -356,7 +410,7 @@ const result = answers.available
             Read integration docs
           </a>
         </div>
-      </Panel>
+      </SetupSection>
 
       <details className="rounded-lg border bg-background p-4">
         <summary className="cursor-pointer text-sm font-medium">
@@ -390,6 +444,59 @@ const result = answers.available
       </details>
     </div>
   );
+}
+
+function SetupSection({
+  id,
+  title,
+  expanded,
+  onToggle,
+  children,
+}: {
+  id: SetupSectionId;
+  title: string;
+  expanded: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <section id={`setup-${id}`} className="scroll-mt-4 border bg-background">
+      <h2>
+        <button
+          type="button"
+          aria-expanded={expanded}
+          aria-controls={`setup-${id}-content`}
+          className="flex w-full items-center justify-between gap-4 px-4 py-3 text-left text-base font-medium"
+          onClick={onToggle}
+        >
+          <span>{title}</span>
+          <IconChevronDownSmall
+            aria-hidden="true"
+            className={cn("shrink-0 transition-transform", expanded && "rotate-180")}
+          />
+        </button>
+      </h2>
+      {expanded ? (
+        <div id={`setup-${id}-content`} className="flex flex-col gap-3 border-t p-4">
+          {children}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function setupSectionFromLocation(): SetupSectionId | null {
+  if (typeof window === "undefined") return null;
+  const section = window.location.hash.replace(/^#setup-/, "");
+  return ["install", "identify", "personalize", "verify"].includes(section)
+    ? (section as SetupSectionId)
+    : null;
+}
+
+function replaceSetupSectionHash(section: SetupSectionId | null) {
+  const url = new URL(window.location.href);
+  url.hash = section ? `setup-${section}` : "";
+  window.history.replaceState(window.history.state, "", url);
 }
 
 function identityDescription(identity: IdentityExample) {
@@ -497,7 +604,7 @@ function ActivationMilestone({
         {complete ? "✓" : "○"}
       </span>
       <span>
-        <strong className="block">{title}</strong>
+        <span className="block font-medium">{title}</span>
         <small className="text-muted-foreground">{detail}</small>
       </span>
     </li>
