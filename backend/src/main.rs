@@ -4508,7 +4508,7 @@ async fn dashboard_feature_handler(
         ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
     ),
     responses(
-        (status = 200, description = "Questions Epode asked and the answers customer agents returned", body = DashboardResponsesPage),
+        (status = 200, description = "Answers customer agents returned and the product operations that requested them", body = DashboardResponsesPage),
         (status = 400, description = "Invalid filters, time range, cursor, or page size", body = ApiErrorEnvelope),
         (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
         (status = 403, description = "Caller cannot access the requested team", body = ApiErrorEnvelope),

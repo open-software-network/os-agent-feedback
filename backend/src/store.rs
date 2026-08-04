@@ -4067,7 +4067,7 @@ pub(crate) async fn dashboard_responses_page(
         .await?;
 
     let mut responses = sqlx::query_as::<_, DashboardResponseSummary>(
-        r"SELECT request.id, request.question,
+        r"SELECT request.id, request.question, request.operation,
           CASE
             WHEN answer.status = 'answered' THEN 'answered'
             WHEN COALESCE(answer.status, request.state) = 'declined' THEN 'declined'
@@ -4075,7 +4075,7 @@ pub(crate) async fn dashboard_responses_page(
               THEN 'no_relevant_context'
             ELSE 'awaiting_answer'
           END AS status,
-          request.purpose, request.surface, request.customer_id,
+          request.purpose, request.surface, customer.id AS customer_id,
           COALESCE(customer.display_name, interaction.customer_ref) AS customer_name,
           interaction.session_id, session.ref_hint AS session_ref,
           request.created_at AS asked_at,
@@ -4087,13 +4087,22 @@ pub(crate) async fn dashboard_responses_page(
           AND interaction.workspace_id = request.workspace_id
         LEFT JOIN sessions_v2 session ON session.id = interaction.session_id
           AND session.workspace_id = request.workspace_id
-        LEFT JOIN customers customer ON customer.id = request.customer_id
+        LEFT JOIN customers linked_customer
+          ON linked_customer.id = COALESCE(
+            request.customer_id, answer.customer_id, interaction.customer_id
+          )
+          AND linked_customer.workspace_id = request.workspace_id
+        LEFT JOIN customers customer
+          ON customer.id = COALESCE(
+            linked_customer.merged_into_customer_id, linked_customer.id
+          )
           AND customer.workspace_id = request.workspace_id
         WHERE request.workspace_id = $1 AND request.product_id = $2
           AND request.created_at >= $3
           AND ($4::TIMESTAMPTZ IS NULL OR request.created_at <= $4)
           AND ($5::TEXT IS NULL OR request.question ILIKE $5 ESCAPE '\'
             OR request.purpose ILIKE $5 ESCAPE '\'
+            OR request.operation ILIKE $5 ESCAPE '\'
             OR COALESCE(customer.display_name, '') ILIKE $5 ESCAPE '\'
             OR COALESCE(interaction.customer_ref, '') ILIKE $5 ESCAPE '\'
             OR COALESCE(session.ref_hint, '') ILIKE $5 ESCAPE '\'
@@ -19722,6 +19731,45 @@ mod product_tests {
             );
             anyhow::ensure!(retry_a.is_ok() ^ retry_b.is_ok());
 
+            let linked_customer_id = sqlx::query_scalar::<_, Uuid>(
+                r"SELECT COALESCE(customer.merged_into_customer_id, customer.id)
+                FROM interactions_v2 interaction
+                JOIN customers customer ON customer.id = interaction.customer_id
+                  AND customer.workspace_id = interaction.workspace_id
+                WHERE interaction.id = $1",
+            )
+            .bind(interaction_id)
+            .fetch_one(&pool)
+            .await?;
+            sqlx::query("UPDATE enrichment_requests SET customer_id = NULL WHERE id = $1")
+                .bind(request.request_id)
+                .execute(&pool)
+                .await?;
+            sqlx::query(
+                "UPDATE enrichment_answers SET customer_id = NULL WHERE request_id = $1",
+            )
+            .bind(request.request_id)
+            .execute(&pool)
+            .await?;
+            let linked_response_page = dashboard_responses_page(
+                &pool,
+                auth_a.workspace.id,
+                auth_a.environment.product_id,
+                DashboardResponseFilters {
+                    query: Some("50_150".into()),
+                    statuses: Some(vec!["answered".into()]),
+                    ..DashboardResponseFilters::default()
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(linked_response_page.responses.len() == 1);
+            anyhow::ensure!(linked_response_page.responses[0].id == request.request_id);
+            anyhow::ensure!(linked_response_page.responses[0].operation == "/search");
+            anyhow::ensure!(
+                linked_response_page.responses[0].customer_id == Some(linked_customer_id)
+            );
+
             let ephemeral_interaction_id = Uuid::new_v4();
             let ephemeral = create_enrichment_request(
                 &pool,
@@ -19815,6 +19863,7 @@ mod product_tests {
             .map_err(test_error)?;
             anyhow::ensure!(response_page.responses.len() == 1);
             anyhow::ensure!(response_page.responses[0].id == ephemeral.request_id);
+            anyhow::ensure!(response_page.responses[0].operation == "/recommend");
             anyhow::ensure!(response_page.responses[0].status == "answered");
             anyhow::ensure!(response_page.responses[0].answers.len() == 1);
             anyhow::ensure!(response_page.responses[0].answers[0].value == "quality");

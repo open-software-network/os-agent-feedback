@@ -1279,6 +1279,7 @@ export interface components {
             customerName: string | null;
             /** Format: uuid */
             id: string;
+            operation: string;
             purpose: string;
             question: string;
             /** Format: uuid */
@@ -3680,7 +3681,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Questions Epode asked and the answers customer agents returned */
+            /** @description Answers customer agents returned and the product operations that requested them */
             200: {
                 headers: {
                     [name: string]: unknown;

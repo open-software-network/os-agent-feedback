@@ -94,6 +94,7 @@ function responsesPage(): DashboardResponsesPage {
       {
         id: "response-1",
         question: "What color does the user prefer?",
+        operation: "search_catalog",
         status: "answered",
         purpose: "product_personalization",
         surface: "mcp",

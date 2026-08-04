@@ -1254,6 +1254,7 @@ pub(crate) struct DashboardSessionResponse {
 pub(crate) struct DashboardResponseSummary {
     pub id: Uuid,
     pub question: String,
+    pub operation: String,
     pub status: String,
     pub purpose: String,
     pub surface: String,

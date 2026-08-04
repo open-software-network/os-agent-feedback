@@ -22,13 +22,13 @@ describe("CustomersView", () => {
     const row = await screen.findByRole("row", { name: "Open customer Acme workspace" });
     expect(within(row).getByText("Known")).toBeVisible();
     expect(within(row).getByText("2")).toBeVisible();
-    expect(within(row).getByText("Allowed")).toBeVisible();
     expect(screen.getAllByText("Anonymous")[0].parentElement).toHaveTextContent("1");
     expect(screen.getByText("Active").parentElement).toHaveTextContent("2");
     expect(screen.queryByText("Unresolved interactions")).not.toBeInTheDocument();
     expect(screen.getByText(/Customers stay linked to their sessions/i)).toBeVisible();
     expect(screen.getByRole("columnheader", { name: "Sessions" })).toBeVisible();
-    expect(screen.getByRole("columnheader", { name: "Data use" })).toBeVisible();
+    expect(screen.queryByRole("columnheader", { name: "Data use" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Sharing filter")).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining("/api/dashboard/customers?productId="),
       expect.objectContaining({ headers: expect.any(Headers) }),
@@ -60,7 +60,6 @@ describe("CustomersView", () => {
     expect(screen.getAllByRole("button", { name: "Open source session" }).length).toBeGreaterThan(
       0,
     );
-    expect(screen.getByRole("heading", { name: "Data use" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "Context returned to product" })).toBeVisible();
     expect(screen.getByText("Context version:").parentElement).toHaveTextContent(
       "ctx1_fixture_customer_context_version",
@@ -69,10 +68,8 @@ describe("CustomersView", () => {
     expect(screen.getByText("Outcome: Completion")).toBeVisible();
     expect(screen.getByText("Used")).toBeVisible();
     expect(screen.getByText(/Customer prompts and searches are not included/i)).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "Data use" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Sessions" })).toBeVisible();
-    expect(screen.getAllByText("Expired").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Targeted Advertising")[0]).toBeVisible();
-    expect(screen.getByText("Data-use history (2)")).toBeVisible();
     expect(screen.queryByRole("heading", { name: "Permission" })).not.toBeInTheDocument();
   });
 
@@ -87,48 +84,6 @@ describe("CustomersView", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Open session" })[0]);
 
     expect(openSession).toHaveBeenCalled();
-  });
-
-  it("shows one data-use choice for the enrichment scopes recorded together", async () => {
-    const detail = customerDetailFixture();
-    const decidedAt = "2026-07-30T12:05:00Z";
-    detail.consent = ["share_preferences", "personalize", "remember_preferences"].map((scope) => ({
-      scope,
-      enrichmentPurpose: "product_personalization" as const,
-      state: "approved",
-      basis: "user_consent",
-      decidedAt,
-      expiresAt: null,
-      revokedAt: null,
-      revision: 1,
-    }));
-    detail.consentHistory = detail.consent.map((grant, index) => ({
-      id: `consent-event-${index}`,
-      scope: grant.scope,
-      enrichmentPurpose: grant.enrichmentPurpose,
-      priorState: null,
-      state: grant.state,
-      basis: grant.basis,
-      revision: grant.revision,
-      source: "enrichment",
-      decidedAt,
-      createdAt: decidedAt,
-    }));
-
-    renderCustomers(mockCustomers(detail), {
-      selectedCustomerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    });
-
-    await screen.findByRole("heading", { name: "What we know" });
-    const dataUseSection = screen.getByRole("heading", { name: "Data use" }).closest("section");
-    expect(dataUseSection).not.toBeNull();
-    expect(
-      within(dataUseSection as HTMLElement).getAllByText("Product Personalization"),
-    ).toHaveLength(2);
-    expect(
-      screen.getByText("Use shared context · Personalize the experience · Remember across visits"),
-    ).toBeVisible();
-    expect(screen.getByText("Data-use history (1)")).toBeVisible();
   });
 });
 

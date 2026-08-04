@@ -5,11 +5,7 @@ import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { useEffect, useMemo, useState } from "react";
 import { DetailRail, DetailWorkspace } from "@/components/dashboard/detail-rail";
-import {
-  ConsentBadge,
-  IdentityBadge,
-  identityLabel,
-} from "@/components/dashboard/intelligence-badges";
+import { IdentityBadge, identityLabel } from "@/components/dashboard/intelligence-badges";
 import { MetricStrip } from "@/components/dashboard/metric-strip";
 import { EmptyState, ErrorState, NativeSelect } from "@/components/dashboard/view-primitives";
 import { Badge } from "@/components/ui/badge";
@@ -27,8 +23,6 @@ import {
 } from "@/components/ui/table";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import {
-  type ConsentEvent,
-  type ConsentGrant,
   type CustomerContextReturn,
   type CustomerDetail,
   type CustomerSignal,
@@ -41,13 +35,11 @@ import { formatDate, relativeDate, titleCase } from "@/lib/dashboard/format";
 
 type CustomerFilters = {
   identityLevel: string;
-  consentState: string;
   range: "all" | "7d" | "30d";
 };
 
 const emptyFilters: CustomerFilters = {
   identityLevel: "",
-  consentState: "",
   range: "30d",
 };
 
@@ -59,7 +51,6 @@ function readCustomerLocation() {
     query: params.get("customerQ") ?? "",
     filters: {
       identityLevel: params.get("customerIdentity") ?? "",
-      consentState: params.get("customerConsent") ?? "",
       range: range === "all" || range === "7d" ? range : "30d",
     } satisfies CustomerFilters,
   };
@@ -70,7 +61,7 @@ function writeCustomerLocation(query: string, filters: CustomerFilters) {
   const url = new URL(window.location.href);
   setParam(url, "customerQ", query);
   setParam(url, "customerIdentity", filters.identityLevel);
-  setParam(url, "customerConsent", filters.consentState);
+  url.searchParams.delete("customerConsent");
   url.searchParams.delete("customerSignal");
   setParam(url, "customerRange", filters.range === "30d" ? "" : filters.range);
   window.history.replaceState(window.history.state, "", url);
@@ -88,11 +79,8 @@ function rangeStart(range: CustomerFilters["range"]) {
 }
 
 function customerFilterCount(filters: CustomerFilters) {
-  return [
-    filters.identityLevel,
-    filters.consentState,
-    filters.range === "30d" ? "" : filters.range,
-  ].filter(Boolean).length;
+  return [filters.identityLevel, filters.range === "30d" ? "" : filters.range].filter(Boolean)
+    .length;
 }
 
 export function CustomersView({
@@ -121,7 +109,6 @@ export function CustomersView({
         productId: productId ?? "",
         q: debouncedQuery.trim() || undefined,
         identityLevel: filters.identityLevel ? [filters.identityLevel] : undefined,
-        consentState: filters.consentState ? [filters.consentState] : undefined,
         since: rangeStart(filters.range),
         cursor: pageParam,
         limit: 50,
@@ -212,12 +199,6 @@ export function CustomersView({
             options={facets?.identityLevel ?? []}
             onChange={(identityLevel) => applyFilters({ ...filters, identityLevel })}
           />
-          <CustomerSelect
-            label="Sharing"
-            value={filters.consentState}
-            options={facets?.consentState ?? []}
-            onChange={(consentState) => applyFilters({ ...filters, consentState })}
-          />
           <NativeSelect
             aria-label="Customer activity range"
             className="w-auto min-w-32"
@@ -257,14 +238,13 @@ export function CustomersView({
             Loading customers…
           </p>
         ) : customers.length ? (
-          <Table className="min-w-[820px] table-fixed">
+          <Table className="min-w-[720px] table-fixed">
             <TableHeader className="sticky top-0 z-[1] bg-background">
               <TableRow className="hover:bg-background">
-                <TableHead className="h-9 w-[34%] pl-5 text-xs">Customer</TableHead>
-                <TableHead className="h-9 w-[18%] text-xs">Type</TableHead>
-                <TableHead className="h-9 w-[16%] text-xs">Sessions</TableHead>
-                <TableHead className="h-9 w-[16%] text-xs">Data use</TableHead>
-                <TableHead className="h-9 w-[16%] pr-5 text-right text-xs">Updated</TableHead>
+                <TableHead className="h-9 w-[42%] pl-5 text-xs">Customer</TableHead>
+                <TableHead className="h-9 w-[22%] text-xs">Type</TableHead>
+                <TableHead className="h-9 w-[18%] text-xs">Sessions</TableHead>
+                <TableHead className="h-9 w-[18%] pr-5 text-right text-xs">Updated</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -390,9 +370,6 @@ function CustomerRow({
         <IdentityBadge level={customer.identityLevel} />
       </TableCell>
       <TableCell className="text-xs">{customer.sessionCount.toLocaleString()}</TableCell>
-      <TableCell>
-        <ConsentBadge state={customer.consentState} />
-      </TableCell>
       <TableCell
         className="pr-5 text-right text-xs text-muted-foreground"
         title={formatDate(customer.lastActivityAt)}
@@ -487,67 +464,6 @@ function contextValue(value: unknown) {
   }
   return "Structured value";
 }
-
-function dataUseScope(scope: string) {
-  switch (scope) {
-    case "share_preferences":
-      return "Use shared context";
-    case "personalize":
-      return "Personalize the experience";
-    case "remember_preferences":
-      return "Remember across visits";
-    case "share_outcome":
-      return "Use outcome feedback";
-    default:
-      return titleCase(scope);
-  }
-}
-
-type DataUseGrant = ConsentGrant & { scopes: string[] };
-type DataUseEvent = ConsentEvent & { scopes: string[] };
-
-function groupDataUseGrants(grants: ConsentGrant[]): DataUseGrant[] {
-  const grouped = new Map<string, DataUseGrant>();
-  for (const grant of grants) {
-    const key = grant.enrichmentPurpose
-      ? [
-          grant.enrichmentPurpose,
-          grant.state,
-          grant.basis,
-          grant.revision,
-          grant.decidedAt,
-          grant.expiresAt,
-          grant.revokedAt,
-        ].join("|")
-      : [grant.scope, grant.state, grant.revision, grant.decidedAt].join("|");
-    const existing = grouped.get(key);
-    if (existing) existing.scopes.push(grant.scope);
-    else grouped.set(key, { ...grant, scopes: [grant.scope] });
-  }
-  return [...grouped.values()];
-}
-
-function groupDataUseEvents(events: ConsentEvent[]): DataUseEvent[] {
-  const grouped = new Map<string, DataUseEvent>();
-  for (const event of events) {
-    const key = event.enrichmentPurpose
-      ? [
-          event.enrichmentPurpose,
-          event.priorState,
-          event.state,
-          event.basis,
-          event.revision,
-          event.source,
-          event.decidedAt,
-        ].join("|")
-      : [event.scope, event.state, event.revision, event.decidedAt].join("|");
-    const existing = grouped.get(key);
-    if (existing) existing.scopes.push(event.scope);
-    else grouped.set(key, { ...event, scopes: [event.scope] });
-  }
-  return [...grouped.values()];
-}
-
 function CustomerDetailContent({
   detail,
   openSession,
@@ -556,8 +472,6 @@ function CustomerDetailContent({
   openSession: (sessionId: string) => void;
 }) {
   const customer = detail.customer;
-  const dataUse = groupDataUseGrants(detail.consent);
-  const dataUseHistory = groupDataUseEvents(detail.consentHistory);
 
   return (
     <>
@@ -567,7 +481,6 @@ function CustomerDetailContent({
       <h2 className="mt-2 text-balance text-lg font-medium leading-6">{customer.displayName}</h2>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <IdentityBadge level={customer.identityLevel} />
-        <ConsentBadge state={customer.consentState} />
       </div>
       <p className="mt-3 text-xs text-muted-foreground">
         {titleCase(customer.kind)}
@@ -644,69 +557,6 @@ function CustomerDetailContent({
 
       <Separator className="my-5" />
       <CustomerContextReturns returns={detail.contextReturns} openSession={openSession} />
-
-      <Separator className="my-5" />
-      <section aria-labelledby="customer-data-use-heading">
-        <h3 id="customer-data-use-heading" className="text-xs font-medium">
-          Data use
-        </h3>
-        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-          Recorded from the customer&apos;s choice in their agent. Epode does not ask them again
-          here.
-        </p>
-        {dataUse.length ? (
-          <ol className="mt-3 divide-y">
-            {dataUse.map((grant) => (
-              <li
-                key={`${grant.enrichmentPurpose ?? grant.scope}-${grant.state}-${grant.revision}`}
-                className="py-2"
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs font-medium">
-                    {titleCase(grant.enrichmentPurpose ?? grant.scope)}
-                  </span>
-                  <ConsentBadge state={grant.state} />
-                </div>
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  {grant.scopes.map(dataUseScope).join(" · ")}
-                </p>
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  {titleCase(grant.basis)} · recorded {formatDate(grant.decidedAt)}
-                  {grant.expiresAt ? ` · expires ${formatDate(grant.expiresAt)}` : ""}
-                  {grant.revokedAt ? ` · revoked ${formatDate(grant.revokedAt)}` : ""}
-                </p>
-              </li>
-            ))}
-          </ol>
-        ) : (
-          <p className="mt-2 text-sm text-muted-foreground">No data-use choice is recorded.</p>
-        )}
-        {dataUseHistory.length ? (
-          <details className="mt-3 border-t pt-3">
-            <summary className="cursor-pointer text-xs font-medium">
-              Data-use history ({dataUseHistory.length})
-            </summary>
-            <ol className="mt-2 divide-y">
-              {dataUseHistory.map((event) => (
-                <li
-                  key={`${event.enrichmentPurpose ?? event.scope}-${event.state}-${event.revision}-${event.decidedAt}`}
-                  className="py-2 text-[11px] text-muted-foreground"
-                >
-                  <span className="font-medium text-foreground">
-                    {titleCase(event.enrichmentPurpose ?? event.scope)}
-                  </span>
-                  {` · ${titleCase(event.priorState ?? "not set")} → ${titleCase(event.state)}`}
-                  {` · ${titleCase(event.source)} · revision ${event.revision}`}
-                  <br />
-                  {event.scopes.map(dataUseScope).join(" · ")}
-                  <br />
-                  {formatDate(event.decidedAt)}
-                </li>
-              ))}
-            </ol>
-          </details>
-        ) : null}
-      </section>
 
       <Separator className="my-5" />
       <section aria-labelledby="customer-sessions-heading">
