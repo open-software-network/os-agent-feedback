@@ -21,6 +21,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 const DefaultEndpoint = "https://app.epode.ai"
@@ -167,23 +168,63 @@ type preparedInteraction struct {
 }
 
 type TelemetryEvent struct {
-	InteractionID     string `json:"interactionId"`
-	Sequence          int64  `json:"sequence,omitempty"`
-	Surface           string `json:"surface"`
-	Operation         string `json:"operation"`
-	StatusCode        int    `json:"statusCode,omitempty"`
-	DurationMS        int64  `json:"durationMs,omitempty"`
-	AccountRef        string `json:"accountRef,omitempty"`
-	UserRef           string `json:"userRef,omitempty"`
-	AnonymousRef      string `json:"anonymousRef,omitempty"`
-	CustomerRef       string `json:"customerRef,omitempty"`
-	Classification    string `json:"classification"`
-	RuntimeHint       string `json:"runtimeHint,omitempty"`
-	RuntimeHintSource string `json:"runtimeHintSource,omitempty"`
-	SessionRef        string `json:"sessionRef,omitempty"`
-	SessionSource     string `json:"sessionSource,omitempty"`
-	OccurredAt        string `json:"occurredAt"`
+	InteractionID      string `json:"interactionId"`
+	Sequence           int64  `json:"sequence,omitempty"`
+	Surface            string `json:"surface"`
+	Operation          string `json:"operation"`
+	StatusCode         int    `json:"statusCode,omitempty"`
+	DurationMS         int64  `json:"durationMs,omitempty"`
+	AccountRef         string `json:"accountRef,omitempty"`
+	UserRef            string `json:"userRef,omitempty"`
+	AnonymousRef       string `json:"anonymousRef,omitempty"`
+	CustomerRef        string `json:"customerRef,omitempty"`
+	Classification     string `json:"classification"`
+	ConfirmationMethod string `json:"confirmationMethod,omitempty"`
+	RuntimeHint        string `json:"runtimeHint,omitempty"`
+	RuntimeHintSource  string `json:"runtimeHintSource,omitempty"`
+	SessionRef         string `json:"sessionRef,omitempty"`
+	SessionSource      string `json:"sessionSource,omitempty"`
+	OccurredAt         string `json:"occurredAt"`
 }
+
+// MCPOutcome is the synthetic completion state of a product MCP tool call.
+type MCPOutcome string
+
+const (
+	MCPOutcomeSuccess MCPOutcome = "success"
+	MCPOutcomeError   MCPOutcome = "error"
+)
+
+var (
+	ErrInvalidMCPOperation = errors.New("agentfeedback: invalid MCP operation")
+	ErrInvalidMCPOutcome   = errors.New("agentfeedback: invalid MCP outcome")
+)
+
+// MCPCompletion is the deliberately constrained input to RecordMCPCompletion.
+type MCPCompletion struct {
+	Operation    string
+	Outcome      MCPOutcome
+	AccountRef   string
+	UserRef      string
+	AnonymousRef string
+	CustomerRef  string
+	SessionRef   string
+	RuntimeHint  string
+}
+
+// MCPHandlerObservation is trusted product context extracted from typed input
+// and the completed result. ResultSessionRef overrides SessionRef only when
+// ResultAccountRef matches the retained authenticated AccountRef.
+type MCPHandlerObservation struct {
+	MCPCompletion
+	IsError          bool
+	Incomplete       bool
+	ResultSessionRef string
+	ResultAccountRef string
+}
+
+// MCPHandlerExtractor inspects typed product values without serializing them.
+type MCPHandlerExtractor[Input, Result any] func(context.Context, Input, Result) (MCPHandlerObservation, error)
 
 type claims struct {
 	V   int    `json:"v"`
@@ -225,21 +266,29 @@ func keyParts(apiKey string) (string, []byte, []byte, error) {
 }
 
 type Runtime struct {
-	options          Options
-	events           chan TelemetryEvent
-	stop             chan struct{}
-	done             chan struct{}
-	once             sync.Once
-	telemetryErrorMu sync.Mutex
-	telemetryError   error
-	sequence         atomic.Int64
-	consentMu        sync.Mutex
-	consentCache     map[string]cachedConsent
-	consentLookups   map[string]struct{}
-	consentSlots     chan struct{}
-	warnCustomerRef  sync.Once
-	warnTelemetry    sync.Once
-	shutdownDeadline atomic.Int64
+	options            Options
+	events             chan TelemetryEvent
+	stop               chan struct{}
+	done               chan struct{}
+	once               sync.Once
+	telemetryErrorMu   sync.Mutex
+	telemetryError     error
+	sequence           atomic.Int64
+	consentMu          sync.Mutex
+	consentCache       map[string]cachedConsent
+	consentLookups     map[string]struct{}
+	consentSlots       chan struct{}
+	warnCustomerRef    sync.Once
+	warnTelemetry      sync.Once
+	shutdownDeadline   atomic.Int64
+	accepting          atomic.Bool
+	deliveryGate       chan struct{}
+	acceptMu           sync.Mutex
+	reservations       int
+	reservationsDone   chan struct{}
+	reservationCommits bool
+	deliveryContext    context.Context
+	cancelDeliveries   context.CancelFunc
 }
 
 type cachedConsent struct {
@@ -305,6 +354,7 @@ func New(options Options) (*Runtime, error) {
 	if options.ConsentCacheTTL <= 0 {
 		options.ConsentCacheTTL = 5 * time.Minute
 	}
+	deliveryContext, cancelDeliveries := context.WithCancel(context.Background())
 	runtime := &Runtime{
 		options:        options,
 		events:         make(chan TelemetryEvent, options.MaxQueueSize),
@@ -313,7 +363,18 @@ func New(options Options) (*Runtime, error) {
 		consentCache:   make(map[string]cachedConsent),
 		consentLookups: make(map[string]struct{}),
 		consentSlots:   make(chan struct{}, maxConcurrentConsentLookups),
+		deliveryGate:   make(chan struct{}, 1),
+		reservationsDone: func() chan struct{} {
+			ch := make(chan struct{})
+			close(ch)
+			return ch
+		}(),
+		reservationCommits: true,
+		deliveryContext:    deliveryContext,
+		cancelDeliveries:   cancelDeliveries,
 	}
+	runtime.deliveryGate <- struct{}{}
+	runtime.accepting.Store(true)
 	go runtime.run()
 	return runtime, nil
 }
@@ -670,6 +731,15 @@ func randomUUID() (string, error) {
 }
 
 func (r *Runtime) record(event TelemetryEvent) {
+	r.acceptMu.Lock()
+	defer r.acceptMu.Unlock()
+	if !r.accepting.Load() {
+		return
+	}
+	r.enqueue(event)
+}
+
+func (r *Runtime) enqueue(event TelemetryEvent) {
 	if event.Sequence == 0 {
 		event.Sequence = r.sequence.Add(1)
 	}
@@ -687,24 +757,183 @@ func (r *Runtime) record(event TelemetryEvent) {
 	}
 }
 
+var mcpOperationPattern = regexp.MustCompile(`^[A-Za-z0-9/_:.*{}-]{1,160}$`)
+var mcpReferencePattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,160}$`)
+
+func trimASCIIWhitespace(value string) string { return strings.Trim(value, "\t\n\v\f\r ") }
+
+func sanitizeMCPReference(value string) string {
+	value = trimASCIIWhitespace(value)
+	if !mcpReferencePattern.MatchString(value) {
+		return ""
+	}
+	return value
+}
+
+// RecordMCPCompletion records one completed product MCP tool invocation.
+func (r *Runtime) RecordMCPCompletion(completion MCPCompletion) error {
+	if !r.active() {
+		return nil
+	}
+	if !mcpOperationPattern.MatchString(completion.Operation) || strings.Contains(completion.Operation, "://") {
+		return ErrInvalidMCPOperation
+	}
+	if completion.Outcome != MCPOutcomeSuccess && completion.Outcome != MCPOutcomeError {
+		return ErrInvalidMCPOutcome
+	}
+	interactionID, err := randomUUID()
+	if err != nil {
+		return nil // telemetry is fail-open
+	}
+	r.record(r.mcpEvent(interactionID, completion))
+	return nil
+}
+
+func (r *Runtime) mcpEvent(interactionID string, completion MCPCompletion) TelemetryEvent {
+	event := TelemetryEvent{
+		InteractionID: interactionID, Surface: "mcp", Operation: completion.Operation,
+		StatusCode: 200, Classification: "confirmed", ConfirmationMethod: "mcp",
+		OccurredAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		AccountRef: sanitizeMCPReference(completion.AccountRef), UserRef: sanitizeMCPReference(completion.UserRef),
+		AnonymousRef: sanitizeMCPReference(completion.AnonymousRef), CustomerRef: sanitizeMCPReference(completion.CustomerRef),
+	}
+	if completion.Outcome == MCPOutcomeError {
+		event.StatusCode = 500
+	}
+	if event.CustomerRef != "" && (event.AccountRef != "" || event.UserRef != "") && event.CustomerRef != event.AccountRef {
+		event.CustomerRef = ""
+	}
+	if event.SessionRef = sanitizeMCPReference(completion.SessionRef); event.SessionRef != "" {
+		event.SessionSource = "mcp"
+	}
+	hint := trimASCIIWhitespace(completion.RuntimeHint)
+	if hint != "" && utf8.ValidString(hint) && utf8.RuneCountInString(hint) <= 200 {
+		event.RuntimeHint, event.RuntimeHintSource = hint, "mcp"
+	}
+	return event
+}
+
+func (r *Runtime) active() bool {
+	r.acceptMu.Lock()
+	defer r.acceptMu.Unlock()
+	return r.accepting.Load() && r.enabled()
+}
+
+func (r *Runtime) reserveExtraction() bool {
+	r.acceptMu.Lock()
+	defer r.acceptMu.Unlock()
+	if !r.accepting.Load() || !r.enabled() {
+		return false
+	}
+	if r.reservations == 0 {
+		r.reservationsDone = make(chan struct{})
+	}
+	r.reservations++
+	return true
+}
+
+func (r *Runtime) releaseExtraction() {
+	r.acceptMu.Lock()
+	r.reservations--
+	if r.reservations == 0 {
+		close(r.reservationsDone)
+	}
+	r.acceptMu.Unlock()
+}
+
+func (r *Runtime) commitReserved(event TelemetryEvent) {
+	r.acceptMu.Lock()
+	defer r.acceptMu.Unlock()
+	if !r.reservationCommits {
+		return
+	}
+	r.enqueue(event)
+}
+
+// WrapMCPHandler wraps a typed framework-neutral handler. Extractor failures
+// and panics produce an unlinked completion and never affect business values.
+func WrapMCPHandler[Input, Result any](r *Runtime, operation string, handler func(context.Context, Input) (Result, error), extractor MCPHandlerExtractor[Input, Result]) func(context.Context, Input) (Result, error) {
+	return func(ctx context.Context, input Input) (result Result, err error) {
+		defer func() {
+			panicValue := recover()
+			if r.reserveExtraction() {
+				defer r.releaseExtraction()
+				observation, extracted := safeMCPExtract(extractor, ctx, input, result)
+				if !extracted {
+					observation = MCPHandlerObservation{}
+				}
+				completion := observation.MCPCompletion
+				completion.Operation = operation
+				if completion.Operation != "" && !observation.Incomplete {
+					completion.Outcome = MCPOutcomeSuccess
+					if err != nil || panicValue != nil || observation.IsError {
+						completion.Outcome = MCPOutcomeError
+					}
+					account := sanitizeMCPReference(completion.AccountRef)
+					if sanitizeMCPReference(observation.ResultAccountRef) == account && account != "" {
+						if canonical := sanitizeMCPReference(observation.ResultSessionRef); canonical != "" {
+							completion.SessionRef = canonical
+						}
+					}
+					if mcpOperationPattern.MatchString(completion.Operation) && !strings.Contains(completion.Operation, "://") {
+						interactionID, randomErr := randomUUID()
+						if randomErr == nil {
+							event := r.mcpEvent(interactionID, completion)
+							r.commitReserved(event)
+						}
+					}
+				}
+			}
+			if panicValue != nil {
+				panic(panicValue)
+			}
+		}()
+		return handler(ctx, input)
+	}
+}
+
+func safeMCPExtract[Input, Result any](extractor MCPHandlerExtractor[Input, Result], ctx context.Context, input Input, result Result) (observation MCPHandlerObservation, ok bool) {
+	if extractor == nil {
+		return observation, false
+	}
+	ok = true
+	defer func() {
+		if recover() != nil {
+			observation, ok = MCPHandlerObservation{}, false
+		}
+	}()
+	observation, err := extractor(ctx, input, result)
+	return observation, err == nil
+}
+
 func (r *Runtime) run() {
 	ticker := time.NewTicker(r.options.FlushInterval)
 	defer func() {
 		ticker.Stop()
-		r.flush()
+		_ = r.flush(context.Background())
 		close(r.done)
 	}()
 	for {
 		select {
 		case <-ticker.C:
-			r.flush()
+			_ = r.flush(context.Background())
 		case <-r.stop:
 			return
 		}
 	}
 }
 
-func (r *Runtime) flush() {
+func (r *Runtime) flush(ctx context.Context) error {
+	select {
+	case <-r.deliveryGate:
+		defer func() { r.deliveryGate <- struct{}{} }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return r.deliverOwned(ctx)
+}
+
+func (r *Runtime) deliverOwned(ctx context.Context) error {
 	events := make([]TelemetryEvent, 0, 50)
 drain:
 	for len(events) < 50 {
@@ -716,7 +945,7 @@ drain:
 		}
 	}
 	if len(events) == 0 {
-		return
+		return nil
 	}
 	body, _ := json.Marshal(map[string]any{"events": events})
 	headers := http.Header{
@@ -727,9 +956,12 @@ drain:
 	url := r.options.Endpoint + "/api/v2/telemetry/batches"
 	var deliveryError error
 	for attempt := 0; attempt < r.options.MaxTelemetryAttempts; attempt++ {
-		deliveryError = r.sendTelemetryAttempt(url, headers, body, len(events))
+		deliveryError = r.sendTelemetryAttempt(ctx, url, headers, body, len(events))
 		if deliveryError == nil {
-			return
+			r.telemetryErrorMu.Lock()
+			r.telemetryError = nil
+			r.telemetryErrorMu.Unlock()
+			return nil
 		}
 		if !isTransientTelemetryError(deliveryError) {
 			break
@@ -743,7 +975,14 @@ drain:
 					break
 				}
 			}
-			time.Sleep(delay)
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				deliveryError = ctx.Err()
+				attempt = r.options.MaxTelemetryAttempts
+			}
 		}
 	}
 	r.telemetryErrorMu.Lock()
@@ -756,6 +995,31 @@ drain:
 		}
 		logger.Printf("[agent-feedback] Telemetry delivery failed after bounded retries; product responses were not affected.")
 	})
+	return deliveryError
+}
+
+// Flush delivers at most one queued telemetry batch. It is a serialized
+// checkpoint, not a promise to drain the queue completely.
+func (r *Runtime) Flush(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-r.deliveryGate:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	result := make(chan error, 1)
+	go func() {
+		defer func() { r.deliveryGate <- struct{}{} }()
+		result <- r.deliverOwned(ctx)
+	}()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 type telemetryHTTPError struct{ status int }
@@ -783,7 +1047,7 @@ func isTransientTelemetryError(err error) bool {
 	return true
 }
 
-func (r *Runtime) sendTelemetryAttempt(url string, headers http.Header, body []byte, expected int) error {
+func (r *Runtime) sendTelemetryAttempt(parent context.Context, url string, headers http.Header, body []byte, expected int) error {
 	timeout := r.options.TelemetryTimeout
 	if deadline := r.shutdownDeadline.Load(); deadline > 0 {
 		remaining := time.Until(time.Unix(0, deadline))
@@ -794,8 +1058,10 @@ func (r *Runtime) sendTelemetryAttempt(url string, headers http.Header, body []b
 			timeout = remaining
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
+	stopRuntimeCancellation := context.AfterFunc(r.deliveryContext, cancel)
+	defer stopRuntimeCancellation()
 	if r.options.Sender != nil {
 		return r.options.Sender(ctx, url, headers.Clone(), body)
 	}
@@ -833,11 +1099,31 @@ func (r *Runtime) sendTelemetryAttempt(url string, headers http.Header, body []b
 }
 
 func (r *Runtime) Shutdown(ctx context.Context) error {
+	r.acceptMu.Lock()
+	r.accepting.Store(false)
+	reservationsDone := r.reservationsDone
+	r.acceptMu.Unlock()
 	shutdownCtx, cancel := context.WithTimeout(ctx, r.options.ShutdownTimeout)
 	defer cancel()
+	go func() {
+		<-shutdownCtx.Done()
+		r.cancelDeliveries()
+	}()
 	if deadline, ok := shutdownCtx.Deadline(); ok {
 		r.shutdownDeadline.CompareAndSwap(0, deadline.UnixNano())
 	}
+	select {
+	case <-reservationsDone:
+	case <-shutdownCtx.Done():
+		r.acceptMu.Lock()
+		r.reservationCommits = false
+		r.acceptMu.Unlock()
+		r.once.Do(func() { close(r.stop) })
+		return shutdownCtx.Err()
+	}
+	r.acceptMu.Lock()
+	r.reservationCommits = false
+	r.acceptMu.Unlock()
 	r.once.Do(func() { close(r.stop) })
 	select {
 	case <-r.done:

@@ -11,7 +11,9 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -90,6 +92,471 @@ func TestCapabilityConformance(t *testing.T) {
 	})
 	if err != nil || token != conformanceToken {
 		t.Fatalf("unexpected token: %s %v", token, err)
+	}
+}
+
+func TestMCPCompletionProjectionAndValidation(t *testing.T) {
+	var batches [][]byte
+	runtime, err := New(Options{APIKey: conformanceKey, FlushInterval: time.Hour, Sender: func(_ context.Context, _ string, _ http.Header, body []byte) error {
+		batches = append(batches, append([]byte(nil), body...))
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.RecordMCPCompletion(MCPCompletion{Operation: "get_summary", Outcome: MCPOutcomeSuccess, AccountRef: " account_42 ", CustomerRef: "account_42", SessionRef: " summary:42 ", RuntimeHint: " go-mcp 🚀 "}); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(runtime.RecordMCPCompletion(MCPCompletion{Operation: "bad?q=1", Outcome: MCPOutcomeSuccess}), ErrInvalidMCPOperation) {
+		t.Fatal("wanted operation error")
+	}
+	if !errors.Is(runtime.RecordMCPCompletion(MCPCompletion{Operation: "good", Outcome: "partial"}), ErrInvalidMCPOutcome) {
+		t.Fatal("wanted outcome error")
+	}
+	if err := runtime.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Events []TelemetryEvent `json:"events"`
+	}
+	if err := json.Unmarshal(batches[0], &payload); err != nil {
+		t.Fatal(err)
+	}
+	event := payload.Events[0]
+	if event.Surface != "mcp" || event.StatusCode != 200 || event.Classification != "confirmed" || event.ConfirmationMethod != "mcp" || event.AccountRef != "account_42" || event.CustomerRef != "account_42" || event.SessionRef != "summary:42" || event.SessionSource != "mcp" || event.RuntimeHint != "go-mcp 🚀" || event.RuntimeHintSource != "mcp" {
+		t.Fatalf("unexpected event: %#v", event)
+	}
+	if event.Sequence <= 0 || event.InteractionID[14] != '4' || event.OccurredAt == "" {
+		t.Fatalf("invalid generated fields: %#v", event)
+	}
+	_ = runtime.Shutdown(context.Background())
+}
+
+func TestMCPCompletionConformanceVectors(t *testing.T) {
+	data, err := os.ReadFile("../../protocol/v1/conformance.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var contract struct {
+		MCPCompletion struct {
+			Vectors []struct {
+				Name  string `json:"name"`
+				Input struct {
+					Operation, Outcome, AccountRef, UserRef, AnonymousRef, CustomerRef, SessionRef, RuntimeHint string
+				} `json:"input"`
+				ExpectedEvent     map[string]any `json:"expectedEvent"`
+				ExpectedErrorKind string         `json:"expectedErrorKind"`
+			} `json:"vectors"`
+		} `json:"mcpCompletion"`
+	}
+	if err := json.Unmarshal(data, &contract); err != nil {
+		t.Fatal(err)
+	}
+	for _, vector := range contract.MCPCompletion.Vectors {
+		t.Run(vector.Name, func(t *testing.T) {
+			var body []byte
+			runtime, _ := New(Options{APIKey: conformanceKey, FlushInterval: time.Hour, Sender: func(_ context.Context, _ string, _ http.Header, value []byte) error {
+				body = append([]byte(nil), value...)
+				return nil
+			}})
+			input := vector.Input
+			err := runtime.RecordMCPCompletion(MCPCompletion{Operation: input.Operation, Outcome: MCPOutcome(input.Outcome), AccountRef: input.AccountRef, UserRef: input.UserRef, AnonymousRef: input.AnonymousRef, CustomerRef: input.CustomerRef, SessionRef: input.SessionRef, RuntimeHint: input.RuntimeHint})
+			if vector.ExpectedErrorKind != "" {
+				if err == nil {
+					t.Fatalf("wanted %s", vector.ExpectedErrorKind)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = runtime.Flush(context.Background())
+				var payload struct {
+					Events []map[string]any `json:"events"`
+				}
+				if err := json.Unmarshal(body, &payload); err != nil {
+					t.Fatal(err)
+				}
+				got := payload.Events[0]
+				delete(got, "interactionId")
+				delete(got, "sequence")
+				delete(got, "occurredAt")
+				if !reflect.DeepEqual(got, vector.ExpectedEvent) {
+					t.Fatalf("projection mismatch\ngot:  %#v\nwant: %#v", got, vector.ExpectedEvent)
+				}
+			}
+			_ = runtime.Shutdown(context.Background())
+		})
+	}
+}
+
+func TestTypedMCPHandlerCanonicalSessionAndPreservation(t *testing.T) {
+	type input struct{ Candidate string }
+	type result struct {
+		Session string
+		IsError bool
+	}
+	var body []byte
+	runtime, _ := New(Options{APIKey: conformanceKey, FlushInterval: time.Hour, Sender: func(_ context.Context, _ string, _ http.Header, value []byte) error {
+		body = append([]byte(nil), value...)
+		return nil
+	}})
+	wantErr := errors.New("business error")
+	handler := WrapMCPHandler(runtime, "create_summary", func(context.Context, input) (result, error) {
+		return result{Session: "canonical:84", IsError: true}, wantErr
+	}, func(_ context.Context, in input, out result) (MCPHandlerObservation, error) {
+		return MCPHandlerObservation{MCPCompletion: MCPCompletion{AccountRef: "account_42", SessionRef: in.Candidate}, IsError: out.IsError, ResultSessionRef: out.Session, ResultAccountRef: "account_42"}, nil
+	})
+	got, gotErr := handler(context.Background(), input{Candidate: "candidate:1"})
+	if got.Session != "canonical:84" || gotErr != wantErr {
+		t.Fatalf("business values changed: %#v %v", got, gotErr)
+	}
+	_ = runtime.Flush(context.Background())
+	if !bytes.Contains(body, []byte(`"sessionRef":"canonical:84"`)) || !bytes.Contains(body, []byte(`"statusCode":500`)) {
+		t.Fatalf("unexpected telemetry: %s", body)
+	}
+	_ = runtime.Shutdown(context.Background())
+}
+
+func TestFlushIsCallerBoundedAndKeepsSingleOwner(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	runtime, err := New(Options{APIKey: conformanceKey, FlushInterval: time.Hour, TelemetryTimeout: time.Hour, Sender: func(context.Context, string, http.Header, []byte) error {
+		calls.Add(1)
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		<-release // deliberately ignores cancellation
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = runtime.RecordMCPCompletion(MCPCompletion{Operation: "blocked", Outcome: MCPOutcomeSuccess})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := runtime.Flush(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Flush returned %v", err)
+	}
+	<-started
+	for range 3 {
+		waiting, stop := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		if err := runtime.Flush(waiting); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("waiting Flush returned %v", err)
+		}
+		stop()
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("got %d delivery owners", calls.Load())
+	}
+	close(release)
+	_ = runtime.Shutdown(context.Background())
+}
+
+func TestFlushOneBatchAndCurrentResult(t *testing.T) {
+	var sizes []int
+	var calls int
+	runtime, _ := New(Options{APIKey: conformanceKey, FlushInterval: time.Hour, MaxTelemetryAttempts: 1, Sender: func(_ context.Context, _ string, _ http.Header, body []byte) error {
+		var payload struct {
+			Events []TelemetryEvent `json:"events"`
+		}
+		_ = json.Unmarshal(body, &payload)
+		sizes = append(sizes, len(payload.Events))
+		calls++
+		if calls == 1 {
+			return errors.New("first")
+		}
+		return nil
+	}})
+	for i := 0; i < 51; i++ {
+		_ = runtime.RecordMCPCompletion(MCPCompletion{Operation: "same_operation", Outcome: MCPOutcomeSuccess})
+	}
+	if err := runtime.Flush(context.Background()); err == nil || err.Error() != "first" {
+		t.Fatalf("first result = %v", err)
+	}
+	if err := runtime.Flush(context.Background()); err != nil {
+		t.Fatalf("stale result = %v", err)
+	}
+	if !reflect.DeepEqual(sizes, []int{50, 1}) {
+		t.Fatalf("batch sizes = %v", sizes)
+	}
+	_ = runtime.Shutdown(context.Background())
+}
+
+func TestHandlerCompletionLosingShutdownRaceSkipsExtractor(t *testing.T) {
+	handlerDone := make(chan struct{})
+	returnHandler := make(chan struct{})
+	var extracted atomic.Int32
+	runtime, _ := New(Options{APIKey: conformanceKey, FlushInterval: time.Hour})
+	wrapped := WrapMCPHandler(runtime, "race", func(context.Context, int) (int, error) {
+		close(handlerDone)
+		<-returnHandler
+		return 1, nil
+	}, func(context.Context, int, int) (MCPHandlerObservation, error) {
+		extracted.Add(1)
+		return MCPHandlerObservation{}, nil
+	})
+	finished := make(chan struct{})
+	go func() { _, _ = wrapped(context.Background(), 0); close(finished) }()
+	<-handlerDone
+	shutdownDone := make(chan struct{})
+	go func() { _ = runtime.Shutdown(context.Background()); close(shutdownDone) }()
+	for runtime.accepting.Load() {
+		time.Sleep(time.Millisecond)
+	}
+	close(returnHandler)
+	<-finished
+	<-shutdownDone
+	if extracted.Load() != 0 {
+		t.Fatal("extractor ran after terminal acceptance closed")
+	}
+}
+
+func waitForMCPAcceptanceClosed(t *testing.T, runtimeUnderTest *Runtime) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for runtimeUnderTest.accepting.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("MCP acceptance did not close")
+		}
+		runtime.Gosched()
+	}
+}
+
+func TestMCPReservationCommitsBeforeShutdownDeadline(t *testing.T) {
+	extractorStarted := make(chan struct{})
+	releaseExtractor := make(chan struct{})
+	var bodies [][]byte
+	runtimeUnderTest, _ := New(Options{
+		APIKey: conformanceKey, FlushInterval: time.Hour, ShutdownTimeout: time.Second,
+		Sender: func(_ context.Context, _ string, _ http.Header, body []byte) error {
+			bodies = append(bodies, append([]byte(nil), body...))
+			return nil
+		},
+	})
+	wrapped := WrapMCPHandler(runtimeUnderTest, "reserved", func(context.Context, int) (int, error) {
+		return 7, nil
+	}, func(context.Context, int, int) (MCPHandlerObservation, error) {
+		close(extractorStarted)
+		<-releaseExtractor
+		return MCPHandlerObservation{}, nil
+	})
+	handlerDone := make(chan struct{})
+	go func() { _, _ = wrapped(context.Background(), 1); close(handlerDone) }()
+	<-extractorStarted // the reservation is acquired before the extractor runs
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- runtimeUnderTest.Shutdown(context.Background()) }()
+	waitForMCPAcceptanceClosed(t, runtimeUnderTest)
+	close(releaseExtractor)
+	<-handlerDone
+	if err := <-shutdownDone; err != nil {
+		t.Fatal(err)
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("delivery batches = %d, want 1", len(bodies))
+	}
+	var payload struct {
+		Events []TelemetryEvent `json:"events"`
+	}
+	if err := json.Unmarshal(bodies[0], &payload); err != nil || len(payload.Events) != 1 || payload.Events[0].Operation != "reserved" {
+		t.Fatalf("final payload = %s, error = %v", bodies[0], err)
+	}
+}
+
+func TestMCPReservationIsFencedAfterShutdownTimeout(t *testing.T) {
+	extractorStarted := make(chan struct{})
+	releaseExtractor := make(chan struct{})
+	var deliveries atomic.Int32
+	runtimeUnderTest, _ := New(Options{
+		APIKey: conformanceKey, FlushInterval: time.Hour, ShutdownTimeout: 25 * time.Millisecond,
+		Sender: func(context.Context, string, http.Header, []byte) error { deliveries.Add(1); return nil },
+	})
+	wrapped := WrapMCPHandler(runtimeUnderTest, "late", func(context.Context, int) (int, error) { return 1, nil }, func(context.Context, int, int) (MCPHandlerObservation, error) {
+		close(extractorStarted)
+		<-releaseExtractor
+		return MCPHandlerObservation{}, nil
+	})
+	handlerDone := make(chan struct{})
+	go func() { _, _ = wrapped(context.Background(), 0); close(handlerDone) }()
+	<-extractorStarted
+	if err := runtimeUnderTest.Shutdown(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown returned %v", err)
+	}
+	close(releaseExtractor)
+	<-handlerDone
+	if got := len(runtimeUnderTest.events); got != 0 || deliveries.Load() != 0 {
+		t.Fatalf("late completion queued=%d delivered=%d", got, deliveries.Load())
+	}
+}
+
+func TestShutdownCancelsWorkerOwnedSenderAttempt(t *testing.T) {
+	started := make(chan struct{})
+	canceled := make(chan error, 1)
+	runtimeUnderTest, _ := New(Options{
+		APIKey: conformanceKey, FlushInterval: time.Millisecond, TelemetryTimeout: time.Hour, ShutdownTimeout: 40 * time.Millisecond,
+		Sender: func(ctx context.Context, _ string, _ http.Header, _ []byte) error {
+			close(started)
+			<-ctx.Done()
+			canceled <- ctx.Err()
+			return ctx.Err()
+		},
+	})
+	_ = runtimeUnderTest.RecordMCPCompletion(MCPCompletion{Operation: "worker", Outcome: MCPOutcomeSuccess})
+	<-started
+	begin := time.Now()
+	err := runtimeUnderTest.Shutdown(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(begin) > 300*time.Millisecond {
+		t.Fatalf("Shutdown = %v after %s", err, time.Since(begin))
+	}
+	if err := <-canceled; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Sender context = %v", err)
+	}
+}
+
+func TestMCPHandlerAdapterBehavior(t *testing.T) {
+	type result struct{ Value string }
+	businessErr := errors.New("business-sensitive-marker")
+	panicValue := &struct{ Value string }{"panic-sensitive-marker"}
+	tests := []struct {
+		name       string
+		handler    func(context.Context, string) (result, error)
+		extractor  MCPHandlerExtractor[string, result]
+		wantEvents int
+		wantStatus int
+		wantSess   string
+		wantErr    error
+		wantPanic  any
+	}{
+		{name: "ordinary success", handler: func(context.Context, string) (result, error) { return result{"result-sensitive-marker"}, nil }, extractor: func(context.Context, string, result) (MCPHandlerObservation, error) {
+			return MCPHandlerObservation{}, nil
+		}, wantEvents: 1, wantStatus: 200},
+		{name: "IsError", handler: func(context.Context, string) (result, error) { return result{}, nil }, extractor: func(context.Context, string, result) (MCPHandlerObservation, error) {
+			return MCPHandlerObservation{IsError: true}, nil
+		}, wantEvents: 1, wantStatus: 500},
+		{name: "Go error preservation", handler: func(context.Context, string) (result, error) { return result{"preserved"}, businessErr }, extractor: func(context.Context, string, result) (MCPHandlerObservation, error) {
+			return MCPHandlerObservation{}, nil
+		}, wantEvents: 1, wantStatus: 500, wantErr: businessErr},
+		{name: "panic preservation", handler: func(context.Context, string) (result, error) { panic(panicValue) }, extractor: func(context.Context, string, result) (MCPHandlerObservation, error) {
+			return MCPHandlerObservation{}, nil
+		}, wantEvents: 1, wantStatus: 500, wantPanic: panicValue},
+		{name: "extractor error unlinked", handler: func(context.Context, string) (result, error) { return result{}, nil }, extractor: func(context.Context, string, result) (MCPHandlerObservation, error) {
+			return MCPHandlerObservation{MCPCompletion: MCPCompletion{SessionRef: "must-not-link"}, Incomplete: true}, errors.New("extractor-sensitive-marker")
+		}, wantEvents: 1, wantStatus: 200},
+		{name: "extractor panic unlinked", handler: func(context.Context, string) (result, error) { return result{}, nil }, extractor: func(context.Context, string, result) (MCPHandlerObservation, error) {
+			panic("extractor-panic-sensitive-marker")
+		}, wantEvents: 1, wantStatus: 200},
+		{name: "successful incomplete", handler: func(context.Context, string) (result, error) { return result{}, nil }, extractor: func(context.Context, string, result) (MCPHandlerObservation, error) {
+			return MCPHandlerObservation{Incomplete: true}, nil
+		}, wantEvents: 0},
+		{name: "wrong account canonical session", handler: func(context.Context, string) (result, error) { return result{}, nil }, extractor: func(context.Context, string, result) (MCPHandlerObservation, error) {
+			return MCPHandlerObservation{MCPCompletion: MCPCompletion{AccountRef: "account", SessionRef: "candidate"}, ResultAccountRef: "other", ResultSessionRef: "canonical"}, nil
+		}, wantEvents: 1, wantStatus: 200, wantSess: "candidate"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var body []byte
+			runtimeUnderTest, _ := New(Options{APIKey: conformanceKey, FlushInterval: time.Hour, Sender: func(_ context.Context, _ string, _ http.Header, value []byte) error {
+				body = append([]byte(nil), value...)
+				return nil
+			}})
+			wrapped := WrapMCPHandler(runtimeUnderTest, "adapter", test.handler, test.extractor)
+			var got result
+			var gotErr error
+			var recovered any
+			func() {
+				defer func() { recovered = recover() }()
+				got, gotErr = wrapped(context.Background(), "input-sensitive-marker")
+			}()
+			if gotErr != test.wantErr || recovered != test.wantPanic || (test.wantErr != nil && got.Value != "preserved") {
+				t.Fatalf("business values: result=%#v error=%v panic=%#v", got, gotErr, recovered)
+			}
+			if err := runtimeUnderTest.Shutdown(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			var payload struct {
+				Events []TelemetryEvent `json:"events"`
+			}
+			if len(body) != 0 {
+				if err := json.Unmarshal(body, &payload); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if len(payload.Events) != test.wantEvents {
+				t.Fatalf("events=%d body=%s", len(payload.Events), body)
+			}
+			if test.wantEvents == 1 && (payload.Events[0].StatusCode != test.wantStatus || payload.Events[0].SessionRef != test.wantSess) {
+				t.Fatalf("event=%#v", payload.Events[0])
+			}
+			for _, marker := range []string{"input-sensitive-marker", "result-sensitive-marker", "business-sensitive-marker", "panic-sensitive-marker", "extractor-sensitive-marker", "extractor-panic-sensitive-marker", "must-not-link"} {
+				if bytes.Contains(body, []byte(marker)) {
+					t.Fatalf("telemetry leaked %q: %s", marker, body)
+				}
+			}
+		})
+	}
+}
+
+func TestMCPDisabledAndShutdownPathsSkipWork(t *testing.T) {
+	var extracted atomic.Int32
+	runtimeUnderTest, _ := New(Options{APIKey: conformanceKey, FeedbackMode: FeedbackOff})
+	wrapped := WrapMCPHandler(runtimeUnderTest, "disabled", func(context.Context, int) (int, error) { return 1, nil }, func(context.Context, int, int) (MCPHandlerObservation, error) {
+		extracted.Add(1)
+		return MCPHandlerObservation{}, nil
+	})
+	_, _ = wrapped(context.Background(), 0)
+	if err := runtimeUnderTest.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = wrapped(context.Background(), 0)
+	if err := runtimeUnderTest.RecordMCPCompletion(MCPCompletion{Operation: "invalid?", Outcome: "invalid"}); err != nil {
+		t.Fatalf("post-shutdown validation ran: %v", err)
+	}
+	if extracted.Load() != 0 {
+		t.Fatalf("extractor calls=%d", extracted.Load())
+	}
+}
+
+func TestMCPRetryBodiesAreIdenticalAndPrivate(t *testing.T) {
+	var bodies [][]byte
+	runtimeUnderTest, _ := New(Options{APIKey: conformanceKey, FlushInterval: time.Hour, MaxTelemetryAttempts: 2, Sender: func(_ context.Context, _ string, _ http.Header, body []byte) error {
+		bodies = append(bodies, append([]byte(nil), body...))
+		if len(bodies) == 1 {
+			return errors.New("transient-sensitive-marker")
+		}
+		return nil
+	}})
+	wrapped := WrapMCPHandler(runtimeUnderTest, "private", func(context.Context, string) (string, error) { return "result-private-marker", nil }, func(context.Context, string, string) (MCPHandlerObservation, error) {
+		return MCPHandlerObservation{}, nil
+	})
+	_, _ = wrapped(context.Background(), "input-private-marker")
+	if err := runtimeUnderTest.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(bodies) != 2 || !bytes.Equal(bodies[0], bodies[1]) {
+		t.Fatalf("retry bodies differ: %q %q", bodies[0], bodies[1])
+	}
+	for _, marker := range []string{"input-private-marker", "result-private-marker", "transient-sensitive-marker"} {
+		if bytes.Contains(bodies[0], []byte(marker)) {
+			t.Fatalf("telemetry leaked %q", marker)
+		}
+	}
+}
+
+func TestRuntimeHintUTF8AndRuneBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name, hint string
+		want       bool
+	}{{"invalid", string([]byte{0xff}), false}, {"two_hundred", strings.Repeat("界", 200), true}, {"two_hundred_one", strings.Repeat("界", 201), false}} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, _ := New(Options{APIKey: conformanceKey, FlushInterval: time.Hour})
+			event := runtime.mcpEvent("id", MCPCompletion{Operation: "op", Outcome: MCPOutcomeSuccess, RuntimeHint: test.hint})
+			if (event.RuntimeHint != "") != test.want {
+				t.Fatalf("hint retained = %t", event.RuntimeHint != "")
+			}
+			_ = runtime.Shutdown(context.Background())
+		})
 	}
 }
 
