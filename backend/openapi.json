@@ -2412,7 +2412,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Questions Epode asked and the answers customer agents returned",
+            "description": "Answers customer agents returned and the product operations that requested them",
             "content": {
               "application/json": {
                 "schema": {
@@ -8096,6 +8096,7 @@
         "required": [
           "id",
           "question",
+          "operation",
           "status",
           "purpose",
           "surface",
@@ -8141,6 +8142,9 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "operation": {
+            "type": "string"
           },
           "purpose": {
             "type": "string"

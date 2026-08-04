@@ -243,6 +243,7 @@ const firstSignal = {
 const firstResponse = {
   id: "89898989-8989-4898-8898-898989898989",
   question: "What does the user need from search right now?",
+  operation: "search_catalog",
   status: "answered",
   purpose: "product_personalization",
   surface: "http_json",
@@ -939,8 +940,8 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await textVisible(page, "What does the user need from search right now?");
 
   await clickText(page, "Responses");
-  await textVisible(page, "Questions asked");
-  await textVisible(page, "What does the user need from search right now?");
+  await textVisible(page, "Tool called");
+  await textVisible(page, "search_catalog");
   await textVisible(page, "Find the newest indexed policy");
   await textVisible(page, "Acme workspace");
   await textVisible(page, "session-42");
@@ -952,7 +953,6 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await metricVisible(page, "Active", "1");
   await clickText(page, "Acme workspace");
   await textVisible(page, "What we know");
-  await textVisible(page, "Data use");
   await textVisible(page, "Sessions");
   const customerDetail = await fixtureRequest(
     state,

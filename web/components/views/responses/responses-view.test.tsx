@@ -13,20 +13,25 @@ describe("ResponsesView", () => {
     window.history.replaceState({}, "", "/?view=responses");
   });
 
-  it("lists questions and received answers with customer and session links", async () => {
+  it("leads with received answers and links the tool, customer, and session", async () => {
     vi.stubGlobal("fetch", responseFetch());
     const openCustomer = vi.fn();
     const openSession = vi.fn();
     renderResponses(openCustomer, openSession);
 
-    const row = await screen.findByRole("row", { name: /What color does the user prefer/i });
+    const row = await screen.findByRole("row", { name: /Blue.*search_catalog/i });
     expect(within(row).getByText("Blue")).toBeVisible();
+    expect(within(row).getByText("search_catalog")).toBeVisible();
     expect(within(row).getByText("Answered")).toBeVisible();
+    expect(within(row).queryByText("What color does the user prefer?")).not.toBeInTheDocument();
     fireEvent.click(within(row).getByRole("button", { name: "Acme workspace" }));
     fireEvent.click(within(row).getByRole("button", { name: "session-42" }));
 
     expect(openCustomer).toHaveBeenCalledWith("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
     expect(openSession).toHaveBeenCalledWith("33333333-3333-4333-8333-333333333333");
+    expect(screen.getByRole("columnheader", { name: "Answer" })).toBeVisible();
+    expect(screen.getByRole("columnheader", { name: "Tool called" })).toBeVisible();
+    expect(screen.queryByRole("columnheader", { name: "Question" })).not.toBeInTheDocument();
   });
 
   it("persists search and status filters and sends both to the server", async () => {
@@ -68,7 +73,7 @@ describe("ResponsesView", () => {
 
     expect(await screen.findByText("No responses yet")).toBeVisible();
     expect(
-      screen.getByText("Questions and answers will appear here after Epode asks a customer agent."),
+      screen.getByText("Answers will appear here after a customer agent shares relevant context."),
     ).toBeVisible();
   });
 });
@@ -92,6 +97,7 @@ function responsePage(): DashboardResponsesPage {
       {
         id: "response-1",
         question: "What color does the user prefer?",
+        operation: "search_catalog",
         status: "answered",
         purpose: "product_personalization",
         surface: "mcp",
