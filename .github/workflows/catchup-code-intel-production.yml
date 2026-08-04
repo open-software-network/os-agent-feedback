@@ -118,7 +118,7 @@ jobs:
     environment: production
     services:
       postgres:
-        image: postgres:16
+        image: postgres:18
         env:
           POSTGRES_PASSWORD: restore-test
           POSTGRES_DB: restored
@@ -143,11 +143,9 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Install pinned Railway and PostgreSQL clients
+      - name: Install pinned Railway client
         run: |
           npm install --global "@railway/cli@${RAILWAY_CLI_VERSION}"
-          sudo apt-get update
-          sudo apt-get install --yes postgresql-client
 
       - name: Verify the exact Railway backup exists and is recent
         id: backup
@@ -192,20 +190,24 @@ jobs:
       - name: Dump and restore production into the isolated runner database
         env:
           RESTORE_DATABASE_URL: postgres://postgres:restore-test@127.0.0.1:5432/restored
+          RESTORE_CONTAINER_ID: ${{ job.services.postgres.id }}
         run: |
           set -euo pipefail
           dump_path="$RUNNER_TEMP/epode-production.dump"
           trap 'rm -f "$dump_path"' EXIT
-          pg_dump "$PRODUCTION_DATABASE_URL" --format=custom --no-owner --no-privileges --file="$dump_path"
-          pg_restore --exit-on-error --no-owner --no-privileges --dbname="$RESTORE_DATABASE_URL" "$dump_path"
-          restored_version="$(psql "$RESTORE_DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 -c 'SELECT max(version) FROM _sqlx_migrations WHERE success')"
-          restored_checksum="$(psql "$RESTORE_DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 -c "SELECT encode(checksum, 'hex') FROM _sqlx_migrations WHERE version = 34 AND success")"
+          [[ -n "$RESTORE_CONTAINER_ID" ]] || { echo "::error::The isolated PostgreSQL service container is unavailable."; exit 1; }
+          docker exec "$RESTORE_CONTAINER_ID" \
+            pg_dump "$PRODUCTION_DATABASE_URL" --format=custom --no-owner --no-privileges >"$dump_path"
+          docker exec -i "$RESTORE_CONTAINER_ID" \
+            pg_restore --exit-on-error --no-owner --no-privileges --dbname="$RESTORE_DATABASE_URL" <"$dump_path"
+          restored_version="$(docker exec "$RESTORE_CONTAINER_ID" psql "$RESTORE_DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 -c 'SELECT max(version) FROM _sqlx_migrations WHERE success')"
+          restored_checksum="$(docker exec "$RESTORE_CONTAINER_ID" psql "$RESTORE_DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 -c "SELECT encode(checksum, 'hex') FROM _sqlx_migrations WHERE version = 34 AND success")"
           [[ "$restored_version" == "34" ]] || { echo "::error::The isolated restore does not contain exact production ledger version 34."; exit 1; }
           [[ "$restored_checksum" == "e43ce57441739aeec57c7a013c5472aceb37aa57640b5aae856dfd3cd80f5b75cc4dae84068b02054c6816ef97110f53" ]] || {
             echo "::error::The isolated restore has the wrong migration-34 checksum."
             exit 1
           }
-          psql "$RESTORE_DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 <<'SQL' >/dev/null
+          docker exec -i "$RESTORE_CONTAINER_ID" psql "$RESTORE_DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 <<'SQL' >/dev/null
           BEGIN READ ONLY;
           SELECT 1 FROM feedback_reports LIMIT 1;
           SELECT 1 FROM products LIMIT 1;

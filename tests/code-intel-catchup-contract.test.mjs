@@ -107,10 +107,18 @@ test("code-intel catch-up rejects unknown modes before database access", () => {
 
 test("catch-up workflow binds real recovery evidence to canary-first production rollout", async () => {
   const source = await readFile(workflow, "utf8");
+  const recoverySource = source.slice(
+    source.indexOf("  recovery_test:"),
+    source.indexOf("  canary_schema:"),
+  );
 
   assert.match(source, /volumeInstanceBackupList/);
-  assert.match(source, /pg_dump "\$PRODUCTION_DATABASE_URL"/);
-  assert.match(source, /pg_restore --exit-on-error/);
+  assert.match(recoverySource, /image: postgres:18/);
+  assert.match(recoverySource, /docker exec "\$RESTORE_CONTAINER_ID"/);
+  assert.match(recoverySource, /pg_dump "\$PRODUCTION_DATABASE_URL"/);
+  assert.match(recoverySource, /docker exec -i "\$RESTORE_CONTAINER_ID"/);
+  assert.match(recoverySource, /pg_restore --exit-on-error/);
+  assert.doesNotMatch(recoverySource, /apt-get install --yes postgresql-client/);
   assert.match(source, /needs: \[plan, recovery_test\]/);
   assert.match(source, /needs: \[plan, recovery_test, canary_schema\]/);
   assert.match(
