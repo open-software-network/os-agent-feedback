@@ -191,7 +191,8 @@ The caller supplies only:
 
 - `operation`: a required, already-normalized tool name;
 - `outcome`: required `success` or `error` completion state;
-- optional opaque `customerRef` and `sessionRef` values selected by the product; and
+- optional opaque `accountRef`, `userRef`, `anonymousRef`, legacy `customerRef`, and `sessionRef`
+  values selected by the product; and
 - an optional diagnostic `runtimeHint`.
 
 APIs should express these inputs idiomatically in each language. They must not accept a raw telemetry
@@ -211,16 +212,25 @@ The SDK maps `success` to status code `200` and `error` to `500`. These syntheti
 tool completion, not HTTP transport or the user's assessment of the product. An ordinary completed MCP
 result is successful, while a result marked `isError` or a thrown/rejected handler call is an error. A
 thrown call is recorded before the adapter rethrows the original error unchanged. Arguments, results,
-exception text, prompts, transcripts, credentials, identities, and raw product data never enter telemetry.
+exception text, prompts, transcripts, credentials, raw identity data, and raw product data never enter
+telemetry.
 
-The SDK trims optional references once, removing ASCII whitespace U+0009–U+000D and U+0020 from both ends.
-A reference is valid only when the trimmed value contains 1–160 ASCII characters matching
-`^[A-Za-z0-9_.:-]+$`. Empty or invalid references, including extractor failures, are omitted rather than
-truncated and do not suppress the interaction. `customerRef` is optional customer context and never groups
-sessions. A valid `sessionRef` is explicit product-workflow continuity evidence and causes the SDK to emit
-`sessionSource: "mcp"`; otherwise both fields are omitted and the interaction remains unlinked.
-Result-derived canonical product handles, including cache or dedup hits, are valid evidence. MCP transport
-session IDs are not product-workflow evidence and adapters must never use them as a fallback.
+The SDK trims optional identity references and `sessionRef` once, removing ASCII whitespace
+U+0009–U+000D and U+0020 from both ends. A reference is valid only when the trimmed value contains 1–160
+ASCII characters matching `^[A-Za-z0-9_.:-]+$`. Empty or invalid references, including extractor failures,
+are omitted rather than truncated and do not suppress the interaction. `accountRef` and `userRef` require
+authenticated product context; `anonymousRef` requires a stable, first-party, product-scoped identifier and
+may accompany verified identity to authorize a deterministic progressive link. `customerRef` is retained
+for legacy compatibility and is never synthesized from a richer identity field. When valid `customerRef`
+conflicts with retained richer identity, the SDK omits only `customerRef`; it keeps the typed references and
+the interaction. A matching `accountRef` and `customerRef` may be retained together. Identity references
+never group sessions.
+
+A valid `sessionRef` is explicit product-workflow continuity evidence and causes the SDK to emit
+`sessionSource: "mcp"`; otherwise both fields are omitted and the interaction remains unlinked. A canonical
+product session handle that becomes available in the completed result, including after a cache or dedup hit,
+is valid session evidence. MCP transport session IDs are not product-workflow evidence and adapters must
+never use them as a fallback.
 
 The SDK applies the same ASCII-whitespace trimming to `runtimeHint`, omits empty values or values longer
 than 200 Unicode code points, and emits `runtimeHintSource: "mcp"` only with a retained hint. A runtime hint
@@ -242,8 +252,9 @@ For every valid completion while instrumentation is enabled, the SDK owns and en
 }
 ```
 
-Valid optional values add `customerRef`, `sessionRef` plus `sessionSource: "mcp"`, and `runtimeHint` plus
-`runtimeHintSource: "mcp"`. Missing fields are omitted rather than serialized as null or empty strings.
+Valid optional identity values add `accountRef`, `userRef`, `anonymousRef`, or legacy `customerRef`; a valid
+`sessionRef` adds `sessionSource: "mcp"`; and a valid `runtimeHint` adds `runtimeHintSource: "mcp"`. Missing
+fields are omitted rather than serialized as null or empty strings.
 Sequence values increase for accepted completions owned by one runtime but need not be gap-free after
 validation failures or queue drops. Automatic adapters may also emit a nonnegative `durationMs` measured
 internally around the tool invocation. The constrained caller cannot supply duration, and a manual recorder
@@ -253,7 +264,8 @@ Recording reuses the SDK's process-level bounded queue, retry policy, and shutdo
 enqueueing are in-memory and no telemetry request is awaited before returning the product result. Queue
 saturation or delivery failure may drop telemetry but cannot become a completion error. Once shutdown
 begins, new completions may be ignored. Bounded shutdown is the shared lifecycle checkpoint; a public
-`flush` operation remains language-specific.
+`flush` operation remains language-specific. Delivery retries reuse the exact queued event, including its
+`interactionId`, `sequence`, and `occurredAt`; they do not create another completion.
 
 Telemetry is independent of feedback consent and result decoration. Consent lookup or envelope preparation
 failure may omit feedback instructions but must not omit a valid interaction. First-class adapters that

@@ -41,15 +41,24 @@ function errorKind(input) {
 
 function expectedEvent(input) {
   if (errorKind(input)) return null;
-  const customerRef = optionalReference(input.customerRef);
+  const accountRef = optionalReference(input.accountRef);
+  const userRef = optionalReference(input.userRef);
+  const anonymousRef = optionalReference(input.anonymousRef);
+  let customerRef = optionalReference(input.customerRef);
   const sessionRef = optionalReference(input.sessionRef);
   const runtimeHint = optionalRuntimeHint(input.runtimeHint);
+  if (customerRef && (accountRef || userRef) && accountRef !== customerRef) {
+    customerRef = undefined;
+  }
   return {
     surface: "mcp",
     operation: input.operation,
     statusCode: input.outcome === "success" ? 200 : 500,
     classification: "confirmed",
     confirmationMethod: "mcp",
+    ...(accountRef ? { accountRef } : {}),
+    ...(userRef ? { userRef } : {}),
+    ...(anonymousRef ? { anonymousRef } : {}),
     ...(customerRef ? { customerRef } : {}),
     ...(sessionRef ? { sessionRef, sessionSource: "mcp" } : {}),
     ...(runtimeHint ? { runtimeHint, runtimeHintSource: "mcp" } : {}),
@@ -61,6 +70,9 @@ test("completed MCP interaction vectors lock the constrained caller and SDK-owne
   assert.deepEqual(completion.callerFields, [
     "operation",
     "outcome",
+    "accountRef",
+    "userRef",
+    "anonymousRef",
     "customerRef",
     "sessionRef",
     "runtimeHint",
@@ -79,9 +91,11 @@ test("completed MCP interaction vectors lock the constrained caller and SDK-owne
     completion.vectors.map(({ name }) => name),
     [
       "success_linked",
+      "success_progressive_identity",
       "success_result_derived_session",
       "error_unlinked",
       "invalid_optionals_fail_open",
+      "legacy_identity_conflict_fail_open",
       "trimmed_optionals",
       "runtime_hint_unicode_boundary",
       "invalid_operation",

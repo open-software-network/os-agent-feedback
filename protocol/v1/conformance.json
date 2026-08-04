@@ -19,7 +19,16 @@
   ],
   "mcpCompletion": {
     "version": 1,
-    "callerFields": ["operation", "outcome", "customerRef", "sessionRef", "runtimeHint"],
+    "callerFields": [
+      "operation",
+      "outcome",
+      "accountRef",
+      "userRef",
+      "anonymousRef",
+      "customerRef",
+      "sessionRef",
+      "runtimeHint"
+    ],
     "generatedFields": {
       "interactionId": "uuid-v4",
       "sequence": "positive-monotonic-runtime-integer",
@@ -36,7 +45,7 @@
         "input": {
           "operation": "get_summary",
           "outcome": "success",
-          "customerRef": "account_42",
+          "anonymousRef": "browser_installation_42",
           "sessionRef": "summary:canonical_42",
           "runtimeHint": "go-mcp 1.2.3"
         },
@@ -46,11 +55,32 @@
           "statusCode": 200,
           "classification": "confirmed",
           "confirmationMethod": "mcp",
-          "customerRef": "account_42",
+          "anonymousRef": "browser_installation_42",
           "sessionRef": "summary:canonical_42",
           "sessionSource": "mcp",
           "runtimeHint": "go-mcp 1.2.3",
           "runtimeHintSource": "mcp"
+        }
+      },
+      {
+        "name": "success_progressive_identity",
+        "scenario": "verified product identity co-supplied with a first-party anonymousRef",
+        "input": {
+          "operation": "get_summary",
+          "outcome": "success",
+          "accountRef": "account_42",
+          "userRef": "user_42",
+          "anonymousRef": "visitor_42"
+        },
+        "expectedEvent": {
+          "surface": "mcp",
+          "operation": "get_summary",
+          "statusCode": 200,
+          "classification": "confirmed",
+          "confirmationMethod": "mcp",
+          "accountRef": "account_42",
+          "userRef": "user_42",
+          "anonymousRef": "visitor_42"
         }
       },
       {
@@ -88,6 +118,9 @@
         "input": {
           "operation": "get_summary",
           "outcome": "success",
+          "accountRef": "account@example.com",
+          "userRef": "user/42",
+          "anonymousRef": "visitor 42",
           "customerRef": "customer@example.com",
           "sessionRef": "workflow/with/path",
           "runtimeHint": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
@@ -101,10 +134,30 @@
         }
       },
       {
+        "name": "legacy_identity_conflict_fail_open",
+        "input": {
+          "operation": "update_summary",
+          "outcome": "success",
+          "accountRef": "account_42",
+          "userRef": "user_42",
+          "customerRef": "different_account"
+        },
+        "expectedEvent": {
+          "surface": "mcp",
+          "operation": "update_summary",
+          "statusCode": 200,
+          "classification": "confirmed",
+          "confirmationMethod": "mcp",
+          "accountRef": "account_42",
+          "userRef": "user_42"
+        }
+      },
+      {
         "name": "trimmed_optionals",
         "input": {
           "operation": "update_summary",
           "outcome": "success",
+          "accountRef": "  account_42  ",
           "customerRef": "  account_42  ",
           "sessionRef": "  summary:canonical_42  ",
           "runtimeHint": "  python-mcp 2.0  "
@@ -115,6 +168,7 @@
           "statusCode": 200,
           "classification": "confirmed",
           "confirmationMethod": "mcp",
+          "accountRef": "account_42",
           "customerRef": "account_42",
           "sessionRef": "summary:canonical_42",
           "sessionSource": "mcp",
