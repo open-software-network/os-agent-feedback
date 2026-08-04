@@ -5,6 +5,8 @@ import json
 import threading
 import time
 import unittest
+import sys
+import subprocess
 from io import BytesIO
 from unittest.mock import patch
 
@@ -50,6 +52,13 @@ def capability_claims(authorization: str) -> dict:
 
 
 class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
+    def test_base_package_does_not_import_optional_mcp(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, "-c", "import agent_feedback,sys; assert 'mcp' not in sys.modules; assert 'agent_feedback.mcp' not in sys.modules"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_agent_reader_prefers_header_and_invalid_utf8_is_absent(self) -> None:
         runtime = AgentFeedback(AgentFeedbackOptions(api_key=KEY))
         body_envelope = runtime.prepare()["envelope"]
@@ -1242,11 +1251,13 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
 
     def test_telemetry_retries_transient_delivery_without_changing_event(self) -> None:
         attempts = 0
+        bodies: list[bytes] = []
         delivered: list[dict] = []
 
         def sender(_url: str, _headers: dict[str, str], body: bytes) -> None:
             nonlocal attempts
             attempts += 1
+            bodies.append(body)
             if attempts < 2:
                 raise TimeoutError("temporarily unavailable")
             delivered.append(json.loads(body))
@@ -1270,6 +1281,7 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         # further one-second backoff made this test depend on scheduler jitter.
         self.assertTrue(runtime.shutdown())
         self.assertEqual(attempts, 2)
+        self.assertEqual(bodies, [bodies[0], bodies[0]])
         self.assertEqual(delivered[0]["events"][0]["interactionId"], prepared["interactionId"])
         self.assertEqual(delivered[0]["events"][0]["sequence"], 1)
 

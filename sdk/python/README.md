@@ -110,3 +110,35 @@ HTTP feedback is best-effort for generic agents. `feedback_from_response`, `insp
 HTTP middleware defaults to `cache_mode="safe"`: responses with an explicit shared-cache policy (`public`, `max-age`, `s-maxage`, `immutable`, or `stale-while-revalidate`) are left completely unchanged. Use `cache_mode="request"` to instrument only requests carrying `Agent-Feedback-Request: 1`; both variants use `Vary` and eligible ordinary 2xx `GET`/`HEAD` responses carry a same-path-and-query discovery `Link`. Use `cache_mode="private"` when every included response is intentionally private. Every instrumented response is changed to `Cache-Control: private, no-store` because its capability is unique.
 
 Pass `feedback_mode="ask_once"` with a stable opaque `customer_ref`. HTTP responses never wait for Epode: the middleware signs a subject-bound capability locally, reads only process-local cached consent, and refreshes that cache in the background after an eligible response. Epode Companion verifies the capability and resolves the authoritative remembered decision before it asks or reports. Unknown customers receive the answer-first `approved|declined` action; Epode remembers the decision and reveals a report contract only after approval. Approved and declined responses include a scoped `manageConsent` action so an explicit user request can reverse the saved choice; declined responses remain quiet otherwise. `ask_always` uses the same two-step flow per report. Agents store no preference, and report bodies contain no consent fields.
+## Completed MCP interactions
+
+The base package has no MCP dependency. A product may record one completed
+product-tool interaction directly with the constrained API:
+
+```python
+feedback.record_interaction(
+    "create_summary", "success", account_ref="account_42", session_ref="summary:84"
+)
+feedback.flush()  # one batch (at most 50 events)
+```
+
+For automatic instrumentation, install `agent-feedback[mcp]` and use the
+official Model Context Protocol Python SDK v2. Decorator order is significant:
+
+```python
+from agent_feedback.mcp import MCPInstrumentation
+from mcp.server import MCPServer
+
+instrumentation = MCPInstrumentation(feedback, resolve_context=resolve_context)
+server = MCPServer("product", extensions=[instrumentation])
+
+@server.tool()
+@instrumentation.instrument_tool
+def product_tool(value: str):
+    return {"value": value}
+```
+
+Only explicitly decorated handler invocations are recorded. Context resolvers
+must return product-authenticated identity and product-proven canonical session
+handles; syntactically valid arguments and MCP transport sessions are not proof.
+Never return prompts, credentials, raw arguments, or raw results as context.

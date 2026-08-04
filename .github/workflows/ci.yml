@@ -21,6 +21,7 @@ jobs:
       node: ${{ steps.filter.outputs.node }}
       sdk-node: ${{ steps.filter.outputs.sdk-node }}
       sdk-packages: ${{ steps.filter.outputs.sdk-packages }}
+      sdk-python-mcp: ${{ steps.filter.outputs.sdk-python-mcp }}
       examples: ${{ steps.filter.outputs.examples }}
       web: ${{ steps.filter.outputs.web }}
       docs: ${{ steps.filter.outputs.docs }}
@@ -67,6 +68,12 @@ jobs:
               - "pnpm-workspace.yaml"
               - ".github/workflows/ci.yml"
               - ".github/workflows/sdk-release.yml"
+            sdk-python-mcp:
+              - "sdk/python/**"
+              - "examples/python-mcp/**"
+              - "protocol/v1/**"
+              - "tests/python-mcp-example-contract.test.mjs"
+              - ".github/workflows/ci.yml"
             examples:
               - "examples/**"
               - "backend/public/agent-feedback-node-*.tgz"
@@ -268,6 +275,22 @@ jobs:
           path: .artifacts/sdk-release
           if-no-files-found: error
 
+  sdk-python-mcp:
+    name: Python SDK MCP extra
+    needs: changes
+    if: needs.changes.outputs.sdk-python-mcp == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Install uv
+        uses: astral-sh/setup-uv@e92bafb6253dcd438e0484186d7669ea7a8ca1cc # v7
+      - name: Test Python SDK with MCP lower bound
+        working-directory: sdk/python
+        run: uv run --no-project --with '.[mcp]' --with 'mcp==2.0.0' -m unittest discover -s tests -v
+
   examples:
     name: Product examples
     needs: changes
@@ -413,7 +436,7 @@ jobs:
 
   ci-ok:
     name: CI
-    needs: [backend, node, sdk-node, sdk-packages, examples, web, docs, workflows]
+    needs: [backend, node, sdk-node, sdk-packages, sdk-python-mcp, examples, web, docs, workflows]
     if: always()
     runs-on: ubuntu-latest
     steps:

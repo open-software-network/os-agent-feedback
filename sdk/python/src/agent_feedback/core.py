@@ -67,6 +67,10 @@ MAX_CONCURRENT_CONSENT_WARMS = 8
 
 logger = logging.getLogger("agent_feedback")
 
+_MCP_OPERATION = re.compile(r"[A-Za-z0-9/_:.*{}-]{1,160}\Z", re.ASCII)
+_MCP_REFERENCE = re.compile(r"[A-Za-z0-9_.:-]{1,160}\Z", re.ASCII)
+_ASCII_EDGE_WHITESPACE = "\t\n\v\f\r "
+
 
 def _default_endpoint() -> str:
     return os.getenv("AGENT_FEEDBACK_URL") or DEFAULT_ENDPOINT
@@ -176,7 +180,11 @@ class _TelemetryQueue:
                 self.thread = threading.Thread(
                     target=self._run, name="agent-feedback", daemon=True
                 )
-                self.thread.start()
+                try:
+                    self.thread.start()
+                except Exception:
+                    self.thread = None
+                    raise
             self._condition.notify_all()
 
     def _run(self) -> None:
@@ -675,6 +683,106 @@ class AgentFeedback:
             event["runtimeHint"] = context["runtimeHint"]
             event["runtimeHintSource"] = "http"
         self.telemetry.push(event)
+
+    def record_interaction(
+        self,
+        operation: str,
+        outcome: str,
+        *,
+        account_ref: str | None = None,
+        user_ref: str | None = None,
+        anonymous_ref: str | None = None,
+        customer_ref: str | None = None,
+        session_ref: str | None = None,
+        runtime_hint: str | None = None,
+    ) -> None:
+        """Record one completed MCP product-tool interaction.
+
+        This deliberately constrained API is not a generic raw-event recorder.
+        IDs, completion time, sequence, status, classification, and sources are
+        owned by the SDK.
+        """
+        if not self.enabled or self.telemetry.stop.is_set():
+            return
+        self._validate_mcp_interaction(operation, outcome)
+        try:
+            self._record_mcp_interaction(
+                operation,
+                outcome,
+                account_ref=account_ref,
+                user_ref=user_ref,
+                anonymous_ref=anonymous_ref,
+                customer_ref=customer_ref,
+                session_ref=session_ref,
+                runtime_hint=runtime_hint,
+            )
+        except Exception:
+            return
+
+    @staticmethod
+    def _validate_mcp_interaction(operation: str, outcome: str) -> None:
+        if not isinstance(operation, str) or not _MCP_OPERATION.fullmatch(operation) or "://" in operation:
+            raise ValueError("invalid MCP operation")
+        if not isinstance(outcome, str) or outcome not in {"success", "error"}:
+            raise ValueError("invalid MCP outcome")
+
+    def _record_mcp_interaction(
+        self,
+        operation: str,
+        outcome: str,
+        *,
+        duration_ms: int | None = None,
+        completed_at: datetime | None = None,
+        **references: str | None,
+    ) -> None:
+        """Adapter-only projection, additionally accepting measured completion data."""
+        if not self.enabled or self.telemetry.stop.is_set():
+            return
+        self._validate_mcp_interaction(operation, outcome)
+
+        retained: dict[str, str] = {}
+        for source, wire_name in (
+            ("account_ref", "accountRef"), ("user_ref", "userRef"),
+            ("anonymous_ref", "anonymousRef"), ("customer_ref", "customerRef"),
+            ("session_ref", "sessionRef"),
+        ):
+            raw = references.get(source)
+            value = raw.strip(_ASCII_EDGE_WHITESPACE) if isinstance(raw, str) else ""
+            if _MCP_REFERENCE.fullmatch(value):
+                retained[wire_name] = value
+        customer = retained.get("customerRef")
+        if customer and (retained.get("accountRef") or retained.get("userRef")) and retained.get("accountRef") != customer:
+            retained.pop("customerRef", None)
+        hint_raw = references.get("runtime_hint")
+        hint = hint_raw.strip(_ASCII_EDGE_WHITESPACE) if isinstance(hint_raw, str) else ""
+        # Encoding rejects lone surrogates, which are not valid Python Unicode text on the wire.
+        try:
+            hint.encode("utf-8")
+        except UnicodeEncodeError:
+            hint = ""
+        if len(hint) > 200:
+            hint = ""
+
+        with self._sequence_lock:
+            self._sequence += 1
+            sequence = self._sequence
+        event: dict[str, Any] = {
+            "interactionId": str(uuid.uuid4()), "sequence": sequence, "surface": "mcp",
+            "operation": operation, "statusCode": 200 if outcome == "success" else 500,
+            "classification": "confirmed", "confirmationMethod": "mcp",
+            "occurredAt": _iso(completed_at or datetime.now(timezone.utc)), **retained,
+        }
+        if "sessionRef" in event:
+            event["sessionSource"] = "mcp"
+        if hint:
+            event.update(runtimeHint=hint, runtimeHintSource="mcp")
+        if duration_ms is not None:
+            event["durationMs"] = max(0, int(duration_ms))
+        self.telemetry.push(event)
+
+    def flush(self) -> bool:
+        """Attempt delivery of at most one batch of 50 queued events."""
+        return self.telemetry.flush()
 
     def shutdown(self) -> bool:
         """Flush pending telemetry. Returns False when a flush terminally failed."""
