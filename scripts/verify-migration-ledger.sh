@@ -169,23 +169,28 @@ IFS='|' read -r current_version failed_count <<< "$(ledger_state)"
 verify_known_checksums
 
 target_count="$(psql_value "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = ${migration_version} AND success")"
-if [[ "$mode" == "verify-before" || "$mode" == "apply" ]]; then
+if [[ "$mode" == "verify-before" ]]; then
   [[ "$current_version" == "$expected_previous_version" ]] ||
     fail "database is not at the reviewed pre-migration version"
   [[ "$target_count" == "0" ]] || fail "reviewed migration is already applied"
 fi
 
 if [[ "$mode" == "apply" ]]; then
-  command -v sqlx >/dev/null 2>&1 || fail "the pinned SQLx CLI is required to apply a migration"
-  # Expansion may inspect existing rows for a new constraint or index, but it
-  # must never wait indefinitely for a live table lock or monopolize the
-  # database. Operators can make these limits stricter, never looser, in the
-  # protected workflow environment.
-  export PGOPTIONS="${PGOPTIONS:--c lock_timeout=5000 -c statement_timeout=300000}"
-  # The psql session owns the advisory lock while SQLx performs its own normal
-  # transactional migration in a child process. Losing this session releases
-  # the lock automatically. SHELL_ERROR makes a failed SQLx child fail closed.
-  psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 <<'SQL'
+  if [[ "$current_version" == "$migration_version" && "$target_count" == "1" ]]; then
+    emit_output migration_applied false
+  else
+    [[ "$current_version" == "$expected_previous_version" && "$target_count" == "0" ]] ||
+      fail "database is neither immediately before nor exactly at the reviewed migration"
+    command -v sqlx >/dev/null 2>&1 || fail "the pinned SQLx CLI is required to apply a migration"
+    # Expansion may inspect existing rows for a new constraint or index, but it
+    # must never wait indefinitely for a live table lock or monopolize the
+    # database. Operators can make these limits stricter, never looser, in the
+    # protected workflow environment.
+    export PGOPTIONS="${PGOPTIONS:--c lock_timeout=5000 -c statement_timeout=300000}"
+    # The psql session owns the advisory lock while SQLx performs its own normal
+    # transactional migration in a child process. Losing this session releases
+    # the lock automatically. SHELL_ERROR makes a failed SQLx child fail closed.
+    psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 <<'SQL'
 SELECT pg_advisory_lock(hashtext('epode'), hashtext('additive-schema-expansion'));
 \! sqlx migrate run --source backend/migrations
 \if :SHELL_ERROR
@@ -194,6 +199,8 @@ SELECT pg_advisory_lock(hashtext('epode'), hashtext('additive-schema-expansion')
 \endif
 SELECT pg_advisory_unlock(hashtext('epode'), hashtext('additive-schema-expansion'));
 SQL
+    emit_output migration_applied true
+  fi
   current_version=""
   failed_count=""
   IFS='|' read -r current_version failed_count <<< "$(ledger_state)"

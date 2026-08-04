@@ -4,59 +4,41 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Read-only verification or the separately attested additive apply path.
+        description: Verify or retry-safely apply one additive migration.
         required: true
         default: verify-canary
         type: choice
         options:
           - verify-canary
           - apply-canary
-          - recover-canary
-          - stage-production-bridge
           - verify-production
           - apply-production
       target_sha:
-        description: Exact 40-character protected-main commit containing the reviewed migration.
-        required: true
-        type: string
-      migration_path:
-        description: Exact backend/migrations/NNNN_name.sql path at target_sha.
-        required: true
-        type: string
-      migration_sha256:
-        description: Independently reviewed lowercase SHA-256 of migration_path.
-        required: true
-        type: string
-      expected_previous_version:
-        description: Exact SQLx version that must precede this one.
+        description: Protected-main commit that adds exactly one migration.
         required: true
         type: string
       verification_state:
-        description: For verify operations, require the database state before or after the migration.
+        description: For verification, require the database immediately before or at the migration.
         required: true
         default: before
         type: choice
         options:
           - before
           - after
-      expected_schema_fingerprint:
-        description: Required for production after-state verification; lowercase SHA-256 from canary.
-        required: false
-        type: string
       backup_reference:
-        description: Apply-production only. Opaque provider backup/snapshot identifier; do not enter a URL or secret.
+        description: Apply-production only. Opaque provider backup or snapshot identifier.
         required: false
         type: string
       backup_verified_at:
-        description: Apply-production only. RFC3339 time the production backup was verified, no more than 24 hours ago.
+        description: Apply-production only. RFC3339 verification time, no more than 24 hours ago.
         required: false
         type: string
       backup_restore_test_reference:
-        description: Apply-production only. Opaque identifier for the latest successful restore test.
+        description: Apply-production only. Opaque identifier for a successful restore test.
         required: false
         type: string
       confirm_production:
-        description: Required acknowledgement for stage-production-bridge and apply-production.
+        description: Required acknowledgement for apply-production.
         required: false
         default: false
         type: boolean
@@ -64,7 +46,6 @@ on:
 permissions:
   actions: read
   contents: read
-  packages: read
 
 concurrency:
   group: epode-release-mutation
@@ -76,7 +57,7 @@ env:
 
 jobs:
   plan:
-    name: Resolve exact additive migration
+    name: Derive and review additive migration
     runs-on: ubuntu-latest
     outputs:
       target_sha: ${{ steps.review.outputs.target_sha }}
@@ -84,19 +65,9 @@ jobs:
       migration_sha256: ${{ steps.review.outputs.migration_sha256 }}
       migration_version: ${{ steps.review.outputs.migration_version }}
       expected_previous_version: ${{ steps.review.outputs.expected_previous_version }}
-      api_ref: ${{ steps.images.outputs.api_ref }}
-      api_digest: ${{ steps.images.outputs.api_digest }}
-      api_revision: ${{ steps.images.outputs.api_revision }}
-      web_ref: ${{ steps.images.outputs.web_ref }}
-      web_digest: ${{ steps.images.outputs.web_digest }}
-      web_revision: ${{ steps.images.outputs.web_revision }}
     env:
       OPERATION: ${{ inputs.operation }}
       TARGET_SHA: ${{ inputs.target_sha }}
-      MIGRATION_PATH: ${{ inputs.migration_path }}
-      EXPECTED_MIGRATION_SHA256: ${{ inputs.migration_sha256 }}
-      EXPECTED_PREVIOUS_VERSION: ${{ inputs.expected_previous_version }}
-      EXPECTED_SCHEMA_FINGERPRINT: ${{ inputs.expected_schema_fingerprint }}
       BACKUP_REFERENCE: ${{ inputs.backup_reference }}
       BACKUP_VERIFIED_AT: ${{ inputs.backup_verified_at }}
       BACKUP_RESTORE_TEST_REFERENCE: ${{ inputs.backup_restore_test_reference }}
@@ -109,8 +80,7 @@ jobs:
           ref: ${{ inputs.target_sha }}
           fetch-depth: 0
 
-      - name: Require protected main, exact CI, and recovery evidence
-        id: review
+      - name: Require protected main and exact successful CI
         run: |
           set -euo pipefail
           if [[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ || "$(git rev-parse HEAD)" != "$TARGET_SHA" ]]; then
@@ -133,27 +103,43 @@ jobs:
             exit 1
           fi
 
-          if [[ "$OPERATION" == "apply-canary" || "$OPERATION" == "recover-canary" \
-            || "$OPERATION" == "stage-production-bridge" \
-            || "$OPERATION" == "apply-production" ]]; then
-            changed_paths="$(git diff --name-only "${TARGET_SHA}^1" "$TARGET_SHA")"
-            if [[ "$changed_paths" != "$MIGRATION_PATH" ]]; then
-              echo "::error::Mutation operations require a migration-marker commit whose only first-parent change is $MIGRATION_PATH."
-              exit 1
-            fi
-          fi
-
-          if [[ "$OPERATION" == "apply-production" || "$OPERATION" == "stage-production-bridge" ]]; then
-            if [[ "$CONFIRM_PRODUCTION" != "true" ]]; then
-              echo "::error::$OPERATION requires confirm_production."
-              exit 1
-            fi
-          elif [[ "$CONFIRM_PRODUCTION" == "true" ]]; then
-            echo "::error::confirm_production is accepted only by production mutation operations."
+      - name: Derive the single added migration
+        id: review
+        run: |
+          set -euo pipefail
+          mapfile -t migration_changes < <(
+            git diff --name-status "${TARGET_SHA}^1" "$TARGET_SHA" -- backend/migrations
+          )
+          if [[ "${#migration_changes[@]}" -ne 1 ]]; then
+            echo "::error::target_sha must add exactly one migration and may not modify earlier migrations."
             exit 1
           fi
+          read -r change migration_path extra <<< "${migration_changes[0]}"
+          if [[ "$change" != "A" || -n "${extra:-}" \
+            || ! "$migration_path" =~ ^backend/migrations/[0-9]{4}_[A-Za-z0-9_]+\.sql$ ]]; then
+            echo "::error::The migration ledger change must be one newly added four-digit SQL file."
+            exit 1
+          fi
+          migration_prefix="$(basename "$migration_path" | cut -d_ -f1)"
+          migration_version="$((10#$migration_prefix))"
+          expected_previous_version="$((migration_version - 1))"
+          migration_sha256="$(sha256sum "$migration_path" | awk '{print $1}')"
+          {
+            echo "target_sha=$TARGET_SHA"
+            echo "migration_path=$migration_path"
+            echo "migration_sha256=$migration_sha256"
+            echo "migration_version=$migration_version"
+            echo "expected_previous_version=$expected_previous_version"
+          } >> "$GITHUB_OUTPUT"
 
+      - name: Validate production recovery acknowledgement
+        run: |
+          set -euo pipefail
           if [[ "$OPERATION" == "apply-production" ]]; then
+            [[ "$CONFIRM_PRODUCTION" == "true" ]] || {
+              echo "::error::apply-production requires confirm_production."
+              exit 1
+            }
             if [[ ! "$BACKUP_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9_.:/-]{7,200}$ \
               || ! "$BACKUP_RESTORE_TEST_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9_.:/-]{7,200}$ ]]; then
               echo "::error::Opaque backup and restore-test references are required."
@@ -170,593 +156,50 @@ jobs:
               echo "::error::backup_verified_at must be valid RFC3339 within the last 24 hours."
               exit 1
             fi
-          elif [[ -n "$BACKUP_REFERENCE" || -n "$BACKUP_VERIFIED_AT" \
-            || -n "$BACKUP_RESTORE_TEST_REFERENCE" ]]; then
-            echo "::error::Recovery acknowledgements are accepted only by apply-production."
-            exit 1
-          fi
-
-          requires_fingerprint=false
-          if [[ "$OPERATION" == "apply-production" \
-            || ("$OPERATION" == "verify-production" && "${{ inputs.verification_state }}" == "after") ]]; then
-            requires_fingerprint=true
-          fi
-          if [[ "$requires_fingerprint" == "true" \
-            && ! "$EXPECTED_SCHEMA_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "::error::Production after-state verification and apply require the reviewed canary fingerprint."
-            exit 1
-          fi
-
-          MIGRATION_MODE=lint scripts/verify-migration-ledger.sh
-          migration_version="$((10#$(basename "$MIGRATION_PATH" | cut -d_ -f1)))"
-          {
-            echo "target_sha=$TARGET_SHA"
-            echo "migration_path=$MIGRATION_PATH"
-            echo "migration_sha256=$EXPECTED_MIGRATION_SHA256"
-            echo "migration_version=$migration_version"
-            echo "expected_previous_version=$EXPECTED_PREVIOUS_VERSION"
-          } >> "$GITHUB_OUTPUT"
-          {
-            echo "### Reviewed database expansion"
-            echo "- **Operation:** \`$OPERATION\`"
-            echo "- **Commit:** \`$TARGET_SHA\`"
-            echo "- **Migration:** \`$MIGRATION_PATH\`"
-            echo "- **SHA-256:** \`$EXPECTED_MIGRATION_SHA256\`"
-            echo "- **Version:** \`$EXPECTED_PREVIOUS_VERSION -> $migration_version\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-          if [[ "$OPERATION" == "apply-production" ]]; then
-            {
-              echo "- **Backup evidence:** \`$BACKUP_REFERENCE\` at \`$BACKUP_VERIFIED_AT\`"
-              echo "- **Restore-test evidence:** \`$BACKUP_RESTORE_TEST_REFERENCE\`"
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Set up Docker Buildx for bridge staging
-        if: inputs.operation == 'stage-production-bridge'
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-
-      - name: Log in to GHCR for bridge resolution
-        if: inputs.operation == 'stage-production-bridge'
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Resolve the immutable migration-marker image pair
-        id: images
-        if: inputs.operation == 'stage-production-bridge'
-        env:
-          TARGET_SHA: ${{ inputs.target_sha }}
-        run: |
-          set -euo pipefail
-          for artifact in api web; do
-            ref="ghcr.io/open-software-network/os-epode-${artifact}:${TARGET_SHA:0:7}"
-            docker buildx imagetools inspect "$ref" --raw >/dev/null
-            digest="$(
-              docker buildx imagetools inspect "$ref" \
-                --format '{{ json .Manifest }}' | jq -r '.digest // empty'
-            )"
-            revision="$(
-              docker buildx imagetools inspect "$ref" \
-                --format '{{ json .Image }}' \
-                | jq -r 'first(.. | objects | select(.config?.Labels?["org.opencontainers.image.revision"] != null) | .config.Labels["org.opencontainers.image.revision"]) // empty'
-            )"
-            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ || "$revision" != "$TARGET_SHA" ]]; then
-              echo "::error::$ref is not the exact immutable target revision."
-              exit 1
-            fi
-            {
-              echo "${artifact}_ref=$ref"
-              echo "${artifact}_digest=$digest"
-              echo "${artifact}_revision=$revision"
-            } >> "$GITHUB_OUTPUT"
-            printf -v "${artifact}_revision" '%s' "$revision"
-          done
-          if [[ "$api_revision" != "$web_revision" ]]; then
-            echo "::error::The migration-marker API and web images have different revisions."
-            exit 1
-          fi
-
-      - name: Preserve every previously published hosted artifact
-        if: inputs.operation == 'stage-production-bridge'
-        env:
-          API_REF: ${{ steps.images.outputs.api_ref }}
-          API_DIGEST: ${{ steps.images.outputs.api_digest }}
-        run: bash scripts/verify-image-artifact-ledger.sh "${API_REF}@${API_DIGEST}"
-
-  stage_production_bridge:
-    name: Stage migration-marker bridge in production
-    needs: plan
-    if: inputs.operation == 'stage-production-bridge'
-    runs-on: ubuntu-latest
-    environment: production
-    permissions:
-      contents: read
-      packages: write
-    env:
-      REGISTRY: ghcr.io
-      RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
-      API_SERVICE: ${{ vars.RAILWAY_API_SERVICE || 'epode-api' }}
-      WEB_SERVICE: ${{ vars.RAILWAY_WEB_SERVICE || 'epode-web' }}
-      CANARY_API_SERVICE: ${{ vars.RAILWAY_CANARY_API_SERVICE || 'agent-feedback-api' }}
-      CANARY_WEB_SERVICE: ${{ vars.RAILWAY_CANARY_WEB_SERVICE || 'epode-web' }}
-      API_ORIGIN: ${{ vars.PRODUCTION_API_ORIGIN || 'https://api.epode.ai' }}
-      WEB_ORIGIN: ${{ vars.PRODUCTION_WEB_ORIGIN || 'https://app.epode.ai' }}
-      WEB_API_URL: ${{ vars.PRODUCTION_WEB_API_URL || 'http://epode-api.railway.internal:8080' }}
-      TARGET_SHA: ${{ needs.plan.outputs.target_sha }}
-      MIGRATION_PATH: ${{ needs.plan.outputs.migration_path }}
-      EXPECTED_MIGRATION_SHA256: ${{ needs.plan.outputs.migration_sha256 }}
-      MIGRATION_VERSION: ${{ needs.plan.outputs.migration_version }}
-      TARGET_API_REF: ${{ needs.plan.outputs.api_ref }}
-      TARGET_API_DIGEST: ${{ needs.plan.outputs.api_digest }}
-      TARGET_WEB_REF: ${{ needs.plan.outputs.web_ref }}
-      TARGET_WEB_DIGEST: ${{ needs.plan.outputs.web_digest }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ needs.plan.outputs.target_sha }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: "22"
-
-      - name: Install pinned Railway CLI
-        run: npm install --global "@railway/cli@${RAILWAY_CLI_VERSION}"
-
-      - name: Validate production routing before bridge staging
-        id: routing
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [[ ! "$API_ORIGIN" =~ ^https://[^/]+$ || ! "$WEB_ORIGIN" =~ ^https://[^/]+$ ]]; then
-            echo "::error::Production origins must be origin-only HTTPS URLs."
-            exit 1
-          fi
-          api_variables="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment production --service "$API_SERVICE" --json)"
-          web_variables="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment production --service "$WEB_SERVICE" --json)"
-          jq -e --arg web "$WEB_ORIGIN" \
-            '.PUBLIC_BASE_URL == $web and .WEB_APP_URL == $web' <<< "$api_variables" >/dev/null || {
-            echo "::error::$API_SERVICE public routing is not the reviewed production web origin."
-            exit 1
-          }
-          jq -e --arg api "$WEB_API_URL" '.API_URL == $api' <<< "$web_variables" >/dev/null || {
-            echo "::error::$WEB_SERVICE API_URL is not the reviewed production API origin."
-            exit 1
-          }
-          accounts_url="$(jq -r '.OS_ACCOUNTS_URL // empty' <<< "$api_variables")"
-          if [[ ! "$accounts_url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]]; then
-            echo "::error::$API_SERVICE has no valid OS_ACCOUNTS_URL."
-            exit 1
-          fi
-          echo "accounts_url=${accounts_url%/}" >> "$GITHUB_OUTPUT"
-
-      - name: Verify the exact pair and migration passed expanded canary
-        id: canary
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_CANARY_TOKEN }}
-        run: |
-          set -euo pipefail
-          attestation="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$CANARY_API_SERVICE" --json)"
-          jq -e \
-            --arg revision "$TARGET_SHA" \
-            --arg api_ref "$TARGET_API_REF" \
-            --arg api_digest "$TARGET_API_DIGEST" \
-            --arg web_ref "$TARGET_WEB_REF" \
-            --arg web_digest "$TARGET_WEB_DIGEST" \
-            --arg path "$MIGRATION_PATH" \
-            --arg sha "$EXPECTED_MIGRATION_SHA256" \
-            --arg version "$MIGRATION_VERSION" \
-            '.EPODE_CANARY_STATUS == "verified"
-              and .EPODE_CANARY_REVISION == $revision
-              and .EPODE_CANARY_API_REF == $api_ref
-              and .EPODE_CANARY_API_DIGEST == $api_digest
-              and .EPODE_CANARY_WEB_REF == $web_ref
-              and .EPODE_CANARY_WEB_DIGEST == $web_digest
-              and .EPODE_MIGRATION_STATUS == "verified"
-              and .EPODE_MIGRATION_REVISION == $revision
-              and .EPODE_MIGRATION_PATH == $path
-              and .EPODE_MIGRATION_SHA256 == $sha
-              and .EPODE_MIGRATION_VERSION == $version
-              and .EPODE_MIGRATION_BRIDGE_MAX_VERSION == $version
-              and .EPODE_MIGRATION_BRIDGE_REF == $api_ref
-              and .EPODE_MIGRATION_BRIDGE_DIGEST == $api_digest
-              and (.EPODE_MIGRATION_SCHEMA_FINGERPRINT | test("^[0-9a-f]{64}$"))
-              and (.EPODE_MIGRATION_BRIDGE_DEPLOYMENT_ID | type == "string" and length > 0)
-              and (.EPODE_CANARY_WEB_DEPLOYMENT_ID | type == "string" and length > 0)' <<< "$attestation" >/dev/null || {
-            echo "::error::The exact migration-marker pair has no complete expanded-canary attestation."
-            exit 1
-          }
-
-          services="$(railway service list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --json)"
-          api_active_id="$(jq -r --arg service "$CANARY_API_SERVICE" 'first(.[] | select(.name == $service) | .deploymentId) // empty' <<< "$services")"
-          web_active_id="$(jq -r --arg service "$CANARY_WEB_SERVICE" 'first(.[] | select(.name == $service) | .deploymentId) // empty' <<< "$services")"
-          api_attested_id="$(jq -r '.EPODE_MIGRATION_BRIDGE_DEPLOYMENT_ID' <<< "$attestation")"
-          web_attested_id="$(jq -r '.EPODE_CANARY_WEB_DEPLOYMENT_ID' <<< "$attestation")"
-          if [[ "$api_active_id" != "$api_attested_id" || "$web_active_id" != "$web_attested_id" ]]; then
-            echo "::error::The active canary pair changed after its migration evidence was recorded."
-            exit 1
-          fi
-          for artifact in api web; do
-            if [[ "$artifact" == "api" ]]; then
-              service="$CANARY_API_SERVICE"
-              active_id="$api_active_id"
-              expected_ref="$TARGET_API_REF"
-              expected_digest="$TARGET_API_DIGEST"
-            else
-              service="$CANARY_WEB_SERVICE"
-              active_id="$web_active_id"
-              expected_ref="$TARGET_WEB_REF"
-              expected_digest="$TARGET_WEB_DIGEST"
-            fi
-            deployments="$(railway deployment list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$service" --limit 100 --json)"
-            active_ref="$(jq -r --arg id "$active_id" 'first(.[] | select(.id == $id) | .meta.image) // empty' <<< "$deployments")"
-            active_digest="$(jq -r --arg id "$active_id" 'first(.[] | select(.id == $id) | .meta.imageDigest) // empty' <<< "$deployments")"
-            active_status="$(jq -r --arg id "$active_id" 'first(.[] | select(.id == $id) | .status) // empty' <<< "$deployments")"
-            if [[ "$active_status" != "SUCCESS" || "$active_ref" != "$expected_ref" || "$active_digest" != "$expected_digest" ]]; then
-              echo "::error::Active canary $service is not the exact attested migration-marker image."
-              exit 1
-            fi
-          done
-          {
-            echo "schema_fingerprint=$(jq -r '.EPODE_MIGRATION_SCHEMA_FINGERPRINT' <<< "$attestation")"
-            echo "migration_run_id=$(jq -r '.EPODE_MIGRATION_RUN_ID' <<< "$attestation")"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Capture the complete restorable production pair
-        id: previous_bridge
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: |
-          set -euo pipefail
-          services="$(railway service list --project "$RAILWAY_PROJECT_ID" --environment production --json)"
-          for artifact in api web; do
-            if [[ "$artifact" == "api" ]]; then
-              service="$API_SERVICE"
-              target_ref="$TARGET_API_REF"
-              target_digest="$TARGET_API_DIGEST"
-            else
-              service="$WEB_SERVICE"
-              target_ref="$TARGET_WEB_REF"
-              target_digest="$TARGET_WEB_DIGEST"
-            fi
-            count="$(jq --arg service "$service" '[.[] | select(.name == $service)] | length' <<< "$services")"
-            [[ "$count" == "1" ]] || { echo "::error::Expected exactly one production service named $service."; exit 1; }
-            active_id="$(jq -r --arg service "$service" 'first(.[] | select(.name == $service) | .deploymentId) // empty' <<< "$services")"
-            deployments="$(railway deployment list --project "$RAILWAY_PROJECT_ID" --environment production --service "$service" --limit 100 --json)"
-            previous_ref="$(jq -r --arg id "$active_id" 'first(.[] | select(.id == $id) | .meta.image) // empty' <<< "$deployments")"
-            previous_digest="$(jq -r --arg id "$active_id" 'first(.[] | select(.id == $id) | .meta.imageDigest) // empty' <<< "$deployments")"
-            previous_status="$(jq -r --arg id "$active_id" 'first(.[] | select(.id == $id) | .status) // empty' <<< "$deployments")"
-            expected_image="$REGISTRY/open-software-network/os-epode-${artifact}"
-            previous_tag="${previous_ref#"${expected_image}:"}"
-            if [[ "$previous_status" != "SUCCESS" || "$previous_tag" == "$previous_ref" \
-              || ! "$previous_tag" =~ ^[0-9a-f]{7}$ || ! "$previous_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-              echo "::error::Active $service is not a restorable immutable Epode deployment."
-              exit 1
-            fi
-            registry_digest="$(docker buildx imagetools inspect "$previous_ref" --format '{{ json .Manifest }}' | jq -r '.digest // empty')"
-            [[ "$registry_digest" == "$previous_digest" ]] || { echo "::error::$previous_ref no longer resolves to its deployed digest."; exit 1; }
-            production_digest="$(docker buildx imagetools inspect "${expected_image}:production" --format '{{ json .Manifest }}' | jq -r '.digest // empty')"
-            if [[ "$production_digest" != "$previous_digest" \
-              && ! ("$previous_ref" == "$target_ref" && "$previous_digest" == "$target_digest") ]]; then
-              echo "::error::The active $service is not identified by its recoverable production tag."
-              exit 1
-            fi
-            {
-              echo "${artifact}_ref=$previous_ref"
-              echo "${artifact}_digest=$previous_digest"
-            } >> "$GITHUB_OUTPUT"
-          done
-
-      - name: Mark production bridge staging pending
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: |
-          railway variable set \
-            "EPODE_PRODUCTION_BRIDGE_STATUS=pending" \
-            "EPODE_PRODUCTION_BRIDGE_REVISION=$TARGET_SHA" \
-            "EPODE_PRODUCTION_BRIDGE_API_REF=$TARGET_API_REF" \
-            "EPODE_PRODUCTION_BRIDGE_API_DIGEST=$TARGET_API_DIGEST" \
-            "EPODE_PRODUCTION_BRIDGE_WEB_REF=$TARGET_WEB_REF" \
-            "EPODE_PRODUCTION_BRIDGE_WEB_DIGEST=$TARGET_WEB_DIGEST" \
-            "EPODE_PRODUCTION_BRIDGE_MIGRATION_PATH=$MIGRATION_PATH" \
-            "EPODE_PRODUCTION_BRIDGE_MIGRATION_SHA256=$EXPECTED_MIGRATION_SHA256" \
-            "EPODE_PRODUCTION_BRIDGE_MIGRATION_VERSION=$MIGRATION_VERSION" \
-            "EPODE_MIGRATION_BRIDGE_MAX_VERSION=$MIGRATION_VERSION" \
-            "EPODE_PRODUCTION_BRIDGE_RUN_ID=${{ github.run_id }}" \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment production \
-            --service "$API_SERVICE" \
-            --skip-deploys \
-            --json >/dev/null
-
-      - name: Stage production API bridge
-        id: stage_api_bridge
-        continue-on-error: true
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: bash scripts/railway-deploy-image.sh production "$API_SERVICE" "$TARGET_API_REF" "$TARGET_API_DIGEST"
-
-      - name: Verify staged API health before changing web
-        id: stage_api_health
-        if: steps.stage_api_bridge.outcome == 'success'
-        continue-on-error: true
-        run: curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 5 "$API_ORIGIN/api/health" >/dev/null
-
-      - name: Stage production web bridge
-        id: stage_web_bridge
-        if: steps.stage_api_bridge.outcome == 'success' && steps.stage_api_health.outcome == 'success'
-        continue-on-error: true
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: bash scripts/railway-deploy-image.sh production "$WEB_SERVICE" "$TARGET_WEB_REF" "$TARGET_WEB_DIGEST"
-
-      - name: Restore API after incomplete bridge staging
-        id: restore_stage_api
-        if: >-
-          always() && (
-            steps.stage_api_bridge.outcome != 'success' ||
-            steps.stage_api_health.outcome != 'success' ||
-            steps.stage_web_bridge.outcome != 'success'
-          )
-        continue-on-error: true
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: >-
-          bash scripts/railway-deploy-image.sh production "$API_SERVICE"
-          "${{ steps.previous_bridge.outputs.api_ref }}"
-          "${{ steps.previous_bridge.outputs.api_digest }}"
-
-      - name: Restore web after incomplete bridge staging
-        id: restore_stage_web
-        if: always() && steps.stage_web_bridge.outcome == 'failure'
-        continue-on-error: true
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: >-
-          bash scripts/railway-deploy-image.sh production "$WEB_SERVICE"
-          "${{ steps.previous_bridge.outputs.web_ref }}"
-          "${{ steps.previous_bridge.outputs.web_digest }}"
-
-      - name: Fail incomplete bridge staging
-        if: >-
-          always() && (
-            steps.stage_api_bridge.outcome != 'success' ||
-            steps.stage_api_health.outcome != 'success' ||
-            steps.stage_web_bridge.outcome != 'success'
-          )
-        run: |
-          if [[ "${{ steps.restore_stage_api.outcome }}" != "success" \
-            || ("${{ steps.restore_stage_web.outcome }}" != "success" && "${{ steps.restore_stage_web.outcome }}" != "skipped") ]]; then
-            echo "::error::Bridge staging failed and at least one restoration failed. Immediate operator intervention is required."
           else
-            echo "::error::Bridge staging failed. Every changed service was restored; the schema was not mutated."
+            if [[ "$CONFIRM_PRODUCTION" == "true" || -n "$BACKUP_REFERENCE" \
+              || -n "$BACKUP_VERIFIED_AT" || -n "$BACKUP_RESTORE_TEST_REFERENCE" ]]; then
+              echo "::error::Recovery acknowledgements are accepted only by apply-production."
+              exit 1
+            fi
           fi
-          exit 1
 
-      - name: Verify staged production health, authentication, and artifacts
-        id: stage_smoke
-        if: steps.stage_web_bridge.outcome == 'success'
-        continue-on-error: true
+      - name: Lint the derived additive migration
         env:
-          ACCOUNTS_URL: ${{ steps.routing.outputs.accounts_url }}
+          MIGRATION_MODE: lint
+          MIGRATION_PATH: ${{ steps.review.outputs.migration_path }}
+          EXPECTED_MIGRATION_SHA256: ${{ steps.review.outputs.migration_sha256 }}
+          EXPECTED_PREVIOUS_VERSION: ${{ steps.review.outputs.expected_previous_version }}
+        run: scripts/verify-migration-ledger.sh
+
+      - name: Summarize the reviewed migration
         run: |
-          set -euo pipefail
-          curl --fail --silent --show-error --max-time 20 "$API_ORIGIN/api/health" >/dev/null
-          bash scripts/verify-public-integration-surface.sh "$WEB_ORIGIN" "$ACCOUNTS_URL"
-
-      - name: Restore API after failed bridge smoke
-        id: restore_smoke_api
-        if: always() && steps.stage_smoke.outcome == 'failure'
-        continue-on-error: true
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: >-
-          bash scripts/railway-deploy-image.sh production "$API_SERVICE"
-          "${{ steps.previous_bridge.outputs.api_ref }}"
-          "${{ steps.previous_bridge.outputs.api_digest }}"
-
-      - name: Restore web after failed bridge smoke
-        id: restore_smoke_web
-        if: always() && steps.stage_smoke.outcome == 'failure'
-        continue-on-error: true
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: >-
-          bash scripts/railway-deploy-image.sh production "$WEB_SERVICE"
-          "${{ steps.previous_bridge.outputs.web_ref }}"
-          "${{ steps.previous_bridge.outputs.web_digest }}"
-
-      - name: Fail a bridge smoke that required restoration
-        if: always() && steps.stage_smoke.outcome == 'failure'
-        run: |
-          if [[ "${{ steps.restore_smoke_api.outcome }}" != "success" || "${{ steps.restore_smoke_web.outcome }}" != "success" ]]; then
-            echo "::error::Bridge smoke failed and at least one restoration failed. Immediate operator intervention is required."
-          else
-            echo "::error::Bridge smoke failed. The previous service pair was restored; the schema was not mutated."
-          fi
-          exit 1
-
-      - name: Move API production tag after bridge smoke
-        id: stage_tag_api
-        if: steps.stage_smoke.outcome == 'success'
-        continue-on-error: true
-        run: >-
-          docker buildx imagetools create
-          --tag "$REGISTRY/open-software-network/os-epode-api:production"
-          "$REGISTRY/open-software-network/os-epode-api@$TARGET_API_DIGEST"
-
-      - name: Move web production tag after API tag
-        id: stage_tag_web
-        if: steps.stage_tag_api.outcome == 'success'
-        continue-on-error: true
-        run: >-
-          docker buildx imagetools create
-          --tag "$REGISTRY/open-software-network/os-epode-web:production"
-          "$REGISTRY/open-software-network/os-epode-web@$TARGET_WEB_DIGEST"
-
-      - name: Verify staged production tags by digest
-        id: stage_tag_readback
-        if: steps.stage_tag_api.outcome == 'success' && steps.stage_tag_web.outcome == 'success'
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          for artifact in api web; do
-            if [[ "$artifact" == "api" ]]; then expected="$TARGET_API_DIGEST"; else expected="$TARGET_WEB_DIGEST"; fi
-            actual="$(docker buildx imagetools inspect "$REGISTRY/open-software-network/os-epode-${artifact}:production" --format '{{ json .Manifest }}' | jq -r '.digest // empty')"
-            [[ "$actual" == "$expected" ]] || { echo "::error::Production $artifact tag does not match staged digest."; exit 1; }
-          done
-
-      - name: Restore prior tags after incomplete bridge tag movement
-        id: restore_stage_tags
-        if: >-
-          always() && steps.stage_smoke.outcome == 'success' && (
-            steps.stage_tag_api.outcome != 'success' ||
-            steps.stage_tag_web.outcome != 'success' ||
-            steps.stage_tag_readback.outcome != 'success'
-          )
-        continue-on-error: true
-        run: |
-          set +e
-          status=0
-          docker buildx imagetools create \
-            --tag "$REGISTRY/open-software-network/os-epode-api:production" \
-            "$REGISTRY/open-software-network/os-epode-api@${{ steps.previous_bridge.outputs.api_digest }}" || status=1
-          docker buildx imagetools create \
-            --tag "$REGISTRY/open-software-network/os-epode-web:production" \
-            "$REGISTRY/open-software-network/os-epode-web@${{ steps.previous_bridge.outputs.web_digest }}" || status=1
-          exit "$status"
-
-      - name: Restore prior services after incomplete bridge tag movement
-        id: restore_stage_services
-        if: >-
-          always() && steps.stage_smoke.outcome == 'success' && (
-            steps.stage_tag_api.outcome != 'success' ||
-            steps.stage_tag_web.outcome != 'success' ||
-            steps.stage_tag_readback.outcome != 'success'
-          )
-        continue-on-error: true
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: |
-          set +e
-          status=0
-          bash scripts/railway-deploy-image.sh production "$API_SERVICE" \
-            "${{ steps.previous_bridge.outputs.api_ref }}" \
-            "${{ steps.previous_bridge.outputs.api_digest }}" || status=1
-          bash scripts/railway-deploy-image.sh production "$WEB_SERVICE" \
-            "${{ steps.previous_bridge.outputs.web_ref }}" \
-            "${{ steps.previous_bridge.outputs.web_digest }}" || status=1
-          exit "$status"
-
-      - name: Fail incomplete bridge tag movement
-        if: >-
-          always() && steps.stage_smoke.outcome == 'success' && (
-            steps.stage_tag_api.outcome != 'success' ||
-            steps.stage_tag_web.outcome != 'success' ||
-            steps.stage_tag_readback.outcome != 'success'
-          )
-        run: |
-          if [[ "${{ steps.restore_stage_tags.outcome }}" != "success" || "${{ steps.restore_stage_services.outcome }}" != "success" ]]; then
-            echo "::error::Bridge tag movement failed and restoration was incomplete. Immediate operator intervention is required."
-          else
-            echo "::error::Bridge tag movement failed. The prior tags and service pair were restored."
-          fi
-          exit 1
-
-      - name: Record exact staged production bridge attestation
-        if: steps.stage_tag_readback.outcome == 'success'
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: |
-          set -euo pipefail
-          railway variable set \
-            "EPODE_PRODUCTION_BRIDGE_STATUS=verified" \
-            "EPODE_PRODUCTION_BRIDGE_REVISION=$TARGET_SHA" \
-            "EPODE_PRODUCTION_BRIDGE_API_REF=$TARGET_API_REF" \
-            "EPODE_PRODUCTION_BRIDGE_API_DIGEST=$TARGET_API_DIGEST" \
-            "EPODE_PRODUCTION_BRIDGE_API_DEPLOYMENT_ID=${{ steps.stage_api_bridge.outputs.deployment_id }}" \
-            "EPODE_PRODUCTION_BRIDGE_WEB_REF=$TARGET_WEB_REF" \
-            "EPODE_PRODUCTION_BRIDGE_WEB_DIGEST=$TARGET_WEB_DIGEST" \
-            "EPODE_PRODUCTION_BRIDGE_WEB_DEPLOYMENT_ID=${{ steps.stage_web_bridge.outputs.deployment_id }}" \
-            "EPODE_PRODUCTION_BRIDGE_MIGRATION_PATH=$MIGRATION_PATH" \
-            "EPODE_PRODUCTION_BRIDGE_MIGRATION_SHA256=$EXPECTED_MIGRATION_SHA256" \
-            "EPODE_PRODUCTION_BRIDGE_MIGRATION_VERSION=$MIGRATION_VERSION" \
-            "EPODE_PRODUCTION_BRIDGE_CANARY_MIGRATION_RUN_ID=${{ steps.canary.outputs.migration_run_id }}" \
-            "EPODE_PRODUCTION_BRIDGE_SCHEMA_FINGERPRINT=${{ steps.canary.outputs.schema_fingerprint }}" \
-            "EPODE_MIGRATION_BRIDGE_MAX_VERSION=$MIGRATION_VERSION" \
-            "EPODE_PRODUCTION_BRIDGE_RUN_ID=${{ github.run_id }}" \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment production \
-            --service "$API_SERVICE" \
-            --skip-deploys \
-            --json >/dev/null
-          variables="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment production --service "$API_SERVICE" --json)"
-          jq -e \
-            --arg revision "$TARGET_SHA" \
-            --arg api_ref "$TARGET_API_REF" \
-            --arg api_digest "$TARGET_API_DIGEST" \
-            --arg api_id "${{ steps.stage_api_bridge.outputs.deployment_id }}" \
-            --arg web_ref "$TARGET_WEB_REF" \
-            --arg web_digest "$TARGET_WEB_DIGEST" \
-            --arg web_id "${{ steps.stage_web_bridge.outputs.deployment_id }}" \
-            --arg path "$MIGRATION_PATH" \
-            --arg sha "$EXPECTED_MIGRATION_SHA256" \
-            --arg version "$MIGRATION_VERSION" \
-            --arg canary_run_id "${{ steps.canary.outputs.migration_run_id }}" \
-            --arg fingerprint "${{ steps.canary.outputs.schema_fingerprint }}" \
-            '.EPODE_PRODUCTION_BRIDGE_STATUS == "verified"
-              and .EPODE_PRODUCTION_BRIDGE_REVISION == $revision
-              and .EPODE_PRODUCTION_BRIDGE_API_REF == $api_ref
-              and .EPODE_PRODUCTION_BRIDGE_API_DIGEST == $api_digest
-              and .EPODE_PRODUCTION_BRIDGE_API_DEPLOYMENT_ID == $api_id
-              and .EPODE_PRODUCTION_BRIDGE_WEB_REF == $web_ref
-              and .EPODE_PRODUCTION_BRIDGE_WEB_DIGEST == $web_digest
-              and .EPODE_PRODUCTION_BRIDGE_WEB_DEPLOYMENT_ID == $web_id
-              and .EPODE_PRODUCTION_BRIDGE_MIGRATION_PATH == $path
-              and .EPODE_PRODUCTION_BRIDGE_MIGRATION_SHA256 == $sha
-              and .EPODE_PRODUCTION_BRIDGE_MIGRATION_VERSION == $version
-              and .EPODE_PRODUCTION_BRIDGE_CANARY_MIGRATION_RUN_ID == $canary_run_id
-              and .EPODE_PRODUCTION_BRIDGE_SCHEMA_FINGERPRINT == $fingerprint
-              and .EPODE_MIGRATION_BRIDGE_MAX_VERSION == $version' <<< "$variables" >/dev/null
           {
-            echo "### Production migration bridge staged"
-            echo "- **Revision:** \`$TARGET_SHA\`"
-            echo "- **API:** \`$TARGET_API_REF@$TARGET_API_DIGEST\`"
-            echo "- **Web:** \`$TARGET_WEB_REF@$TARGET_WEB_DIGEST\`"
-            echo "- **Database:** unchanged at version ${{ needs.plan.outputs.expected_previous_version }}"
-            echo "- **Expanded-canary fingerprint:** \`${{ steps.canary.outputs.schema_fingerprint }}\`"
+            echo "### Additive migration plan"
+            echo "- **Operation:** \`${{ inputs.operation }}\`"
+            echo "- **Revision:** \`${{ steps.review.outputs.target_sha }}\`"
+            echo "- **Migration:** \`${{ steps.review.outputs.migration_path }}\`"
+            echo "- **Version:** \`${{ steps.review.outputs.expected_previous_version }} -> ${{ steps.review.outputs.migration_version }}\`"
+            echo "- **SHA-256:** \`${{ steps.review.outputs.migration_sha256 }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   database:
     name: ${{ inputs.operation }} additive expansion
     needs: plan
-    if: inputs.operation != 'stage-production-bridge'
     runs-on: ubuntu-latest
     environment: ${{ contains(inputs.operation, 'production') && 'production' || 'v2-canary' }}
     env:
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
       RAILWAY_ENVIRONMENT: ${{ contains(inputs.operation, 'production') && 'production' || 'v2-canary' }}
-      API_SERVICE: ${{ vars.RAILWAY_API_SERVICE || 'epode-api' }}
-      WEB_SERVICE: ${{ vars.RAILWAY_WEB_SERVICE || 'epode-web' }}
+      API_SERVICE: ${{ vars.RAILWAY_API_SERVICE || (contains(inputs.operation, 'production') && 'epode-api' || 'agent-feedback-api') }}
       CANARY_API_SERVICE: ${{ vars.RAILWAY_CANARY_API_SERVICE || 'agent-feedback-api' }}
       DATABASE_SERVICE: ${{ vars.RAILWAY_DATABASE_SERVICE || 'Postgres' }}
       API_ORIGIN: ${{ contains(inputs.operation, 'production') && (vars.PRODUCTION_API_ORIGIN || 'https://api.epode.ai') || format('https://{0}', vars.V2_CANARY_API_DOMAIN) }}
+      TARGET_SHA: ${{ needs.plan.outputs.target_sha }}
       MIGRATION_PATH: ${{ needs.plan.outputs.migration_path }}
       EXPECTED_MIGRATION_SHA256: ${{ needs.plan.outputs.migration_sha256 }}
       EXPECTED_PREVIOUS_VERSION: ${{ needs.plan.outputs.expected_previous_version }}
-      TARGET_SHA: ${{ needs.plan.outputs.target_sha }}
+      MIGRATION_VERSION: ${{ needs.plan.outputs.migration_version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -783,7 +226,6 @@ jobs:
           --features rustls,postgres
 
       - name: Resolve the selected database without exposing its URL
-        id: database
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
@@ -806,172 +248,141 @@ jobs:
             echo "$delimiter"
           } >> "$GITHUB_ENV"
 
-      - name: Verify the selected ledger without mutation
-        if: startsWith(inputs.operation, 'verify')
+      - name: Read verified canary schema evidence
+        id: canary
+        if: inputs.operation == 'apply-production' || (inputs.operation == 'verify-production' && inputs.verification_state == 'after')
         env:
-          MIGRATION_MODE: ${{ inputs.verification_state == 'before' && 'verify-before' || 'verify-after' }}
-          EXPECTED_SCHEMA_FINGERPRINT: ${{ inputs.verification_state == 'after' && inputs.expected_schema_fingerprint || '' }}
-        run: scripts/verify-migration-ledger.sh
-
-      - name: Verify the applied canary ledger before recovery
-        id: verify_recovery
-        if: inputs.operation == 'recover-canary'
-        env:
-          MIGRATION_MODE: verify-after
-        run: scripts/verify-migration-ledger.sh
-
-      - name: Require matching interrupted canary evidence
-        if: inputs.operation == 'recover-canary'
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_CANARY_TOKEN }}
         run: |
           set -euo pipefail
           variables="$(railway variable list \
             --project "$RAILWAY_PROJECT_ID" \
             --environment v2-canary \
-            --service "$API_SERVICE" \
+            --service "$CANARY_API_SERVICE" \
             --json)"
           jq -e \
             --arg revision "$TARGET_SHA" \
             --arg path "$MIGRATION_PATH" \
             --arg sha "$EXPECTED_MIGRATION_SHA256" \
-            --arg version "${{ needs.plan.outputs.migration_version }}" \
-            '.EPODE_MIGRATION_STATUS == "pending"
+            --arg version "$MIGRATION_VERSION" \
+            '.EPODE_MIGRATION_STATUS == "verified"
               and .EPODE_MIGRATION_REVISION == $revision
               and .EPODE_MIGRATION_PATH == $path
               and .EPODE_MIGRATION_SHA256 == $sha
               and .EPODE_MIGRATION_VERSION == $version
-              and .EPODE_MIGRATION_BRIDGE_MAX_VERSION == $version' <<< "$variables" >/dev/null || {
-            echo "::error::Canary recovery requires matching pending evidence from an interrupted apply."
-            exit 1
-          }
+              and (.EPODE_MIGRATION_SCHEMA_FINGERPRINT | test("^[0-9a-f]{64}$"))' \
+            <<< "$variables" >/dev/null || {
+              echo "::error::The exact migration has no verified canary schema evidence."
+              exit 1
+            }
+          echo "schema_fingerprint=$(jq -r '.EPODE_MIGRATION_SCHEMA_FINGERPRINT' <<< "$variables")" >> "$GITHUB_OUTPUT"
 
-      - name: Invalidate previous canary migration evidence
-        if: inputs.operation == 'apply-canary' || inputs.operation == 'recover-canary'
+      - name: Verify the selected ledger without mutation
+        if: startsWith(inputs.operation, 'verify')
+        env:
+          MIGRATION_MODE: ${{ inputs.verification_state == 'before' && 'verify-before' || 'verify-after' }}
+          EXPECTED_SCHEMA_FINGERPRINT: ${{ steps.canary.outputs.schema_fingerprint || '' }}
+        run: scripts/verify-migration-ledger.sh
+
+      - name: Capture the active application before expansion
+        id: active
+        if: startsWith(inputs.operation, 'apply')
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          railway variable set \
-            "EPODE_MIGRATION_STATUS=pending" \
-            "EPODE_MIGRATION_REVISION=$TARGET_SHA" \
-            "EPODE_MIGRATION_PATH=$MIGRATION_PATH" \
-            "EPODE_MIGRATION_SHA256=$EXPECTED_MIGRATION_SHA256" \
-            "EPODE_MIGRATION_VERSION=${{ needs.plan.outputs.migration_version }}" \
-            "EPODE_MIGRATION_BRIDGE_MAX_VERSION=${{ needs.plan.outputs.migration_version }}" \
-            "EPODE_MIGRATION_SCHEMA_FINGERPRINT=pending" \
-            "EPODE_MIGRATION_BRIDGE_REF=pending" \
-            "EPODE_MIGRATION_BRIDGE_DIGEST=pending" \
-            "EPODE_MIGRATION_BRIDGE_DEPLOYMENT_ID=pending" \
-            "EPODE_MIGRATION_RUN_ID=${{ github.run_id }}" \
+          set -euo pipefail
+          services="$(railway service list --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT" --json)"
+          count="$(jq --arg service "$API_SERVICE" '[.[] | select(.name == $service)] | length' <<< "$services")"
+          [[ "$count" == "1" ]] || { echo "::error::Expected exactly one API service named $API_SERVICE."; exit 1; }
+          deployment_id="$(jq -r --arg service "$API_SERVICE" 'first(.[] | select(.name == $service) | .deploymentId) // empty' <<< "$services")"
+          deployments="$(railway deployment list --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT" --service "$API_SERVICE" --limit 100 --json)"
+          image_ref="$(jq -r --arg id "$deployment_id" 'first(.[] | select(.id == $id) | .meta.image) // empty' <<< "$deployments")"
+          image_digest="$(jq -r --arg id "$deployment_id" 'first(.[] | select(.id == $id) | .meta.imageDigest) // empty' <<< "$deployments")"
+          status="$(jq -r --arg id "$deployment_id" 'first(.[] | select(.id == $id) | .status) // empty' <<< "$deployments")"
+          if [[ "$status" != "SUCCESS" || ! "$image_ref" =~ ^ghcr\.io/open-software-network/os-epode-api:[0-9a-f]{7}$ \
+            || ! "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::The active API is not a successful immutable Epode image."
+            exit 1
+          fi
+          {
+            echo "ref=$image_ref"
+            echo "digest=$image_digest"
+            echo "deployment_id=$deployment_id"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Authorize the additive suffix and mark expansion pending
+        if: startsWith(inputs.operation, 'apply')
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          set -euo pipefail
+          current_variables="$(railway variable list \
             --project "$RAILWAY_PROJECT_ID" \
-            --environment v2-canary \
+            --environment "$RAILWAY_ENVIRONMENT" \
+            --service "$API_SERVICE" \
+            --json)"
+          current_max="$(jq -r '.EPODE_ADDITIVE_MIGRATION_MAX_VERSION // .EPODE_MIGRATION_BRIDGE_MAX_VERSION // "0"' <<< "$current_variables")"
+          if [[ ! "$current_max" =~ ^[0-9]+$ || "$current_max" -gt "$MIGRATION_VERSION" ]]; then
+            echo "::error::Refusing to lower or replace the current additive migration authorization."
+            exit 1
+          fi
+          prefix="EPODE_MIGRATION"
+          if [[ "${{ inputs.operation }}" == "apply-production" ]]; then
+            prefix="EPODE_PRODUCTION_MIGRATION"
+          fi
+          railway variable set \
+            "EPODE_ADDITIVE_MIGRATION_MAX_VERSION=$MIGRATION_VERSION" \
+            "EPODE_MIGRATION_BRIDGE_MAX_VERSION=$MIGRATION_VERSION" \
+            "${prefix}_STATUS=pending" \
+            "${prefix}_REVISION=$TARGET_SHA" \
+            "${prefix}_PATH=$MIGRATION_PATH" \
+            "${prefix}_SHA256=$EXPECTED_MIGRATION_SHA256" \
+            "${prefix}_VERSION=$MIGRATION_VERSION" \
+            "${prefix}_SCHEMA_FINGERPRINT=pending" \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment "$RAILWAY_ENVIRONMENT" \
             --service "$API_SERVICE" \
             --skip-deploys \
             --json >/dev/null
 
-      - name: Capture the exact canary bridge image
-        id: bridge
-        if: inputs.operation == 'apply-canary' || inputs.operation == 'recover-canary'
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: |
-          set -euo pipefail
-          services="$(railway service list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --json)"
-          service_count="$(jq --arg service "$API_SERVICE" '[.[] | select(.name == $service)] | length' <<< "$services")"
-          [[ "$service_count" == "1" ]] || { echo "::error::Expected exactly one canary bridge service."; exit 1; }
-          deployment_id="$(jq -r --arg service "$API_SERVICE" 'first(.[] | select(.name == $service) | .deploymentId) // empty' <<< "$services")"
-          deployments="$(railway deployment list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$API_SERVICE" --limit 100 --json)"
-          bridge_ref="$(jq -r --arg id "$deployment_id" 'first(.[] | select(.id == $id) | .meta.image) // empty' <<< "$deployments")"
-          bridge_digest="$(jq -r --arg id "$deployment_id" 'first(.[] | select(.id == $id) | .meta.imageDigest) // empty' <<< "$deployments")"
-          bridge_status="$(jq -r --arg id "$deployment_id" 'first(.[] | select(.id == $id) | .status) // empty' <<< "$deployments")"
-          if [[ "$bridge_status" != "SUCCESS" || ! "$bridge_ref" =~ ^ghcr\.io/open-software-network/os-epode-api:[0-9a-f]{7}$ \
-            || ! "$bridge_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::The active canary API is not an immutable, successful bridge image."
-            exit 1
-          fi
-          {
-            echo "before_deployment_id=$deployment_id"
-            echo "ref=$bridge_ref"
-            echo "digest=$bridge_digest"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Apply the reviewed migration to canary under advisory lock
-        id: apply_canary
-        if: inputs.operation == 'apply-canary'
+      - name: Apply the reviewed migration under advisory lock
+        id: apply
+        if: startsWith(inputs.operation, 'apply')
         env:
           MIGRATION_MODE: apply
+          EXPECTED_SCHEMA_FINGERPRINT: ${{ steps.canary.outputs.schema_fingerprint || '' }}
         run: scripts/verify-migration-ledger.sh
 
-      - name: Restart and verify the exact bridge image on expanded canary schema
-        id: restart_bridge
-        if: inputs.operation == 'apply-canary' || inputs.operation == 'recover-canary'
+      - name: Restart the same application against the expanded schema
+        id: restart
+        if: startsWith(inputs.operation, 'apply')
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          BEFORE_DEPLOYMENT_ID: ${{ steps.bridge.outputs.before_deployment_id }}
-          EXPECTED_BRIDGE_REF: ${{ steps.bridge.outputs.ref }}
-          EXPECTED_BRIDGE_DIGEST: ${{ steps.bridge.outputs.digest }}
         run: |
-          set -euo pipefail
-          [[ "$API_ORIGIN" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || {
-            echo "::error::The canary API origin is missing or invalid."
-            exit 1
-          }
-          railway redeploy \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment v2-canary \
-            --service "$API_SERVICE" \
-            --yes \
-            --json >/dev/null
-          restarted_id=""
-          for _ in $(seq 1 60); do
-            services="$(railway service list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --json)"
-            candidate="$(jq -r --arg service "$API_SERVICE" 'first(.[] | select(.name == $service) | .deploymentId) // empty' <<< "$services")"
-            if [[ -n "$candidate" && "$candidate" != "$BEFORE_DEPLOYMENT_ID" ]]; then
-              deployments="$(railway deployment list --project "$RAILWAY_PROJECT_ID" --environment v2-canary --service "$API_SERVICE" --limit 20 --json)"
-              status="$(jq -r --arg id "$candidate" 'first(.[] | select(.id == $id) | .status) // empty' <<< "$deployments")"
-              if [[ "$status" == "FAILED" || "$status" == "CRASHED" || "$status" == "REMOVED" ]]; then
-                echo "::error::The migration bridge failed to restart on the expanded schema."
-                exit 1
-              fi
-              if [[ "$status" == "SUCCESS" ]]; then
-                active_ref="$(jq -r --arg id "$candidate" 'first(.[] | select(.id == $id) | .meta.image) // empty' <<< "$deployments")"
-                active_digest="$(jq -r --arg id "$candidate" 'first(.[] | select(.id == $id) | .meta.imageDigest) // empty' <<< "$deployments")"
-                if [[ "$active_ref" != "$EXPECTED_BRIDGE_REF" || "$active_digest" != "$EXPECTED_BRIDGE_DIGEST" ]]; then
-                  echo "::error::Canary restart changed the reviewed bridge image."
-                  exit 1
-                fi
-                restarted_id="$candidate"
-                break
-              fi
-            fi
-            sleep 5
-          done
-          [[ -n "$restarted_id" ]] || { echo "::error::Timed out waiting for the canary bridge restart."; exit 1; }
+          bash scripts/railway-deploy-image.sh \
+            "$RAILWAY_ENVIRONMENT" \
+            "$API_SERVICE" \
+            "${{ steps.active.outputs.ref }}" \
+            "${{ steps.active.outputs.digest }}"
           curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 5 "$API_ORIGIN/api/health" >/dev/null
-          echo "deployment_id=$restarted_id" >> "$GITHUB_OUTPUT"
 
-      - name: Attest expanded canary schema and bridge restart
-        if: inputs.operation == 'apply-canary' || inputs.operation == 'recover-canary'
+      - name: Record verified canary expansion
+        if: inputs.operation == 'apply-canary'
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          SCHEMA_FINGERPRINT: ${{ inputs.operation == 'apply-canary' && steps.apply_canary.outputs.schema_fingerprint || steps.verify_recovery.outputs.schema_fingerprint }}
-          BRIDGE_REF: ${{ steps.bridge.outputs.ref }}
-          BRIDGE_DIGEST: ${{ steps.bridge.outputs.digest }}
-          BRIDGE_DEPLOYMENT_ID: ${{ steps.restart_bridge.outputs.deployment_id }}
+          SCHEMA_FINGERPRINT: ${{ steps.apply.outputs.schema_fingerprint }}
         run: |
           set -euo pipefail
-          [[ "$SCHEMA_FINGERPRINT" =~ ^[0-9a-f]{64}$ && "$BRIDGE_DEPLOYMENT_ID" != "pending" ]]
           railway variable set \
             "EPODE_MIGRATION_STATUS=verified" \
             "EPODE_MIGRATION_REVISION=$TARGET_SHA" \
             "EPODE_MIGRATION_PATH=$MIGRATION_PATH" \
             "EPODE_MIGRATION_SHA256=$EXPECTED_MIGRATION_SHA256" \
-            "EPODE_MIGRATION_VERSION=${{ needs.plan.outputs.migration_version }}" \
-            "EPODE_MIGRATION_BRIDGE_MAX_VERSION=${{ needs.plan.outputs.migration_version }}" \
+            "EPODE_MIGRATION_VERSION=$MIGRATION_VERSION" \
             "EPODE_MIGRATION_SCHEMA_FINGERPRINT=$SCHEMA_FINGERPRINT" \
-            "EPODE_MIGRATION_BRIDGE_REF=$BRIDGE_REF" \
-            "EPODE_MIGRATION_BRIDGE_DIGEST=$BRIDGE_DIGEST" \
-            "EPODE_MIGRATION_BRIDGE_DEPLOYMENT_ID=$BRIDGE_DEPLOYMENT_ID" \
+            "EPODE_MIGRATION_API_REF=${{ steps.active.outputs.ref }}" \
+            "EPODE_MIGRATION_API_DIGEST=${{ steps.active.outputs.digest }}" \
+            "EPODE_MIGRATION_API_DEPLOYMENT_ID=${{ steps.restart.outputs.deployment_id }}" \
             "EPODE_MIGRATION_RUN_ID=${{ github.run_id }}" \
             --project "$RAILWAY_PROJECT_ID" \
             --environment v2-canary \
@@ -983,224 +394,42 @@ jobs:
             --arg revision "$TARGET_SHA" \
             --arg path "$MIGRATION_PATH" \
             --arg sha "$EXPECTED_MIGRATION_SHA256" \
-            --arg version "${{ needs.plan.outputs.migration_version }}" \
+            --arg version "$MIGRATION_VERSION" \
             --arg fingerprint "$SCHEMA_FINGERPRINT" \
-            --arg bridge_ref "$BRIDGE_REF" \
-            --arg bridge_digest "$BRIDGE_DIGEST" \
-            --arg bridge_id "$BRIDGE_DEPLOYMENT_ID" \
-            '.EPODE_MIGRATION_STATUS == "verified"
-              and .EPODE_MIGRATION_REVISION == $revision
-              and .EPODE_MIGRATION_PATH == $path
-              and .EPODE_MIGRATION_SHA256 == $sha
-              and .EPODE_MIGRATION_BRIDGE_MAX_VERSION == $version
-              and .EPODE_MIGRATION_SCHEMA_FINGERPRINT == $fingerprint
-              and .EPODE_MIGRATION_BRIDGE_REF == $bridge_ref
-              and .EPODE_MIGRATION_BRIDGE_DIGEST == $bridge_digest
-              and .EPODE_MIGRATION_BRIDGE_DEPLOYMENT_ID == $bridge_id' <<< "$variables" >/dev/null
-
-      - name: Verify exact canary and production bridge evidence
-        id: production_evidence
-        if: inputs.operation == 'apply-production'
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          RAILWAY_CANARY_TOKEN: ${{ secrets.RAILWAY_CANARY_TOKEN }}
-        run: |
-          set -euo pipefail
-          canary="$(RAILWAY_TOKEN="$RAILWAY_CANARY_TOKEN" railway variable list \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment v2-canary \
-            --service "$CANARY_API_SERVICE" \
-            --json)"
-          jq -e \
-            --arg revision "$TARGET_SHA" \
-            --arg path "$MIGRATION_PATH" \
-            --arg sha "$EXPECTED_MIGRATION_SHA256" \
-            --arg version "${{ needs.plan.outputs.migration_version }}" \
-            --arg expected_fingerprint "${{ inputs.expected_schema_fingerprint }}" \
+            --arg api_ref "${{ steps.active.outputs.ref }}" \
+            --arg api_digest "${{ steps.active.outputs.digest }}" \
+            --arg deployment_id "${{ steps.restart.outputs.deployment_id }}" \
             '.EPODE_MIGRATION_STATUS == "verified"
               and .EPODE_MIGRATION_REVISION == $revision
               and .EPODE_MIGRATION_PATH == $path
               and .EPODE_MIGRATION_SHA256 == $sha
               and .EPODE_MIGRATION_VERSION == $version
-              and .EPODE_MIGRATION_BRIDGE_MAX_VERSION == $version
-              and .EPODE_MIGRATION_SCHEMA_FINGERPRINT == $expected_fingerprint
-              and (.EPODE_MIGRATION_BRIDGE_REF | test("^ghcr\\.io/open-software-network/os-epode-api:[0-9a-f]{7}$"))
-              and (.EPODE_MIGRATION_BRIDGE_DIGEST | test("^sha256:[0-9a-f]{64}$"))
-              and (.EPODE_CANARY_WEB_REF | test("^ghcr\\.io/open-software-network/os-epode-web:[0-9a-f]{7}$"))
-              and (.EPODE_CANARY_WEB_DIGEST | test("^sha256:[0-9a-f]{64}$"))
-              and (.EPODE_MIGRATION_BRIDGE_DEPLOYMENT_ID | type == "string" and length > 0)' <<< "$canary" >/dev/null || {
-            echo "::error::The exact migration has no verified canary schema and bridge-restart attestation."
-            exit 1
-          }
-          bridge_ref="$(jq -r '.EPODE_MIGRATION_BRIDGE_REF' <<< "$canary")"
-          bridge_digest="$(jq -r '.EPODE_MIGRATION_BRIDGE_DIGEST' <<< "$canary")"
-          web_ref="$(jq -r '.EPODE_CANARY_WEB_REF' <<< "$canary")"
-          web_digest="$(jq -r '.EPODE_CANARY_WEB_DIGEST' <<< "$canary")"
-          fingerprint="$(jq -r '.EPODE_MIGRATION_SCHEMA_FINGERPRINT' <<< "$canary")"
-          canary_migration_run_id="$(jq -r '.EPODE_MIGRATION_RUN_ID' <<< "$canary")"
+              and .EPODE_MIGRATION_SCHEMA_FINGERPRINT == $fingerprint
+              and .EPODE_MIGRATION_API_REF == $api_ref
+              and .EPODE_MIGRATION_API_DIGEST == $api_digest
+              and .EPODE_MIGRATION_API_DEPLOYMENT_ID == $deployment_id' \
+            <<< "$variables" >/dev/null
 
-          production="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment production --service "$API_SERVICE" --json)"
-          jq -e \
-            --arg revision "$TARGET_SHA" \
-            --arg path "$MIGRATION_PATH" \
-            --arg sha "$EXPECTED_MIGRATION_SHA256" \
-            --arg version "${{ needs.plan.outputs.migration_version }}" \
-            --arg fingerprint "$fingerprint" \
-            --arg api_ref "$bridge_ref" \
-            --arg api_digest "$bridge_digest" \
-            --arg web_ref "$web_ref" \
-            --arg web_digest "$web_digest" \
-            --arg canary_run_id "$canary_migration_run_id" \
-            '.EPODE_PRODUCTION_BRIDGE_STATUS == "verified"
-              and .EPODE_PRODUCTION_BRIDGE_REVISION == $revision
-              and .EPODE_PRODUCTION_BRIDGE_MIGRATION_PATH == $path
-              and .EPODE_PRODUCTION_BRIDGE_MIGRATION_SHA256 == $sha
-              and .EPODE_PRODUCTION_BRIDGE_MIGRATION_VERSION == $version
-              and .EPODE_PRODUCTION_BRIDGE_SCHEMA_FINGERPRINT == $fingerprint
-              and .EPODE_PRODUCTION_BRIDGE_API_REF == $api_ref
-              and .EPODE_PRODUCTION_BRIDGE_API_DIGEST == $api_digest
-              and .EPODE_PRODUCTION_BRIDGE_WEB_REF == $web_ref
-              and .EPODE_PRODUCTION_BRIDGE_WEB_DIGEST == $web_digest
-              and .EPODE_PRODUCTION_BRIDGE_CANARY_MIGRATION_RUN_ID == $canary_run_id
-              and .EPODE_MIGRATION_BRIDGE_MAX_VERSION == $version
-              and (.EPODE_PRODUCTION_BRIDGE_API_DEPLOYMENT_ID | type == "string" and length > 0)
-              and (.EPODE_PRODUCTION_BRIDGE_WEB_DEPLOYMENT_ID | type == "string" and length > 0)' <<< "$production" >/dev/null || {
-            echo "::error::Production has no exact, verified migration-marker bridge attestation."
-            exit 1
-          }
-          attested_api_id="$(jq -r '.EPODE_PRODUCTION_BRIDGE_API_DEPLOYMENT_ID' <<< "$production")"
-          attested_web_id="$(jq -r '.EPODE_PRODUCTION_BRIDGE_WEB_DEPLOYMENT_ID' <<< "$production")"
-          services="$(railway service list --project "$RAILWAY_PROJECT_ID" --environment production --json)"
-          for artifact in api web; do
-            if [[ "$artifact" == "api" ]]; then
-              service="$API_SERVICE"
-              attested_id="$attested_api_id"
-              expected_ref="$bridge_ref"
-              expected_digest="$bridge_digest"
-            else
-              service="$WEB_SERVICE"
-              attested_id="$attested_web_id"
-              expected_ref="$web_ref"
-              expected_digest="$web_digest"
-            fi
-            active_id="$(jq -r --arg service "$service" 'first(.[] | select(.name == $service) | .deploymentId) // empty' <<< "$services")"
-            deployments="$(railway deployment list --project "$RAILWAY_PROJECT_ID" --environment production --service "$service" --limit 100 --json)"
-            active_ref="$(jq -r --arg id "$active_id" 'first(.[] | select(.id == $id) | .meta.image) // empty' <<< "$deployments")"
-            active_digest="$(jq -r --arg id "$active_id" 'first(.[] | select(.id == $id) | .meta.imageDigest) // empty' <<< "$deployments")"
-            active_status="$(jq -r --arg id "$active_id" 'first(.[] | select(.id == $id) | .status) // empty' <<< "$deployments")"
-            if [[ "$active_id" != "$attested_id" || "$active_status" != "SUCCESS" \
-              || "$active_ref" != "$expected_ref" || "$active_digest" != "$expected_digest" ]]; then
-              echo "::error::Production $service changed after the exact bridge attestation."
-              exit 1
-            fi
-          done
-          {
-            echo "schema_fingerprint=$fingerprint"
-            echo "bridge_ref=$bridge_ref"
-            echo "bridge_digest=$bridge_digest"
-            echo "bridge_deployment_id=$attested_api_id"
-            echo "web_ref=$web_ref"
-            echo "web_digest=$web_digest"
-            echo "web_deployment_id=$attested_web_id"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Mark production expansion pending before database mutation
+      - name: Record verified production expansion
         if: inputs.operation == 'apply-production'
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: |
-          railway variable set \
-            "EPODE_PRODUCTION_MIGRATION_STATUS=pending" \
-            "EPODE_PRODUCTION_MIGRATION_REVISION=$TARGET_SHA" \
-            "EPODE_PRODUCTION_MIGRATION_PATH=$MIGRATION_PATH" \
-            "EPODE_PRODUCTION_MIGRATION_SHA256=$EXPECTED_MIGRATION_SHA256" \
-            "EPODE_PRODUCTION_MIGRATION_VERSION=${{ needs.plan.outputs.migration_version }}" \
-            "EPODE_MIGRATION_BRIDGE_MAX_VERSION=${{ needs.plan.outputs.migration_version }}" \
-            "EPODE_PRODUCTION_MIGRATION_SCHEMA_FINGERPRINT=${{ steps.production_evidence.outputs.schema_fingerprint }}" \
-            "EPODE_PRODUCTION_MIGRATION_RUN_ID=${{ github.run_id }}" \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment production \
-            --service "$API_SERVICE" \
-            --skip-deploys \
-            --json >/dev/null
-
-      - name: Apply exact canary schema to production under advisory lock
-        id: apply_production
-        if: inputs.operation == 'apply-production'
-        env:
-          MIGRATION_MODE: apply
-          EXPECTED_SCHEMA_FINGERPRINT: ${{ steps.production_evidence.outputs.schema_fingerprint }}
-        run: scripts/verify-migration-ledger.sh
-
-      - name: Restart and verify the exact production bridge on expanded schema
-        id: restart_production_bridge
-        if: inputs.operation == 'apply-production'
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          BEFORE_DEPLOYMENT_ID: ${{ steps.production_evidence.outputs.bridge_deployment_id }}
-          EXPECTED_BRIDGE_REF: ${{ steps.production_evidence.outputs.bridge_ref }}
-          EXPECTED_BRIDGE_DIGEST: ${{ steps.production_evidence.outputs.bridge_digest }}
-        run: |
-          set -euo pipefail
-          railway redeploy \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment production \
-            --service "$API_SERVICE" \
-            --yes \
-            --json >/dev/null
-          restarted_id=""
-          for _ in $(seq 1 60); do
-            services="$(railway service list --project "$RAILWAY_PROJECT_ID" --environment production --json)"
-            candidate="$(jq -r --arg service "$API_SERVICE" 'first(.[] | select(.name == $service) | .deploymentId) // empty' <<< "$services")"
-            if [[ -n "$candidate" && "$candidate" != "$BEFORE_DEPLOYMENT_ID" ]]; then
-              deployments="$(railway deployment list --project "$RAILWAY_PROJECT_ID" --environment production --service "$API_SERVICE" --limit 20 --json)"
-              status="$(jq -r --arg id "$candidate" 'first(.[] | select(.id == $id) | .status) // empty' <<< "$deployments")"
-              if [[ "$status" == "FAILED" || "$status" == "CRASHED" || "$status" == "REMOVED" ]]; then
-                echo "::error::The production migration bridge failed to restart on the expanded schema."
-                exit 1
-              fi
-              if [[ "$status" == "SUCCESS" ]]; then
-                active_ref="$(jq -r --arg id "$candidate" 'first(.[] | select(.id == $id) | .meta.image) // empty' <<< "$deployments")"
-                active_digest="$(jq -r --arg id "$candidate" 'first(.[] | select(.id == $id) | .meta.imageDigest) // empty' <<< "$deployments")"
-                if [[ "$active_ref" != "$EXPECTED_BRIDGE_REF" || "$active_digest" != "$EXPECTED_BRIDGE_DIGEST" ]]; then
-                  echo "::error::Production restart changed the reviewed bridge image."
-                  exit 1
-                fi
-                restarted_id="$candidate"
-                break
-              fi
-            fi
-            sleep 5
-          done
-          [[ -n "$restarted_id" ]] || { echo "::error::Timed out waiting for the production bridge restart."; exit 1; }
-          curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 5 "$API_ORIGIN/api/health" >/dev/null
-          echo "deployment_id=$restarted_id" >> "$GITHUB_OUTPUT"
-
-      - name: Verify production health and record expansion evidence
-        if: inputs.operation == 'apply-production'
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          SCHEMA_FINGERPRINT: ${{ steps.apply_production.outputs.schema_fingerprint }}
+          SCHEMA_FINGERPRINT: ${{ steps.apply.outputs.schema_fingerprint }}
           BACKUP_REFERENCE: ${{ inputs.backup_reference }}
           BACKUP_VERIFIED_AT: ${{ inputs.backup_verified_at }}
           BACKUP_RESTORE_TEST_REFERENCE: ${{ inputs.backup_restore_test_reference }}
         run: |
           set -euo pipefail
-          curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 5 "$API_ORIGIN/api/health" >/dev/null
           railway variable set \
             "EPODE_PRODUCTION_MIGRATION_STATUS=verified" \
             "EPODE_PRODUCTION_MIGRATION_REVISION=$TARGET_SHA" \
             "EPODE_PRODUCTION_MIGRATION_PATH=$MIGRATION_PATH" \
             "EPODE_PRODUCTION_MIGRATION_SHA256=$EXPECTED_MIGRATION_SHA256" \
-            "EPODE_PRODUCTION_MIGRATION_VERSION=${{ needs.plan.outputs.migration_version }}" \
+            "EPODE_PRODUCTION_MIGRATION_VERSION=$MIGRATION_VERSION" \
             "EPODE_PRODUCTION_MIGRATION_SCHEMA_FINGERPRINT=$SCHEMA_FINGERPRINT" \
-            "EPODE_PRODUCTION_MIGRATION_BRIDGE_REF=${{ steps.production_evidence.outputs.bridge_ref }}" \
-            "EPODE_PRODUCTION_MIGRATION_BRIDGE_DIGEST=${{ steps.production_evidence.outputs.bridge_digest }}" \
-            "EPODE_PRODUCTION_MIGRATION_BRIDGE_DEPLOYMENT_ID=${{ steps.restart_production_bridge.outputs.deployment_id }}" \
-            "EPODE_PRODUCTION_MIGRATION_WEB_REF=${{ steps.production_evidence.outputs.web_ref }}" \
-            "EPODE_PRODUCTION_MIGRATION_WEB_DIGEST=${{ steps.production_evidence.outputs.web_digest }}" \
-            "EPODE_PRODUCTION_MIGRATION_WEB_DEPLOYMENT_ID=${{ steps.production_evidence.outputs.web_deployment_id }}" \
-            "EPODE_PRODUCTION_BRIDGE_CONSUMED_BY_MIGRATION_RUN_ID=${{ github.run_id }}" \
+            "EPODE_PRODUCTION_MIGRATION_API_REF=${{ steps.active.outputs.ref }}" \
+            "EPODE_PRODUCTION_MIGRATION_API_DIGEST=${{ steps.active.outputs.digest }}" \
+            "EPODE_PRODUCTION_MIGRATION_API_DEPLOYMENT_ID=${{ steps.restart.outputs.deployment_id }}" \
             "EPODE_PRODUCTION_MIGRATION_BACKUP_REFERENCE=$BACKUP_REFERENCE" \
             "EPODE_PRODUCTION_MIGRATION_BACKUP_VERIFIED_AT=$BACKUP_VERIFIED_AT" \
             "EPODE_PRODUCTION_MIGRATION_RESTORE_TEST_REFERENCE=$BACKUP_RESTORE_TEST_REFERENCE" \
@@ -1210,26 +439,45 @@ jobs:
             --service "$API_SERVICE" \
             --skip-deploys \
             --json >/dev/null
-          {
-            echo "### Production schema expansion verified"
-            echo "- **Migration:** \`$MIGRATION_PATH\`"
-            echo "- **Revision:** \`$TARGET_SHA\`"
-            echo "- **Schema fingerprint:** \`$SCHEMA_FINGERPRINT\`"
-            echo "- **Bridge:** \`${{ steps.production_evidence.outputs.bridge_ref }}@${{ steps.production_evidence.outputs.bridge_digest }}\`"
-            echo "- **Backup evidence:** \`$BACKUP_REFERENCE\`"
-            echo "- **Restore-test evidence:** \`$BACKUP_RESTORE_TEST_REFERENCE\`"
-            echo "- **Web:** \`${{ steps.production_evidence.outputs.web_ref }}@${{ steps.production_evidence.outputs.web_digest }}\`"
-            echo "- **Application pair:** exact staged migration-marker pair remained active"
-          } >> "$GITHUB_STEP_SUMMARY"
+          variables="$(railway variable list --project "$RAILWAY_PROJECT_ID" --environment production --service "$API_SERVICE" --json)"
+          jq -e \
+            --arg revision "$TARGET_SHA" \
+            --arg path "$MIGRATION_PATH" \
+            --arg sha "$EXPECTED_MIGRATION_SHA256" \
+            --arg version "$MIGRATION_VERSION" \
+            --arg fingerprint "$SCHEMA_FINGERPRINT" \
+            --arg api_ref "${{ steps.active.outputs.ref }}" \
+            --arg api_digest "${{ steps.active.outputs.digest }}" \
+            --arg deployment_id "${{ steps.restart.outputs.deployment_id }}" \
+            --arg backup "$BACKUP_REFERENCE" \
+            --arg restore "$BACKUP_RESTORE_TEST_REFERENCE" \
+            '.EPODE_PRODUCTION_MIGRATION_STATUS == "verified"
+              and .EPODE_PRODUCTION_MIGRATION_REVISION == $revision
+              and .EPODE_PRODUCTION_MIGRATION_PATH == $path
+              and .EPODE_PRODUCTION_MIGRATION_SHA256 == $sha
+              and .EPODE_PRODUCTION_MIGRATION_VERSION == $version
+              and .EPODE_PRODUCTION_MIGRATION_SCHEMA_FINGERPRINT == $fingerprint
+              and .EPODE_PRODUCTION_MIGRATION_API_REF == $api_ref
+              and .EPODE_PRODUCTION_MIGRATION_API_DIGEST == $api_digest
+              and .EPODE_PRODUCTION_MIGRATION_API_DEPLOYMENT_ID == $deployment_id
+              and .EPODE_PRODUCTION_MIGRATION_BACKUP_REFERENCE == $backup
+              and .EPODE_PRODUCTION_MIGRATION_RESTORE_TEST_REFERENCE == $restore' \
+            <<< "$variables" >/dev/null
 
-      - name: Summarize read-only verification
-        if: startsWith(inputs.operation, 'verify')
+      - name: Summarize result
+        env:
+          IS_APPLY: ${{ startsWith(inputs.operation, 'apply') }}
         run: |
           {
-            echo "### Read-only migration verification"
+            echo "### Additive migration result"
             echo "- **Environment:** \`$RAILWAY_ENVIRONMENT\`"
-            echo "- **Required state:** \`${{ inputs.verification_state }}\`"
+            echo "- **Operation:** \`${{ inputs.operation }}\`"
             echo "- **Migration:** \`$MIGRATION_PATH\`"
-            echo "- **Database mutation:** none"
-            echo "- **Railway mutation:** none"
+            if [[ "$IS_APPLY" == "true" ]]; then
+              echo "- **Application restarted:** \`${{ steps.active.outputs.ref }}@${{ steps.active.outputs.digest }}\`"
+              echo "- **Backup evidence:** \`${{ inputs.operation == 'apply-production' && inputs.backup_reference || 'not required' }}\`"
+            else
+              echo "- **Database mutation:** none"
+              echo "- **Railway mutation:** none"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
