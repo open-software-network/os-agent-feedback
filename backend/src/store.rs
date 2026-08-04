@@ -3515,6 +3515,11 @@ pub(crate) async fn dashboard_sessions_page(
           s.started_at, s.last_seen_at, s.created_at,
           activity.interaction_count, activity.report_count,
           activity.first_operation, activity.last_operation, activity.customer_ref,
+          customer.id AS customer_id,
+          COALESCE(customer.display_name, customer_identifier.display_hint,
+            CASE WHEN customer.identity_level = 'pseudonymous'
+              THEN 'Anonymous customer' ELSE 'Customer' END) AS customer_display_name,
+          customer.identity_level,
           activity.strongest_impact
         FROM sessions_v2 s
         CROSS JOIN LATERAL (
@@ -3527,6 +3532,8 @@ pub(crate) async fn dashboard_sessions_page(
               FILTER (WHERE i.id IS NOT NULL))[1] AS last_operation,
             (ARRAY_AGG(i.customer_ref ORDER BY i.occurred_at, i.client_sequence NULLS LAST, i.id)
               FILTER (WHERE i.customer_ref IS NOT NULL))[1] AS customer_ref,
+            (ARRAY_AGG(i.customer_id ORDER BY i.occurred_at, i.client_sequence NULLS LAST, i.id)
+              FILTER (WHERE i.customer_id IS NOT NULL))[1] AS customer_id,
             (ARRAY_AGG(r.impact ORDER BY CASE r.impact
               WHEN 'blocked' THEN 5 WHEN 'hindered' THEN 4
               WHEN 'helped_with_friction' THEN 3 WHEN 'neutral' THEN 2
@@ -3536,6 +3543,19 @@ pub(crate) async fn dashboard_sessions_page(
           LEFT JOIN feedback_reports r ON r.interaction_id = i.id
           WHERE i.session_id = s.id AND i.occurred_at >= $9
         ) activity
+        LEFT JOIN customers linked_customer ON linked_customer.id = activity.customer_id
+          AND linked_customer.workspace_id = s.workspace_id
+        LEFT JOIN customers customer ON customer.id = COALESCE(
+            linked_customer.merged_into_customer_id, linked_customer.id)
+          AND customer.workspace_id = s.workspace_id
+        LEFT JOIN LATERAL (
+          SELECT identifier.display_hint FROM customer_identifiers identifier
+          WHERE identifier.workspace_id = s.workspace_id
+            AND identifier.customer_id = customer.id
+          ORDER BY CASE identifier.kind WHEN 'user_ref' THEN 0
+            WHEN 'account_ref' THEN 1 ELSE 2 END,
+            identifier.created_at, identifier.id LIMIT 1
+        ) customer_identifier ON TRUE
         WHERE s.environment_id = $1 AND s.last_seen_at >= $2
           AND ($3::TIMESTAMPTZ IS NULL OR s.last_seen_at <= $3)
           AND ($4::TEXT IS NULL OR s.ref_hint ILIKE $4 ESCAPE '\'
@@ -4703,6 +4723,11 @@ pub(crate) async fn dashboard_customer_by_id(
           session.source, session.ref_hint, session.started_at, session.last_seen_at,
           session.created_at, activity.interaction_count, activity.report_count,
           activity.first_operation, activity.last_operation, activity.customer_ref,
+          customer.id AS customer_id,
+          COALESCE(customer.display_name, customer_identifier.display_hint,
+            CASE WHEN customer.identity_level = 'pseudonymous'
+              THEN 'Anonymous customer' ELSE 'Customer' END) AS customer_display_name,
+          customer.identity_level,
           activity.strongest_impact
         FROM sessions_v2 session
         CROSS JOIN LATERAL (SELECT COUNT(interaction.id)::BIGINT interaction_count,
@@ -4713,6 +4738,8 @@ pub(crate) async fn dashboard_customer_by_id(
             interaction.client_sequence DESC NULLS LAST, interaction.id DESC))[1] last_operation,
           (ARRAY_AGG(interaction.customer_ref ORDER BY interaction.occurred_at)
             FILTER (WHERE interaction.customer_ref IS NOT NULL))[1] customer_ref,
+          (ARRAY_AGG(interaction.customer_id ORDER BY interaction.occurred_at)
+            FILTER (WHERE interaction.customer_id IS NOT NULL))[1] customer_id,
           (ARRAY_AGG(report.impact ORDER BY CASE report.impact
             WHEN 'blocked' THEN 5 WHEN 'hindered' THEN 4
             WHEN 'helped_with_friction' THEN 3 WHEN 'neutral' THEN 2
@@ -4722,6 +4749,19 @@ pub(crate) async fn dashboard_customer_by_id(
           LEFT JOIN feedback_reports report ON report.interaction_id = interaction.id
           WHERE interaction.session_id = session.id AND interaction.customer_id = $3
             AND interaction.occurred_at >= $4) activity
+        LEFT JOIN customers linked_customer ON linked_customer.id = activity.customer_id
+          AND linked_customer.workspace_id = session.workspace_id
+        LEFT JOIN customers customer ON customer.id = COALESCE(
+            linked_customer.merged_into_customer_id, linked_customer.id)
+          AND customer.workspace_id = session.workspace_id
+        LEFT JOIN LATERAL (
+          SELECT identifier.display_hint FROM customer_identifiers identifier
+          WHERE identifier.workspace_id = session.workspace_id
+            AND identifier.customer_id = customer.id
+          ORDER BY CASE identifier.kind WHEN 'user_ref' THEN 0
+            WHEN 'account_ref' THEN 1 ELSE 2 END,
+            identifier.created_at, identifier.id LIMIT 1
+        ) customer_identifier ON TRUE
         WHERE session.workspace_id = $1 AND session.environment_id IN (
           SELECT id FROM product_environments WHERE workspace_id = $1 AND product_id = $2)
           AND activity.interaction_count > 0
@@ -5694,6 +5734,11 @@ pub(crate) async fn dashboard_with_limits(
           COALESCE(activity.interaction_count, 0) AS interaction_count,
           COALESCE(activity.report_count, 0) AS report_count,
           activity.first_operation, activity.last_operation, activity.customer_ref,
+          customer.id AS customer_id,
+          COALESCE(customer.display_name, customer_identifier.display_hint,
+            CASE WHEN customer.identity_level = 'pseudonymous'
+              THEN 'Anonymous customer' ELSE 'Customer' END) AS customer_display_name,
+          customer.identity_level,
           activity.strongest_impact
         FROM selected_sessions s
         LEFT JOIN LATERAL (
@@ -5706,6 +5751,8 @@ pub(crate) async fn dashboard_with_limits(
               FILTER (WHERE i.id IS NOT NULL))[1] AS last_operation,
             (ARRAY_AGG(i.customer_ref ORDER BY i.occurred_at, i.client_sequence NULLS LAST, i.id)
               FILTER (WHERE i.customer_ref IS NOT NULL))[1] AS customer_ref,
+            (ARRAY_AGG(i.customer_id ORDER BY i.occurred_at, i.client_sequence NULLS LAST, i.id)
+              FILTER (WHERE i.customer_id IS NOT NULL))[1] AS customer_id,
             (ARRAY_AGG(r.impact ORDER BY
               CASE r.impact
                 WHEN 'blocked' THEN 5
@@ -5722,6 +5769,19 @@ pub(crate) async fn dashboard_with_limits(
           LEFT JOIN feedback_reports r ON r.interaction_id = i.id
           WHERE i.session_id = s.id AND i.occurred_at >= $2
         ) activity ON TRUE
+        LEFT JOIN customers linked_customer ON linked_customer.id = activity.customer_id
+          AND linked_customer.workspace_id = s.workspace_id
+        LEFT JOIN customers customer ON customer.id = COALESCE(
+            linked_customer.merged_into_customer_id, linked_customer.id)
+          AND customer.workspace_id = s.workspace_id
+        LEFT JOIN LATERAL (
+          SELECT identifier.display_hint FROM customer_identifiers identifier
+          WHERE identifier.workspace_id = s.workspace_id
+            AND identifier.customer_id = customer.id
+          ORDER BY CASE identifier.kind WHEN 'user_ref' THEN 0
+            WHEN 'account_ref' THEN 1 ELSE 2 END,
+            identifier.created_at, identifier.id LIMIT 1
+        ) customer_identifier ON TRUE
         ORDER BY s.last_seen_at DESC",
     )
     .bind(environment_id)
@@ -6025,8 +6085,12 @@ pub(crate) async fn dashboard_session_by_id(
               THEN 'no_relevant_context'
             ELSE 'awaiting_answer'
           END AS status,
-          request.purpose, request.surface, request.customer_id,
-          COALESCE(customer.display_name, interaction.customer_ref) AS customer_name,
+          request.purpose, request.surface,
+          customer.id AS customer_id,
+          COALESCE(customer.display_name, customer_identifier.display_hint,
+            interaction.customer_ref,
+            CASE WHEN customer.identity_level = 'pseudonymous'
+              THEN 'Anonymous customer' ELSE 'Customer' END) AS customer_name,
           request.created_at AS asked_at,
           COALESCE(answer.created_at, request.answered_at) AS answered_at
         FROM enrichment_requests request
@@ -6036,8 +6100,20 @@ pub(crate) async fn dashboard_session_by_id(
           AND environment.workspace_id = interaction.workspace_id
         LEFT JOIN enrichment_answers answer ON answer.request_id = request.id
           AND answer.workspace_id = request.workspace_id
-        LEFT JOIN customers customer ON customer.id = request.customer_id
+        LEFT JOIN customers linked_customer ON linked_customer.id = COALESCE(
+            request.customer_id, answer.customer_id, interaction.customer_id)
+          AND linked_customer.workspace_id = request.workspace_id
+        LEFT JOIN customers customer ON customer.id = COALESCE(
+            linked_customer.merged_into_customer_id, linked_customer.id)
           AND customer.workspace_id = request.workspace_id
+        LEFT JOIN LATERAL (
+          SELECT identifier.display_hint FROM customer_identifiers identifier
+          WHERE identifier.workspace_id = request.workspace_id
+            AND identifier.customer_id = customer.id
+          ORDER BY CASE identifier.kind WHEN 'user_ref' THEN 0
+            WHEN 'account_ref' THEN 1 ELSE 2 END,
+            identifier.created_at, identifier.id LIMIT 1
+        ) customer_identifier ON TRUE
         WHERE interaction.session_id = $1 AND request.workspace_id = $2
           AND request.product_id = $3
           AND interaction.occurred_at >= NOW() - make_interval(days => environment.retention_days)
@@ -15534,6 +15610,40 @@ mod product_tests {
                 .execute(&pool)
                 .await?;
             }
+            let checkout_customer = Uuid::new_v4();
+            sqlx::query(
+                r"INSERT INTO customers
+                (id, workspace_id, kind, identity_level, identity_confidence,
+                 first_seen_at, last_seen_at)
+                VALUES ($1, $2, 'user', 'verified', 1, $3, $3)",
+            )
+            .bind(checkout_customer)
+            .bind(workspace.id)
+            .bind(now - Duration::minutes(5))
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                r"INSERT INTO customer_identifiers
+                (id, workspace_id, product_id, customer_id, kind, ref_hash, display_hint,
+                 identity_level, provenance, verified_at)
+                VALUES ($1, $2, $3, $4, 'user_ref', $5, 'user-checkout',
+                  'verified', 'company_authenticated', $6)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(workspace.id)
+            .bind(product.id)
+            .bind(checkout_customer)
+            .bind(sha256("checkout-customer"))
+            .bind(now - Duration::minutes(5))
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "UPDATE interactions_v2 SET customer_id = $1 WHERE id = ANY($2)",
+            )
+            .bind(checkout_customer)
+            .bind(vec![checkout, checkout_retry])
+            .execute(&pool)
+            .await?;
             let checkout_report = Uuid::new_v4();
             let search_report = Uuid::new_v4();
             let expired_mixed_report = Uuid::new_v4();
@@ -15823,6 +15933,11 @@ mod product_tests {
             anyhow::ensure!(checkout_summary.interaction_count == 2);
             anyhow::ensure!(checkout_summary.report_count == 1);
             anyhow::ensure!(checkout_summary.first_operation.as_deref() == Some("checkout"));
+            anyhow::ensure!(checkout_summary.customer_id == Some(checkout_customer));
+            anyhow::ensure!(
+                checkout_summary.customer_display_name.as_deref() == Some("user-checkout")
+            );
+            anyhow::ensure!(checkout_summary.identity_level.as_deref() == Some("verified"));
 
             let expired_activity_filter = dashboard_sessions_page(
                 &pool,
@@ -15923,6 +16038,11 @@ mod product_tests {
             .map_err(test_error)?;
             anyhow::ensure!(checkout_detail.interactions.len() == 2);
             anyhow::ensure!(checkout_detail.reports.len() == 1);
+            anyhow::ensure!(checkout_detail.responses.len() == 1);
+            anyhow::ensure!(checkout_detail.responses[0].customer_id == Some(checkout_customer));
+            anyhow::ensure!(
+                checkout_detail.responses[0].customer_name.as_deref() == Some("user-checkout")
+            );
             anyhow::ensure!(
                 checkout_detail
                     .interactions

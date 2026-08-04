@@ -87,8 +87,7 @@ async function loadMcpDependencies() {
   const sdkUrl = pathToFileURL(join(repo, "sdk/node/dist/customer-mcp.js")).href;
   const sdk = await import(sdkUrl);
   const require = createRequire(join(repo, "sdk/node/package.json"));
-  const packageEntry = require.resolve("@modelcontextprotocol/server");
-  const { McpServer } = await import(pathToFileURL(packageEntry).href);
+  const { McpServer } = require("@modelcontextprotocol/server");
   return { epode: sdk.epode, McpServer };
 }
 

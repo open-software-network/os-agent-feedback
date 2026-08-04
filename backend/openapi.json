@@ -8677,12 +8677,28 @@
           "firstOperation",
           "lastOperation",
           "customerRef",
+          "customerId",
+          "customerDisplayName",
+          "identityLevel",
           "strongestImpact"
         ],
         "properties": {
           "createdAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "customerDisplayName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "customerId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           },
           "customerRef": {
             "type": [
@@ -8703,6 +8719,12 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "identityLevel": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "interactionCount": {
             "type": "integer",
