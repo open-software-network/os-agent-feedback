@@ -160,15 +160,18 @@ test("public cookie examples fail closed outside explicit local demo mode", asyn
   }
 });
 
-test("the MCP SDK owns inline elicitation with a compatibility fallback", async () => {
+test("the MCP SDK owns best-effort inline elicitation and otherwise shares nothing", async () => {
   const source = await read("sdk/node/src/customer-mcp.ts");
   assert.match(source, /"record_customer_context_consent"/);
   assert.match(source, /"share_customer_context"/);
-  assert.match(source, /permissionMode: "mcp_elicitation"/);
+  assert.match(source, /permissionMode: "best_effort_mcp_elicitation"/);
   assert.match(source, /resultType: "input_required"/);
   assert.match(source, /inputResponses\?\.customer_context_permission/);
   assert.match(source, /"this_session_only"/);
   assert.match(source, /"canceled", "cancelled", "incomplete"/);
   assert.match(source, /result\.isError === true/);
   assert.match(source, /surface: "mcp"/);
+  assert.match(source, /reason: "form_elicitation_unavailable"/);
+  assert.doesNotMatch(source, /fallbackTool/);
+  assert.doesNotMatch(source, /Ask the exact question once, then use/);
 });

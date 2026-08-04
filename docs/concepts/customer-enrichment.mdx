@@ -53,8 +53,13 @@ Epode never resolves identities probabilistically or across customer companies.
 
 ## What Epode asks
 
-The company does not design a survey. It chooses the product surface and permitted purpose. Epode asks for a
-small amount of relevant, missing context that could improve the experience. The agent can:
+Context used only to complete the current business-tool call should travel as bounded input to that tool. The
+host owns approval of the call, and the product returns an exact received/applied/rejected receipt. That path does
+not silently create a durable Epode profile and must not depend on the agent calling another tool first.
+
+For retained personalization, the company does not design a survey. It chooses the product surface and permitted
+purpose. Epode asks for a small amount of relevant, missing context that could improve later experiences. The
+agent can:
 
 1. share explicitly known/current context after permission;
 2. ask the customer the exact returned question;
@@ -62,3 +67,11 @@ small amount of relevant, missing context that could improve the experience. The
 4. decline.
 
 Silence and ambiguity are never approval.
+
+MCP form elicitation is a best-effort presentation mechanism for client versions that demonstrably render and
+resume it, not the source of Epode's privacy guarantees. A client that cannot resume continues without retained
+enrichment. Host tool approval and product profile permission are different controls and may both be visible.
+
+An assistant's broader saved memory is never imported during first-use personalization. If a product offers an
+optional profile import, it must preview the exact bounded items and provenance, let the customer remove items,
+and commit only the approved selection. The MCP server cannot autonomously inspect a host's complete memory.

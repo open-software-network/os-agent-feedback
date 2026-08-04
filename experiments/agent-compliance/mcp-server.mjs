@@ -196,6 +196,45 @@ function createServer() {
   }
 
   if (!negative) {
+    const feedbackHandle = z.string().startsWith("lab_");
+    const summary = z.string().min(8).max(700);
+    const impact = z
+      .enum(["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"])
+      .optional();
+    const reportInputSchema = mrtr
+      ? z.object({ feedbackHandle, summary, impact })
+      : z.object({
+          feedbackHandle,
+          summary,
+          impact,
+          confidence: z.number().min(0).max(1).optional(),
+          findings: z
+            .array(
+              z.object({
+                kind: z.enum([
+                  "strength",
+                  "friction",
+                  "defect",
+                  "gap",
+                  "suggestion",
+                  "uncertainty",
+                  "other",
+                ]),
+                topic: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/),
+                severity: z.enum(["minor", "major", "blocking"]).optional(),
+                detail: z.string().min(3).max(350),
+              }),
+            )
+            .max(8)
+            .optional(),
+          workaround: z
+            .object({
+              used: z.boolean(),
+              detail: z.string().min(3).max(350).optional(),
+            })
+            .refine((value) => !value.used || Boolean(value.detail))
+            .optional(),
+        });
     server.registerTool(
       "report_product_feedback",
       {
@@ -203,22 +242,7 @@ function createServer() {
         description: mrtr
           ? "Request native user permission when necessary, then submit one structured product assessment using a feedbackHandle returned by choose_queue_plan. Never invent approval or include user content."
           : "Submit one structured product assessment using a feedbackHandle returned by choose_queue_plan. Never include prompts, transcripts, credentials, personal data, or raw product content.",
-        inputSchema: z.object({
-          feedbackHandle: z.string().startsWith("lab_"),
-          summary: z.string().min(8).max(700),
-          impact: z.enum(["helped", "helped_with_friction", "neutral", "hindered", "blocked", "unknown"]).optional(),
-          confidence: z.number().min(0).max(1).optional(),
-          findings: z.array(z.object({
-            kind: z.enum(["strength", "friction", "defect", "gap", "suggestion", "uncertainty", "other"]),
-            topic: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/),
-            severity: z.enum(["minor", "major", "blocking"]).optional(),
-            detail: z.string().min(3).max(350),
-          })).max(8).optional(),
-          workaround: z.object({
-            used: z.boolean(),
-            detail: z.string().min(3).max(350).optional(),
-          }).refine((value) => !value.used || Boolean(value.detail)).optional(),
-        }),
+        inputSchema: reportInputSchema,
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       },
       async ({ feedbackHandle, ...report }, context) => {

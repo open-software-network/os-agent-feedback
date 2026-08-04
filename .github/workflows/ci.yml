@@ -57,6 +57,7 @@ jobs:
               - "biome.json"
               - "Makefile"
               - "sdk/node/**"
+              - "tests/customer-context-mcp-e2e.mjs"
               - ".github/workflows/ci.yml"
             sdk-packages:
               - "sdk/**"
@@ -190,8 +191,10 @@ jobs:
         run: |
           npm --prefix examples/mvp-retail-express install --ignore-scripts --no-audit --no-fund
           npm --prefix examples/mvp-anonymous-express install --ignore-scripts --no-audit --no-fund
-      - name: Run customer personalization and advertising journeys
-        run: pnpm test:customer-enrichment-e2e
+      - name: Run customer personalization, advertising, and MCP journeys
+        run: |
+          pnpm test:customer-enrichment-e2e
+          pnpm test:customer-context-mcp-e2e
 
   node:
     name: Node and Biome
@@ -277,11 +280,13 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: |
+            examples/customer-context-scenarios/package-lock.json
             examples/node-express/package-lock.json
             examples/node-mcp/package-lock.json
             examples/static-docs-edge/package-lock.json
       - name: Install locked production dependencies
         run: |
+          npm ci --prefix examples/customer-context-scenarios --omit=dev --ignore-scripts
           npm ci --prefix examples/node-express --omit=dev --ignore-scripts
           npm ci --prefix examples/node-mcp --omit=dev --ignore-scripts
           npm install \
@@ -293,8 +298,11 @@ jobs:
             "$GITHUB_WORKSPACE/backend/public/agent-feedback-node-0.4.0.tgz"
       - name: Check entry points
         run: |
+          node --check examples/customer-context-scenarios/mcp-server.js
           node --check examples/node-express/src/index.js
           node --check examples/node-mcp/src/index.js
+      - name: Test the Shopwise MCP transport
+        run: npm test --prefix examples/customer-context-scenarios
       - name: Validate static edge worker bundle
         run: npm run --prefix examples/static-docs-edge check
       - name: Smoke-test health endpoints

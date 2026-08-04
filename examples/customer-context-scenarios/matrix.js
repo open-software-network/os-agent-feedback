@@ -1,0 +1,333 @@
+const user = (accountRef, userRef) => ({ accountRef, userRef });
+
+const signal = (key, type, value, provenance, confidence = 1) => ({
+  key,
+  type,
+  value,
+  provenance,
+  confidence,
+});
+
+export const customerContextScenarios = [
+  {
+    id: "commerce-remembered-across-sessions",
+    industry: "e-commerce",
+    product: "Shopwise",
+    description: "A shopper opts into durable, first-party shopping preferences.",
+    steps: [
+      {
+        action: "retrieve",
+        identity: user("shop_household_42", "shopper_7"),
+        sessionRef: "shop_journey_1",
+        operation: "search_catalog",
+        query: "Find a sustainable gift under $150 that arrives this week.",
+        expect: { keys: [], permission: "not_set" },
+      },
+      {
+        action: "share",
+        identity: user("shop_household_42", "shopper_7"),
+        sessionRef: "shop_journey_1",
+        operation: "share_customer_context",
+        query: "Remember that I usually prioritize sustainable options under $150.",
+        choice: "always_allow",
+        signals: [
+          signal(
+            "shopping.priority",
+            "preference",
+            "sustainability",
+            "agent_reports_user_statement",
+          ),
+          signal(
+            "shopping.budget_band",
+            "constraint",
+            "50_150",
+            "agent_reports_current_task",
+          ),
+          signal(
+            "shopping.delivery_window",
+            "constraint",
+            "within_week",
+            "agent_inference",
+            0.82,
+          ),
+        ],
+        expect: {
+          state: "answered",
+          elicited: true,
+          acceptedKeys: [
+            "shopping.budget_band",
+            "shopping.delivery_window",
+            "shopping.priority",
+          ],
+          retention: "customer",
+        },
+      },
+      {
+        action: "end_session",
+        identity: user("shop_household_42", "shopper_7"),
+        sessionRef: "shop_journey_1",
+      },
+      {
+        action: "retrieve",
+        identity: user("shop_household_42", "shopper_7"),
+        sessionRef: "shop_journey_2",
+        operation: "search_catalog",
+        query: "Show me a housewarming gift.",
+        expect: {
+          keys: [
+            "shopping.budget_band",
+            "shopping.delivery_window",
+            "shopping.priority",
+          ],
+          permission: "always_allow",
+        },
+      },
+      {
+        action: "retrieve",
+        identity: user("shop_household_42", "shopper_new"),
+        sessionRef: "shop_journey_new",
+        operation: "search_catalog",
+        query: "Show me a housewarming gift.",
+        expect: { keys: [], permission: "not_set" },
+      },
+    ],
+  },
+  {
+    id: "travel-session-only-isolation",
+    industry: "travel",
+    product: "Roamwise",
+    description: "A traveler shares trip-specific preferences for one planning session only.",
+    steps: [
+      {
+        action: "share",
+        identity: user("travel_loyalty_42", "traveler_7"),
+        sessionRef: "paris_planning_1",
+        operation: "search_stays",
+        query: "For this Paris trip, favor convenience and keep rooms under $500.",
+        choice: "this_session_only",
+        signals: [
+          signal(
+            "shopping.priority",
+            "preference",
+            "convenience",
+            "agent_reports_current_task",
+          ),
+          signal(
+            "shopping.budget_band",
+            "constraint",
+            "150_500",
+            "agent_reports_user_statement",
+          ),
+        ],
+        expect: {
+          state: "answered",
+          elicited: true,
+          acceptedKeys: ["shopping.budget_band", "shopping.priority"],
+          retention: "session",
+        },
+      },
+      {
+        action: "retrieve",
+        identity: user("travel_loyalty_42", "traveler_7"),
+        sessionRef: "paris_planning_1",
+        operation: "compare_stays",
+        query: "Compare the top two stays.",
+        expect: {
+          keys: ["shopping.budget_band", "shopping.priority"],
+          permission: "this_session_only",
+        },
+      },
+      {
+        action: "end_session",
+        identity: user("travel_loyalty_42", "traveler_7"),
+        sessionRef: "paris_planning_1",
+      },
+      {
+        action: "retrieve",
+        identity: user("travel_loyalty_42", "traveler_7"),
+        sessionRef: "tokyo_planning_2",
+        operation: "search_stays",
+        query: "Find somewhere to stay in Tokyo.",
+        expect: { keys: [], permission: "not_set" },
+      },
+    ],
+  },
+  {
+    id: "finance-decline-and-sensitive-boundary",
+    industry: "finance",
+    product: "Ledgerly",
+    description: "A customer declines personalization; financial attributes are never accepted.",
+    steps: [
+      {
+        action: "share",
+        identity: user("finance_account_8", "investor_14"),
+        sessionRef: "research_1",
+        operation: "explain_investment",
+        query: "Explain index funds, but don't build a profile about me.",
+        choice: "dont_allow",
+        signals: [
+          signal(
+            "content.topic_depth",
+            "preference",
+            "practical",
+            "agent_reports_current_task",
+          ),
+        ],
+        expect: { state: "declined", elicited: true, acceptedKeys: [], retention: "none" },
+      },
+      {
+        action: "retrieve",
+        identity: user("finance_account_8", "investor_14"),
+        sessionRef: "research_2",
+        operation: "compare_funds",
+        query: "Compare two broad-market funds.",
+        expect: { keys: [], permission: "dont_allow" },
+      },
+      {
+        action: "share",
+        identity: user("finance_account_9", "investor_15"),
+        sessionRef: "research_sensitive",
+        operation: "share_customer_context",
+        query: "Use my account balance and credit score to tailor the answer.",
+        choice: "always_allow",
+        signals: [
+          signal(
+            "financial_account.balance",
+            "constraint",
+            "over_50000",
+            "agent_reports_user_statement",
+          ),
+          signal(
+            "creditworthiness",
+            "constraint",
+            "excellent",
+            "agent_reports_user_statement",
+          ),
+        ],
+        expect: {
+          state: "no_relevant_context",
+          elicited: true,
+          acceptedKeys: [],
+          rejectedKeys: ["creditworthiness", "financial_account.balance"],
+          retention: "customer",
+        },
+      },
+    ],
+  },
+  {
+    id: "healthcare-safe-preferences-only",
+    industry: "healthcare",
+    product: "Carepath",
+    description: "Only safe content presentation preferences survive; clinical facts do not.",
+    steps: [
+      {
+        action: "share",
+        identity: user("care_account_31", "patient_portal_4"),
+        sessionRef: "care_visit_1",
+        operation: "prepare_visit",
+        query: "Keep portal instructions short and at an overview level from now on.",
+        choice: "always_allow",
+        signals: [
+          signal(
+            "content.format",
+            "preference",
+            "short",
+            "agent_reports_user_statement",
+          ),
+          signal(
+            "content.topic_depth",
+            "preference",
+            "overview",
+            "agent_reports_user_statement",
+          ),
+          signal(
+            "medical_condition",
+            "constraint",
+            "asthma",
+            "agent_inference",
+            0.6,
+          ),
+        ],
+        expect: {
+          state: "answered",
+          elicited: true,
+          acceptedKeys: ["content.format", "content.topic_depth"],
+          rejectedKeys: ["medical_condition"],
+          retention: "customer",
+        },
+      },
+      {
+        action: "end_session",
+        identity: user("care_account_31", "patient_portal_4"),
+        sessionRef: "care_visit_1",
+      },
+      {
+        action: "retrieve",
+        identity: user("care_account_31", "patient_portal_4"),
+        sessionRef: "care_visit_2",
+        operation: "show_instructions",
+        query: "What should I bring to my visit?",
+        expect: {
+          keys: ["content.format", "content.topic_depth"],
+          permission: "always_allow",
+        },
+      },
+    ],
+  },
+  {
+    id: "education-household-user-isolation",
+    industry: "education",
+    product: "Learnwise",
+    description: "Two learners in one household receive separate remembered experiences.",
+    steps: [
+      {
+        action: "share",
+        identity: user("learning_household_5", "learner_ada"),
+        sessionRef: "lesson_ada_1",
+        operation: "recommend_lesson",
+        query: "I prefer expert-level interactive lessons.",
+        choice: "always_allow",
+        signals: [
+          signal(
+            "content.format",
+            "preference",
+            "interactive",
+            "agent_reports_user_statement",
+          ),
+          signal(
+            "content.topic_depth",
+            "preference",
+            "expert",
+            "agent_reports_user_statement",
+          ),
+          signal("interest.topic", "preference", "technology", "agent_inference", 0.76),
+        ],
+        expect: {
+          state: "answered",
+          elicited: true,
+          acceptedKeys: ["content.format", "content.topic_depth", "interest.topic"],
+          retention: "customer",
+        },
+      },
+      {
+        action: "retrieve",
+        identity: user("learning_household_5", "learner_ada"),
+        sessionRef: "lesson_ada_2",
+        operation: "recommend_lesson",
+        query: "What should I learn today?",
+        expect: {
+          keys: ["content.format", "content.topic_depth", "interest.topic"],
+          permission: "always_allow",
+        },
+      },
+      {
+        action: "retrieve",
+        identity: user("learning_household_5", "learner_grace"),
+        sessionRef: "lesson_grace_1",
+        operation: "recommend_lesson",
+        query: "What should I learn today?",
+        expect: { keys: [], permission: "not_set" },
+      },
+    ],
+  },
+];

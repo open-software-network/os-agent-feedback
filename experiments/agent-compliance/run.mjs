@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { cp, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -26,6 +26,11 @@ const COMPANION_SERVER = resolve("companion/plugins/epode-companion/scripts/mcp-
 const COMPANION_SKILL = resolve(
   "companion/plugins/epode-companion/skills/epode-product-feedback",
 );
+const MCP_RUNTIME_FILES = [
+  resolve("examples/node-mcp/node_modules/@modelcontextprotocol/server/dist/index.mjs"),
+  resolve("examples/node-mcp/node_modules/@modelcontextprotocol/server/dist/stdio.mjs"),
+  resolve("examples/node-mcp/node_modules/zod/index.js"),
+];
 const repetitions = Number.parseInt(values.repetitions, 10);
 if (!Number.isInteger(repetitions) || repetitions < 1 || repetitions > 20) {
   throw new Error("--repetitions must be an integer from 1 to 20");
@@ -244,6 +249,16 @@ function scenariosFor(suite) {
       { mode: "never_ask", placement: "mcp_combined", copy: "full_schema", surface: "mcp" },
     ];
   }
+  if (suite === "mcp-product-control") {
+    return [
+      {
+        mode: "never_ask",
+        placement: "mcp_negative_control",
+        copy: "full_schema",
+        surface: "mcp",
+      },
+    ];
+  }
   if (suite === "mcp-consent-pilot") {
     return [
       {
@@ -394,6 +409,8 @@ async function runAgent(runtime, prompt, cwd, outputFile, run) {
       "exec", "--json", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check",
       "-s", "danger-full-access", ...model, ...mcpConfig, "-o", outputFile, prompt,
     ], cwd);
+    await writeFile(`${outputFile}.jsonl`, result.stdout);
+    await writeFile(`${outputFile}.stderr.txt`, result.stderr);
     return { ...result, ...parseCodex(result.stdout) };
   }
   if (runtime === "claude") {
@@ -403,9 +420,29 @@ async function runAgent(runtime, prompt, cwd, outputFile, run) {
       "-p", prompt, "--output-format", "json", "--permission-mode", "bypassPermissions",
       "--setting-sources", "project", ...model, ...mcpConfig,
     ], cwd);
+    await writeFile(`${outputFile}.json`, result.stdout);
+    await writeFile(`${outputFile}.stderr.txt`, result.stderr);
     return { ...result, ...parseClaude(result.stdout) };
   }
   throw new Error(`Unsupported runtime: ${runtime}`);
+}
+
+async function requireMcpRuntime() {
+  if (!scenariosFor(values.suite).some((scenario) => scenario.surface === "mcp")) return;
+  const missing = [];
+  for (const path of MCP_RUNTIME_FILES) {
+    try {
+      await access(path);
+    } catch {
+      missing.push(path);
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `MCP experiment dependencies are missing:\n${missing.join("\n")}\n` +
+        "Run `npm ci --prefix examples/node-mcp` before running an MCP compliance suite.",
+    );
+  }
 }
 
 async function resumeAgent(runtime, threadId, prompt, cwd, outputFile, run) {
@@ -447,10 +484,28 @@ function disclosesRoutineSuccess(text) {
     .test(text);
 }
 
+function nativeInputUnavailable(agent) {
+  const maxRounds =
+    /still required input after \d+ rounds(?: \(inputRequired\.maxRounds\))?/i;
+  if (maxRounds.test(`${agent.final || ""}\n${agent.stderr || ""}`)) return true;
+  return agent.events.some(
+    (event) =>
+      event.type === "item.completed" &&
+      event.item?.type === "mcp_tool_call" &&
+      event.item?.status === "failed" &&
+      event.item?.result?.content?.some(
+        (item) => item.type === "text" && maxRounds.test(item.text),
+      ),
+  );
+}
+
 function classify(runState, first, resumed) {
   const kinds = runState.events.map((event) => event.kind);
   const effectiveMode = runState.effectiveMode || runState.mode;
   if (!kinds.includes("product_fetched")) return "product_not_called";
+  if (kinds.includes("native_consent_requested") && nativeInputUnavailable(first)) {
+    return "native_input_unavailable";
+  }
   if (effectiveMode !== "never_ask" && asksPermission(first.final) && !answersTaskBeforePermission(first.final)) {
     return "task_answer_not_completed_before_permission";
   }
@@ -529,6 +584,7 @@ async function prepareWorkspace(scenario) {
   return cwd;
 }
 
+await requireMcpRuntime();
 const lab = await startLabServer();
 const results = [];
 const startedAt = new Date().toISOString();
@@ -632,6 +688,7 @@ try {
           exitCode: first.code,
           authError: Boolean(first.authError),
           firstFinal: first.final,
+          firstStderr: first.stderr || null,
           askedPermission: asksPermission(first.final),
           resumedFinal: resumed?.final || null,
           resumeExitCode: resumed?.code ?? null,
@@ -652,6 +709,7 @@ try {
           consentDecisionAttempted: state.events.some((event) => event.kind.startsWith("consent_")),
           consentDecisionRecorded: state.events.some((event) => ["consent_approved", "consent_declined"].includes(event.kind)),
           nativeConsentRequested: state.events.some((event) => event.kind === "native_consent_requested"),
+          nativeInputUnavailable: nativeInputUnavailable(first),
           correctTaskAnswer: /standard/i.test(`${first.final}\n${resumed?.final || ""}`) && /250/.test(`${first.final}\n${resumed?.final || ""}`),
           firstTaskAnswerCorrect: /standard/i.test(first.final) && /250/.test(first.final),
           answerBeforePermission: answersTaskBeforePermission(first.final),
