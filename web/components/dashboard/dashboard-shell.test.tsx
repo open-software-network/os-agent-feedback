@@ -19,7 +19,15 @@ describe("DashboardShell", () => {
       </DashboardShell>,
     );
 
-    const labels = ["Home", "Customers", "Responses", "Sessions", "Connectors", "Configurations"];
+    const labels = [
+      "Home",
+      "Customers",
+      "Responses",
+      "Sessions",
+      "Questions",
+      "Connectors",
+      "Configurations",
+    ];
     for (const label of labels) expect(screen.getByRole("button", { name: label })).toBeVisible();
     for (const hidden of [
       "Insights",
@@ -38,6 +46,49 @@ describe("DashboardShell", () => {
       .map((item) => item.textContent)
       .filter((label) => ["Home", "Customers", "Responses", "Sessions"].includes(label ?? ""));
     expect(coreLabels).toEqual(["Home", "Customers", "Responses", "Sessions"]);
+  });
+
+  it("opens Questions from the sidebar as a top-level destination", () => {
+    const onNavigate = vi.fn();
+    render(
+      <DashboardShell
+        data={dashboardFixture()}
+        view="home"
+        onNavigate={onNavigate}
+        onWorkspaceChange={vi.fn()}
+        onProductChange={vi.fn()}
+        onLogout={vi.fn()}
+      >
+        <div>Dashboard content</div>
+      </DashboardShell>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Questions" }));
+
+    expect(onNavigate).toHaveBeenCalledWith("questions");
+  });
+
+  it("marks the Questions sidebar entry current on the Questions view", () => {
+    render(
+      <DashboardShell
+        data={dashboardFixture()}
+        view="questions"
+        onNavigate={vi.fn()}
+        onWorkspaceChange={vi.fn()}
+        onProductChange={vi.fn()}
+        onLogout={vi.fn()}
+      >
+        <div>Dashboard content</div>
+      </DashboardShell>,
+    );
+
+    expect(screen.getByRole("button", { name: "Questions" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(screen.getByRole("button", { name: "Configurations" })).not.toHaveAttribute(
+      "aria-current",
+    );
   });
 
   it("opens Product from the Configurations sidebar entry", () => {
@@ -64,7 +115,7 @@ describe("DashboardShell", () => {
     render(
       <DashboardShell
         data={dashboardFixture()}
-        view="questions"
+        view="policy"
         onNavigate={vi.fn()}
         onWorkspaceChange={vi.fn()}
         onProductChange={vi.fn()}

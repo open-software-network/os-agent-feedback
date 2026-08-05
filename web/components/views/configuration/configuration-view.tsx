@@ -13,7 +13,6 @@ const sectionContent: Record<ConfigurationSection, { label: string }> = {
   configuration: { label: "Product" },
   team: { label: "Team" },
   policy: { label: "Data controls" },
-  questions: { label: "Questions" },
 };
 
 const MEMBER_CONFIGURATION_VIEWS: readonly ConfigurationSection[] = ["configuration", "team"];

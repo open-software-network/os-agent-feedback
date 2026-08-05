@@ -21,12 +21,11 @@ describe("ConfigurationView", () => {
       "Product",
       "Team",
       "Data controls",
-      "Questions",
     ]);
     expect(screen.getByRole("tab", { name: "Product" })).toHaveAttribute("aria-selected", "true");
 
-    fireEvent.click(screen.getByRole("tab", { name: "Questions" }));
-    expect(onSectionChange).toHaveBeenCalledWith("questions");
+    fireEvent.click(screen.getByRole("tab", { name: "Data controls" }));
+    expect(onSectionChange).toHaveBeenCalledWith("policy");
   });
 
   it("keeps read-only product and team configuration available to members", () => {

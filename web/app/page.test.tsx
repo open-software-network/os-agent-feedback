@@ -34,6 +34,7 @@ describe("dashboard data flow", () => {
       "Customers",
       "Responses",
       "Sessions",
+      "Questions",
       "Connectors",
       "Configurations",
     ]) {
@@ -189,6 +190,7 @@ describe("dashboard data flow", () => {
     expect(screen.getByRole("button", { name: "Configurations" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Setup" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Data controls" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Questions" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Connectors" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "New product" })).not.toBeInTheDocument();
     await waitFor(() => expect(window.location.search).not.toContain("view=connectors"));
@@ -313,7 +315,7 @@ describe("dashboard data flow", () => {
     expect(message).not.toBeInTheDocument();
   });
 
-  it("keeps Setup on Home and opens Data controls and Questions within Configurations", async () => {
+  it("keeps Setup on Home and opens Data controls within Configurations", async () => {
     window.history.replaceState({}, "", "/?view=policy");
     vi.stubGlobal(
       "fetch",
@@ -337,7 +339,6 @@ describe("dashboard data flow", () => {
       "Product",
       "Team",
       "Data controls",
-      "Questions",
     ]);
     expect(screen.getByRole("tab", { name: "Data controls" })).toHaveAttribute(
       "aria-selected",
@@ -347,6 +348,39 @@ describe("dashboard data flow", () => {
     expect(await screen.findByRole("heading", { name: "Connect Search API" })).toBeVisible();
     expect(screen.getByRole("region", { name: "Setup" })).toBeVisible();
     expect(new URL(window.location.href).searchParams.get("view")).toBeNull();
+  });
+
+  it("opens Questions from the sidebar as a top-level view", async () => {
+    const data = dashboardFixture();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        if (String(input).includes("/context-fields")) {
+          return Promise.resolve(
+            json({ fields: [], legacyCatalogActive: false, defaultCatalog: [] }),
+          );
+        }
+        return Promise.resolve(json(data));
+      }),
+    );
+
+    render(
+      <Providers>
+        <Home />
+      </Providers>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Questions" }));
+
+    expect((await screen.findAllByRole("heading", { name: "Questions" })).length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.getByRole("button", { name: "Questions" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+    expect(new URL(window.location.href).searchParams.get("view")).toBe("questions");
   });
 
   it("clears a success notice when navigating to another view", async () => {

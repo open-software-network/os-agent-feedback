@@ -2,6 +2,7 @@
 
 import { IconChatBubbles } from "central-icons/IconChatBubbles";
 import { IconChevronGrabberVertical } from "central-icons/IconChevronGrabberVertical";
+import { IconCircleQuestionmark } from "central-icons/IconCircleQuestionmark";
 import { IconClock9OClock } from "central-icons/IconClock9OClock";
 import { IconHome } from "central-icons/IconHome";
 import { IconPeople } from "central-icons/IconPeople";
@@ -73,6 +74,11 @@ const navigation: Array<{
     view: "sessions",
     label: "Sessions",
     icon: IconClock9OClock,
+  },
+  {
+    view: "questions",
+    label: "Questions",
+    icon: IconCircleQuestionmark,
   },
   {
     view: "connectors",
@@ -238,7 +244,10 @@ function AppSidebar({
           <SidebarGroupContent>
             <SidebarMenu>
               {navigation
-                .filter((item) => item.view !== "connectors" || canCreateProduct)
+                .filter(
+                  (item) =>
+                    (item.view !== "connectors" && item.view !== "questions") || canCreateProduct,
+                )
                 .map((item) => {
                   const active =
                     view === item.view ||
@@ -333,7 +342,7 @@ export function DashboardShell({
     sessions: "Sessions",
     configuration: "Configurations",
     policy: "Configurations",
-    questions: "Configurations",
+    questions: "Questions",
     connectors: "Connectors",
     team: "Configurations",
     interactions: "Interaction",

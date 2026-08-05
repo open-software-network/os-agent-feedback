@@ -202,9 +202,9 @@ export function QuestionsView({
   }
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="mx-auto flex w-full max-w-6xl flex-col gap-5">
       <PageHeader
-        eyebrow="Configuration"
+        eyebrow="Customer enrichment"
         title="Questions"
         description="Define exactly what this product may ask a customer's agent. You choose the question, its semantic type, and every allowed answer."
         actions={
