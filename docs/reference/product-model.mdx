@@ -1,0 +1,106 @@
+---
+title: "Customer, Response, and Session contract"
+description: "The normative product model for completed operations and their optional feedback and context exchanges."
+---
+
+This is the target EPD-30 product-model contract, frozen under EPD-32, not the current dashboard API contract. It
+remains unpublished until the interaction-rooted Response API and dashboard replace the legacy
+enrichment-request-rooted Responses model. It is the implementation boundary for that migration, SDK
+coordination, and experimental Companion customer-context support.
+
+## Core objects
+
+### Customer
+
+A Customer is a product-scoped identity resolved only from company-authenticated identity evidence or a
+product-owned first-party anonymous identity. Epode does not infer, merge, or link Customers from behavior,
+timing, prompts, agent claims, or Session membership. Raw identity references remain company-side telemetry and
+are never returned to an agent; a safe compatibility display hint may remain visible to the company.
+
+### Response
+
+A Response is exactly one completed instrumented product operation. Its identity is the corresponding
+`interactions_v2.id`; an SDK must not mint a second interaction ID because the same operation also produced
+feedback or a customer-context exchange.
+
+An eligible interaction is a retained `interactions_v2` row whose completion was accepted from telemetry or an
+exact protocol artifact. Incomplete `unknown` or `pending` placeholders are excluded until accepted completion
+evidence reconciles them. Eligible completed MCP success and error operations are included, as are successful
+HTTP opportunities that have not been classified by stronger evidence; the latter appear with
+`evidence: unclassified`.
+
+Every eligible completed interaction appears exactly once in the Response read model. Lists, cursors, filters,
+counts, metrics, and rollups are rooted in that one interaction row. Artifact joins cannot multiply a Response or
+make an otherwise eligible Response disappear. Feedback state and context-exchange state do not decide whether
+the Response exists.
+
+### Session
+
+A Session groups Responses only when the product supplies explicit, authenticated continuity proof scoped by
+product environment, Session source, and the interaction's proven Customer scope. The Response read model uses
+only the interaction's persisted `session_id`; it never recomputes or widens Session membership. Missing proof
+leaves the Response unlinked. Customer identity alone, timestamps, labels, prompts, similarity, and MCP transport
+sessions never create Session membership.
+
+The Response read model derives its Customer and Session links only from the interaction. An attached artifact
+cannot create, replace, or widen either link.
+
+## Independent attached artifacts
+
+A Response may have neither, either, or both of these typed artifacts:
+
+- `feedback`: the existing `afr2_` feedback report and consent lifecycle;
+- `contextExchange`: the existing `aqr1_` bounded company question, consent, and answer lifecycle.
+
+A bounded company question is part of the `contextExchange` attached to the Response that caused the question.
+It is not another top-level Response. Response evidence, feedback status, and context-exchange status are
+independent fields: changing one must not imply or overwrite another. A validated protocol artifact may
+strengthen Response evidence, but its lifecycle status does not replace the evidence field.
+
+Each artifact is a zero-or-one aggregate projection per Response. Lifecycle events and history rows do not
+become additional Responses. Feedback and context exchange produced by the same product operation reuse the
+Response's one request-owned interaction ID.
+
+The two artifacts retain separate schemas, validators, capabilities, persistence tables, and state machines.
+Only fixed-origin, fail-closed transport plumbing may be shared. Existing tables are not renamed and the model
+does not introduce a generic artifact table.
+
+## Handler ownership
+
+Exactly one handler owns a context exchange. Ownership follows this precedence:
+
+1. `company_mcp` — the company's native MCP integration;
+2. `epode_companion` — the trusted Epode Companion for supported HTTP or HTML responses;
+3. `same_origin_best_effort` — the company's fixed same-origin relay when neither stronger handler owns it.
+
+The owner is selected before issuance and remains immutable. Inspection exposes the authoritative owner,
+purpose, retention or expiry policy, `rememberAllowed`, allowed options, immutable catalog identity and version
+or hash, and configured allowed-key subset as machine-readable request-specific values. A lower-priority handler
+rejects an exchange owned by a higher-priority handler; ownership is not reassigned at runtime and a second
+answer is never submitted.
+
+## Privacy and failure boundary
+
+Agent-facing handoffs and attached artifacts contain bounded structured evidence, not prompts, transcripts, raw
+tool inputs or outputs, free-form agent prose, credentials, raw Customer references, identity hashes, or raw
+Session references. Agents cannot widen a request's catalog, allowed keys, purpose, retention, remember policy,
+allowed options, or handler owner. Answer validation intersects Companion's static allowlist with every inspected
+request constraint.
+
+Instrumentation and artifact delivery remain bounded, asynchronous, and fail-open for the useful product call.
+Missing proof is a valid unlinked Response. It is distinct from server rejection, local queue overflow, and
+shutdown-undelivered telemetry.
+
+## Companion v1 customer-context scope
+
+Companion customer-context handling is experimental, disabled by default, and limited to bounded
+`product_personalization`. It accepts only a static allowlisted answer schema intersected with the inspected
+request's immutable allowed-key subset.
+
+Companion v1 does not support arbitrary or free-form questions, `targeted_advertising`, or `agent_inference`
+answers. It rejects `company_mcp`-owned exchanges and fails closed without changing the useful product result.
+Consent refusal is `consent_declined`; it is distinct from `no_relevant_context` and `answer_skipped`. New
+Companion answer tool schemas do not add an answer-level `declined` status.
+
+Enabling Companion customer-context by default requires a separate GA decision after the interaction-rooted
+Response API and dashboard migration are complete and fresh-session and adversarial compliance runs pass.
