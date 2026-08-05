@@ -5,7 +5,7 @@ import { dashboardFixture } from "@/components/dashboard/test-fixture";
 import { DashboardShell } from "./dashboard-shell";
 
 describe("DashboardShell", () => {
-  it("uses the thin customer-enrichment navigation", () => {
+  it("uses the agent-experience navigation", () => {
     render(
       <DashboardShell
         data={dashboardFixture()}
@@ -23,7 +23,7 @@ describe("DashboardShell", () => {
       "Home",
       "Customers",
       "Responses",
-      "Sessions",
+      "Journeys",
       "Questions",
       "Connectors",
       "Configurations",
@@ -44,8 +44,8 @@ describe("DashboardShell", () => {
     const coreLabels = screen
       .getAllByRole("button")
       .map((item) => item.textContent)
-      .filter((label) => ["Home", "Customers", "Responses", "Sessions"].includes(label ?? ""));
-    expect(coreLabels).toEqual(["Home", "Customers", "Responses", "Sessions"]);
+      .filter((label) => ["Home", "Journeys", "Customers", "Responses"].includes(label ?? ""));
+    expect(coreLabels).toEqual(["Home", "Journeys", "Customers", "Responses"]);
   });
 
   it("opens Questions from the sidebar as a top-level destination", () => {
@@ -175,7 +175,7 @@ describe("DashboardShell", () => {
     for (const hidden of ["Connectors", "Setup", "Data controls"]) {
       expect(screen.queryByRole("button", { name: hidden })).not.toBeInTheDocument();
     }
-    for (const label of ["Home", "Customers", "Responses", "Sessions", "Configurations"]) {
+    for (const label of ["Home", "Journeys", "Customers", "Responses", "Configurations"]) {
       expect(screen.getByRole("button", { name: label })).toBeVisible();
     }
     fireEvent.click(screen.getByRole("button", { name: "Configurations" }));

@@ -239,7 +239,7 @@ export function CustomersView({
               <TableRow className="hover:bg-background">
                 <TableHead className="h-9 w-[42%] pl-5 text-xs">Customer</TableHead>
                 <TableHead className="h-9 w-[22%] text-xs">Identity</TableHead>
-                <TableHead className="h-9 w-[18%] text-xs">Sessions</TableHead>
+                <TableHead className="h-9 w-[18%] text-xs">Journeys</TableHead>
                 <TableHead className="h-9 w-[18%] pr-5 text-right text-xs">Updated</TableHead>
               </TableRow>
             </TableHeader>
@@ -677,9 +677,9 @@ function CustomerDetailContent({
       </section>
 
       <Separator className="my-5" />
-      <section aria-labelledby="customer-sessions-heading">
-        <h3 id="customer-sessions-heading" className="text-xs font-medium">
-          Sessions
+      <section aria-labelledby="customer-journeys-heading" aria-label="Journeys">
+        <h3 id="customer-journeys-heading" className="text-xs font-medium">
+          Journeys
         </h3>
         {detail.sessions.length ? (
           <ol className="mt-3 divide-y">
@@ -687,7 +687,7 @@ function CustomerDetailContent({
               <li key={session.id} className="-mx-2">
                 <Button
                   variant="ghost"
-                  aria-label={`Open session ${session.refHint}`}
+                  aria-label={`Open journey ${session.refHint}`}
                   className="h-auto w-full justify-start rounded-md px-2 py-2 text-left font-normal whitespace-normal hover:bg-muted/40"
                   onClick={() => openSession(session.id)}
                 >
@@ -702,7 +702,7 @@ function CustomerDetailContent({
             ))}
           </ol>
         ) : (
-          <p className="mt-2 text-sm text-muted-foreground">No sessions for this customer yet.</p>
+          <p className="mt-2 text-sm text-muted-foreground">No journeys for this customer yet.</p>
         )}
       </section>
     </>

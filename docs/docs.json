@@ -2,7 +2,7 @@
   "$schema": "https://mintlify.com/docs.json",
   "theme": "maple",
   "name": "Epode",
-  "description": "Learn permissioned customer context through customer agents, then personalize and measure the experience.",
+  "description": "Serve agent experience graphs, learn permissioned customer context, personalize, and measure outcomes.",
   "colors": {
     "primary": "#1D4ED8",
     "light": "#68C4FF",
@@ -15,10 +15,20 @@
   "favicon": "/logo.svg",
   "navbar": {
     "links": [
-      { "label": "Dashboard", "href": "https://app.epode.ai" },
-      { "label": "GitHub", "href": "https://github.com/open-software-network/os-epode" }
+      {
+        "label": "Dashboard",
+        "href": "https://app.epode.ai"
+      },
+      {
+        "label": "GitHub",
+        "href": "https://github.com/open-software-network/os-epode"
+      }
     ],
-    "primary": { "type": "button", "label": "Open Epode", "href": "https://app.epode.ai" }
+    "primary": {
+      "type": "button",
+      "label": "Open Epode",
+      "href": "https://app.epode.ai"
+    }
   },
   "navigation": {
     "tabs": [
@@ -27,11 +37,16 @@
         "groups": [
           {
             "group": "Start here",
-            "pages": ["index", "quickstart", "integrations/choose"]
+            "pages": [
+              "index",
+              "quickstart",
+              "integrations/choose"
+            ]
           },
           {
             "group": "Understand Epode",
             "pages": [
+              "concepts/agent-experience",
               "concepts/how-it-works",
               "concepts/customer-enrichment",
               "concepts/reliability",
@@ -90,8 +105,16 @@
     ],
     "global": {
       "anchors": [
-        { "anchor": "Dashboard", "icon": "chart-line", "href": "https://app.epode.ai" },
-        { "anchor": "Status", "icon": "signal", "href": "https://app.epode.ai/api/health" }
+        {
+          "anchor": "Dashboard",
+          "icon": "chart-line",
+          "href": "https://app.epode.ai"
+        },
+        {
+          "anchor": "Status",
+          "icon": "signal",
+          "href": "https://app.epode.ai/api/health"
+        }
       ]
     }
   },

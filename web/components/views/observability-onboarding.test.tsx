@@ -94,7 +94,7 @@ describe("observability onboarding states", () => {
     expect(screen.queryByText("No matching feedback")).not.toBeInTheDocument();
   });
 
-  it("explains why a product has no sessions instead of offering a no-op filter reset", () => {
+  it("explains why a product has no journeys instead of offering a no-op filter reset", () => {
     const data = emptyDashboard();
     vi.stubGlobal(
       "fetch",
@@ -109,8 +109,8 @@ describe("observability onboarding states", () => {
     );
     renderWithQuery(sessionsView(data));
 
-    expect(screen.getByText("No proven sessions yet")).toBeVisible();
-    expect(screen.getByText(/stable application-level reference/i)).toBeVisible();
+    expect(screen.getByText("No proven journeys yet")).toBeVisible();
+    expect(screen.getByText(/experience graph or the product supplies a stable session reference/i)).toBeVisible();
     expect(screen.queryByRole("button", { name: "Clear filters" })).not.toBeInTheDocument();
   });
 
@@ -139,14 +139,14 @@ describe("observability onboarding states", () => {
     renderWithQuery(sessionsView(data));
 
     expect(screen.getByRole("row", { name: /session-42/ })).toBeVisible();
-    fireEvent.change(screen.getByLabelText("Search sessions"), {
+    fireEvent.change(screen.getByLabelText("Search journeys"), {
       target: { value: "missing" },
     });
 
     await waitFor(() =>
       expect(screen.queryByRole("row", { name: /session-42/ })).not.toBeInTheDocument(),
     );
-    expect(screen.getByText("Loading sessions…")).toBeVisible();
+    expect(screen.getByText("Loading journeys…")).toBeVisible();
   });
 
   it("keeps team rename reachable inside the Configuration layout", async () => {

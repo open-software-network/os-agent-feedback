@@ -10,3 +10,4 @@ export { createStaticDocsProxy } from "./edge.js";
 export { agentFeedback as expressAgentFeedback } from "./express.js";
 export { agentFeedback as fastifyAgentFeedback } from "./fastify.js";
 export { createMcpInstrumentation, instrumentMcp } from "./mcp.js";
+export * from "./experience-graph.js";

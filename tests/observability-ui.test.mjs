@@ -39,9 +39,10 @@ test("feedback connects structured reports to interaction and session context", 
 });
 
 test("sessions expose proof-based grouping, aggregate health, and a linked timeline", () => {
-  assert.match(script, /Agent journeys/);
+  assert.match(script, /Agent experience/);
+  assert.match(script, /No proven journeys/);
   assert.match(script, /Proof-based continuity/);
-  assert.match(script, /Interactions per session/);
+  assert.match(script, /Interactions per journey/);
   assert.match(script, /Interaction journey/);
   assert.match(script, /timeline-feedback/);
   assert.match(script, /never guesses continuity from timing or identity/);
@@ -70,7 +71,7 @@ test("Home turns product health into an operational overview", () => {
 });
 
 test("the full app exposes live counts, setup health, and structured policy controls", () => {
-  assert.match(html, /<p>FEATURES<\/p>[\s\S]*data-view="feedback"[\s\S]*data-view="sessions"/);
+  assert.match(html, /<p>EXPERIENCE<\/p>[\s\S]*data-view="sessions"[\s\S]*data-view="feedback"/);
   assert.doesNotMatch(html, /<p>FEEDBACK<\/p>|<p>PRODUCT USE<\/p>/);
   assert.doesNotMatch(html, /data-view="interactions"/);
   assert.match(html, /data-nav-count="feedback"/);

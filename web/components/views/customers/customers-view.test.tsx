@@ -32,7 +32,7 @@ describe("CustomersView", () => {
     expect(screen.queryByLabelText("Identity filter")).not.toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "Identity" })).toBeVisible();
     expect(screen.queryByRole("columnheader", { name: "Type" })).not.toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Sessions" })).toBeVisible();
+    expect(screen.getByRole("columnheader", { name: "Journeys" })).toBeVisible();
     expect(screen.queryByRole("columnheader", { name: "Data use" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Sharing filter")).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
@@ -100,7 +100,7 @@ describe("CustomersView", () => {
     expect(screen.queryByText(/Not mobile/)).not.toBeInTheDocument();
     expect(screen.getByText("ExampleBrowser/1.0")).toBeVisible();
     expect(screen.getByText(/MAC addresses are not exposed by routed HTTP/i)).toBeVisible();
-    expect(screen.getByRole("heading", { name: "Sessions" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Journeys" })).toBeVisible();
     expect(screen.queryByRole("heading", { name: "Permission" })).not.toBeInTheDocument();
   });
 
@@ -112,14 +112,14 @@ describe("CustomersView", () => {
     });
 
     await screen.findByRole("heading", { name: "Acme workspace" });
-    const sessions = screen.getByRole("region", { name: "Sessions" });
+    const sessions = screen.getByRole("region", { name: "Journeys" });
     const sessionRow = within(sessions).getByRole("button", {
-      name: "Open session session-42",
+      name: "Open journey session-42",
     });
     expect(within(sessionRow).getByText("session-42")).toBeVisible();
     expect(sessionRow).toHaveClass("px-2");
     expect(sessionRow.parentElement).toHaveClass("-mx-2");
-    expect(within(sessions).queryByText("Open session")).not.toBeInTheDocument();
+    expect(within(sessions).queryByText("Open journey")).not.toBeInTheDocument();
     fireEvent.click(sessionRow);
 
     expect(openSession).toHaveBeenCalledWith("55555555-5555-4555-8555-555555555555");

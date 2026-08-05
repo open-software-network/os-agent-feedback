@@ -1,9 +1,9 @@
 "use client";
 
 import { IconChatBubbles } from "central-icons/IconChatBubbles";
+import { IconFootsteps } from "central-icons/IconFootsteps";
 import { IconChevronGrabberVertical } from "central-icons/IconChevronGrabberVertical";
 import { IconCircleQuestionmark } from "central-icons/IconCircleQuestionmark";
-import { IconClock9OClock } from "central-icons/IconClock9OClock";
 import { IconHome } from "central-icons/IconHome";
 import { IconPeople } from "central-icons/IconPeople";
 import { IconPlugin2 } from "central-icons/IconPlugin2";
@@ -61,6 +61,11 @@ const navigation: Array<{
     icon: IconHome,
   },
   {
+    view: "sessions",
+    label: "Journeys",
+    icon: IconFootsteps,
+  },
+  {
     view: "customers",
     label: "Customers",
     icon: IconPeople,
@@ -69,11 +74,6 @@ const navigation: Array<{
     view: "responses",
     label: "Responses",
     icon: IconChatBubbles,
-  },
-  {
-    view: "sessions",
-    label: "Sessions",
-    icon: IconClock9OClock,
   },
   {
     view: "questions",
@@ -339,7 +339,7 @@ export function DashboardShell({
     customers: "Customers",
     responses: "Responses",
     feedback: "Response",
-    sessions: "Sessions",
+    sessions: "Journeys",
     configuration: "Configurations",
     policy: "Configurations",
     questions: "Questions",
