@@ -86,11 +86,10 @@ describe("SessionsView", () => {
     expect(selectSession).toHaveBeenCalledWith(null);
   });
 
-  it("links canonical questions and bounded answers to their session interaction", async () => {
+  it("keeps legacy response records out of graph-pure journey details", async () => {
     const base = dashboardFixture();
     const session = base.sessions[0];
     const interaction = base.interactions[0];
-    const openInteraction = vi.fn();
     vi.stubGlobal(
       "fetch",
       sessionFetch(base, {
@@ -136,77 +135,18 @@ describe("SessionsView", () => {
         selectedSessionId={session.id}
         selectSession={vi.fn()}
         openFeedback={vi.fn()}
-        openInteraction={openInteraction}
-        loadMore={vi.fn()}
-        refresh={vi.fn().mockResolvedValue(undefined)}
-      />,
-    );
-
-    const responses = await screen.findByRole("region", { name: "Permissioned memory" });
-    const journey = screen.getByRole("region", { name: "Observed journey" });
-    expect(journey.compareDocumentPosition(responses) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
-      Node.DOCUMENT_POSITION_FOLLOWING,
-    );
-    expect(
-      within(responses).getByText("What should Tripwise prioritize for this traveler?"),
-    ).toBeVisible();
-    expect(within(responses).queryByText("Answered")).not.toBeInTheDocument();
-    expect(within(responses).getByText("travel.cabin_preference")).toBeVisible();
-    expect(within(responses).getByText("premium_economy")).toBeVisible();
-    expect(within(responses).getByText("travel.max_stops")).toBeVisible();
-    expect(within(responses).getByText("1")).toBeVisible();
-    expect(within(responses).getByText("Traveler 1042", { exact: false })).toBeVisible();
-    expect(within(responses).queryByText(/raw prompt|tool query/i)).not.toBeInTheDocument();
-
-    fireEvent.click(within(responses).getByRole("button", { name: "Open interaction" }));
-    expect(openInteraction).toHaveBeenCalledWith(interaction.id);
-  });
-
-  it("describes a response exception once without status chrome", async () => {
-    const base = dashboardFixture();
-    const session = base.sessions[0];
-    const interaction = base.interactions[0];
-    vi.stubGlobal(
-      "fetch",
-      sessionFetch(base, {
-        session,
-        interactions: [interaction],
-        reports: [],
-        responses: [
-          {
-            id: "response-1",
-            interactionId: interaction.id,
-            question: "What context can be shared?",
-            status: "declined",
-            purpose: "product_personalization",
-            surface: "mcp",
-            customerId: null,
-            customerName: null,
-            askedAt: "2026-08-02T12:00:00Z",
-            answeredAt: "2026-08-02T12:01:00Z",
-            answers: [],
-          },
-        ],
-      }),
-    );
-
-    renderWithQuery(
-      <SessionsView
-        data={base}
-        selectedSessionId={session.id}
-        selectSession={vi.fn()}
-        openFeedback={vi.fn()}
         openInteraction={vi.fn()}
         loadMore={vi.fn()}
         refresh={vi.fn().mockResolvedValue(undefined)}
       />,
     );
 
-    const responses = await screen.findByRole("region", { name: "Permissioned memory" });
+    expect(await screen.findByRole("region", { name: "Observed journey" })).toBeVisible();
+    expect(screen.queryByText("Permissioned memory")).not.toBeInTheDocument();
     expect(
-      within(responses).getByText("The customer agent declined to share permissioned memory."),
-    ).toBeVisible();
-    expect(within(responses).queryByText(/^Declined$/)).not.toBeInTheDocument();
+      screen.queryByText("What should Tripwise prioritize for this traveler?"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("travel.cabin_preference")).not.toBeInTheDocument();
   });
 
   it("opens a session from the full row or its explicit accessible control", () => {

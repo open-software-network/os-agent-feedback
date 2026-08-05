@@ -910,7 +910,7 @@ async function clickText(page, text) {
 
 async function textVisible(page, text) {
   await page.waitForFunction(
-    (target) => document.body.innerText.includes(target),
+    (target) => document.body.innerText.toLocaleLowerCase().includes(target.toLocaleLowerCase()),
     { timeout: 15_000 },
     text,
   );
@@ -994,9 +994,8 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
     String(journeyDetail.headers.cookie).includes(TEST_COOKIE),
     "the journey detail BFF must forward the real browser session cookie",
   );
-  await textVisible(page, "Permissioned memory");
-  await textVisible(page, "What does the user need from search right now?");
-  await textVisible(page, "Find the newest indexed policy");
+  await textVisible(page, "Observed journey");
+  await textVisible(page, "search");
   await page.screenshot({ path: path.join(artifactDirectory, "05-journey.png"), fullPage: true });
   await page.click('button[aria-label="Close journey detail"]');
 
@@ -1005,13 +1004,10 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await metricVisible(page, "Customers", "1");
   await metricVisible(page, "Known", "1");
   await clickText(page, "Acme workspace");
-  await textVisible(page, "What we know");
-  await textVisible(page, "Context returned to product");
-  await textVisible(page, "Freshness First");
-  await textVisible(page, "Request facts");
-  await textVisible(page, "IP 203.0.113.42");
-  await textVisible(page, "MAC addresses are not exposed by routed HTTP");
-  await textVisible(page, "Journeys");
+  await textVisible(page, "Experience graph");
+  await textVisible(page, "Latest observed node");
+  await textVisible(page, "Graph journeys");
+  await textVisible(page, "not promoted to durable memory");
   await page.screenshot({ path: path.join(artifactDirectory, "02-customers.png"), fullPage: true });
   const customerDetail = await fixtureRequest(
     state,

@@ -32,10 +32,8 @@ import {
 } from "@/components/ui/table";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import {
-  type CustomerContextReturn,
   type CustomerDetail,
   type CustomerFacets,
-  type CustomerSignal,
   type CustomerSummary,
   fetchCustomerDetail,
   fetchCustomersPage,
@@ -491,40 +489,8 @@ function CustomerInspector({
   );
 }
 
-function signalSource(provenance: string) {
-  switch (provenance) {
-    case "agent_reports_user_statement":
-      return "Customer said";
-    case "agent_reports_current_task":
-      return "Current request";
-    case "agent_inference":
-      return "Assistant inference";
-    case "product_activity":
-      return "Product activity";
-    case "company_assertion":
-      return "Company record";
-    default:
-      return titleCase(provenance);
-  }
-}
-
-function signalValue(signal: CustomerSignal) {
-  if (typeof signal.value === "string" || typeof signal.value === "number") {
-    return String(signal.value);
-  }
-  if (typeof signal.value === "boolean") return signal.value ? "Yes" : "No";
-  if (Array.isArray(signal.value)) {
-    return signal.value
-      .filter((value) => ["string", "number", "boolean"].includes(typeof value))
-      .map(String)
-      .join(", ");
-  }
-  return null;
-}
-
-function rawAddsInfo(summary: string, raw: string) {
-  const normalize = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, "");
-  return !normalize(summary).includes(normalize(raw));
+function graphNode(operation: string | null) {
+  return operation?.trim() || "No graph node observed";
 }
 
 function CustomerDetailContent({
@@ -536,11 +502,11 @@ function CustomerDetailContent({
 }) {
   const customer = detail.customer;
   const referenceHints = [customer.userRefHint, customer.accountRefHint].filter(Boolean);
-  const usedSignalIds = new Set(
-    detail.contextReturns.flatMap((retrieval) =>
-      retrieval.decisions.flatMap((decision) => decision.signalIds),
-    ),
+  const interactionCount = detail.sessions.reduce(
+    (total, session) => total + session.interactionCount,
+    0,
   );
+  const latestSession = detail.sessions[0];
 
   return (
     <>
@@ -550,6 +516,11 @@ function CustomerDetailContent({
       </div>
       <p className="mt-3 text-xs text-muted-foreground">
         Customer{referenceHints.length ? ` · ${referenceHints.join(" · ")}` : ""}
+      </p>
+      <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
+        {customer.identityLevel === "pseudonymous"
+          ? "Stable pseudonymous identity supplied by the product. Epode links graph journeys without requiring personal information."
+          : "Stable product-owned identity used to link this customer’s graph journeys."}
       </p>
       {customer.segments.length ? (
         <div className="mt-3 flex flex-wrap gap-1">
@@ -562,139 +533,75 @@ function CustomerDetailContent({
       ) : null}
 
       <Separator className="my-5" />
-      <section aria-labelledby="customer-knowledge-heading">
+      <section aria-labelledby="customer-experience-graph-heading">
         <div className="flex items-center justify-between gap-3">
-          <h3 id="customer-knowledge-heading" className="text-xs font-medium">
-            What we know
+          <h3 id="customer-experience-graph-heading" className="text-xs font-medium">
+            Experience graph
           </h3>
           <span className="text-[11px] text-muted-foreground">
-            {detail.signals.length.toLocaleString()}{" "}
-            {detail.signals.length === 1 ? "answer" : "answers"}
-          </span>
-        </div>
-        {detail.signals.length ? (
-          <ol className="mt-3 divide-y">
-            {detail.signals.map((signal) => {
-              const value = signalValue(signal);
-              const raw = [signal.signalKey, value].filter(Boolean).join(" · ");
-              const sourceSession = signal.sessionId
-                ? detail.sessions.find((session) => session.id === signal.sessionId)
-                : undefined;
-              return (
-                <li key={signal.id} className="py-3 first:pt-0">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="text-xs font-medium leading-5">{signal.summary}</p>
-                      {raw && rawAddsInfo(signal.summary, raw) ? (
-                        <p className="mt-1 break-words font-mono text-[11px] text-muted-foreground">
-                          {raw}
-                        </p>
-                      ) : null}
-                    </div>
-                    <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
-                      <Badge variant="secondary">{titleCase(signal.type)}</Badge>
-                      {usedSignalIds.has(signal.id) ? (
-                        <Badge variant="secondary">Used</Badge>
-                      ) : null}
-                    </div>
-                  </div>
-                  <div className="mt-2 flex items-center justify-between gap-3">
-                    <p className="text-[11px] text-muted-foreground">
-                      {signalSource(signal.provenance)} · {relativeDate(signal.collectedAt)}
-                    </p>
-                    {sourceSession ? (
-                      <Button
-                        variant="link"
-                        size="xs"
-                        className="h-auto shrink-0 p-0"
-                        onClick={() => openSession(sourceSession.id)}
-                      >
-                        Open source session
-                      </Button>
-                    ) : null}
-                  </div>
-                </li>
-              );
-            })}
-          </ol>
-        ) : (
-          <p className="mt-2 text-sm text-muted-foreground">No customer answers are linked yet.</p>
-        )}
-      </section>
-
-      <Separator className="my-5" />
-      <CustomerContextReturns returns={detail.contextReturns} openSession={openSession} />
-
-      <Separator className="my-5" />
-      <section aria-labelledby="customer-request-facts-heading">
-        <div className="flex items-center justify-between gap-3">
-          <h3 id="customer-request-facts-heading" className="text-xs font-medium">
-            Request facts
-          </h3>
-          <span className="text-[11px] text-muted-foreground">
-            {detail.counts.requestObservations.toLocaleString()} observed
+            {detail.sessions.length.toLocaleString()}{" "}
+            {detail.sessions.length === 1 ? "path" : "paths"}
           </span>
         </div>
         <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-          Automatically observed by the company&apos;s server. Cookies, credentials, full referrer
-          URLs, and arbitrary headers are excluded. MAC addresses are not exposed by routed HTTP.
+          Need state is observed in the paths the customer&apos;s agent traversed. It is scoped to
+          each journey and is not promoted to durable memory.
         </p>
-        {detail.requestObservations.length ? (
-          <ol className="mt-3 divide-y">
-            {detail.requestObservations.map((observation) => {
-              const facts = [
-                observation.clientIp ? `IP ${observation.clientIp}` : null,
-                observation.method,
-                observation.acceptLanguage,
-              ].filter(Boolean);
-              return (
-                <li key={observation.id} className="py-3 first:pt-0">
-                  <p className="break-words font-mono text-[11px] text-foreground">
-                    {facts.join(" · ") || "HTTP request"}
-                  </p>
-                  {observation.userAgent ? (
-                    <p className="mt-1 break-words text-[11px] text-muted-foreground">
-                      {observation.userAgent}
-                    </p>
-                  ) : null}
-                  {observation.referrerOrigin ? (
-                    <p className="mt-1 break-words text-[11px] text-muted-foreground">
-                      Referrer origin: {observation.referrerOrigin}
-                    </p>
-                  ) : null}
-                  <p className="mt-1 text-[11px] text-muted-foreground">
-                    Observed {formatDate(observation.observedAt)}
-                  </p>
-                </li>
-              );
-            })}
-          </ol>
+        {latestSession ? (
+          <div className="mt-3 border bg-muted/20 p-3">
+            <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              Latest observed node
+            </p>
+            <p className="mt-2 break-words font-mono text-xs leading-5">
+              {graphNode(latestSession.lastOperation)}
+            </p>
+            <p className="mt-2 text-[11px] text-muted-foreground">
+              {relativeDate(latestSession.lastSeenAt)} · {latestSession.refHint}
+            </p>
+          </div>
         ) : (
           <p className="mt-2 text-sm text-muted-foreground">
-            No request facts have been observed for this customer yet.
+            No experience-graph path has been observed for this customer yet.
           </p>
         )}
       </section>
 
       <Separator className="my-5" />
-      <section aria-labelledby="customer-journeys-heading" aria-label="Journeys">
-        <h3 id="customer-journeys-heading" className="text-xs font-medium">
-          Journeys
-        </h3>
+      <section aria-labelledby="customer-journeys-heading" aria-label="Graph journeys">
+        <div className="flex items-center justify-between gap-3">
+          <h3 id="customer-journeys-heading" className="text-xs font-medium">
+            Graph journeys
+          </h3>
+          <span className="text-[11px] text-muted-foreground">
+            {interactionCount.toLocaleString()} {interactionCount === 1 ? "node" : "nodes"}
+          </span>
+        </div>
+        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+          Open a journey to inspect every observed node in chronological order.
+        </p>
         {detail.sessions.length ? (
           <ol className="mt-3 divide-y">
             {detail.sessions.map((session) => (
               <li key={session.id} className="-mx-2">
                 <Button
                   variant="ghost"
-                  aria-label={`Open journey ${session.refHint}`}
-                  className="h-auto w-full justify-start rounded-md px-2 py-2 text-left font-normal whitespace-normal hover:bg-muted/40"
+                  aria-label={`Open graph journey ${session.refHint}`}
+                  className="h-auto w-full justify-start rounded-md px-2 py-3 text-left font-normal whitespace-normal hover:bg-muted/40"
                   onClick={() => openSession(session.id)}
                 >
                   <span className="min-w-0">
-                    <span className="block truncate font-mono text-xs">{session.refHint}</span>
+                    <span className="block truncate font-mono text-xs font-medium">
+                      {session.refHint}
+                    </span>
+                    <span className="mt-1 block break-words font-mono text-[10px] leading-4 text-muted-foreground">
+                      {graphNode(session.firstOperation)}
+                      {session.lastOperation && session.lastOperation !== session.firstOperation
+                        ? ` → ${session.lastOperation}`
+                        : ""}
+                    </span>
                     <span className="mt-1 block text-[11px] text-muted-foreground">
-                      {session.interactionCount} interactions · {relativeDate(session.lastSeenAt)}
+                      {session.interactionCount} {session.interactionCount === 1 ? "node" : "nodes"}{" "}
+                      · {relativeDate(session.lastSeenAt)}
                     </span>
                   </span>
                 </Button>
@@ -702,123 +609,9 @@ function CustomerDetailContent({
             ))}
           </ol>
         ) : (
-          <p className="mt-2 text-sm text-muted-foreground">No journeys for this customer yet.</p>
+          <p className="mt-2 text-sm text-muted-foreground">No graph journeys yet.</p>
         )}
       </section>
     </>
-  );
-}
-
-function CustomerContextReturns({
-  returns,
-  openSession,
-}: {
-  returns: CustomerContextReturn[];
-  openSession: (sessionId: string) => void;
-}) {
-  return (
-    <section aria-labelledby="customer-context-returned-heading">
-      <div className="flex items-center justify-between gap-3">
-        <h3 id="customer-context-returned-heading" className="text-xs font-medium">
-          Context returned to product
-        </h3>
-        <span className="text-[11px] text-muted-foreground">
-          {returns.length.toLocaleString()} {returns.length === 1 ? "retrieval" : "retrievals"}
-        </span>
-      </div>
-      <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-        Structured fields returned through Epode. Customer prompts and searches are not included.
-      </p>
-      {returns.length ? (
-        <ol className="mt-3 divide-y">
-          {returns.map((retrieval) => {
-            return (
-              <li key={retrieval.retrievalId} className="py-3 first:pt-0">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="text-xs font-medium">{titleCase(retrieval.purpose)}</p>
-                    <p className="mt-1 text-[11px] text-muted-foreground">
-                      Returned {formatDate(retrieval.retrievedAt)} · {retrieval.items.length}{" "}
-                      {retrieval.items.length === 1 ? "field" : "fields"}
-                    </p>
-                  </div>
-                  {retrieval.sessionId ? (
-                    <Button
-                      variant="link"
-                      size="xs"
-                      className="h-auto shrink-0 p-0"
-                      onClick={() => openSession(retrieval.sessionId ?? "")}
-                    >
-                      Open session
-                    </Button>
-                  ) : null}
-                </div>
-                {retrieval.items.length ? (
-                  <p className="mt-2 break-words font-mono text-[11px] text-muted-foreground">
-                    {retrieval.items.map((item) => item.key).join(" · ")}
-                  </p>
-                ) : (
-                  <p className="mt-2 text-[11px] text-muted-foreground">
-                    No saved context fields were returned.
-                  </p>
-                )}
-                <details className="mt-2">
-                  <summary className="cursor-pointer text-[11px] text-muted-foreground">
-                    Retrieval details
-                  </summary>
-                  <dl className="mt-2 space-y-1 font-mono text-[10px] leading-4 text-muted-foreground">
-                    <div>
-                      <dt className="inline font-sans">Context version: </dt>
-                      <dd className="inline break-all">{retrieval.contextVersion}</dd>
-                    </div>
-                    <div>
-                      <dt className="inline font-sans">Retrieval: </dt>
-                      <dd className="inline break-all">{retrieval.retrievalId}</dd>
-                    </div>
-                  </dl>
-                </details>
-                {retrieval.decisions.length ? (
-                  <div className="mt-3 space-y-2">
-                    {retrieval.decisions.map((decision) => (
-                      <div key={decision.id} className="border-l-2 pl-3">
-                        <p className="text-xs font-medium">
-                          {decision.variant
-                            ? `Applied variant: ${titleCase(decision.variant)}`
-                            : "Personalization applied"}
-                        </p>
-                        <p className="mt-1 text-[11px] text-muted-foreground">
-                          {decision.signalIds.length} returned{" "}
-                          {decision.signalIds.length === 1 ? "field" : "fields"} used
-                        </p>
-                        {decision.outcomes.length ? (
-                          <p className="mt-1 text-[11px] text-muted-foreground">
-                            Outcome:{" "}
-                            {decision.outcomes
-                              .map((outcome) => titleCase(outcome.outcome))
-                              .join(", ")}
-                          </p>
-                        ) : (
-                          <p className="mt-1 text-[11px] text-muted-foreground">
-                            No outcome linked yet.
-                          </p>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="mt-3 text-[11px] text-muted-foreground">
-                    No product decision has been linked to this retrieval.
-                  </p>
-                )}
-              </li>
-            );
-          })}
-        </ol>
-      ) : (
-        <p className="mt-2 text-sm text-muted-foreground">
-          No customer context has been returned to this product yet.
-        </p>
-      )}
-    </section>
   );
 }
