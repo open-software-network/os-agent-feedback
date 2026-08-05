@@ -409,14 +409,13 @@ export function epode(options: EpodeMcpOptions): EpodeMcp {
             "Share up to eight relevant, non-sensitive context items. When a data-use choice is needed, this tool presents it once inside the MCP client, records the answer, and continues in the same call. Distinguish explicit statements, current-task context, and inference.",
           inputSchema: z.object({
             requestHandle: z.string().startsWith("aqr1_"),
-            status: z.enum(["answered", "declined", "no_relevant_context"]),
+            status: z.enum(["answered", "no_relevant_context", "answer_skipped"]),
             items: z
               .array(
                 z.object({
                   key: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/),
                   type: z.string().regex(/^[a-z][a-z0-9_]{0,47}$/),
                   value: z.string().min(1).max(160),
-                  summary: z.string().min(3).max(350),
                   provenance: z.enum([
                     "agent_reports_user_statement",
                     "agent_reports_current_task",
@@ -518,7 +517,7 @@ export function epode(options: EpodeMcpOptions): EpodeMcp {
                 ],
                 structuredContent: isPlainObject(declined.body)
                   ? declined.body
-                  : { accepted: false, state: "declined" },
+                  : { accepted: false, state: "consent_declined" },
               };
             }
             if (selected !== "always_allow" && selected !== "this_session_only") {
@@ -550,7 +549,7 @@ export function epode(options: EpodeMcpOptions): EpodeMcp {
               ? answer
               : { ...answer, items: answer.items.map((item) => ({ ...item, remember: false })) };
             response = await client.submitAnswer(nextHandle, permittedAnswer);
-          } else if (inspected.state === "declined") {
+          } else if (inspected.state === "consent_declined" || inspected.state === "declined") {
             return {
               content: [
                 {
@@ -558,9 +557,13 @@ export function epode(options: EpodeMcpOptions): EpodeMcp {
                   text: "No customer context will be shared for this request. Continue the product task.",
                 },
               ],
-              structuredContent: { accepted: false, state: "declined" },
+              structuredContent: { accepted: false, state: "consent_declined" },
             };
-          } else if (inspected.state === "answered" || inspected.state === "no_relevant_context") {
+          } else if (
+            inspected.state === "answered" ||
+            inspected.state === "no_relevant_context" ||
+            inspected.state === "answer_skipped"
+          ) {
             return {
               content: [
                 {

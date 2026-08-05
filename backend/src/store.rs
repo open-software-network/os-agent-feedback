@@ -9094,6 +9094,26 @@ struct ExistingEnrichmentInteractionRow {
     runtime_hint: Option<String>,
 }
 
+async fn normalize_enrichment_terminal_state(
+    tx: &mut Transaction<'_, Postgres>,
+    request: &mut EnrichmentRequestRow,
+) -> Result<(), ApiError> {
+    if request.state == "declined" {
+        let has_answer = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM enrichment_answers WHERE request_id = $1)",
+        )
+        .bind(request.id)
+        .fetch_one(&mut **tx)
+        .await?;
+        request.state = if has_answer {
+            "answer_skipped".to_owned()
+        } else {
+            "consent_declined".to_owned()
+        };
+    }
+    Ok(())
+}
+
 fn validate_enrichment_purpose(value: &str) -> Result<(), ApiError> {
     if ENRICHMENT_PURPOSES.contains(&value) {
         Ok(())
@@ -9458,7 +9478,7 @@ fn enrichment_answer_action(
     public_base_url: &str,
     token: &str,
     catalog: Option<&RequestFieldCatalog>,
-    _handler_owner: &str,
+    handler_owner: &str,
 ) -> EnrichmentAnswerAction {
     let (catalog_version, entries, signal_types) = catalog.map_or_else(
         || {
@@ -9501,28 +9521,45 @@ fn enrichment_answer_action(
         authorization: format!("Bearer {token}"),
         content_type: "application/json".to_owned(),
         body_schema: EnrichmentAnswerBodySchema {
-            status: vec![
-                "answered".to_owned(),
-                "declined".to_owned(),
-                "no_relevant_context".to_owned(),
-            ],
+            status: enrichment_answer_statuses(handler_owner),
             items: EnrichmentAnswerItemsSchema {
                 maximum: 8,
                 required: ["key", "type", "value", "provenance", "remember"]
                     .map(str::to_owned)
                     .to_vec(),
                 signal_types,
-                provenance: [
-                    "agent_reports_user_statement",
-                    "agent_reports_current_task",
-                    "agent_inference",
-                ]
-                .map(str::to_owned)
-                .to_vec(),
+                provenance: enrichment_answer_provenances(handler_owner),
                 catalog_version,
                 catalog: entries,
             },
         },
+    }
+}
+
+// Keep advertising the legacy wire spelling until every pre-0044 backend has
+// drained. New backends normalize it to the distinct `answer_skipped` outcome,
+// while official SDKs expose the canonical name and translate at the relay.
+fn enrichment_answer_statuses(_handler_owner: &str) -> Vec<String> {
+    ["answered", "declined", "no_relevant_context"]
+        .map(str::to_owned)
+        .to_vec()
+}
+
+// Companion ownership is deliberately policy-only until EPD-38 activates its
+// request path. Native company MCP keeps its existing inference semantics.
+fn enrichment_answer_provenances(handler_owner: &str) -> Vec<String> {
+    if handler_owner == "epode_companion" {
+        ["agent_reports_user_statement", "agent_reports_current_task"]
+            .map(str::to_owned)
+            .to_vec()
+    } else {
+        [
+            "agent_reports_user_statement",
+            "agent_reports_current_task",
+            "agent_inference",
+        ]
+        .map(str::to_owned)
+        .to_vec()
     }
 }
 
@@ -9782,7 +9819,7 @@ pub(crate) async fn create_enrichment_request(
         .bind(input.interaction_id)
         .fetch_optional(&mut *tx)
         .await?;
-    if let Some(request) = existing_request {
+    if let Some(mut request) = existing_request {
         if request.request_hash != request_hash || request.expires_at <= now {
             return Err(ApiError::conflict(
                 "interactionId was already used with a different or expired enrichment request",
@@ -9807,6 +9844,7 @@ pub(crate) async fn create_enrichment_request(
                 "This enrichment request cannot be retried with the current product key",
             ));
         }
+        normalize_enrichment_terminal_state(&mut tx, &mut request).await?;
         tx.commit().await?;
         return Ok(enrichment_response(
             public_base_url,
@@ -10243,13 +10281,14 @@ async fn verified_enrichment_request(
     let request_sql = format!(
         "SELECT {columns} FROM enrichment_requests WHERE id = $1 AND interaction_id = $2 AND api_key_id = $3 FOR UPDATE"
     );
-    let request = sqlx::query_as::<_, EnrichmentRequestRow>(&request_sql)
+    let mut request = sqlx::query_as::<_, EnrichmentRequestRow>(&request_sql)
         .bind(claims.q)
         .bind(claims.i)
         .bind(parsed_enrichment_key_id(capability)?)
         .fetch_optional(&mut **tx)
         .await?
         .ok_or_else(ApiError::unauthorized)?;
+    normalize_enrichment_terminal_state(tx, &mut request).await?;
     if request.expires_at <= Utc::now() || request.capability_nonce_hash != sha256(&claims.n) {
         return Err(ApiError::unauthorized());
     }
@@ -10494,18 +10533,24 @@ pub(crate) async fn decide_enrichment_consent(
         request.remember,
     )
     .await?;
-    if !["answered", "no_relevant_context"].contains(&request.state.as_str()) {
+    if !["answered", "no_relevant_context", "answer_skipped"].contains(&request.state.as_str()) {
         request.state = resolved_state;
     }
-    sqlx::query("UPDATE enrichment_requests SET state = $2, updated_at = NOW() WHERE id = $1")
-        .bind(request.id)
-        .bind(&request.state)
-        .execute(&mut *tx)
-        .await?;
+    if request.state != "answer_skipped" {
+        sqlx::query("UPDATE enrichment_requests SET state = $2, updated_at = NOW() WHERE id = $1")
+            .bind(request.id)
+            .bind(&request.state)
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
     Ok(EnrichmentConsentDecisionResponse {
         request_id: request.id,
-        state: request.state.clone(),
+        state: if request.state == "declined" {
+            "consent_declined".to_owned()
+        } else {
+            request.state.clone()
+        },
         changed,
         stage_instruction: enrichment_stage_instruction(&request),
         answer_instruction: (request.state == "answer_ready")
@@ -11412,9 +11457,14 @@ async fn active_enrichment_share_grant(
 pub(crate) async fn submit_enrichment_answer(
     pool: &PgPool,
     capability: &str,
-    input: EnrichmentAnswerInput,
+    mut input: EnrichmentAnswerInput,
 ) -> Result<EnrichmentAnswerResponse, ApiError> {
-    if !["answered", "declined", "no_relevant_context"].contains(&input.status.as_str()) {
+    // `declined` was the pre-0044 answer spelling. It is an answer-endpoint
+    // alias only; consent decisions continue to use their separate contract.
+    if input.status == "declined" {
+        "answer_skipped".clone_into(&mut input.status);
+    }
+    if !["answered", "no_relevant_context", "answer_skipped"].contains(&input.status.as_str()) {
         return Err(ApiError::bad_request("Invalid enrichment answer status"));
     }
     if (input.status == "answered") == input.items.is_empty() || input.items.len() > 8 {
@@ -11428,14 +11478,36 @@ pub(crate) async fn submit_enrichment_answer(
     let catalog_fields = field_catalog.fields.as_slice();
     for item in &input.items {
         validate_enrichment_item(item, &request.purpose, catalog_fields)?;
+        if request.handler_owner == "epode_companion" && item.provenance == "agent_inference" {
+            return Err(ApiError::bad_request(
+                "Companion answers cannot report agent inference",
+            ));
+        }
     }
     let payload_hash = sha256_bytes(&serde_json::to_vec(&input).map_err(ApiError::internal)?);
-    let existing = sqlx::query_as::<_, (Uuid, String, Vec<u8>)>(
-        "SELECT id, status, payload_hash FROM enrichment_answers WHERE request_id = $1",
+    let stored_payload_hash = if input.status == "answer_skipped" {
+        let mut legacy_input = input.clone();
+        "declined".clone_into(&mut legacy_input.status);
+        sha256_bytes(&serde_json::to_vec(&legacy_input).map_err(ApiError::internal)?)
+    } else {
+        payload_hash.clone()
+    };
+    let outcome_available = sqlx::query_scalar::<_, bool>(
+        r"SELECT EXISTS (SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'enrichment_answers'
+            AND column_name = 'outcome')",
     )
-    .bind(request.id)
-    .fetch_optional(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
+    let existing_sql = if outcome_available {
+        "SELECT id, COALESCE(outcome, status), payload_hash FROM enrichment_answers WHERE request_id = $1"
+    } else {
+        "SELECT id, status, payload_hash FROM enrichment_answers WHERE request_id = $1"
+    };
+    let existing = sqlx::query_as::<_, (Uuid, String, Vec<u8>)>(existing_sql)
+        .bind(request.id)
+        .fetch_optional(&mut *tx)
+        .await?;
     if existing.is_none() && request.state != "answer_ready" {
         return Err(ApiError::forbidden(
             "Customer context sharing is not approved for this request",
@@ -11447,8 +11519,16 @@ pub(crate) async fn submit_enrichment_answer(
         input.items.iter().any(|item| item.remember),
     )
     .await?;
-    if let Some((answer_id, _, existing_hash)) = existing {
-        if existing_hash != payload_hash {
+    if let Some((answer_id, existing_outcome, existing_hash)) = existing {
+        let normalized_existing = if existing_outcome == "declined" {
+            "answer_skipped"
+        } else {
+            existing_outcome.as_str()
+        };
+        let semantic_legacy_skip = normalized_existing == "answer_skipped"
+            && input.status == "answer_skipped"
+            && input.items.is_empty();
+        if existing_hash != payload_hash && !semantic_legacy_skip {
             return Err(ApiError::conflict(
                 "This enrichment request already has a different answer",
             ));
@@ -11474,21 +11554,33 @@ pub(crate) async fn submit_enrichment_answer(
         ));
     }
     let answer_id = Uuid::new_v4();
-    sqlx::query(
+    let legacy_status = if input.status == "answer_skipped" {
+        "declined"
+    } else {
+        input.status.as_str()
+    };
+    let insert_sql = if outcome_available {
         r"INSERT INTO enrichment_answers
         (id, workspace_id, product_id, request_id, interaction_id, customer_id,
-         status, payload_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-    )
-    .bind(answer_id)
-    .bind(request.workspace_id)
-    .bind(request.product_id)
-    .bind(request.id)
-    .bind(request.interaction_id)
-    .bind(request.customer_id)
-    .bind(&input.status)
-    .bind(&payload_hash)
-    .execute(&mut *tx)
-    .await?;
+         status, payload_hash, outcome) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)"
+    } else {
+        r"INSERT INTO enrichment_answers
+        (id, workspace_id, product_id, request_id, interaction_id, customer_id,
+         status, payload_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)"
+    };
+    let mut insert = sqlx::query(insert_sql)
+        .bind(answer_id)
+        .bind(request.workspace_id)
+        .bind(request.product_id)
+        .bind(request.id)
+        .bind(request.interaction_id)
+        .bind(request.customer_id)
+        .bind(legacy_status)
+        .bind(&stored_payload_hash);
+    if outcome_available {
+        insert = insert.bind(&input.status);
+    }
+    insert.execute(&mut *tx).await?;
     let current_retained_until = Utc::now()
         + Duration::days(i64::from(
             sqlx::query_scalar::<_, i32>(
@@ -11581,8 +11673,10 @@ pub(crate) async fn submit_enrichment_answer(
         "answered"
     } else if input.status == "no_relevant_context" {
         "no_relevant_context"
-    } else {
+    } else if input.status == "answer_skipped" {
         "declined"
+    } else {
+        "no_relevant_context"
     };
     sqlx::query(
         r"UPDATE enrichment_requests SET state = $2,
@@ -19735,7 +19829,6 @@ mod product_tests {
             key: "shopping.budget_band".into(),
             signal_type: "constraint".into(),
             value: "50_150".into(),
-            _summary: None,
             provenance: "agent_reports_user_statement".into(),
             confidence: Some(0.95),
             remember: true,
@@ -19801,7 +19894,6 @@ mod product_tests {
             key: "interest.topic".into(),
             signal_type: "preference".into(),
             value: "outdoor_travel".into(),
-            _summary: None,
             provenance: "agent_reports_user_statement".into(),
             confidence: Some(1.0),
             remember: true,
@@ -19861,7 +19953,6 @@ mod product_tests {
                 key: key.into(),
                 signal_type: signal_type.into(),
                 value: value.into(),
-                _summary: None,
                 provenance: "agent_reports_user_statement".into(),
                 confidence: Some(1.0),
                 remember: true,
@@ -19906,7 +19997,6 @@ mod product_tests {
                 key: key.into(),
                 signal_type: "preference".into(),
                 value: "anything".into(),
-                _summary: None,
                 provenance: "agent_reports_user_statement".into(),
                 confidence: Some(1.0),
                 remember: true,
@@ -20065,6 +20155,39 @@ mod product_tests {
             }))?;
         anyhow::ensure!(previous_snapshot.question_type.is_none());
         anyhow::ensure!(previous_snapshot.effective_type() == "preference");
+        Ok(())
+    }
+
+    #[test]
+    fn enrichment_answer_schema_is_bounded_and_owner_specific() -> anyhow::Result<()> {
+        let base_item = serde_json::json!({
+            "key": "shopping.priority",
+            "type": "preference",
+            "value": "quality",
+            "provenance": "agent_reports_current_task",
+            "confidence": 0.8,
+            "remember": false,
+            "expiresAt": null
+        });
+        serde_json::from_value::<crate::models::EnrichmentAnswerItemInput>(base_item.clone())?;
+        let mut with_summary = base_item;
+        with_summary["summary"] = serde_json::json!("free-form text");
+        anyhow::ensure!(
+            serde_json::from_value::<crate::models::EnrichmentAnswerItemInput>(with_summary)
+                .is_err()
+        );
+
+        anyhow::ensure!(
+            enrichment_answer_statuses("company_mcp")
+                == ["answered", "declined", "no_relevant_context"]
+        );
+        anyhow::ensure!(
+            enrichment_answer_provenances("company_mcp").contains(&"agent_inference".to_owned())
+        );
+        anyhow::ensure!(
+            !enrichment_answer_provenances("epode_companion")
+                .contains(&"agent_inference".to_owned())
+        );
         Ok(())
     }
 
@@ -20429,7 +20552,6 @@ mod product_tests {
                     key: "shopping.budget_band".into(),
                     signal_type: "constraint".into(),
                     value: "50_150".into(),
-                    _summary: Some("Customer belongs to the Black community".into()),
                     provenance: "agent_reports_user_statement".into(),
                     confidence: Some(0.98),
                     remember: true,
@@ -20438,7 +20560,6 @@ mod product_tests {
                     key: "content.format".into(),
                     signal_type: "preference".into(),
                     value: "short".into(),
-                    _summary: None,
                     provenance: "agent_inference".into(),
                     confidence: Some(0.55),
                     remember: true,
@@ -20774,7 +20895,7 @@ mod product_tests {
             )
             .await
             .map_err(test_error)?;
-            anyhow::ensure!(revoked.changed && revoked.state == "declined");
+            anyhow::ensure!(revoked.changed && revoked.state == "consent_declined");
             anyhow::ensure!(
                 revoked
                     .stage_instruction
@@ -20990,7 +21111,6 @@ mod product_tests {
                             key: "shopping.priority".into(),
                             signal_type: "preference".into(),
                             value: "quality".into(),
-                            _summary: None,
                             provenance: "agent_reports_user_statement".into(),
                             confidence: Some(1.0),
                             remember: false,
@@ -21186,7 +21306,6 @@ mod product_tests {
                         key: "shopping.priority".into(),
                         signal_type: "preference".into(),
                         value: "price".into(),
-                        _summary: None,
                         provenance: "agent_reports_user_statement".into(),
                         confidence: Some(1.0),
                         remember: true,
@@ -21560,7 +21679,6 @@ mod product_tests {
                         key: "shopping.priority".into(),
                         signal_type: "preference".into(),
                         value: "quality".into(),
-                        _summary: None,
                         provenance: "agent_reports_current_task".into(),
                         confidence: Some(1.0),
                         remember: false,
@@ -21693,7 +21811,6 @@ mod product_tests {
                 key: key.into(),
                 signal_type: signal_type.into(),
                 value: value.into(),
-                _summary: None,
                 provenance: "agent_reports_user_statement".into(),
                 confidence: Some(1.0),
                 remember: false,

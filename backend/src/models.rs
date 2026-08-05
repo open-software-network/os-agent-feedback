@@ -938,9 +938,6 @@ pub(crate) struct EnrichmentAnswerItemInput {
     #[serde(rename = "type")]
     pub signal_type: String,
     pub value: String,
-    #[serde(default, skip_serializing, rename = "summary")]
-    #[schema(ignore)]
-    pub _summary: Option<String>,
     pub provenance: String,
     pub confidence: Option<f64>,
     pub remember: bool,

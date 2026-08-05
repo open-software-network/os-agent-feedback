@@ -93,8 +93,6 @@ pub struct CustomerAnswerItem {
     pub key: String,
     pub r#type: String,
     pub value: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
     pub provenance: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f64>,
@@ -107,8 +105,8 @@ pub struct CustomerAnswerItem {
 #[serde(rename_all = "snake_case")]
 pub enum CustomerAnswerStatus {
     Answered,
-    Declined,
     NoRelevantContext,
+    AnswerSkipped,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -448,11 +446,17 @@ impl EpodeClient {
         if !valid {
             return relay_error(400, "invalid_customer_context_body");
         }
+        let mut wire_body = request.body.clone();
+        if target.ends_with("/answers")
+            && wire_body.get("status").and_then(Value::as_str) == Some("answer_skipped")
+        {
+            wire_body["status"] = Value::String("declined".into());
+        }
         match self
             .post(
                 target,
                 &format!("Bearer {handle}"),
-                &request.body,
+                &wire_body,
                 self.relay_timeout,
             )
             .await
@@ -654,7 +658,10 @@ fn valid_answer(value: &Value) -> bool {
         None => &empty,
     };
     if items.len() > 8
-        || !matches!(status, "answered" | "declined" | "no_relevant_context")
+        || !matches!(
+            status,
+            "answered" | "declined" | "no_relevant_context" | "answer_skipped"
+        )
         || (status == "answered") == items.is_empty()
     {
         return false;
@@ -672,7 +679,6 @@ fn valid_answer_item(value: &Value) -> bool {
             "key",
             "type",
             "value",
-            "summary",
             "provenance",
             "confidence",
             "remember",
@@ -710,13 +716,6 @@ fn valid_answer_item(value: &Value) -> bool {
         )
         || !object.get("remember").is_some_and(Value::is_boolean)
     {
-        return false;
-    }
-    if object.get("summary").is_some_and(|value| {
-        value.as_str().is_none_or(|summary| {
-            summary.len() < 3 || !bounded(summary, 350) || sensitive_text(summary)
-        })
-    }) {
         return false;
     }
     if object.get("confidence").is_some_and(|value| {
@@ -1197,7 +1196,6 @@ mod tests {
                         key: "shopping.budget_band".into(),
                         r#type: "customer_goal".into(),
                         value: "50_150".into(),
-                        summary: None,
                         provenance: "agent_reports_user_statement".into(),
                         confidence: Some(1.0),
                         remember: true,

@@ -124,7 +124,14 @@ export interface AgentAction {
 export interface EnrichmentRequest {
   requestId: string;
   interactionId: string;
-  state: "consent_required" | "answer_ready" | "declined" | "answered" | "no_relevant_context";
+  state:
+    | "consent_required"
+    | "answer_ready"
+    | "consent_declined"
+    | "declined"
+    | "answered"
+    | "no_relevant_context"
+    | "answer_skipped";
   purpose: CustomerPurpose;
   identityLevel: CustomerIdentityLevel;
   stageInstruction: string;
@@ -152,8 +159,6 @@ export interface CustomerAnswerItem {
   key: string;
   type: CustomerSignalType;
   value: string;
-  /** Optional legacy input. Epode discards it and generates a canonical catalog summary. */
-  summary?: string;
   provenance: CustomerSignalProvenance;
   confidence?: number;
   remember: boolean;
@@ -161,7 +166,7 @@ export interface CustomerAnswerItem {
 }
 
 export interface CustomerAnswerInput {
-  status: "answered" | "declined" | "no_relevant_context";
+  status: "answered" | "no_relevant_context" | "answer_skipped";
   items: CustomerAnswerItem[];
 }
 
@@ -338,7 +343,6 @@ function validateAnswerItem(value: unknown): value is CustomerAnswerItem {
       "key",
       "type",
       "value",
-      "summary",
       "provenance",
       "confidence",
       "remember",
@@ -351,16 +355,11 @@ function validateAnswerItem(value: unknown): value is CustomerAnswerItem {
     typeof value.value !== "string" ||
     value.value.length < 1 ||
     value.value.length > 160 ||
-    (value.summary !== undefined &&
-      (typeof value.summary !== "string" ||
-        value.summary.length < 3 ||
-        value.summary.length > 350)) ||
     !["agent_reports_user_statement", "agent_reports_current_task", "agent_inference"].includes(
       String(value.provenance),
     ) ||
     typeof value.remember !== "boolean" ||
-    containsSensitiveText(value.value) ||
-    (value.summary !== undefined && containsSensitiveText(value.summary))
+    containsSensitiveText(value.value)
   ) {
     return false;
   }
@@ -399,7 +398,11 @@ function validateAnswerBody(value: unknown): boolean {
   ) {
     return false;
   }
-  if (!["answered", "declined", "no_relevant_context"].includes(String(value.status))) {
+  if (
+    !["answered", "declined", "no_relevant_context", "answer_skipped"].includes(
+      String(value.status),
+    )
+  ) {
     return false;
   }
   const items = value.items || [];
@@ -611,6 +614,12 @@ export class EpodeClient {
       ? validateConsentBody(input.body)
       : validateAnswerBody(input.body);
     if (!valid) return { status: 400, body: { error: "invalid_customer_context_body" } };
+    const wireBody =
+      target.endsWith("/answers") &&
+      isPlainObject(input.body) &&
+      input.body.status === "answer_skipped"
+        ? { ...input.body, status: "declined" }
+        : input.body;
     try {
       const response = await this.#fetch(`${this.endpoint}${target}`, {
         method: "POST",
@@ -619,7 +628,7 @@ export class EpodeClient {
           "content-type": "application/json",
           "user-agent": USER_AGENT,
         },
-        body: JSON.stringify(input.body),
+        body: JSON.stringify(wireBody),
         redirect: "manual",
         signal: AbortSignal.timeout(this.#relayTimeoutMs),
       });

@@ -80,7 +80,6 @@ type CustomerAnswerItem struct {
 	Key        string   `json:"key"`
 	Type       string   `json:"type"`
 	Value      string   `json:"value"`
-	Summary    string   `json:"summary,omitempty"`
 	Provenance string   `json:"provenance"`
 	Confidence *float64 `json:"confidence,omitempty"`
 	Remember   bool     `json:"remember"`
@@ -335,6 +334,16 @@ func (client *CustomerClient) Relay(ctx context.Context, input RelayRequest) Rel
 	if err != nil || !validRelayBody(target, body) {
 		return RelayResponse{Status: http.StatusBadRequest, Body: map[string]any{"error": "invalid_customer_context_body"}}
 	}
+	if target == "/api/v2/enrichment/answers" {
+		var wireBody map[string]any
+		if json.Unmarshal(body, &wireBody) == nil && wireBody["status"] == "answer_skipped" {
+			wireBody["status"] = "declined"
+			body, err = json.Marshal(wireBody)
+			if err != nil {
+				return RelayResponse{Status: http.StatusBadRequest, Body: map[string]any{"error": "invalid_customer_context_body"}}
+			}
+		}
+	}
 	status, responseBody, err := client.post(ctx, target, "Bearer "+match[1], body, client.relayTimeout)
 	if err != nil {
 		return RelayResponse{Status: http.StatusServiceUnavailable, Body: map[string]any{"error": "customer_context_temporarily_unavailable", "retryable": true}}
@@ -482,7 +491,7 @@ func validRelayBody(target string, encoded []byte) bool {
 	if !ok || len(items) > 8 {
 		return false
 	}
-	if status != "answered" && status != "declined" && status != "no_relevant_context" {
+	if status != "answered" && status != "declined" && status != "no_relevant_context" && status != "answer_skipped" {
 		return false
 	}
 	if (status == "answered") != (len(items) > 0) {
@@ -501,7 +510,7 @@ func validAnswerItem(raw any) bool {
 	if !ok || len(item) < 5 || len(item) > 8 {
 		return false
 	}
-	allowed := map[string]bool{"key": true, "type": true, "value": true, "summary": true, "provenance": true, "confidence": true, "remember": true, "expiresAt": true}
+	allowed := map[string]bool{"key": true, "type": true, "value": true, "provenance": true, "confidence": true, "remember": true, "expiresAt": true}
 	for key := range item {
 		if !allowed[key] {
 			return false
@@ -510,17 +519,10 @@ func validAnswerItem(raw any) bool {
 	key, keyOK := item["key"].(string)
 	kind, kindOK := item["type"].(string)
 	value, valueOK := item["value"].(string)
-	summary, summaryExists := item["summary"]
 	provenance, provenanceOK := item["provenance"].(string)
 	_, rememberOK := item["remember"].(bool)
 	if !keyOK || !answerKey.MatchString(key) || sensitiveKey(key) || !kindOK || !questionType.MatchString(kind) || !valueOK || len([]rune(value)) < 1 || len([]rune(value)) > 160 || sensitiveText(value) || !provenanceOK || !oneOf(provenance, "agent_reports_user_statement", "agent_reports_current_task", "agent_inference") || !rememberOK {
 		return false
-	}
-	if summaryExists {
-		text, ok := summary.(string)
-		if !ok || len([]rune(text)) < 3 || len([]rune(text)) > 350 || sensitiveText(text) {
-			return false
-		}
 	}
 	if confidence, exists := item["confidence"]; exists {
 		number, ok := confidence.(float64)

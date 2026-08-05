@@ -25,7 +25,7 @@ SignalType = str
 SignalProvenance = Literal[
     "agent_reports_user_statement", "agent_reports_current_task", "agent_inference"
 ]
-AnswerStatus = Literal["answered", "declined", "no_relevant_context"]
+AnswerStatus = Literal["answered", "no_relevant_context", "answer_skipped"]
 OutcomeKind = Literal["conversion", "completion", "engagement", "dismissal", "abandonment"]
 Transport = Callable[[str, Mapping[str, str], bytes, float], tuple[int, bytes]]
 
@@ -130,7 +130,6 @@ class CustomerAnswerItem:
     value: str
     provenance: SignalProvenance
     remember: bool
-    summary: str | None = None
     confidence: float | None = None
     expires_at: str | None = None
 
@@ -385,10 +384,13 @@ class EpodeClient:
         valid = _valid_consent(value.body) if target.endswith("/decisions") else _valid_answer(value.body)
         if not valid:
             return RelayResponse(400, {"error": "invalid_customer_context_body"})
+        wire_body = value.body
+        if target.endswith("/answers") and value.body.get("status") == "answer_skipped":
+            wire_body = {**value.body, "status": "declined"}
         try:
             status, body = self._post(
                 target,
-                value.body,
+                wire_body,
                 f"Bearer {handle_match.group(1)}",
                 self._relay_timeout,
             )
@@ -595,12 +597,11 @@ def _valid_consent(value: Any) -> bool:
 def _valid_answer_item(value: Any) -> bool:
     if not _plain(value) or not _exact(
         value,
-        {"key", "type", "value", "summary", "provenance", "confidence", "remember", "expiresAt"},
+        {"key", "type", "value", "provenance", "confidence", "remember", "expiresAt"},
     ):
         return False
     confidence = value.get("confidence")
     expires_at = value.get("expiresAt")
-    summary = value.get("summary")
     return (
         isinstance(value.get("key"), str)
         and bool(_KEY.fullmatch(value["key"]))
@@ -610,14 +611,6 @@ def _valid_answer_item(value: Any) -> bool:
         and isinstance(value.get("value"), str)
         and 1 <= len(value["value"]) <= 160
         and not _sensitive_text(value["value"])
-        and (
-            summary is None
-            or (
-                isinstance(summary, str)
-                and 3 <= len(summary) <= 350
-                and not _sensitive_text(summary)
-            )
-        )
         and value.get("provenance") in _PROVENANCE
         and type(value.get("remember")) is bool
         and (confidence is None or (type(confidence) in {int, float} and 0 <= confidence <= 1))
@@ -628,7 +621,12 @@ def _valid_answer_item(value: Any) -> bool:
 def _valid_answer(value: Any) -> bool:
     if not _plain(value) or not set(value).issubset({"status", "items"}) or "status" not in value:
         return False
-    if value["status"] not in {"answered", "declined", "no_relevant_context"}:
+    if value["status"] not in {
+        "answered",
+        "declined",
+        "no_relevant_context",
+        "answer_skipped",
+    }:
         return False
     items = value.get("items", [])
     if not isinstance(items, list) or len(items) > 8 or not all(_valid_answer_item(item) for item in items):
@@ -670,8 +668,6 @@ def _answer_body(value: CustomerAnswerInput) -> dict[str, Any]:
             "provenance": raw["provenance"],
             "remember": raw["remember"],
         }
-        if raw["summary"] is not None:
-            encoded["summary"] = raw["summary"]
         if raw["confidence"] is not None:
             encoded["confidence"] = raw["confidence"]
         if raw["expires_at"] is not None:

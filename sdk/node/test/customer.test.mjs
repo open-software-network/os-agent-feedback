@@ -34,7 +34,7 @@ const answerInstruction =
   "Provide only non-sensitive context the user explicitly shared or that is directly relevant to the current task for this product experience by Example Store. Mark only durable preferences as remembered; keep situational context interaction-scoped. Never include prompts, transcripts, names, emails, credentials, or raw customer content.";
 const consentBodySchema = { decision: ["approved", "declined"] };
 const answerBodySchema = {
-  status: ["answered", "declined", "no_relevant_context"],
+  status: ["answered", "no_relevant_context", "declined"],
   items: {
     maximum: 8,
     required: ["key", "type", "value", "provenance", "remember"],
@@ -413,7 +413,6 @@ function customerAnswer(requestHandle, remember = true) {
         key: "shopping.priority",
         type: "preference",
         value: "outdoor_travel",
-        summary: "Customer prefers outdoor travel.",
         provenance: "agent_reports_user_statement",
         confidence: 1,
         remember,
@@ -1021,7 +1020,6 @@ test("company-side Express completes learn, retrieve, personalize, and measure",
           key: "budget",
           type: "customer_goal",
           value: "under_150_usd",
-          summary: "Customer explicitly stated a budget under $150.",
           provenance: "agent_reports_user_statement",
           confidence: 1,
           remember: true,
@@ -1087,7 +1085,6 @@ test("same-origin relay rejects unknown customer fields without contacting Epode
           key: "contact",
           type: "preference",
           value: "person@example.com",
-          summary: "Customer supplied an email address.",
           provenance: "agent_reports_user_statement",
           remember: true,
         },
@@ -1105,6 +1102,21 @@ test("same-origin relay rejects unknown customer fields without contacting Epode
   assert.equal(noContext.status, 200);
   assert.equal(service.calls.length, 1);
   assert.deepEqual(service.calls[0].body, { status: "no_relevant_context" });
+
+  const skipped = await client.submitAnswer("aqr1_safe", {
+    status: "answer_skipped",
+    items: [],
+  });
+  assert.equal(skipped.status, 200);
+  assert.deepEqual(service.calls[1].body, { status: "declined", items: [] });
+
+  const advertisedLegacy = await client.relay({
+    path: "/_epode/v1/enrichment/answers",
+    authorization: "Bearer aqr1_safe",
+    body: { status: "declined", items: [] },
+  });
+  assert.equal(advertisedLegacy.status, 200);
+  assert.deepEqual(service.calls[2].body, { status: "declined", items: [] });
 });
 
 test("Fastify mounts the same-origin relay and preserves the business shape", async () => {
@@ -1424,7 +1436,6 @@ test("ephemeral context continues only when the agent returns the bounded intera
           key: "budget",
           type: "constraint",
           value: "under_150_usd",
-          summary: "Customer explicitly stated a budget under $150.",
           provenance: "agent_reports_current_task",
           confidence: 1,
           remember: false,
@@ -1654,7 +1665,6 @@ test("company-owned MCP elicits and records one session-only choice inside shari
         key: "travel.style",
         type: "preference",
         value: "outdoor_travel",
-        summary: "Customer prefers outdoor travel.",
         provenance: "agent_reports_user_statement",
         confidence: 1,
         remember: true,
@@ -1852,7 +1862,10 @@ test("MCP customer context is idempotent for replayed and terminal requests", as
     const result = await tools
       .get("share_customer_context")
       .handler(customerAnswer(requestHandle), { mcpReq: {} });
-    assert.deepEqual(result.structuredContent, { accepted: false, state: "declined" });
+    assert.deepEqual(result.structuredContent, {
+      accepted: false,
+      state: "consent_declined",
+    });
     assert.equal(record.consentCount, 0);
     assert.equal(record.answerCount, 0);
   });
