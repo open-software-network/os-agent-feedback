@@ -43,7 +43,7 @@ use tower_http::{
     compression::CompressionLayer,
     cors::{Any, CorsLayer},
     services::ServeDir,
-    trace::TraceLayer,
+    trace::{DefaultMakeSpan, TraceLayer},
 };
 use utoipa::{
     Modify, OpenApi,
@@ -358,7 +358,15 @@ fn build_app_router(dev_auth_enabled: bool) -> OpenApiRouter<Arc<AppState>> {
         // no-op unless OTLP export is configured.
         .layer(from_fn(telemetry::record_request_metrics))
         .layer(from_fn(telemetry::extract_parent_context))
-        .layer(TraceLayer::new_for_http())
+        // The request span is created at INFO (tower-http's make-span default
+        // is DEBUG) so the `tower_http=info` filter enables it and the
+        // OpenTelemetry layer converts it into an exported trace span. The
+        // per-request events keep their DEBUG defaults, so stdout stays free
+        // of per-request log lines.
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO)),
+        )
         .layer(from_fn(security_headers))
 }
 
