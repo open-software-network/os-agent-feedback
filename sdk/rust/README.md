@@ -3,6 +3,33 @@
 Version 0.4.0 preserves the existing Axum/Tower feedback middleware and adds a
 typed, framework-neutral company-side customer-enrichment client.
 
+Completed MCP calls can be recorded without an HTTP layer. The recorder owns the
+same bounded queue and lifecycle as `AgentFeedbackLayer`; clones share sequence
+numbers and shutdown state.
+
+```rust
+use agent_feedback::{AgentFeedbackRecorder, McpCompletion, McpOutcome, Options};
+
+let recorder = AgentFeedbackRecorder::new(Options::new(product_key))?;
+recorder.record_mcp_completion(
+    McpCompletion::new("create_summary", McpOutcome::Success)
+        .identity(trusted_product_identity)
+        .session_ref(canonical_product_session),
+)?;
+recorder.shutdown().await?;
+```
+
+Only bounded identifiers from trusted product state belong in a completion.
+Never pass tool arguments, results, prompts, errors, credentials, or transport
+identifiers. Invalid optional references are omitted; invalid operation names
+return `McpCompletionError::InvalidOperation`. Enable the `rmcp` feature for
+`RmcpToolCompletionHandler`, a transparent wrapper around the official rmcp 3.1
+API. Its trusted product-context resolver runs before and after completed calls
+so create tools can link a canonical result-derived session. Intermediate
+input/task responses and protocol errors are not events; tool-level `isError`
+completions are recorded as errors. The wrapper forwards the complete
+`ServerHandler` surface and never records raw arguments or results.
+
 ```rust
 use agent_feedback::{
     CustomerContextInput, CustomerIdentity, CustomerPurpose, EnrichmentRequestInput,
