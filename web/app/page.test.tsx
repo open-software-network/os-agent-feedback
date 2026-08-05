@@ -29,7 +29,14 @@ describe("dashboard data flow", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
-    for (const view of ["Home", "Customers", "Responses", "Sessions", "Configurations"]) {
+    for (const view of [
+      "Home",
+      "Customers",
+      "Responses",
+      "Sessions",
+      "Connectors",
+      "Configurations",
+    ]) {
       expect(screen.getByRole("button", { name: view })).toBeVisible();
     }
     expect(fetchMock).toHaveBeenCalledWith(
@@ -90,6 +97,7 @@ describe("dashboard data flow", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Create product key" }));
+    expect(window.location.hash).toBe("#setup");
     expect((await screen.findAllByText(secret)).length).toBeGreaterThan(0);
     const storedValues = Array.from({ length: window.sessionStorage.length }, (_, index) => {
       const key = window.sessionStorage.key(index);
@@ -220,9 +228,11 @@ describe("dashboard data flow", () => {
       </Providers>,
     );
 
-    expect(await screen.findByRole("tab", { name: "Connectors" })).toHaveAttribute(
-      "aria-selected",
-      "true",
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Connectors" })).toHaveAttribute(
+        "aria-current",
+        "page",
+      ),
     );
     expect(await screen.findByText(message)).toHaveAttribute("role", role);
     expect(window.location.search).not.toContain("github=");
@@ -250,12 +260,13 @@ describe("dashboard data flow", () => {
     expect(await screen.findByText(message)).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Home" }));
     expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Configurations" }));
-    fireEvent.click(await screen.findByRole("tab", { name: "Connectors" }));
+    fireEvent.click(screen.getByRole("button", { name: "Connectors" }));
 
-    expect(await screen.findByRole("tab", { name: "Connectors" })).toHaveAttribute(
-      "aria-selected",
-      "true",
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Connectors" })).toHaveAttribute(
+        "aria-current",
+        "page",
+      ),
     );
     expect(screen.queryByText(message)).not.toBeInTheDocument();
   });
@@ -302,7 +313,7 @@ describe("dashboard data flow", () => {
     expect(message).not.toBeInTheDocument();
   });
 
-  it("opens Setup and Data controls as tabs within Configurations", async () => {
+  it("keeps Setup on Home and opens Data controls and Questions within Configurations", async () => {
     window.history.replaceState({}, "", "/?view=policy");
     vi.stubGlobal(
       "fetch",
@@ -323,20 +334,19 @@ describe("dashboard data flow", () => {
       "page",
     );
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
-      "Setup",
       "Product",
-      "Connectors",
       "Team",
       "Data controls",
-      "Context fields",
+      "Questions",
     ]);
     expect(screen.getByRole("tab", { name: "Data controls" })).toHaveAttribute(
       "aria-selected",
       "true",
     );
-    fireEvent.click(screen.getByRole("tab", { name: "Setup" }));
+    fireEvent.click(screen.getByRole("button", { name: "Home" }));
     expect(await screen.findByRole("heading", { name: "Connect Search API" })).toBeVisible();
-    expect(new URL(window.location.href).searchParams.get("view")).toBe("setup");
+    expect(screen.getByRole("region", { name: "Setup" })).toBeVisible();
+    expect(new URL(window.location.href).searchParams.get("view")).toBeNull();
   });
 
   it("clears a success notice when navigating to another view", async () => {

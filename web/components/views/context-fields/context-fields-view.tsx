@@ -5,12 +5,7 @@ import { IconPlusSmall } from "central-icons/IconPlusSmall";
 import { IconTrashCanSimple } from "central-icons/IconTrashCanSimple";
 import { useCallback, useEffect, useState } from "react";
 
-import {
-  NativeSelect,
-  PageHeader,
-  Panel,
-  StatusMessage,
-} from "@/components/dashboard/view-primitives";
+import { PageHeader, Panel, StatusMessage } from "@/components/dashboard/view-primitives";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -43,15 +38,12 @@ import {
 import type { DashboardData } from "@/lib/api/dashboard";
 import { isEditor } from "@/lib/dashboard/format";
 
-const FIELD_TYPES = ["intent", "preference", "constraint", "interest"] as const;
-
 type FieldFormState = {
   key: string;
   label: string;
   type: string;
   allowedValues: string;
   operations: string;
-  targetedAdvertisingSafe: boolean;
   enabled: boolean;
 };
 
@@ -61,7 +53,6 @@ const emptyForm: FieldFormState = {
   type: "preference",
   allowedValues: "",
   operations: "",
-  targetedAdvertisingSafe: false,
   enabled: true,
 };
 
@@ -72,7 +63,6 @@ function formFor(field: ContextFieldDefinition): FieldFormState {
     type: field.type,
     allowedValues: field.allowedValues.join(", "),
     operations: (field.operations ?? []).join(", "),
-    targetedAdvertisingSafe: field.targetedAdvertisingSafe,
     enabled: field.enabled,
   };
 }
@@ -92,7 +82,10 @@ function validateForm(form: FieldFormState, creating: boolean): string {
     return "The epode.* namespace is reserved for built-in fields.";
   }
   if (form.label.trim().length < 3 || form.label.trim().length > 120) {
-    return "Label must be between 3 and 120 characters.";
+    return "Question must be between 3 and 120 characters.";
+  }
+  if (!/^[a-z][a-z0-9_]{0,47}$/.test(form.type.trim())) {
+    return "Type must be a lowercase snake_case name between 1 and 48 characters.";
   }
   const values = parseList(form.allowedValues);
   if (values.length === 0 || values.length > 32) {
@@ -108,7 +101,7 @@ function validateForm(form: FieldFormState, creating: boolean): string {
   return "";
 }
 
-export function ContextFieldsView({
+export function QuestionsView({
   data,
   setNotice,
 }: {
@@ -138,7 +131,7 @@ export function ContextFieldsView({
       setDefaultCatalog(result.defaultCatalog);
       setError("");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Context fields could not be loaded.");
+      setError(cause instanceof Error ? cause.message : "Questions could not be loaded.");
     }
   }, [product, data.workspace.id]);
 
@@ -175,9 +168,9 @@ export function ContextFieldsView({
     const operations = parseList(form.operations);
     const input: ContextFieldInput = {
       label: form.label.trim(),
-      type: form.type,
+      type: form.type.trim(),
       allowedValues: parseList(form.allowedValues),
-      targetedAdvertisingSafe: form.targetedAdvertisingSafe,
+      targetedAdvertisingSafe: editing?.targetedAdvertisingSafe ?? false,
       operations: operations.length ? operations : null,
       enabled: form.enabled,
     };
@@ -186,10 +179,10 @@ export function ContextFieldsView({
     try {
       await saveContextField(product.id, form.key.trim(), input, data.workspace.id);
       setSheetOpen(false);
-      setNotice(`Saved context field ${form.key.trim()}.`);
+      setNotice(`Saved question ${form.key.trim()}.`);
       await load();
     } catch (cause) {
-      setFormError(cause instanceof Error ? cause.message : "The field could not be saved.");
+      setFormError(cause instanceof Error ? cause.message : "The question could not be saved.");
     } finally {
       setSaving(false);
     }
@@ -200,10 +193,10 @@ export function ContextFieldsView({
     try {
       await deleteContextField(product.id, key, data.workspace.id);
       setPendingDelete(null);
-      setNotice(`Deleted context field ${key}.`);
+      setNotice(`Deleted question ${key}.`);
       await load();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "The field could not be deleted.");
+      setError(cause instanceof Error ? cause.message : "The question could not be deleted.");
       setPendingDelete(null);
     }
   }
@@ -212,34 +205,34 @@ export function ContextFieldsView({
     <div className="flex flex-col gap-5">
       <PageHeader
         eyebrow="Configuration"
-        title="Context fields"
-        description="The closed set of customer context this product may ask an agent for. Names are free-form; answers are always one of the allowed values you define."
+        title="Questions"
+        description="Define exactly what this product may ask a customer's agent. You choose the question, its semantic type, and every allowed answer."
         actions={
           editor ? (
             <Button type="button" onClick={openCreate}>
               <IconPlusSmall />
-              Add field
+              Add question
             </Button>
           ) : undefined
         }
       />
       {error ? <StatusMessage tone="error">{error}</StatusMessage> : null}
       {legacyCatalogActive ? (
-        <Panel title="Default fields in use">
+        <Panel title="Default questions in use">
           <p className="text-sm text-muted-foreground">
-            This product currently asks for the built-in default fields listed below. Add a field of
-            your own to start a custom catalog — as soon as one of your fields is enabled, your
+            This product currently asks the built-in questions listed below. Add a question of your
+            own to start a custom catalog — as soon as one of your questions is enabled, your
             catalog replaces the default set for every new request.
           </p>
         </Panel>
       ) : null}
       {fields === null ? (
-        <Panel>Loading context fields…</Panel>
+        <Panel>Loading questions…</Panel>
       ) : fields.length === 0 ? (
         <Panel>
           <p className="text-sm text-muted-foreground">
-            No fields defined yet. Each field needs a key, a customer-facing label, a type, and a
-            closed list of allowed values.
+            No questions defined yet. Each question needs a key, a customer-facing prompt, a type,
+            and a closed list of allowed values.
           </p>
         </Panel>
       ) : (
@@ -247,11 +240,10 @@ export function ContextFieldsView({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Field</TableHead>
+                <TableHead>Question</TableHead>
                 <TableHead>Type</TableHead>
                 <TableHead>Allowed values</TableHead>
                 <TableHead>Operations</TableHead>
-                <TableHead>Ads</TableHead>
                 <TableHead>State</TableHead>
                 {editor ? <TableHead className="w-28" /> : null}
               </TableRow>
@@ -261,8 +253,8 @@ export function ContextFieldsView({
                 <TableRow key={field.key}>
                   <TableCell>
                     <div className="flex flex-col">
-                      <code className="text-sm">{field.key}</code>
-                      <span className="text-xs text-muted-foreground">{field.label}</span>
+                      <span className="text-sm">{field.label}</span>
+                      <code className="text-xs text-muted-foreground">{field.key}</code>
                     </div>
                   </TableCell>
                   <TableCell>{field.type}</TableCell>
@@ -289,13 +281,6 @@ export function ContextFieldsView({
                       </div>
                     ) : (
                       <span className="text-muted-foreground">All operations</span>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    {field.targetedAdvertisingSafe ? (
-                      <Badge variant="secondary">Eligible</Badge>
-                    ) : (
-                      <span className="text-muted-foreground">Off</span>
                     )}
                   </TableCell>
                   <TableCell>
@@ -358,22 +343,21 @@ export function ContextFieldsView({
       )}
       {!editor ? (
         <p className="text-sm text-muted-foreground">
-          Only a team owner or admin can change context fields.
+          Only a team owner or admin can change questions.
         </p>
       ) : null}
       {legacyCatalogActive && defaultCatalog.length > 0 ? (
-        <Panel title="Default fields (built in)">
+        <Panel title="Default questions (built in)">
           <p className="mb-3 text-sm text-muted-foreground">
-            Shared defaults for products that have not defined their own fields. They cannot be
-            edited; enabling any field of your own replaces this entire set.
+            Shared defaults for products that have not defined their own questions. They cannot be
+            edited; enabling any question of your own replaces this entire set.
           </p>
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Field</TableHead>
+                <TableHead>Question key</TableHead>
                 <TableHead>Type</TableHead>
                 <TableHead>Allowed values</TableHead>
-                <TableHead>Ads</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -400,13 +384,6 @@ export function ContextFieldsView({
                       ) : null}
                     </div>
                   </TableCell>
-                  <TableCell>
-                    {field.targetedAdvertisingSafe ? (
-                      <Badge variant="secondary">Eligible</Badge>
-                    ) : (
-                      <span className="text-muted-foreground">Off</span>
-                    )}
-                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -416,15 +393,15 @@ export function ContextFieldsView({
       <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
         <SheetContent className="overflow-y-auto">
           <SheetHeader>
-            <SheetTitle>{editing ? `Edit ${editing.key}` : "Add context field"}</SheetTitle>
+            <SheetTitle>{editing ? `Edit ${editing.key}` : "Add question"}</SheetTitle>
             <SheetDescription>
-              Closed answers only: the agent picks one of the allowed values. Editing a field never
-              changes requests that already ran.
+              Closed answers only: the agent picks one of the allowed values. Editing a question
+              never changes requests that already ran.
             </SheetDescription>
           </SheetHeader>
           <div className="flex flex-col gap-4 px-4">
             <div className="flex flex-col gap-2">
-              <Label htmlFor="field-key">Field key</Label>
+              <Label htmlFor="field-key">Key</Label>
               <Input
                 id="field-key"
                 value={form.key}
@@ -439,7 +416,7 @@ export function ContextFieldsView({
               </p>
             </div>
             <div className="flex flex-col gap-2">
-              <Label htmlFor="field-label">Label</Label>
+              <Label htmlFor="field-label">Question topic</Label>
               <Input
                 id="field-label"
                 value={form.label}
@@ -447,22 +424,20 @@ export function ContextFieldsView({
                 onChange={(event) => setForm({ ...form, label: event.target.value })}
               />
               <p className="text-xs text-muted-foreground">
-                Shown to the customer in the permission question.
+                Epode inserts this topic into the customer permission question.
               </p>
             </div>
             <div className="flex flex-col gap-2">
               <Label htmlFor="field-type">Type</Label>
-              <NativeSelect
+              <Input
                 id="field-type"
                 value={form.type}
+                placeholder="preference"
                 onChange={(event) => setForm({ ...form, type: event.target.value })}
-              >
-                {FIELD_TYPES.map((type) => (
-                  <option key={type} value={type}>
-                    {type}
-                  </option>
-                ))}
-              </NativeSelect>
+              />
+              <p className="text-xs text-muted-foreground">
+                Your own lowercase category, such as preference, goal, constraint, or intent.
+              </p>
             </div>
             <div className="flex flex-col gap-2">
               <Label htmlFor="field-values">Allowed values</Label>
@@ -497,21 +472,11 @@ export function ContextFieldsView({
               />
               <Label htmlFor="field-enabled">Enabled</Label>
             </div>
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="field-advertising"
-                checked={form.targetedAdvertisingSafe}
-                onCheckedChange={(checked) =>
-                  setForm({ ...form, targetedAdvertisingSafe: checked === true })
-                }
-              />
-              <Label htmlFor="field-advertising">Eligible for targeted advertising</Label>
-            </div>
             {formError ? <StatusMessage tone="error">{formError}</StatusMessage> : null}
           </div>
           <SheetFooter>
             <Button type="button" disabled={saving} onClick={() => void submit()}>
-              {saving ? "Saving…" : "Save field"}
+              {saving ? "Saving…" : "Save question"}
             </Button>
           </SheetFooter>
         </SheetContent>

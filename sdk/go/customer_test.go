@@ -132,7 +132,7 @@ func TestCustomerClientCompletesEnrichmentPersonalizationLoop(t *testing.T) {
 		t.Fatal("sensitive runtime metadata must fail open before network delivery")
 	}
 	answer := client.SubmitAnswer(context.Background(), "aqr1_answer-1", CustomerAnswerInput{Status: "answered", Items: []CustomerAnswerItem{{
-		Key: "shopping.budget_band", Type: "constraint", Value: "50_150", Provenance: "agent_reports_user_statement", Remember: true,
+		Key: "shopping.budget_band", Type: "customer_goal", Value: "50_150", Provenance: "agent_reports_user_statement", Remember: true,
 	}}})
 	if answer.Status != http.StatusOK {
 		t.Fatalf("answer relay failed: %#v", answer)

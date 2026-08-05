@@ -5,6 +5,7 @@ import { IconChevronGrabberVertical } from "central-icons/IconChevronGrabberVert
 import { IconClock9OClock } from "central-icons/IconClock9OClock";
 import { IconHome } from "central-icons/IconHome";
 import { IconPeople } from "central-icons/IconPeople";
+import { IconPlugin2 } from "central-icons/IconPlugin2";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
 import type { ComponentType, CSSProperties, ReactNode } from "react";
 import { PageHeader } from "@/components/dashboard/page-header";
@@ -74,7 +75,12 @@ const navigation: Array<{
     icon: IconClock9OClock,
   },
   {
-    view: "setup",
+    view: "connectors",
+    label: "Connectors",
+    icon: IconPlugin2,
+  },
+  {
+    view: "configuration",
     label: "Configurations",
     icon: IconSettingsGear4,
   },
@@ -231,30 +237,30 @@ function AppSidebar({
         <SidebarGroup>
           <SidebarGroupContent>
             <SidebarMenu>
-              {navigation.map((item) => {
-                const active =
-                  view === item.view ||
-                  (item.view === "setup" && CONFIGURATION_VIEWS.has(view)) ||
-                  (item.view === "responses" && view === "feedback") ||
-                  (item.view === "sessions" && view === "interactions");
-                const destination =
-                  item.view === "setup" && !canCreateProduct ? "configuration" : item.view;
-                return (
-                  <SidebarMenuItem key={item.view}>
-                    <SidebarMenuButton
-                      type="button"
-                      isActive={active}
-                      tooltip={item.label}
-                      aria-current={active ? "page" : undefined}
-                      onClick={() => onNavigate(destination)}
-                      className="data-active:shadow-[inset_2px_0_0_var(--attention)]"
-                    >
-                      <item.icon />
-                      <span>{item.label}</span>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                );
-              })}
+              {navigation
+                .filter((item) => item.view !== "connectors" || canCreateProduct)
+                .map((item) => {
+                  const active =
+                    view === item.view ||
+                    (item.view === "configuration" && CONFIGURATION_VIEWS.has(view)) ||
+                    (item.view === "responses" && view === "feedback") ||
+                    (item.view === "sessions" && view === "interactions");
+                  return (
+                    <SidebarMenuItem key={item.view}>
+                      <SidebarMenuButton
+                        type="button"
+                        isActive={active}
+                        tooltip={item.label}
+                        aria-current={active ? "page" : undefined}
+                        onClick={() => onNavigate(item.view)}
+                        className="data-active:shadow-[inset_2px_0_0_var(--attention)]"
+                      >
+                        <item.icon />
+                        <span>{item.label}</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  );
+                })}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
@@ -286,9 +292,7 @@ function AppSidebar({
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
                 <DropdownMenuGroup>
-                  <DropdownMenuItem
-                    onClick={() => onNavigate(canCreateProduct ? "setup" : "configuration")}
-                  >
+                  <DropdownMenuItem onClick={() => onNavigate("configuration")}>
                     <IconSettingsGear4 />
                     Configurations
                   </DropdownMenuItem>
@@ -328,10 +332,9 @@ export function DashboardShell({
     feedback: "Response",
     sessions: "Sessions",
     configuration: "Configurations",
-    setup: "Configurations",
     policy: "Configurations",
-    "context-fields": "Configurations",
-    connectors: "Configurations",
+    questions: "Configurations",
+    connectors: "Connectors",
     team: "Configurations",
     interactions: "Interaction",
   };

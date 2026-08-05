@@ -1,13 +1,14 @@
 "use client";
 
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 
 import type { ViewBaseProps } from "@/components/dashboard/types";
 import {
   EmptyState,
   ErrorState,
   NativeSelect,
+  PageHeader,
   Panel,
   StatusMessage,
 } from "@/components/dashboard/view-primitives";
@@ -45,72 +46,123 @@ export function ConnectorsView({ data }: Pick<ViewBaseProps, "data">) {
   const editable = isEditor(data.currentRole);
 
   return (
-    <div className="space-y-6">
-      <DataDestinationsPanel workspaceId={data.workspace.id} editable={editable} />
+    <div className="mx-auto max-w-6xl space-y-8">
+      <PageHeader
+        eyebrow="Product connections"
+        title="Connectors"
+        description="Connect Epode to the systems that receive data, extend workflows, and link feedback to source code."
+      />
 
-      <div className="space-y-3">
-        <Panel>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 className="font-medium">GitHub</h2>
-              <p className="text-sm text-muted-foreground">
-                View the organizations and repositories available to this workspace.
-              </p>
-            </div>
-            <Button
-              type="button"
-              variant="outline"
-              aria-expanded={githubExpanded}
-              onClick={() => setGithubExpanded((expanded) => !expanded)}
-            >
-              {githubExpanded ? "Hide GitHub" : "Show GitHub"}
-            </Button>
-          </div>
+      <ConnectorSection
+        id="destinations"
+        title="Destinations"
+        description="Send Epode data continuously to systems your team owns."
+      >
+        <DataDestinationsPanel workspaceId={data.workspace.id} editable={editable} />
+      </ConnectorSection>
 
-          {githubExpanded ? (
-            <GithubConnector
-              workspaceId={data.workspace.id}
-              response={installationsQuery.data}
-              pending={installationsQuery.isPending}
-              error={installationsQuery.error}
-              retry={() => installationsQuery.refetch()}
-            />
-          ) : null}
-        </Panel>
-
-        {PLANNED_CONNECTORS.map((connector) => (
-          <Panel key={connector}>
-            <div className="flex flex-wrap items-center justify-between gap-3" aria-disabled="true">
+      <ConnectorSection
+        id="apps"
+        title="Apps"
+        description="Authorize external apps that Epode can work with on behalf of this team."
+      >
+        <div className="space-y-3">
+          <Panel>
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="font-medium">{connector}</h2>
-                <p className="text-sm text-muted-foreground">Planned</p>
+                <h3 className="font-medium">GitHub</h3>
+                <p className="text-sm text-muted-foreground">
+                  View the organizations and repositories available to this workspace.
+                </p>
               </div>
               <Button
                 type="button"
                 variant="outline"
-                disabled
-                aria-disabled="true"
-                aria-label={`${connector} planned`}
+                aria-expanded={githubExpanded}
+                onClick={() => setGithubExpanded((expanded) => !expanded)}
               >
-                Planned
+                {githubExpanded ? "Hide GitHub" : "Show GitHub"}
               </Button>
             </div>
-          </Panel>
-        ))}
-      </div>
 
-      <ProductMappingPanel
-        workspaceId={data.workspace.id}
-        product={data.currentProduct}
-        editable={editable}
-        expanded={mappingExpanded}
-        setExpanded={setMappingExpanded}
-        installations={installationsQuery.data}
-        installationsPending={installationsQuery.isPending}
-        installationsError={installationsQuery.error}
-        retryInstallations={() => installationsQuery.refetch()}
-      />
+            {githubExpanded ? (
+              <GithubConnector
+                workspaceId={data.workspace.id}
+                response={installationsQuery.data}
+                pending={installationsQuery.isPending}
+                error={installationsQuery.error}
+                retry={() => installationsQuery.refetch()}
+              />
+            ) : null}
+          </Panel>
+
+          {PLANNED_CONNECTORS.map((connector) => (
+            <Panel key={connector}>
+              <div
+                className="flex flex-wrap items-center justify-between gap-3"
+                aria-disabled="true"
+              >
+                <div>
+                  <h3 className="font-medium">{connector}</h3>
+                  <p className="text-sm text-muted-foreground">Planned</p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled
+                  aria-disabled="true"
+                  aria-label={`${connector} planned`}
+                >
+                  Planned
+                </Button>
+              </div>
+            </Panel>
+          ))}
+        </div>
+      </ConnectorSection>
+
+      <ConnectorSection
+        id="code"
+        title="Code"
+        description="Link product feedback to the repository where your team can investigate and act on it."
+      >
+        <ProductMappingPanel
+          workspaceId={data.workspace.id}
+          product={data.currentProduct}
+          editable={editable}
+          expanded={mappingExpanded}
+          setExpanded={setMappingExpanded}
+          installations={installationsQuery.data}
+          installationsPending={installationsQuery.isPending}
+          installationsError={installationsQuery.error}
+          retryInstallations={() => installationsQuery.refetch()}
+        />
+      </ConnectorSection>
     </div>
+  );
+}
+
+function ConnectorSection({
+  id,
+  title,
+  description,
+  children,
+}: {
+  id: string;
+  title: string;
+  description: string;
+  children: ReactNode;
+}) {
+  return (
+    <section aria-labelledby={`connectors-${id}`} className="space-y-3">
+      <div>
+        <h2 id={`connectors-${id}`} className="text-lg font-medium">
+          {title}
+        </h2>
+        <p className="text-sm text-muted-foreground">{description}</p>
+      </div>
+      {children}
+    </section>
   );
 }
 

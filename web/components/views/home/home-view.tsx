@@ -2,21 +2,34 @@
 
 import { IconArrowUpRight } from "central-icons/IconArrowUpRight";
 import Image from "next/image";
-
+import { useEffect } from "react";
+import type { ShownSecrets } from "@/components/dashboard/types";
 import { Button } from "@/components/ui/button";
+import { SetupView } from "@/components/views/setup/setup-view";
 import type { DashboardData } from "@/lib/api/dashboard";
 import { isEditor } from "@/lib/dashboard/format";
 
 export function HomeView({
   data,
+  secrets,
+  rememberSecret,
+  refresh,
+  setNotice,
 }: {
   data: DashboardData;
-  openCustomer?: (customerId: string) => void;
-  openSession?: (sessionId: string) => void;
-  openFeedback: (reportId: string) => void;
+  secrets: ShownSecrets | null;
+  rememberSecret: (kind: "write" | "read", secret: string) => void;
   refresh: () => Promise<unknown>;
+  setNotice: (message: string) => void;
 }) {
   const needsSetup = data.insights.opportunities === 0 && isEditor(data.currentRole);
+
+  useEffect(() => {
+    if (window.location.hash !== "#setup") return;
+    window.requestAnimationFrame(() => {
+      document.getElementById("setup")?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    });
+  }, []);
 
   return (
     <div className="mx-auto grid max-w-6xl gap-5">
@@ -32,7 +45,7 @@ export function HomeView({
           </p>
           <div className="mt-6 flex flex-wrap gap-2">
             {needsSetup ? (
-              <Button onClick={() => navigateToDashboardView("setup")}>Finish setup</Button>
+              <Button onClick={scrollToSetup}>Finish setup</Button>
             ) : (
               <Button onClick={() => navigateToDashboardView("responses")}>
                 View responses
@@ -45,11 +58,26 @@ export function HomeView({
           </div>
         </div>
       </section>
+      {isEditor(data.currentRole) ? (
+        <section id="setup" aria-label="Setup" className="scroll-mt-4">
+          <SetupView
+            data={data}
+            secrets={secrets}
+            rememberSecret={rememberSecret}
+            refresh={refresh}
+            setNotice={setNotice}
+          />
+        </section>
+      ) : null}
     </div>
   );
 }
 
-type VisibleDashboardView = "customers" | "responses" | "sessions" | "setup";
+type VisibleDashboardView = "customers" | "responses" | "sessions";
+
+function scrollToSetup() {
+  document.getElementById("setup")?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+}
 
 function navigateToDashboardView(view: VisibleDashboardView) {
   const url = new URL(window.location.href);

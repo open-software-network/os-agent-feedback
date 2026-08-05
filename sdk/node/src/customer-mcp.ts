@@ -377,7 +377,7 @@ export function epode(options: EpodeMcpOptions): EpodeMcp {
               .array(
                 z.object({
                   key: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/),
-                  type: z.enum(["intent", "preference", "constraint", "interest"]),
+                  type: z.string().regex(/^[a-z][a-z0-9_]{0,47}$/),
                   value: z.string().min(1).max(160),
                   summary: z.string().min(3).max(350),
                   provenance: z.enum([

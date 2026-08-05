@@ -9421,9 +9421,24 @@ fn enrichment_answer_action(
     token: &str,
     catalog: Option<&RequestFieldCatalog>,
 ) -> EnrichmentAnswerAction {
-    let (catalog_version, entries) = catalog.map_or_else(
-        || ("v1".to_owned(), enrichment_catalog_schema()),
+    let (catalog_version, entries, signal_types) = catalog.map_or_else(
+        || {
+            (
+                "v1".to_owned(),
+                enrichment_catalog_schema(),
+                ["intent", "preference", "constraint"]
+                    .map(str::to_owned)
+                    .to_vec(),
+            )
+        },
         |catalog| {
+            let signal_types = catalog
+                .fields
+                .iter()
+                .map(|field| field.signal_type.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
             (
                 catalog.version.clone(),
                 catalog
@@ -9432,10 +9447,12 @@ fn enrichment_answer_action(
                     .map(|field| EnrichmentCatalogEntry {
                         key: field.key.clone(),
                         signal_type: field.signal_type.clone(),
+                        question_type: field.question_type.clone(),
                         allowed_values: field.allowed_values.clone(),
                         targeted_advertising_safe: field.targeted_advertising_safe,
                     })
                     .collect(),
+                signal_types,
             )
         },
     );
@@ -9455,9 +9472,7 @@ fn enrichment_answer_action(
                 required: ["key", "type", "value", "provenance", "remember"]
                     .map(str::to_owned)
                     .to_vec(),
-                signal_types: ["intent", "preference", "constraint"]
-                    .map(str::to_owned)
-                    .to_vec(),
+                signal_types,
                 provenance: [
                     "agent_reports_user_statement",
                     "agent_reports_current_task",
@@ -10329,6 +10344,8 @@ struct EnrichmentFieldSnapshot {
     label: String,
     #[serde(rename = "type")]
     signal_type: String,
+    #[serde(default)]
+    question_type: Option<String>,
     allowed_values: Vec<String>,
     targeted_advertising_safe: bool,
 }
@@ -10339,6 +10356,7 @@ impl From<&'static EnrichmentCatalogDefinition> for EnrichmentFieldSnapshot {
             key: definition.key.to_owned(),
             label: definition.key.replace(['.', '_'], " "),
             signal_type: definition.signal_type.to_owned(),
+            question_type: None,
             allowed_values: definition
                 .allowed_values
                 .iter()
@@ -10372,6 +10390,7 @@ struct EnrichmentFieldDefinitionRow {
     field_key: String,
     label: String,
     signal_type: String,
+    question_type: Option<String>,
     allowed_values: Vec<String>,
     targeted_advertising_safe: bool,
     operations: Option<Vec<String>>,
@@ -10386,7 +10405,7 @@ fn field_definition_response(
     EnrichmentFieldDefinitionResponse {
         key: row.field_key.clone(),
         label: row.label.clone(),
-        signal_type: row.signal_type.clone(),
+        signal_type: row.effective_type().to_owned(),
         allowed_values: row.allowed_values.clone(),
         targeted_advertising_safe: row.targeted_advertising_safe,
         operations: row.operations.clone(),
@@ -10401,16 +10420,37 @@ fn snapshot_from_definition(row: &EnrichmentFieldDefinitionRow) -> EnrichmentFie
         key: row.field_key.clone(),
         label: row.label.clone(),
         signal_type: row.signal_type.clone(),
+        question_type: row.question_type.clone(),
         allowed_values: row.allowed_values.clone(),
         targeted_advertising_safe: row.targeted_advertising_safe,
     }
 }
 
-/// Product-defined context fields live in a table added by migration 0035.
-/// Rolling deploys must keep legacy behavior until the table exists.
+impl EnrichmentFieldDefinitionRow {
+    fn effective_type(&self) -> &str {
+        self.question_type.as_deref().unwrap_or(&self.signal_type)
+    }
+}
+
+impl EnrichmentFieldSnapshot {
+    fn effective_type(&self) -> &str {
+        self.question_type.as_deref().unwrap_or(&self.signal_type)
+    }
+}
+
+/// Product-defined context fields live in a table added by migration 0040;
+/// product-authored question types require the nullable column from 0042.
+/// Fail closed until both are available so a new image can boot safely before
+/// the separately managed additive expansion lands.
 async fn enrichment_fields_available(tx: &mut Transaction<'_, Postgres>) -> Result<bool, ApiError> {
     sqlx::query_scalar::<_, bool>(
-        "SELECT to_regclass('public.enrichment_field_definitions') IS NOT NULL",
+        r"SELECT to_regclass('public.enrichment_field_definitions') IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'enrichment_field_definitions'
+              AND column_name = 'question_type'
+          )",
     )
     .fetch_one(&mut **tx)
     .await
@@ -10424,7 +10464,7 @@ async fn load_product_field_definitions(
     enabled_only: bool,
 ) -> Result<Vec<EnrichmentFieldDefinitionRow>, ApiError> {
     sqlx::query_as::<_, EnrichmentFieldDefinitionRow>(
-        r"SELECT field_key, label, signal_type, allowed_values,
+        r"SELECT field_key, label, signal_type, question_type, allowed_values,
           targeted_advertising_safe, operations, enabled, created_at, updated_at
         FROM enrichment_field_definitions
         WHERE product_id = $1 AND workspace_id = $2
@@ -10628,9 +10668,16 @@ fn validate_field_definition_input(
             "label must be between 3 and 120 characters",
         ));
     }
-    if !["intent", "preference", "constraint"].contains(&input.signal_type.as_str()) {
+    let signal_type = input.signal_type.as_str();
+    let valid_signal_type = !signal_type.is_empty()
+        && signal_type.len() <= 48
+        && signal_type.starts_with(|character: char| character.is_ascii_lowercase())
+        && signal_type.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+        });
+    if !valid_signal_type {
         return Err(ApiError::bad_request(
-            "type must be intent, preference, or constraint",
+            "type must be a lowercase snake_case name between 1 and 48 characters",
         ));
     }
     if input.allowed_values.is_empty() || input.allowed_values.len() > 32 {
@@ -10732,20 +10779,25 @@ pub(crate) async fn upsert_enrichment_field(
             "Product context fields are unavailable until the latest migration is applied",
         ));
     }
+    let compatibility_signal_type = match input.signal_type.as_str() {
+        "intent" | "preference" | "constraint" => input.signal_type.as_str(),
+        _ => "preference",
+    };
     let row = sqlx::query_as::<_, EnrichmentFieldDefinitionRow>(
         r"INSERT INTO enrichment_field_definitions
-        (id, workspace_id, product_id, field_key, label, signal_type, allowed_values,
+        (id, workspace_id, product_id, field_key, label, signal_type, question_type, allowed_values,
          targeted_advertising_safe, operations, enabled, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
         ON CONFLICT (product_id, workspace_id, field_key) DO UPDATE SET
           label = EXCLUDED.label,
           signal_type = EXCLUDED.signal_type,
+          question_type = EXCLUDED.question_type,
           allowed_values = EXCLUDED.allowed_values,
           targeted_advertising_safe = EXCLUDED.targeted_advertising_safe,
           operations = EXCLUDED.operations,
           enabled = EXCLUDED.enabled,
           updated_at = NOW()
-        RETURNING field_key, label, signal_type, allowed_values,
+        RETURNING field_key, label, signal_type, question_type, allowed_values,
           targeted_advertising_safe, operations, enabled, created_at, updated_at",
     )
     .bind(Uuid::new_v4())
@@ -10753,6 +10805,7 @@ pub(crate) async fn upsert_enrichment_field(
     .bind(product_id)
     .bind(field_key)
     .bind(input.label.trim())
+    .bind(compatibility_signal_type)
     .bind(&input.signal_type)
     .bind(&input.allowed_values)
     .bind(input.targeted_advertising_safe)
@@ -10781,7 +10834,7 @@ pub(crate) async fn delete_enrichment_field(
     let deleted = sqlx::query_as::<_, EnrichmentFieldDefinitionRow>(
         r"DELETE FROM enrichment_field_definitions
         WHERE product_id = $1 AND workspace_id = $2 AND field_key = $3
-        RETURNING field_key, label, signal_type, allowed_values,
+        RETURNING field_key, label, signal_type, question_type, allowed_values,
           targeted_advertising_safe, operations, enabled, created_at, updated_at",
     )
     .bind(product_id)
@@ -10964,6 +11017,7 @@ fn enrichment_catalog_schema() -> Vec<EnrichmentCatalogEntry> {
         .map(|definition| EnrichmentCatalogEntry {
             key: definition.key.to_owned(),
             signal_type: definition.signal_type.to_owned(),
+            question_type: None,
             allowed_values: definition
                 .allowed_values
                 .iter()
@@ -11211,7 +11265,7 @@ pub(crate) async fn submit_enrichment_answer(
         .bind(serde_json::json!({
             "remembered": item.remember,
             "purpose": request.purpose,
-            "enrichmentType": &definition.signal_type,
+            "enrichmentType": definition.effective_type(),
             "catalogVersion": field_catalog
                 .as_ref()
                 .map_or("v1", |catalog| catalog.version.as_str()),
@@ -19661,9 +19715,12 @@ mod product_tests {
             operations: None,
             enabled: true,
         };
-        anyhow::ensure!(validate_field_definition_input(&valid).is_err());
+        anyhow::ensure!(validate_field_definition_input(&valid).is_ok());
+        let mut invalid_type = valid.clone();
+        invalid_type.signal_type = "Customer Goal".into();
+        anyhow::ensure!(validate_field_definition_input(&invalid_type).is_err());
         let mut valid_typed = valid;
-        valid_typed.signal_type = "preference".into();
+        valid_typed.signal_type = "customer_goal".into();
         anyhow::ensure!(validate_field_definition_input(&valid_typed).is_ok());
         let mut duplicate_values = valid_typed.clone();
         duplicate_values.allowed_values = vec!["gift".into(), "gift".into()];
@@ -19686,6 +19743,34 @@ mod product_tests {
         anyhow::ensure!(
             normalized == Some(vec!["/search".to_owned(), "search_catalog".to_owned()])
         );
+        Ok(())
+    }
+
+    #[test]
+    fn custom_question_snapshots_remain_compatible_with_the_previous_api() -> anyhow::Result<()> {
+        let snapshot = EnrichmentFieldSnapshot {
+            key: "journey.occasion".into(),
+            label: "Shopping occasion".into(),
+            signal_type: "preference".into(),
+            question_type: Some("customer_goal".into()),
+            allowed_values: vec!["gift".into()],
+            targeted_advertising_safe: false,
+        };
+        anyhow::ensure!(snapshot.effective_type() == "customer_goal");
+        let encoded = serde_json::to_value(&snapshot)?;
+        anyhow::ensure!(encoded["type"] == "preference");
+        anyhow::ensure!(encoded["questionType"] == "customer_goal");
+
+        let previous_snapshot: EnrichmentFieldSnapshot =
+            serde_json::from_value(serde_json::json!({
+                "key": "journey.occasion",
+                "label": "Shopping occasion",
+                "type": "preference",
+                "allowedValues": ["gift"],
+                "targetedAdvertisingSafe": false
+            }))?;
+        anyhow::ensure!(previous_snapshot.question_type.is_none());
+        anyhow::ensure!(previous_snapshot.effective_type() == "preference");
         Ok(())
     }
 
@@ -21280,7 +21365,7 @@ mod product_tests {
                 "journey.occasion",
                 EnrichmentFieldDefinitionInput {
                     label: "Shopping occasion".into(),
-                    signal_type: "preference".into(),
+                    signal_type: "customer_goal".into(),
                     allowed_values: vec!["gift".into(), "self_purchase".into()],
                     targeted_advertising_safe: false,
                     operations: Some(vec!["/search".into(), "/checkout".into()]),
@@ -21290,6 +21375,7 @@ mod product_tests {
             .await
             .map_err(test_error)?;
             anyhow::ensure!(occasion.key == "journey.occasion" && occasion.enabled);
+            anyhow::ensure!(occasion.signal_type == "customer_goal");
             upsert_enrichment_field(
                 &pool,
                 auth.workspace.id,
@@ -21408,20 +21494,28 @@ mod product_tests {
             anyhow::ensure!(
                 submit_schema.catalog.len() == 1
                     && submit_schema.catalog[0].key == "journey.occasion"
+                    && submit_schema.catalog[0].signal_type == "preference"
+                    && submit_schema.catalog[0].question_type.as_deref() == Some("customer_goal")
             );
+            anyhow::ensure!(submit_schema.signal_types == vec!["preference"]);
             let search_answer = search_answer.map_err(test_error)?;
             anyhow::ensure!(search_answer.signals.len() == 1);
             anyhow::ensure!(search_answer.signals[0].summary == "Shopping occasion: gift");
             anyhow::ensure!(
-                sqlx::query_scalar::<_, String>(
-                    "SELECT attributes->>'catalogVersion' FROM customer_signals
+                sqlx::query_as::<_, (String, String, String)>(
+                    "SELECT signal_type, attributes->>'enrichmentType',
+                      attributes->>'catalogVersion' FROM customer_signals
                     WHERE id = $1 AND workspace_id = $2",
                 )
                 .bind(search_answer.signals[0].signal_id)
                 .bind(auth.workspace.id)
                 .fetch_one(&pool)
                 .await?
-                    == "product:v1"
+                    == (
+                        "preference".to_owned(),
+                        "customer_goal".to_owned(),
+                        "product:v1".to_owned(),
+                    )
             );
 
             // The closed custom catalog replaces the legacy global catalog.
@@ -21493,7 +21587,7 @@ mod product_tests {
                 "journey.occasion",
                 EnrichmentFieldDefinitionInput {
                     label: "Shopping occasion".into(),
-                    signal_type: "preference".into(),
+                    signal_type: "customer_goal".into(),
                     allowed_values: vec!["replacement".into()],
                     targeted_advertising_safe: false,
                     operations: Some(vec!["/search".into(), "/checkout".into()]),
@@ -21522,7 +21616,7 @@ mod product_tests {
                 "journey.occasion",
                 EnrichmentFieldDefinitionInput {
                     label: "Shopping occasion".into(),
-                    signal_type: "preference".into(),
+                    signal_type: "customer_goal".into(),
                     allowed_values: vec!["gift".into(), "self_purchase".into()],
                     targeted_advertising_safe: false,
                     operations: Some(vec!["/search".into(), "/checkout".into()]),

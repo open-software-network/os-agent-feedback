@@ -1700,6 +1700,7 @@ export interface components {
         EnrichmentCatalogEntry: {
             allowedValues: string[];
             key: string;
+            questionType?: string | null;
             targetedAdvertisingSafe: boolean;
             type: string;
         };

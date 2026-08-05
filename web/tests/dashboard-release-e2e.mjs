@@ -1035,8 +1035,7 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   );
   assert.equal(responseFilteredSessions.headers["x-workspace-id"], ids.workspace);
 
-  await clickText(page, "Configurations");
-  await clickText(page, "Setup");
+  await clickText(page, "Home");
   await textVisible(page, "Connect Search API");
   await textVisible(page, "Install Epode once in your company's product.");
   await metricVisible(page, "Product key", "Ready");
@@ -1054,6 +1053,12 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
     "Setup complete: Epode received customer answers and your product retrieved them.",
   );
 
+  await clickText(page, "Connectors");
+  await textVisible(page, "Destinations");
+  await textVisible(page, "Apps");
+  await textVisible(page, "Code");
+
+  await clickText(page, "Configurations");
   await clickText(page, "Data controls");
   await textVisible(page, "Allowed customer information");
   await textVisible(page, "Product personalization");
