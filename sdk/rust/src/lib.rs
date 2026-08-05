@@ -2110,7 +2110,7 @@ fn valid_manage_consent(action: &ManageConsentContract, current: &str) -> bool {
 }
 
 pub async fn submit_feedback_consent(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     envelope: &Envelope,
     decision: &str,
     allowed_origins: &[&str],
@@ -2144,6 +2144,7 @@ pub async fn submit_feedback_consent(
     }) {
         return Err(SubmitError::UntrustedOrigin);
     }
+    let client = submission_client()?;
     Ok(client
         .post(destination)
         .header("authorization", &action.submit_decision.authorization)
@@ -2157,7 +2158,7 @@ pub async fn submit_feedback_consent(
 }
 
 pub async fn submit_product_feedback(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     envelope: &Envelope,
     mut report: FeedbackReport,
     allowed_origins: &[&str],
@@ -2243,6 +2244,7 @@ pub async fn submit_product_feedback(
         return Err(SubmitError::UntrustedOrigin);
     }
     let submission = FeedbackSubmission { report: &report };
+    let client = submission_client()?;
     Ok(client
         .post(submit)
         .header("authorization", &submit_contract.authorization)
@@ -2253,6 +2255,12 @@ pub async fn submit_product_feedback(
         .error_for_status()?
         .json()
         .await?)
+}
+
+fn submission_client() -> Result<reqwest::Client, SubmitError> {
+    Ok(reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?)
 }
 
 #[derive(Debug)]
@@ -2379,6 +2387,35 @@ mod tests {
     fn legacy_auto_mode_is_rejected() {
         let parsed = serde_json::from_str::<FeedbackMode>("\"auto\"");
         assert!(parsed.is_err());
+    }
+
+    #[tokio::test]
+    async fn authenticated_submission_client_rejects_redirects() {
+        let sink = TcpListener::bind("127.0.0.1:0").unwrap();
+        sink.set_nonblocking(true).unwrap();
+        let sink_address = sink.local_addr().unwrap();
+        let source = TcpListener::bind("127.0.0.1:0").unwrap();
+        let source_address = source.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = source.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            let response = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{sink_address}/stolen\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let response = submission_client()
+            .unwrap()
+            .post(format!("http://{source_address}/submit"))
+            .body("private report")
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+        assert!(sink.accept().is_err(), "submission reached redirect target");
     }
 
     #[test]
