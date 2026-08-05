@@ -18,8 +18,11 @@ function harness(options = {}) {
     feedbackTools: [],
     flushIntervalMs: 60_000,
     fetch: async (_url, init) => {
-      requests.push(JSON.parse(init.body));
-      return new Response("{}", { status: 202 });
+      const payload = JSON.parse(init.body);
+      requests.push(payload);
+      return new Response(JSON.stringify({ accepted: payload.events.length, dropped: 0 }), {
+        status: 202,
+      });
     },
     ...options,
   });
@@ -238,7 +241,9 @@ test("retryable telemetry reuses the exact event and payload", async () => {
       assert.equal(init.redirect, "manual");
       bodies.push(init.body);
       attempt += 1;
-      return new Response("{}", { status: attempt === 1 ? 503 : 202 });
+      return new Response(attempt === 1 ? "{}" : '{"accepted":1,"dropped":0}', {
+        status: attempt === 1 ? 503 : 202,
+      });
     },
   });
   runtime.register("create_item", async () => ({ content: [] }));
@@ -246,6 +251,185 @@ test("retryable telemetry reuses the exact event and payload", async () => {
   await runtime.instrumentation.shutdown();
   assert.equal(bodies.length, 2);
   assert.equal(bodies[1], bodies[0]);
+});
+
+test("a retry keeps its batch atomic while a new event is queued", async () => {
+  const bodies = [];
+  let releaseFirstAttempt;
+  let releaseSecondBatch;
+  let markSecondBatchStarted;
+  const firstAttemptBlocked = new Promise((resolve) => {
+    releaseFirstAttempt = resolve;
+  });
+  const secondBatchBlocked = new Promise((resolve) => {
+    releaseSecondBatch = resolve;
+  });
+  const secondBatchStarted = new Promise((resolve) => {
+    markSecondBatchStarted = resolve;
+  });
+  const runtime = harness({
+    maxTelemetryAttempts: 2,
+    logger: { debug() {}, warn() {} },
+    fetch: async (_url, init) => {
+      bodies.push(init.body);
+      if (bodies.length === 1) {
+        await firstAttemptBlocked;
+        return new Response("{}", { status: 503 });
+      }
+      const payload = JSON.parse(init.body);
+      if (bodies.length === 3) {
+        markSecondBatchStarted();
+        await secondBatchBlocked;
+      }
+      return new Response(JSON.stringify({ accepted: payload.events.length, dropped: 0 }), {
+        status: 202,
+      });
+    },
+  });
+  runtime.register("first", async () => ({ content: [] }));
+  runtime.register("second", async () => ({ content: [] }));
+  await runtime.call("first");
+  const activeFlush = runtime.instrumentation.flush();
+  await new Promise((resolve) => setImmediate(resolve));
+  await runtime.call("second");
+  let successorSettled = false;
+  const successorFlush = runtime.instrumentation.flush().then(() => {
+    successorSettled = true;
+  });
+  let queuedSettled = false;
+  const queuedFlush = runtime.instrumentation.flush();
+  void queuedFlush.then(() => {
+    queuedSettled = true;
+  });
+  releaseFirstAttempt();
+  let flushDeadline;
+  try {
+    await Promise.race([
+      secondBatchStarted,
+      new Promise((_, reject) => {
+        flushDeadline = setTimeout(
+          () => reject(new Error("telemetry retry did not settle")),
+          2_000,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(flushDeadline);
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(successorSettled, false);
+  assert.equal(queuedSettled, false);
+  releaseSecondBatch();
+  await Promise.all([successorFlush, queuedFlush]);
+
+  assert.equal(bodies.length, 3);
+  assert.equal(bodies[1], bodies[0]);
+  assert.deepEqual(
+    bodies.map((body) => JSON.parse(body).events.map((event) => event.operation)),
+    [["first"], ["first"], ["second"]],
+  );
+  await activeFlush;
+  await runtime.instrumentation.shutdown();
+});
+
+test("terminal telemetry statuses and receipts are not retried", async (t) => {
+  const cases = [
+    ["wrong status", 200, '{"accepted":1,"dropped":0}'],
+    ["empty receipt", 202, ""],
+    ["malformed receipt", 202, "{"],
+    ["partial receipt", 202, '{"accepted":0,"dropped":1}'],
+    ["terminal client error", 400, "{}"],
+  ];
+  for (const [name, status, body] of cases) {
+    await t.test(name, async () => {
+      let attempts = 0;
+      const warnings = [];
+      const runtime = harness({
+        maxTelemetryAttempts: 3,
+        logger: {
+          debug() {},
+          warn(message) {
+            warnings.push(message);
+          },
+        },
+        fetch: async () => {
+          attempts += 1;
+          return new Response(body, { status });
+        },
+      });
+      const productResult = { content: [{ type: "text", text: "unchanged" }] };
+      runtime.register("create_item", async () => productResult);
+      assert.equal(await runtime.call("create_item"), productResult);
+      await runtime.instrumentation.shutdown();
+      assert.equal(attempts, 1);
+      assert.equal(warnings.length, 1);
+    });
+  }
+});
+
+test("only transport failures, 408, 429, and 5xx statuses are retried", async (t) => {
+  for (const status of [408, 429, 503]) {
+    await t.test(String(status), async () => {
+      const bodies = [];
+      const runtime = harness({
+        maxTelemetryAttempts: 2,
+        logger: { debug() {}, warn() {} },
+        fetch: async (_url, init) => {
+          bodies.push(init.body);
+          return new Response(bodies.length === 1 ? "{}" : '{"accepted":1,"dropped":0}', {
+            status: bodies.length === 1 ? status : 202,
+          });
+        },
+      });
+      runtime.register("create_item", async () => ({ content: [] }));
+      await runtime.call("create_item");
+      await runtime.instrumentation.shutdown();
+      assert.equal(bodies.length, 2);
+      assert.equal(bodies[1], bodies[0]);
+    });
+  }
+  await t.test("transport failure", async () => {
+    let attempts = 0;
+    const runtime = harness({
+      maxTelemetryAttempts: 2,
+      logger: { debug() {}, warn() {} },
+      fetch: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("offline");
+        return new Response('{"accepted":1,"dropped":0}', { status: 202 });
+      },
+    });
+    runtime.register("create_item", async () => ({ content: [] }));
+    await runtime.call("create_item");
+    await runtime.instrumentation.shutdown();
+    assert.equal(attempts, 2);
+  });
+  await t.test("response body transport failure", async () => {
+    const bodies = [];
+    const runtime = harness({
+      maxTelemetryAttempts: 2,
+      logger: { debug() {}, warn() {} },
+      fetch: async (_url, init) => {
+        bodies.push(init.body);
+        if (bodies.length === 1) {
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.error(new Error("body stream failed"));
+              },
+            }),
+            { status: 202 },
+          );
+        }
+        return new Response('{"accepted":1,"dropped":0}', { status: 202 });
+      },
+    });
+    runtime.register("create_item", async () => ({ content: [] }));
+    await runtime.call("create_item");
+    await runtime.instrumentation.shutdown();
+    assert.equal(bodies.length, 2);
+    assert.equal(bodies[1], bodies[0]);
+  });
 });
 
 test("a completion after terminal shutdown is a product-preserving no-op", async () => {
@@ -303,6 +487,31 @@ test("shutdown joins an active flush and prevents post-return retry", async () =
   await activeFlush;
   await new Promise((resolve) => setTimeout(resolve, 550));
   assert.equal(requestCount, 1);
+});
+
+test("shutdown prevents a sleeping retry from starting after its deadline", async () => {
+  let requestCount = 0;
+  const runtime = harness({
+    maxTelemetryAttempts: 2,
+    shutdownTimeoutMs: 20,
+    fetch: async () => {
+      requestCount += 1;
+      return new Response("{}", { status: 503 });
+    },
+  });
+  runtime.register("retry_backoff", async () => ({ content: [] }));
+  await runtime.call("retry_backoff");
+  const activeFlush = runtime.instrumentation.flush();
+  while (requestCount === 0) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  await runtime.instrumentation.shutdown();
+  const requestCountAtShutdown = requestCount;
+  await new Promise((resolve) => setTimeout(resolve, 550));
+  await activeFlush;
+  assert.equal(requestCountAtShutdown, 1);
+  assert.equal(requestCount, requestCountAtShutdown);
 });
 
 test("shutdown bounds a flush it starts when transport ignores cancellation", async () => {

@@ -175,7 +175,7 @@ export interface PreparedInteraction {
   occurredAt: string;
 }
 
-type QueuedEvent = { event: TelemetryEvent; attempts: number; retryAt: number };
+type QueuedEvent = { event: TelemetryEvent };
 
 const DEFAULT_ENDPOINT = "https://app.epode.ai";
 const MAX_BACKGROUND_CONSENT_LOOKUPS = 8;
@@ -319,7 +319,7 @@ class TelemetryQueue {
         this.#warnedDrop = true;
       }
     }
-    this.#events.push({ event, attempts: 0, retryAt: 0 });
+    this.#events.push({ event });
     if (this.#events.length >= 50) {
       void this.flush();
     } else if (!this.#timer) {
@@ -332,7 +332,11 @@ class TelemetryQueue {
   }
 
   async flush(): Promise<void> {
-    if (this.#flushing) return this.#flushing;
+    if (this.#flushing) {
+      await this.#flushing;
+      if (!this.#shutdownComplete) await this.flush();
+      return;
+    }
     if (!this.#events.length) return;
     this.#flushing = this.#flushOnce().finally(() => {
       this.#flushing = undefined;
@@ -348,54 +352,74 @@ class TelemetryQueue {
   }
 
   async #flushOnce(): Promise<void> {
-    const now = Date.now();
-    const batch: QueuedEvent[] = [];
-    const waiting: QueuedEvent[] = [];
-    for (const entry of this.#events) {
-      if (batch.length < 50 && (this.#shuttingDown || entry.retryAt <= now)) {
-        batch.push(entry);
-      } else {
-        waiting.push(entry);
-      }
-    }
-    this.#events = waiting;
+    const batch = this.#events.splice(0, 50);
     if (!batch.length) return;
-    try {
-      const response = await this.#fetch(`${this.#endpoint}/api/v2/telemetry/batches`, {
-        method: "POST",
-        redirect: "manual",
-        headers: {
-          authorization: `Bearer ${this.#apiKey}`,
-          "content-type": "application/json",
-          "user-agent": "@epode/node/0.4.0",
-        },
-        body: JSON.stringify({ events: batch.map(({ event }) => event) }),
-        signal: AbortSignal.timeout(
-          this.#shuttingDown
-            ? Math.max(1, Math.min(this.#telemetryTimeoutMs, this.#shutdownDeadline - Date.now()))
-            : this.#telemetryTimeoutMs,
-        ),
-      });
-      if (!response.ok) throw new Error(`telemetry HTTP ${response.status}`);
-      this.#warned = false;
-    } catch (error) {
-      for (const entry of batch) {
-        entry.attempts += 1;
-        entry.retryAt = Date.now() + Math.min(30_000, 500 * 2 ** (entry.attempts - 1));
-        if (
-          entry.attempts < this.#maxTelemetryAttempts &&
-          !this.#shutdownComplete &&
-          (!this.#shuttingDown || Date.now() < this.#shutdownDeadline) &&
-          this.#events.length < this.#maxQueueSize
-        ) {
-          this.#events.push(entry);
-        }
+    const body = JSON.stringify({ events: batch.map(({ event }) => event) });
+    for (let attempt = 1; attempt <= this.#maxTelemetryAttempts; attempt += 1) {
+      if (this.#shutdownComplete || (this.#shuttingDown && Date.now() >= this.#shutdownDeadline)) {
+        return;
       }
-      if (!this.#warned) {
-        this.#logger.warn(
-          `[agent-feedback] Telemetry delivery failed; product responses were not affected. ${String(error)}`,
-        );
-        this.#warned = true;
+      let retryable = true;
+      try {
+        const response = await this.#fetch(`${this.#endpoint}/api/v2/telemetry/batches`, {
+          method: "POST",
+          redirect: "manual",
+          headers: {
+            authorization: `Bearer ${this.#apiKey}`,
+            "content-type": "application/json",
+            "user-agent": "@epode/node/0.4.0",
+          },
+          body,
+          signal: AbortSignal.timeout(
+            this.#shuttingDown
+              ? Math.max(1, Math.min(this.#telemetryTimeoutMs, this.#shutdownDeadline - Date.now()))
+              : this.#telemetryTimeoutMs,
+          ),
+        });
+        if (response.status === 202) {
+          const receiptBody = await response.text();
+          retryable = false;
+          const receipt: unknown = JSON.parse(receiptBody);
+          if (
+            !receipt ||
+            typeof receipt !== "object" ||
+            !("accepted" in receipt) ||
+            receipt.accepted !== batch.length ||
+            !("dropped" in receipt) ||
+            receipt.dropped !== 0
+          ) {
+            throw new Error("telemetry receipt did not fully accept the submitted batch");
+          }
+        } else {
+          retryable =
+            response.status === 408 ||
+            response.status === 429 ||
+            (response.status >= 500 && response.status < 600);
+          throw new Error(`telemetry HTTP ${response.status}`);
+        }
+        this.#warned = false;
+        return;
+      } catch (error) {
+        if (!this.#warned) {
+          this.#logger.warn(
+            `[agent-feedback] Telemetry delivery failed; product responses were not affected. ${String(error)}`,
+          );
+          this.#warned = true;
+        }
+        if (
+          !retryable ||
+          attempt >= this.#maxTelemetryAttempts ||
+          this.#shutdownComplete ||
+          (this.#shuttingDown && Date.now() >= this.#shutdownDeadline)
+        ) {
+          return;
+        }
+        if (!this.#shuttingDown) {
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, Math.min(30_000, 500 * 2 ** (attempt - 1)));
+            unref(timer);
+          });
+        }
       }
     }
   }
