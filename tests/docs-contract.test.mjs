@@ -369,6 +369,41 @@ test("docs explain the product/customer-agent boundary and evidence model", asyn
   assert.match(privacy, /prompts or transcripts/i);
 });
 
+test("the Customer, Response, and Session contract fixes identity and artifact ownership", async () => {
+  const contract = await read("docs/reference/product-model.mdx");
+  const publishedPages = docsConfig.navigation.tabs.flatMap((tab) =>
+    tab.groups.flatMap((group) => group.pages),
+  );
+  assert.match(contract, /not the current dashboard API contract[\s\S]*remains unpublished/i);
+  assert.ok(!publishedPages.includes("reference/product-model"));
+  assert.match(contract, /Response is exactly one completed instrumented product operation/);
+  assert.match(contract, /identity is the corresponding\s+`interactions_v2\.id`/);
+  assert.match(contract, /Every eligible completed interaction appears exactly once/);
+  assert.match(contract, /evidence: unclassified/);
+  assert.match(contract, /Lists, cursors, filters,\s+counts, metrics, and rollups are rooted/);
+  assert.match(contract, /Artifact joins cannot multiply a Response/);
+  assert.match(contract, /neither, either, or both/);
+  assert.match(contract, /`contextExchange` attached to the Response/);
+  assert.match(contract, /zero-or-one aggregate projection per Response/);
+  assert.match(contract, /one request-owned interaction ID/);
+  assert.match(contract, /Customer and Session links only from the interaction/);
+  assert.match(contract, /interaction's persisted `session_id`/);
+  assert.match(
+    contract,
+    /`company_mcp`[\s\S]*`epode_companion`[\s\S]*`same_origin_best_effort`/,
+  );
+  assert.match(contract, /owner is selected before issuance and remains immutable/);
+  assert.match(contract, /purpose, retention or expiry policy, `rememberAllowed`, allowed options/);
+  assert.match(contract, /catalog identity and version\s+or hash/);
+  assert.match(contract, /separate schemas, validators, capabilities, persistence tables/);
+  assert.match(contract, /does not introduce a generic artifact table/);
+  assert.match(contract, /experimental, disabled by default/);
+  assert.match(contract, /does not support arbitrary or free-form questions/);
+  assert.match(contract, /`targeted_advertising`, or `agent_inference`/);
+  assert.match(contract, /`consent_declined`[\s\S]*`no_relevant_context`[\s\S]*`answer_skipped`/);
+  assert.match(contract, /Response API and dashboard migration are complete/);
+});
+
 test("every shipped agent handoff keeps routine feedback success out of the user answer", async () => {
   const handoffs = await Promise.all([
     read("protocol/v1/README.md"),
