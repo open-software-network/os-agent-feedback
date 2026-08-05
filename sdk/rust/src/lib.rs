@@ -1,4 +1,8 @@
 pub mod customer;
+mod interaction;
+pub use interaction::{AgentFeedbackRecorder, McpCompletion, McpCompletionError, McpOutcome};
+#[cfg(feature = "rmcp")]
+pub mod rmcp;
 pub use customer::{
     AgentAction, CUSTOMER_CONTEXT_RELAY_PATHS, CustomerAnswerInput, CustomerAnswerItem,
     CustomerAnswerStatus, CustomerClientError, CustomerContext, CustomerContextInput,
@@ -358,7 +362,8 @@ struct TelemetryEvent {
     surface: String,
     operation: String,
     status_code: u16,
-    duration_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     account_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -368,6 +373,8 @@ struct TelemetryEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     customer_ref: Option<String>,
     classification: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confirmation_method: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     runtime_hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -380,7 +387,7 @@ struct TelemetryEvent {
 }
 
 #[derive(Clone)]
-struct Runtime {
+pub(crate) struct Runtime {
     options: Arc<Options>,
     sender: mpsc::Sender<Box<TelemetryEvent>>,
     shutdown_sender: mpsc::Sender<(
@@ -397,7 +404,7 @@ struct Runtime {
 }
 
 impl Runtime {
-    fn new(mut options: Options) -> Result<Self, Error> {
+    pub(crate) fn new(mut options: Options) -> Result<Self, Error> {
         key_parts(&options.api_key)?;
         if options.feedback_mode == FeedbackMode::Invalid {
             return Err(Error::InvalidFeedbackMode);
@@ -444,7 +451,7 @@ impl Runtime {
         })
     }
 
-    fn enabled(&self) -> bool {
+    pub(crate) fn enabled(&self) -> bool {
         self.options.feedback_mode != FeedbackMode::Off
             && std::env::var("AGENT_FEEDBACK_ENABLED").as_deref() != Ok("false")
     }
@@ -858,7 +865,7 @@ impl Runtime {
         })
     }
 
-    fn record(&self, mut event: TelemetryEvent) {
+    pub(crate) fn record(&self, mut event: TelemetryEvent) {
         if event.sequence == 0 {
             event.sequence = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
         }
@@ -867,7 +874,7 @@ impl Runtime {
         }
     }
 
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
+    pub(crate) async fn shutdown(&self) -> Result<(), ShutdownError> {
         if self.stopping.swap(true, Ordering::AcqRel) {
             return Err(ShutdownError::AlreadyStarted);
         }
@@ -1137,9 +1144,19 @@ pub struct AgentFeedbackLayer {
 
 impl AgentFeedbackLayer {
     pub fn new(options: Options) -> Result<Self, Error> {
-        Ok(Self {
-            runtime: Runtime::new(options)?,
-        })
+        Ok(Self::from_recorder(AgentFeedbackRecorder::new(options)?))
+    }
+
+    pub fn from_recorder(recorder: AgentFeedbackRecorder) -> Self {
+        Self {
+            runtime: recorder.runtime,
+        }
+    }
+
+    pub fn recorder(&self) -> AgentFeedbackRecorder {
+        AgentFeedbackRecorder {
+            runtime: self.runtime.clone(),
+        }
     }
 
     pub async fn shutdown(&self) -> Result<(), ShutdownError> {
@@ -1371,8 +1388,9 @@ async fn instrument_response(
             surface: "http_headers".into(),
             operation: normalize_operation(&operation),
             status_code: response.status().as_u16(),
-            duration_ms: started.elapsed().as_millis() as u64,
+            duration_ms: Some(started.elapsed().as_millis() as u64),
             classification: "unclassified",
+            confirmation_method: None,
             occurred_at: prepared.occurred_at,
             account_ref,
             user_ref,
@@ -1486,12 +1504,13 @@ async fn instrument_response(
         surface: surface.into(),
         operation: normalize_operation(&operation),
         status_code: status.as_u16(),
-        duration_ms: started.elapsed().as_millis() as u64,
+        duration_ms: Some(started.elapsed().as_millis() as u64),
         account_ref,
         user_ref,
         anonymous_ref,
         customer_ref,
         classification: "unclassified",
+        confirmation_method: None,
         runtime_hint_source: runtime_hint.as_ref().map(|_| "http"),
         runtime_hint,
         session_source: session_ref.as_ref().map(|_| "customer"),
@@ -2426,12 +2445,13 @@ mod tests {
             surface: "http_json".into(),
             operation: "/search".into(),
             status_code: 200,
-            duration_ms: 1,
+            duration_ms: Some(1),
             account_ref: Some("org_verified".into()),
             user_ref: Some("user_verified".into()),
             anonymous_ref: Some("anon_verified".into()),
             customer_ref: Some("legacy_verified".into()),
             classification: "unclassified",
+            confirmation_method: None,
             runtime_hint: None,
             runtime_hint_source: None,
             session_ref: None,
@@ -3330,19 +3350,21 @@ mod tests {
                 }
             }
         });
-        let layer = AgentFeedbackLayer::new(
-            Options::new(KEY)
-                .endpoint(endpoint)
-                .feedback_mode(FeedbackMode::AskOnce)
-                .customer_ref(|request| {
-                    request
-                        .headers()
-                        .get("x-customer-ref")
-                        .and_then(|value| value.to_str().ok())
-                        .map(str::to_owned)
-                }),
-        )
-        .unwrap();
+        let mut options = Options::new(KEY)
+            .endpoint(endpoint)
+            .feedback_mode(FeedbackMode::AskOnce)
+            .customer_ref(|request| {
+                request
+                    .headers()
+                    .get("x-customer-ref")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned)
+            });
+        // Keep the fixture's deliberately blocked lookups alive until the
+        // semaphore assertion; otherwise the normal request timeout can recycle
+        // permits and make historical open sockets look concurrently active.
+        options.consent_timeout = Duration::from_secs(30);
+        let layer = AgentFeedbackLayer::new(options).unwrap();
         let app = Router::new()
             .route(
                 "/search",
@@ -3836,12 +3858,13 @@ mod tests {
             surface: "http_json".into(),
             operation: format!("/test/{index}"),
             status_code: 200,
-            duration_ms: 1,
+            duration_ms: Some(1),
             account_ref: None,
             user_ref: None,
             anonymous_ref: None,
             customer_ref: None,
             classification: "unclassified",
+            confirmation_method: None,
             runtime_hint: None,
             runtime_hint_source: None,
             session_ref: None,

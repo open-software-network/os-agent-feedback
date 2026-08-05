@@ -62,6 +62,9 @@ jobs:
               - ".github/workflows/ci.yml"
             sdk-packages:
               - "sdk/**"
+              - "examples/rust-axum/**"
+              - "examples/rust-rmcp/**"
+              - "protocol/v1/**"
               - "scripts/sdk-release-readiness.sh"
               - "package.json"
               - "pnpm-lock.yaml"
@@ -264,8 +267,11 @@ jobs:
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: "1.88"
+          components: clippy, rustfmt
       - name: Install locked Node dependencies
         run: pnpm install --frozen-lockfile
+      - name: Test Rust SDK and examples
+        run: make sdk-rust-test
       - name: Build, validate, and install SDK artifacts
         run: SDK_ARTIFACT_DIR=.artifacts/sdk-release bash scripts/sdk-release-readiness.sh
       - name: Upload SDK release candidates

@@ -655,7 +655,7 @@ fn valid_answer(value: &Value) -> bool {
     };
     if items.len() > 8
         || !matches!(status, "answered" | "declined" | "no_relevant_context")
-        || (status == "answered") != !items.is_empty()
+        || (status == "answered") == items.is_empty()
     {
         return false;
     }
@@ -726,9 +726,9 @@ fn valid_answer_item(value: &Value) -> bool {
     }) {
         return false;
     }
-    !object
+    object
         .get("expiresAt")
-        .is_some_and(|value| value.as_str().is_none_or(|value| !bounded(value, 64)))
+        .is_none_or(|value| value.as_str().is_some_and(|value| bounded(value, 64)))
 }
 
 fn valid_question_type(value: &str) -> bool {

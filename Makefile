@@ -1,4 +1,4 @@
-.PHONY: help install node-install backend-install node-version-check dev-env dev-setup dev-bootstrap dev-compose-check dev-db dev-db-stop dev-observability dev-observability-stop dev-backend dev-web backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test sdk-node-test web-install web-types-check web-check web-typecheck web-test web-release-e2e web-build docs-validate docs-a11y types check
+.PHONY: help install node-install backend-install node-version-check dev-env dev-setup dev-bootstrap dev-compose-check dev-db dev-db-stop dev-observability dev-observability-stop dev-backend dev-web backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test sdk-node-test sdk-rust-test web-install web-types-check web-check web-typecheck web-test web-release-e2e web-build docs-validate docs-a11y types check
 
 .DEFAULT_GOAL := help
 
@@ -109,6 +109,11 @@ node-test:  ## Run the root Node test suite
 
 sdk-node-test:  ## Build and test the Node SDK
 	cd sdk/node && pnpm test
+
+sdk-rust-test:  ## Format, lint, and test the Rust SDK and compile its examples
+	cd sdk/rust && cargo fmt --check && cargo clippy --locked --all-targets --all-features -- -D warnings && cargo test --locked --all-features
+	cd examples/rust-axum && cargo check --locked
+	cd examples/rust-rmcp && cargo check --locked
 
 # --- Web ---
 web-install: node-version-check  ## Install the web workspace dependencies from the lockfile

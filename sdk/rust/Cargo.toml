@@ -13,6 +13,10 @@ keywords = ["agent", "feedback", "middleware", "axum"]
 categories = ["web-programming::http-server"]
 include = ["src/**", "Cargo.toml", "Cargo.lock", "README.md"]
 
+[features]
+default = []
+rmcp = ["dep:rmcp"]
+
 [dependencies]
 axum = "0.8"
 base64 = "0.22"
@@ -22,6 +26,7 @@ hmac = "0.12"
 http = "1"
 http-body = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+rmcp = { version = "=3.1.0", optional = true, default-features = false, features = ["server", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -30,5 +35,7 @@ tower = "0.5"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+rmcp = { version = "=3.1.0", default-features = false, features = ["client", "server", "macros"] }
+schemars = "1"
+tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }

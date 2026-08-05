@@ -181,6 +181,16 @@ printf '%s\n' 'fn main() { let _ = agent_feedback::Options::new("test"); let _ =
   cargo build --locked >/dev/null
 )
 
+# Compile the optional rmcp surface from the extracted crate as well. This
+# catches package include/feature wiring mistakes that source-tree tests cannot.
+printf '%s\n' '[package]' 'name = "agent-feedback-smoke"' 'version = "0.0.0"' 'edition = "2024"' '' '[dependencies]' "agent-feedback = { path = \"$rust_extract/agent-feedback-$version\", features = [\"rmcp\"] }" > "$rust_consumer/Cargo.toml"
+printf '%s\n' 'fn main() { let _ = std::mem::size_of::<agent_feedback::rmcp::Unlinked>(); }' > "$rust_consumer/src/main.rs"
+(
+  cd "$rust_consumer"
+  cargo generate-lockfile >/dev/null
+  cargo build --locked >/dev/null
+)
+
 (
   cd "$artifact_dir"
   find node python go rust -type f -print0 | sort -z | xargs -0 shasum -a 256 > CHECKSUMS.sha256
