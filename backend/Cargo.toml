@@ -18,6 +18,17 @@ dotenvy = "0.15"
 form_urlencoded = "1"
 hmac = "0.12"
 jsonwebtoken = "9"
+opentelemetry = "0.32"
+opentelemetry-appender-tracing = "0.32"
+opentelemetry-http = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = [
+    "trace",
+    "metrics",
+    "logs",
+    "http-proto",
+    "reqwest-client",
+] }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
@@ -27,6 +38,7 @@ sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid"
 tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "signal"] }
 tower-http = { version = "0.6", features = ["compression-full", "cors", "fs", "trace"] }
 tracing = "0.1"
+tracing-opentelemetry = "0.33"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid", "preserve_path_order"] }
 utoipa-axum = "0.2"

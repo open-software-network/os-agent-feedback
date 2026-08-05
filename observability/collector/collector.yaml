@@ -1,0 +1,54 @@
+# OpenTelemetry Collector: the single OTLP intake for epode-api and
+# epode-web. Fans traces out to Tempo, metrics to Prometheus (native OTLP
+# ingest), and logs to Loki's OTLP endpoint.
+#
+# Hostnames use Railway private DNS and assume the sibling services are named
+# `tempo`, `loki`, and `prometheus`. If a service is renamed, update the
+# endpoints here to match.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  batch:
+    timeout: 5s
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo.railway.internal:4317
+    tls:
+      insecure: true
+  otlphttp/prometheus:
+    # Prometheus 3.x native OTLP metrics ingest; /v1/metrics is appended.
+    endpoint: http://prometheus.railway.internal:9090/api/v1/otlp
+    tls:
+      insecure: true
+  otlphttp/loki:
+    # Loki 3.x OTLP logs endpoint; /v1/logs is appended.
+    endpoint: http://loki.railway.internal:3100/otlp
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/loki]

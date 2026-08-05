@@ -6,6 +6,20 @@ registry digest is valid, and Railway reports both the same tag in
 `meta.image` and the same digest in `meta.imageDigest` for the successful
 deployment.
 
+## Observability
+
+Traces, metrics, and logs from `epode-api` and `epode-web` flow over OTLP to
+a self-hosted Grafana stack on Railway (collector, Tempo, Prometheus, Loki,
+Grafana). The stack's per-service configs, pinned images, and provisioning
+live in [`observability/`](../../observability/README.md), including the
+service/volume table and the two application environment variables
+(`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`) that switch export on.
+
+Export is opt-in per environment: set the variables on `v2-canary` first,
+confirm traces arrive in Grafana, then set them on `production` as part of a
+promotion. Leaving them unset keeps the previous stdout-only behavior, so the
+stack can be deployed independently of any application release.
+
 ## Required external configuration
 
 GitHub and Railway configuration is intentionally not created by repository

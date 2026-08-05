@@ -146,6 +146,10 @@ make dev-web     # serves the dashboard at http://localhost:3000
 
 With developer authentication enabled, open `http://localhost:8080/__dev`, enter an email, and continue to the dashboard. The backend applies local migrations before listening, and the first login creates a personal workspace, so bootstrap does not seed data. Run `pnpm run seed:dashboard-demo` only when an optional populated demo workspace is wanted. Stop PostgreSQL later with `make dev-db-stop`. Run `make help` to list all setup and verification commands.
 
+### Local observability
+
+`make dev-observability` starts a self-contained Grafana OpenTelemetry stack (traces, metrics, logs) with Grafana on `http://localhost:3001` (`admin`/`admin`). Set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` in `backend/.env` and `web/.env.local` to export telemetry from both processes; with the variable unset, telemetry export stays off and nothing changes. Stop it with `make dev-observability-stop`. Production uses the per-component Railway stack documented in [`observability/`](observability/README.md).
+
 ## Production
 
 - Dashboard/API: https://app.epode.ai

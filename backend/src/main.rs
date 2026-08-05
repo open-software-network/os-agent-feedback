@@ -12,6 +12,7 @@ mod models;
 mod os_accounts;
 mod security;
 mod store;
+mod telemetry;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -351,6 +352,12 @@ fn build_app_router(dev_auth_enabled: bool) -> OpenApiRouter<Arc<AppState>> {
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(cors)
         .layer(CompressionLayer::new())
+        // Telemetry middleware runs inside the TraceLayer span: axum applies
+        // layers added earlier after layers added later, so the request span
+        // already exists when the parent context is extracted. Both hooks
+        // no-op unless OTLP export is configured.
+        .layer(from_fn(telemetry::record_request_metrics))
+        .layer(from_fn(telemetry::extract_parent_context))
         .layer(TraceLayer::new_for_http())
         .layer(from_fn(security_headers))
 }
@@ -380,16 +387,7 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     let production = env::var("RAILWAY_ENVIRONMENT").is_ok()
         || env::var("APP_ENV").as_deref() == Ok("production");
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "agent_feedback=info,tower_http=info".into());
-    if production {
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .json()
-            .init();
-    } else {
-        tracing_subscriber::fmt().with_env_filter(filter).init();
-    }
+    let telemetry = telemetry::init(production)?;
 
     let database_url =
         env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL is required"))?;
@@ -648,6 +646,8 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+    // The server has drained; flush any buffered spans, metrics, and logs.
+    telemetry.shutdown();
     Ok(())
 }
 
