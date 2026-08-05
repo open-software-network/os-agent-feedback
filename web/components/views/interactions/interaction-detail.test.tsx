@@ -73,6 +73,48 @@ describe("InteractionDetail", () => {
     expect(openFeedback).toHaveBeenCalledWith(data.reports[0].id);
     expect(openSession).toHaveBeenCalledWith(data.sessions[0].id);
   });
+
+  it("shows privacy-safe resolved Customer linkage without a customer ref", () => {
+    const data = dashboardFixture();
+    const interaction = data.interactions[0];
+    interaction.customerRef = null;
+    interaction.customerId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+    renderWithQuery(
+      <InteractionDetail
+        data={data}
+        interactionId={interaction.id}
+        back={vi.fn()}
+        openFeedback={vi.fn()}
+        openSession={vi.fn()}
+      />,
+    );
+
+    expect(screen.getAllByText("Linked customer", { exact: false })).toHaveLength(2);
+    expect(screen.queryByText("Unknown customer", { exact: false })).not.toBeInTheDocument();
+    expect(screen.queryByText("Not linked")).not.toBeInTheDocument();
+    expect(screen.queryByText(interaction.customerId)).not.toBeInTheDocument();
+  });
+
+  it("preserves the unlinked Customer labels when no linkage exists", () => {
+    const data = dashboardFixture();
+    const interaction = data.interactions[0];
+    interaction.customerRef = null;
+    interaction.customerId = null;
+
+    renderWithQuery(
+      <InteractionDetail
+        data={data}
+        interactionId={interaction.id}
+        back={vi.fn()}
+        openFeedback={vi.fn()}
+        openSession={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Unknown customer", { exact: false })).toBeVisible();
+    expect(screen.getByText("Not linked")).toBeVisible();
+  });
 });
 
 function renderWithQuery(element: ReactElement) {
