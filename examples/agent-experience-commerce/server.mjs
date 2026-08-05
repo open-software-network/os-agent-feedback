@@ -9,7 +9,12 @@ import {
   experienceTelemetryDetails,
 } from "@epode/node/experience-graph";
 
-import { humanCatalogSummary, lightingCatalog } from "./catalog.mjs";
+import {
+  humanCatalogSummary,
+  lightingCatalog,
+  productCatalog,
+  productGraph,
+} from "./catalog.mjs";
 
 const PORT = Number(process.env.PORT || 4311);
 const AGENT_UA =
@@ -22,7 +27,13 @@ const runtime = process.env.EPODE_API_KEY
       apiKey: process.env.EPODE_API_KEY,
       endpoint: process.env.EPODE_API_URL || process.env.AGENT_FEEDBACK_URL,
       feedbackMode: process.env.AGENT_FEEDBACK_MODE || "never_ask",
-      include: ["/agent-negotiate/**", "/agent-decide/**", "/agent-item", "/"],
+      include: [
+        "/agent-negotiate/**",
+        "/agent-decide/**",
+        "/agent-product/**",
+        "/agent-item",
+        "/",
+      ],
       runtimeHint: () => "agent-experience-commerce/1.0",
     })
   : null;
@@ -79,6 +90,17 @@ function parseJourneyPath(pathname, prefix) {
   const [journeyId, category, ...tokens] = segments;
   if (!journeyId || !category) return null;
   return { journeyId, category, tokens };
+}
+
+function parseProductPath(pathname) {
+  const prefix = "/agent-product/";
+  if (!pathname.startsWith(prefix)) return null;
+  const segments = pathname.slice(prefix.length).split("/").filter(Boolean);
+  const [journeyId, itemId, ...rest] = segments;
+  if (!journeyId || !itemId) return null;
+  const terminal = rest.at(-1);
+  const tokens = terminal === "evaluate-fit" || terminal === "alternatives" ? rest.slice(0, -1) : rest;
+  return { journeyId, itemId, tokens, terminal };
 }
 
 export function createApp() {
@@ -180,6 +202,50 @@ export function createApp() {
     }
   });
 
+  app.get("/agent-product/*path", (request, response) => {
+    const started = performance.now();
+    const parsed = parseProductPath(request.path);
+    if (!parsed) return json(response, 400, { error: "invalid_product_graph_path" });
+    if (parsed.tokens.some((token) => !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(token))) {
+      return json(response, 400, {
+        error: "invalid_need_token",
+        message: "Need-state tokens use lowercase letters, numbers, and single hyphens.",
+      });
+    }
+    try {
+      const options = {
+        origin: originFor(request),
+        journeyId: parsed.journeyId,
+        itemId: parsed.itemId,
+        tokens: parsed.tokens,
+        searchId: randomUUID(),
+      };
+      const node =
+        parsed.terminal === "evaluate-fit"
+          ? productGraph.buildProductFit(options)
+          : parsed.terminal === "alternatives"
+            ? productGraph.buildProductAlternatives(options)
+            : productGraph.buildProductGraph(options);
+      if (!node) {
+        return json(response, 404, {
+          error: "item_not_found",
+          requestedItemId: parsed.itemId,
+          available: productCatalog.map((item) => item.id),
+        });
+      }
+      const status = node.error === "alternatives_not_applicable" ? 409 : node.error ? 422 : 200;
+      recordHop(
+        "/agent-product/lamp",
+        parsed.journeyId,
+        status,
+        Math.round(performance.now() - started),
+      );
+      return json(response, status, node);
+    } catch (error) {
+      return json(response, 400, { error: "invalid_product_graph", message: String(error) });
+    }
+  });
+
   app.get("/agent-item", (request, response) => {
     const started = performance.now();
     const itemId = String(request.query.item_id || "");
@@ -189,7 +255,23 @@ export function createApp() {
     const status = detail.error ? 404 : 200;
     const journeyId = searchId ? `j-search-${searchId.slice(0, 8)}` : `j-item-${itemId || "unknown"}`;
     recordHop(detail.operation || "/agent-item", journeyId, status, Math.round(performance.now() - started));
-    return json(response, status, detail);
+    if (detail.error) return json(response, status, detail);
+    const productJourneyId = `j-${randomUUID()}`;
+    const productBase = `${originFor(request)}/agent-product/${productJourneyId}/${encodeURIComponent(itemId)}`;
+    return json(response, status, {
+      ...detail,
+      evaluationGraph: {
+        description:
+          "Evaluate this product against the current task using fact-backed matches, conflicts, and unknowns.",
+        startUrl: productBase,
+        initialDimensions: ["purpose", "budget", "capability", "finish", "evidence"].map(
+          (dimension) => ({
+            dimension,
+            url: `${productBase}/consider-${dimension}`,
+          }),
+        ),
+      },
+    });
   });
 
   return app;

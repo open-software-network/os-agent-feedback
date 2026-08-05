@@ -195,6 +195,112 @@ export interface ExperienceGraphOptions {
   paths?: ExperienceGraphPaths;
 }
 
+/** Protocol identifiers used by the programmable domain and product graphs. */
+export const AGENT_EXPERIENCE_PROTOCOLS = {
+  negotiation: "agent-experience-graph/negotiation-2.1",
+  decision: "agent-experience-graph/decision-2.1",
+  item: "agent-experience-graph/item-1.0",
+  product: "agent-experience-graph/product-1.0",
+  productFit: "agent-experience-graph/product-fit-1.0",
+  productAlternatives: "agent-experience-graph/product-alternatives-1.0",
+} as const;
+
+export type ExperienceEvidenceKind = "catalog_fact" | "seller_claim" | "unknown";
+
+export type ExperienceSellerClaimAttribution =
+  | "seller_marketing_copy"
+  | "manufacturer_claim"
+  | "merchant_claim";
+
+export interface ExperienceSellerClaim {
+  claim: string;
+  attributedTo: ExperienceSellerClaimAttribution;
+  verified: boolean;
+}
+
+export interface ExperienceCatalogRecord {
+  id: string;
+  title: string;
+  brand: string;
+  category: string;
+  price: { amount: number; currency: string };
+  summary: string;
+  attributes: Record<string, string[]>;
+  notSpecified: string[];
+  sellerClaims: ExperienceSellerClaim[];
+}
+
+export interface ExperienceFitLine {
+  dimension: string;
+  status: "match" | "miss" | "unknown";
+  evidence: string;
+}
+
+export interface ExperienceViolation {
+  dimension: string;
+  requested: unknown;
+  actual: unknown;
+}
+
+export interface ExperienceEvaluatedItem {
+  itemId: string;
+  utilityScore: number;
+  fitByDimension: ExperienceFitLine[];
+  violatedHardConstraints: ExperienceViolation[];
+}
+
+export interface ExperienceCounterfactual {
+  change: string;
+  effect: string;
+  deltaUsd?: number;
+  itemId?: string;
+}
+
+export interface ExperienceDomainEvaluation {
+  exact: ExperienceEvaluatedItem[];
+  nearMisses: ExperienceEvaluatedItem[];
+  counterfactuals: ExperienceCounterfactual[];
+}
+
+export interface ExperienceQuestionDefinition {
+  dimension: string;
+  question: string;
+  whyItMatters: string;
+  choices: ExperienceChoice[];
+  unknownToken?: string;
+}
+
+export interface ExperienceEdgeGroupDefinition {
+  dimension: string;
+  whyItMatters: string;
+  choices: ExperienceChoice[];
+}
+
+/**
+ * Programmable domain contract for catalogs whose decision semantics cannot be
+ * expressed by the declarative dimension matcher.
+ */
+export interface AgentExperienceDomain<State> {
+  slug: string;
+  brand: string;
+  entryLabel: string;
+  tagline: string;
+  catalog: ExperienceCatalogRecord[];
+  initialState(): State;
+  applyToken(state: State, token: string): boolean;
+  expressedDimensions(state: State): string[];
+  hasDecisionInput(state: State): boolean;
+  publicState(state: State): Record<string, unknown>;
+  nextQuestion(state: State): ExperienceQuestionDefinition | null;
+  edgeGroups(state: State): ExperienceEdgeGroupDefinition[];
+  evaluate(state: State): ExperienceDomainEvaluation;
+}
+
+export interface ParsedDomainNeed<State> {
+  state: State;
+  invalidTokens: string[];
+}
+
 const TOKEN_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const JOURNEY_RE = /^j-[a-z0-9-]+$/i;
 
@@ -665,6 +771,278 @@ function buildCounterfactuals(
   }
 
   return counterfactuals;
+}
+
+export function parseDomainNeedTokens<State>(
+  domain: AgentExperienceDomain<State>,
+  tokens: string[],
+): ParsedDomainNeed<State> {
+  const state = domain.initialState();
+  const invalidTokens: string[] = [];
+  for (const token of tokens) {
+    if (!isValidNeedToken(token) || !domain.applyToken(state, token)) {
+      invalidTokens.push(token);
+    }
+  }
+  return { state, invalidTokens };
+}
+
+function domainNegotiationUrl(
+  domain: AgentExperienceDomain<unknown>,
+  origin: string,
+  journeyId: string,
+  tokens: string[],
+): string {
+  const base = `${origin.replace(/\/$/, "")}/agent-negotiate/${journeyId}/${domain.slug}`;
+  return tokens.length ? `${base}/${tokens.join("/")}` : base;
+}
+
+function domainDecisionUrl(
+  domain: AgentExperienceDomain<unknown>,
+  origin: string,
+  journeyId: string,
+  tokens: string[],
+): string {
+  const base = `${origin.replace(/\/$/, "")}/agent-decide/${journeyId}/${domain.slug}`;
+  return tokens.length ? `${base}/${tokens.join("/")}` : base;
+}
+
+function domainItemUrl(
+  domain: AgentExperienceDomain<unknown>,
+  origin: string,
+  itemId: string,
+  searchId: string,
+  position: string | number,
+): string {
+  const url = new URL(
+    `/agent-item/${domain.slug}/${encodeURIComponent(itemId)}`,
+    origin.endsWith("/") ? origin : `${origin}/`,
+  );
+  url.searchParams.set("search_id", searchId);
+  url.searchParams.set("position", String(position));
+  return url.toString();
+}
+
+function checkedDomainChoiceUrl(base: string, choice: ExperienceChoice): ExperienceChoiceLink {
+  if (!isValidNeedToken(choice.token)) {
+    throw new Error(`Domain choice token "${choice.token}" is not a valid need token.`);
+  }
+  return {
+    value: choice.value,
+    meaning: choice.meaning,
+    token: choice.token,
+    url: append(base, choice.token),
+    strength: choice.strength,
+  };
+}
+
+export function buildDomainNegotiationNode<State>(
+  domain: AgentExperienceDomain<State>,
+  origin: string,
+  journeyId: string,
+  tokens: string[],
+) {
+  if (!isValidJourneyId(journeyId)) {
+    throw new Error("journeyId must look like j-<id>");
+  }
+  const parsed = parseDomainNeedTokens(domain, tokens);
+  const domainForUrl = domain as AgentExperienceDomain<unknown>;
+  const base = domainNegotiationUrl(domainForUrl, origin, journeyId, tokens);
+  const decisionReady = domain.hasDecisionInput(parsed.state);
+  const resultsUrl = decisionReady
+    ? domainDecisionUrl(domainForUrl, origin, journeyId, tokens)
+    : null;
+  const question = domain.nextQuestion(parsed.state);
+
+  return {
+    protocol: AGENT_EXPERIENCE_PROTOCOLS.negotiation,
+    domain: domain.slug,
+    merchant: domain.brand,
+    stage: !decisionReady
+      ? ("decision_input_required" as const)
+      : question
+        ? ("express_more_or_decide" as const)
+        : ("ready_to_decide" as const),
+    journeyId,
+    needState: domain.publicState(parsed.state),
+    invalidTokens: parsed.invalidTokens,
+    disclosureModel: {
+      principle: "Share only task-relevant values that improve this recommendation.",
+      acceptedProvenance: [
+        "current_user_request",
+        "user_confirmed",
+        "agent_inference_from_current_task",
+      ],
+      memoryOnlyValues:
+        "Do not supply a long-term-memory value unless it is independently relevant to the current task.",
+    },
+    traversalRule:
+      "Open exactly one URL supplied by the current response. Never construct, edit, or combine path segments. The next response preserves prior state and supplies the next exact links.",
+    nextQuestion: question
+      ? {
+          dimension: question.dimension,
+          question: question.question,
+          whyItMatters: question.whyItMatters,
+          choices: question.choices.map((choice) => checkedDomainChoiceUrl(base, choice)),
+          ...(question.unknownToken
+            ? {
+                unknownUrl: isValidNeedToken(question.unknownToken)
+                  ? append(base, question.unknownToken)
+                  : (() => {
+                      throw new Error(
+                        `Domain unknown token "${question.unknownToken}" is not a valid need token.`,
+                      );
+                    })(),
+              }
+            : {}),
+          ...(resultsUrl ? { skipUrl: resultsUrl } : {}),
+        }
+      : null,
+    availableNeedEdges: domain.edgeGroups(parsed.state).map((group) => ({
+      dimension: group.dimension,
+      whyItMatters: group.whyItMatters,
+      choices: group.choices.map((choice) => checkedDomainChoiceUrl(base, choice)),
+    })),
+    resultsUrl,
+    sufficiency: decisionReady
+      ? {
+          sufficientForResults: true,
+          note: "Add more known inputs only when they materially improve this recommendation.",
+        }
+      : {
+          sufficientForResults: false,
+          note: "Choose one known task-relevant edge. If none is known, clarify the need with the user.",
+        },
+    operation: `/agent-negotiate/${domain.slug}`,
+  };
+}
+
+export function buildDomainDecisionNode<State>(
+  domain: AgentExperienceDomain<State>,
+  origin: string,
+  journeyId: string,
+  tokens: string[],
+  searchId = cryptoRandomId(),
+) {
+  if (!isValidJourneyId(journeyId)) {
+    throw new Error("journeyId must look like j-<id>");
+  }
+  const parsed = parseDomainNeedTokens(domain, tokens);
+  const domainForUrl = domain as AgentExperienceDomain<unknown>;
+  if (!domain.hasDecisionInput(parsed.state)) {
+    return {
+      protocol: AGENT_EXPERIENCE_PROTOCOLS.decision,
+      error: "decision_input_required" as const,
+      message:
+        "At least one task-relevant constraint, preference, purpose, or priority is required before results can be ranked.",
+      journeyId,
+      domain: domain.slug,
+      merchant: domain.brand,
+      needState: domain.publicState(parsed.state),
+      invalidTokens: parsed.invalidTokens,
+      negotiateUrl: domainNegotiationUrl(domainForUrl, origin, journeyId, tokens),
+      operation: `/agent-decide/${domain.slug}`,
+    };
+  }
+
+  const evaluation = domain.evaluate(parsed.state);
+  const allEvaluated = [...evaluation.exact, ...evaluation.nearMisses];
+  const seen = new Set<string>();
+  const uniqueEvaluated = allEvaluated.filter((entry) => {
+    if (seen.has(entry.itemId)) return false;
+    seen.add(entry.itemId);
+    return true;
+  });
+  const exact = uniqueEvaluated.filter((entry) => entry.violatedHardConstraints.length === 0);
+  const nearMisses = uniqueEvaluated.filter((entry) => entry.violatedHardConstraints.length > 0);
+  const records = new Map(domain.catalog.map((record) => [record.id, record]));
+  const serialize = (entry: ExperienceEvaluatedItem, position: string | number) => {
+    const record = records.get(entry.itemId);
+    return {
+      itemId: entry.itemId,
+      title: record?.title ?? entry.itemId,
+      brand: record?.brand ?? domain.brand,
+      price: record?.price,
+      summary: record?.summary ?? "",
+      catalogAttributes: record?.attributes ?? {},
+      utilityScore: entry.utilityScore,
+      fitByDimension: entry.fitByDimension,
+      violatedHardConstraints: entry.violatedHardConstraints,
+      detailUrl: domainItemUrl(domainForUrl, origin, entry.itemId, searchId, position),
+    };
+  };
+
+  return {
+    protocol: AGENT_EXPERIENCE_PROTOCOLS.decision,
+    stage: "decision_support" as const,
+    journeyId,
+    domain: domain.slug,
+    merchant: domain.brand,
+    searchId,
+    needState: domain.publicState(parsed.state),
+    invalidTokens: parsed.invalidTokens,
+    exactMatchCount: exact.length,
+    exactMatches: exact.map((entry, index) => serialize(entry, index + 1)),
+    nearMissCount: nearMisses.length,
+    nearMisses: nearMisses.map((entry, index) => serialize(entry, `near-${index + 1}`)),
+    counterfactuals:
+      exact.length === 0 && nearMisses.length > 0
+        ? evaluation.counterfactuals.map((counterfactual, index) => ({
+            change: counterfactual.change,
+            effect: counterfactual.effect,
+            ...(counterfactual.deltaUsd !== undefined ? { deltaUsd: counterfactual.deltaUsd } : {}),
+            ...(counterfactual.itemId
+              ? {
+                  detailUrl: domainItemUrl(
+                    domainForUrl,
+                    origin,
+                    counterfactual.itemId,
+                    searchId,
+                    `counterfactual-${index + 1}`,
+                  ),
+                }
+              : {}),
+          }))
+        : [],
+    operation: `/agent-decide/${domain.slug}`,
+  };
+}
+
+export function buildDomainItemNode<State>(
+  domain: AgentExperienceDomain<State>,
+  origin: string,
+  itemId: string,
+  searchId: string | null = null,
+  position: string | number | null = null,
+) {
+  const record = domain.catalog.find((candidate) => candidate.id === itemId);
+  if (!record) return null;
+  const positionValue =
+    position !== null && /^\d+$/.test(String(position)) ? Number(position) : position;
+
+  return {
+    protocol: AGENT_EXPERIENCE_PROTOCOLS.item,
+    domain: domain.slug,
+    merchant: domain.brand,
+    itemId: record.id,
+    searchAttribution: searchId ? { searchId, resultPosition: positionValue } : null,
+    catalog: {
+      provenance: "merchant_catalog" as const,
+      title: record.title,
+      brand: record.brand,
+      category: record.category,
+      price: record.price,
+      summary: record.summary,
+      attributes: record.attributes,
+      notSpecified: record.notSpecified,
+    },
+    sellerClaims: record.sellerClaims,
+    navigation: {
+      searchGuide: `${origin.replace(/\/$/, "")}/`,
+      negotiate: `${origin.replace(/\/$/, "")}/agent-negotiate/j-${cryptoRandomId()}/${domain.slug}`,
+    },
+    operation: `/agent-item/${domain.slug}`,
+  };
 }
 
 export function createExperienceGraph(definition: ExperienceGraphDefinition) {

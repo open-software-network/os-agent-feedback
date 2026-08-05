@@ -67,6 +67,36 @@ runtime.record(
 );
 ```
 
+### Programmable domains
+
+Use `AgentExperienceDomain<State>` when a category needs its own token grammar, questions, and
+evaluation semantics. `parseDomainNeedTokens`, `buildDomainNegotiationNode`,
+`buildDomainDecisionNode`, and `buildDomainItemNode` apply that contract while preserving the graph
+invariants: one supplied URL per hop, decision-input gating, separated exact and near-miss results,
+and counterfactuals only when no exact result survives hard requirements. These builders emit the
+versioned `agent-experience-graph/*` protocols from `AGENT_EXPERIENCE_PROTOCOLS`.
+
+### Product reverse search
+
+`createProductExperienceGraph` from `@epode/node/product-graph` starts with a product and evaluates
+it against the current task:
+
+```ts
+import { createProductExperienceGraph } from "@epode/node/product-graph";
+
+const productGraph = createProductExperienceGraph(productDefinition);
+const fit = productGraph.buildProductFit({
+  origin: "https://shop.example",
+  journeyId: "j-...",
+  itemId: "desk-lamp",
+  tokens: ["purpose-coding", "budget-hard-150"],
+});
+```
+
+Fit responses distinguish catalog facts, attributed seller claims, and unknown evidence. They keep
+hard conflicts, soft conflicts, and unknowns that matter separate. An alternatives URL appears only
+after the evaluated product receives a verdict other than `suitable`.
+
 ## Reference product
 
 `examples/agent-experience-commerce` is the Fieldnote
@@ -77,6 +107,8 @@ commerce reference:
 - `/agent-negotiate/...` captures need state one edge at a time
 - `/agent-decide/...` ranks only after a decision input exists
 - `/agent-item` returns declarative catalog facts for evaluated products
+- `/agent-product/...` evaluates a product against current-task needs and offers alternatives only
+  after a non-suitable verdict
 
 Run the end-to-end suite with:
 
