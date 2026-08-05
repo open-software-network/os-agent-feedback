@@ -5,15 +5,11 @@ export const DASHBOARD_NAV_VIEWS = [
   "customers",
   "responses",
   "sessions",
+  "questions",
   "connectors",
   "configuration",
 ] as const;
-export const DASHBOARD_CONFIGURATION_VIEWS = [
-  "configuration",
-  "team",
-  "policy",
-  "questions",
-] as const;
+export const DASHBOARD_CONFIGURATION_VIEWS = ["configuration", "team", "policy"] as const;
 export const DASHBOARD_VIEWS = [
   ...DASHBOARD_NAV_VIEWS,
   ...DASHBOARD_CONFIGURATION_VIEWS,

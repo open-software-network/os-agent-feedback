@@ -507,13 +507,11 @@ export function DashboardApp() {
           <PolicyView data={currentData} refresh={refresh} setNotice={showNotice} />,
         );
       case "questions":
-        return isEditor(currentData.currentRole)
-          ? configurationPage(
-              currentData,
-              "questions",
-              <QuestionsView data={currentData} refresh={refresh} setNotice={showNotice} />,
-            )
-          : homePage(currentData);
+        return isEditor(currentData.currentRole) ? (
+          <QuestionsView data={currentData} refresh={refresh} setNotice={showNotice} />
+        ) : (
+          homePage(currentData)
+        );
       case "connectors":
         return isEditor(currentData.currentRole) ? (
           <ConnectorsView data={currentData} />
