@@ -18,7 +18,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context, Poll},
@@ -386,6 +386,22 @@ struct TelemetryEvent {
     occurred_at: String,
 }
 
+/// A content-free point-in-time snapshot of telemetry queue loss.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TelemetryDiagnostics {
+    pub queue_overflow_drops: u64,
+    pub shutdown_undelivered: u64,
+}
+
+#[derive(Default)]
+struct TelemetryDiagnosticState {
+    queue_overflow_drops: u64,
+    shutdown_undelivered: u64,
+    overflow_episode: bool,
+    outstanding: u64,
+    shutdown_claimed: bool,
+}
+
 #[derive(Clone)]
 pub(crate) struct Runtime {
     options: Arc<Options>,
@@ -398,6 +414,7 @@ pub(crate) struct Runtime {
     stopping: Arc<AtomicBool>,
     warned_missing_customer_ref: Arc<AtomicBool>,
     sequence: Arc<AtomicU64>,
+    diagnostics: Arc<StdMutex<TelemetryDiagnosticState>>,
     consent_cache: Arc<Mutex<HashMap<String, CachedConsentEntry>>>,
     consent_lookups: Arc<Mutex<HashSet<String>>>,
     consent_slots: Arc<Semaphore>,
@@ -429,6 +446,7 @@ impl Runtime {
         let (shutdown_sender, shutdown_receiver) = mpsc::channel(1);
         let (shutdown_signal, shutdown_watch) = watch::channel(None);
         let options = Arc::new(options);
+        let diagnostics = Arc::new(StdMutex::new(TelemetryDiagnosticState::default()));
         let handle =
             tokio::runtime::Handle::try_current().map_err(|_| Error::MissingTokioRuntime)?;
         handle.spawn(telemetry_worker(
@@ -436,6 +454,7 @@ impl Runtime {
             receiver,
             shutdown_receiver,
             shutdown_watch,
+            diagnostics.clone(),
         ));
         Ok(Self {
             options,
@@ -445,6 +464,7 @@ impl Runtime {
             stopping: Arc::new(AtomicBool::new(false)),
             warned_missing_customer_ref: Arc::new(AtomicBool::new(false)),
             sequence: Arc::new(AtomicU64::new(0)),
+            diagnostics,
             consent_cache: Arc::new(Mutex::new(HashMap::new())),
             consent_lookups: Arc::new(Mutex::new(HashSet::new())),
             consent_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_CONSENT_LOOKUPS)),
@@ -869,14 +889,52 @@ impl Runtime {
         if event.sequence == 0 {
             event.sequence = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
         }
-        if !self.stopping.load(Ordering::Acquire) {
-            let _ = self.sender.try_send(Box::new(event));
+        let warn = {
+            let mut state = self.diagnostics.lock().unwrap();
+            if self.stopping.load(Ordering::Acquire) {
+                return;
+            }
+            match self.sender.try_send(Box::new(event)) {
+                Ok(()) => {
+                    state.outstanding += 1;
+                    state.overflow_episode = false;
+                    false
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    state.queue_overflow_drops += 1;
+                    let warn = !state.overflow_episode;
+                    state.overflow_episode = true;
+                    warn
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    if self.stopping.load(Ordering::Acquire) {
+                        state.shutdown_undelivered += 1;
+                    }
+                    false
+                }
+            }
+        };
+        if warn {
+            eprintln!(
+                "[agent-feedback] Telemetry queue capacity was exceeded; telemetry was discarded and product responses were not affected."
+            );
+        }
+    }
+
+    pub(crate) fn diagnostics(&self) -> TelemetryDiagnostics {
+        let state = self.diagnostics.lock().unwrap();
+        TelemetryDiagnostics {
+            queue_overflow_drops: state.queue_overflow_drops,
+            shutdown_undelivered: state.shutdown_undelivered,
         }
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), ShutdownError> {
-        if self.stopping.swap(true, Ordering::AcqRel) {
-            return Err(ShutdownError::AlreadyStarted);
+        {
+            let _state = self.diagnostics.lock().unwrap();
+            if self.stopping.swap(true, Ordering::AcqRel) {
+                return Err(ShutdownError::AlreadyStarted);
+            }
         }
         let deadline = tokio::time::Instant::now() + self.options.shutdown_timeout;
         self.shutdown_signal.send_replace(Some(deadline));
@@ -887,10 +945,14 @@ impl Runtime {
                 mpsc::error::TrySendError::Full(_) => ShutdownError::AlreadyStarted,
                 mpsc::error::TrySendError::Closed(_) => ShutdownError::WorkerStopped,
             })?;
-        tokio::time::timeout_at(deadline, receiver)
-            .await
-            .map_err(|_| ShutdownError::TimedOut)?
-            .map_err(|_| ShutdownError::WorkerStopped)?
+        match tokio::time::timeout_at(deadline, receiver).await {
+            Err(_) => {
+                claim_outstanding(&self.diagnostics);
+                Err(ShutdownError::TimedOut)
+            }
+            Ok(Err(_)) => Err(ShutdownError::WorkerStopped),
+            Ok(Ok(result)) => result,
+        }
     }
 }
 
@@ -902,6 +964,7 @@ async fn telemetry_worker(
         oneshot::Sender<Result<(), ShutdownError>>,
     )>,
     mut shutdown_watch: watch::Receiver<Option<tokio::time::Instant>>,
+    diagnostics: Arc<StdMutex<TelemetryDiagnosticState>>,
 ) {
     let Ok(client) = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -919,10 +982,16 @@ async fn telemetry_worker(
             biased;
             message = receiver.recv() => match message {
                 Some(event) => {
-                    if pending.len() >= options.max_queue_size { pending.pop_front(); }
+                    if pending.len() >= options.max_queue_size {
+                        pending.pop_front();
+                        let warn = note_overflow(&diagnostics);
+                        if warn {
+                            eprintln!("[agent-feedback] Telemetry queue capacity was exceeded; telemetry was discarded and product responses were not affected.");
+                        }
+                    }
                     pending.push_back(*event);
                     if pending.len() >= 50 {
-                        let delivered = flush_events(&client, &options, &mut pending, &mut shutdown_watch).await;
+                        let delivered = flush_events(&client, &options, &mut pending, &mut shutdown_watch, &diagnostics).await;
                         report_telemetry_delivery(delivered, &mut warned_delivery_failure);
                     }
                 }
@@ -932,10 +1001,19 @@ async fn telemetry_worker(
                 let Some((deadline, done)) = done else { return; };
                 receiver.close();
                 while let Some(event) = receiver.recv().await {
-                    if pending.len() >= options.max_queue_size { pending.pop_front(); }
+                    if pending.len() >= options.max_queue_size {
+                        pending.pop_front();
+                        let warn = note_overflow(&diagnostics);
+                        if warn {
+                            eprintln!("[agent-feedback] Telemetry queue capacity was exceeded; telemetry was discarded and product responses were not affected.");
+                        }
+                    }
                     pending.push_back(*event);
                 }
-                let result = flush_all_events(&client, &options, &mut pending, deadline).await;
+                let result = flush_all_events(&client, &options, &mut pending, deadline, &diagnostics).await;
+                if result.is_err() {
+                    claim_outstanding(&diagnostics);
+                }
                 if result.is_err() {
                     report_telemetry_delivery(false, &mut warned_delivery_failure);
                 }
@@ -943,10 +1021,35 @@ async fn telemetry_worker(
                 return;
             },
             _ = interval.tick() => {
-                let delivered = flush_events(&client, &options, &mut pending, &mut shutdown_watch).await;
+                let delivered = flush_events(&client, &options, &mut pending, &mut shutdown_watch, &diagnostics).await;
                 report_telemetry_delivery(delivered, &mut warned_delivery_failure);
             },
         }
+    }
+}
+
+fn note_overflow(diagnostics: &StdMutex<TelemetryDiagnosticState>) -> bool {
+    let mut state = diagnostics.lock().unwrap();
+    state.queue_overflow_drops += 1;
+    state.outstanding = state.outstanding.saturating_sub(1);
+    let warn = !state.overflow_episode;
+    state.overflow_episode = true;
+    warn
+}
+
+fn note_delivered(diagnostics: &StdMutex<TelemetryDiagnosticState>, count: usize) {
+    let mut state = diagnostics.lock().unwrap();
+    if !state.shutdown_claimed {
+        state.outstanding = state.outstanding.saturating_sub(count as u64);
+    }
+}
+
+fn claim_outstanding(diagnostics: &StdMutex<TelemetryDiagnosticState>) {
+    let mut state = diagnostics.lock().unwrap();
+    if !state.shutdown_claimed {
+        state.shutdown_undelivered += state.outstanding;
+        state.outstanding = 0;
+        state.shutdown_claimed = true;
     }
 }
 
@@ -966,9 +1069,10 @@ async fn flush_all_events(
     options: &Options,
     pending: &mut VecDeque<TelemetryEvent>,
     deadline: tokio::time::Instant,
+    diagnostics: &StdMutex<TelemetryDiagnosticState>,
 ) -> Result<(), ShutdownError> {
     while !pending.is_empty() {
-        if !flush_events_before_deadline(client, options, pending, deadline).await {
+        if !flush_events_before_deadline(client, options, pending, deadline, diagnostics).await {
             return Err(ShutdownError::DeliveryFailed);
         }
     }
@@ -980,6 +1084,7 @@ async fn flush_events(
     options: &Options,
     pending: &mut VecDeque<TelemetryEvent>,
     shutdown_watch: &mut watch::Receiver<Option<tokio::time::Instant>>,
+    diagnostics: &StdMutex<TelemetryDiagnosticState>,
 ) -> bool {
     if pending.is_empty() {
         return true;
@@ -988,6 +1093,9 @@ async fn flush_events(
         .filter_map(|_| pending.pop_front())
         .collect();
     let delivered = deliver_batch(client, options, &events, shutdown_watch).await;
+    if delivered {
+        note_delivered(diagnostics, events.len());
+    }
     if !delivered {
         for event in events.into_iter().rev() {
             pending.push_front(event);
@@ -1001,6 +1109,7 @@ async fn flush_events_before_deadline(
     options: &Options,
     pending: &mut VecDeque<TelemetryEvent>,
     deadline: tokio::time::Instant,
+    diagnostics: &StdMutex<TelemetryDiagnosticState>,
 ) -> bool {
     if pending.is_empty() {
         return true;
@@ -1009,6 +1118,9 @@ async fn flush_events_before_deadline(
         .filter_map(|_| pending.pop_front())
         .collect();
     let delivered = deliver_batch_before_deadline(client, options, &events, deadline).await;
+    if delivered {
+        note_delivered(diagnostics, events.len());
+    }
     if !delivered {
         for event in events.into_iter().rev() {
             pending.push_front(event);
@@ -1161,6 +1273,10 @@ impl AgentFeedbackLayer {
 
     pub async fn shutdown(&self) -> Result<(), ShutdownError> {
         self.runtime.shutdown().await
+    }
+
+    pub fn diagnostics(&self) -> TelemetryDiagnostics {
+        self.runtime.diagnostics()
     }
 }
 
@@ -4055,5 +4171,36 @@ mod tests {
             .map(|_| batches.recv_timeout(Duration::from_secs(1)).unwrap())
             .sum();
         assert_eq!(delivered, 120);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bounded_queue_reports_overflow_and_shutdown_loss() {
+        let (endpoint, _requests) = scripted_telemetry_server(vec![(503, "")]);
+        let mut options = Options::new(KEY).endpoint(endpoint);
+        options.max_queue_size = 1;
+        options.flush_interval = Duration::from_secs(3600);
+        options.max_telemetry_attempts = 1;
+        let runtime = Runtime::new(options).unwrap();
+        runtime.record(telemetry_event(1));
+        runtime.record(telemetry_event(2));
+        runtime.record(telemetry_event(3));
+        assert_eq!(runtime.diagnostics().queue_overflow_drops, 2);
+        assert_eq!(runtime.shutdown().await, Err(ShutdownError::DeliveryFailed));
+        assert_eq!(runtime.diagnostics().shutdown_undelivered, 1);
+    }
+
+    #[test]
+    fn shutdown_ownership_claim_is_exact_and_stable() {
+        let diagnostics = StdMutex::new(TelemetryDiagnosticState {
+            outstanding: 73,
+            ..TelemetryDiagnosticState::default()
+        });
+        claim_outstanding(&diagnostics);
+        claim_outstanding(&diagnostics);
+        note_delivered(&diagnostics, 50);
+
+        let state = diagnostics.lock().unwrap();
+        assert_eq!(state.shutdown_undelivered, 73);
+        assert_eq!(state.outstanding, 0);
     }
 }

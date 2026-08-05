@@ -76,6 +76,10 @@ impl AgentFeedbackRecorder {
         })
     }
 
+    pub fn diagnostics(&self) -> crate::TelemetryDiagnostics {
+        self.runtime.diagnostics()
+    }
+
     pub fn record_mcp_completion(
         &self,
         completion: McpCompletion,

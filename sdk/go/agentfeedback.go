@@ -266,29 +266,46 @@ func keyParts(apiKey string) (string, []byte, []byte, error) {
 }
 
 type Runtime struct {
-	options            Options
-	events             chan TelemetryEvent
-	stop               chan struct{}
-	done               chan struct{}
-	once               sync.Once
-	telemetryErrorMu   sync.Mutex
-	telemetryError     error
-	sequence           atomic.Int64
-	consentMu          sync.Mutex
-	consentCache       map[string]cachedConsent
-	consentLookups     map[string]struct{}
-	consentSlots       chan struct{}
-	warnCustomerRef    sync.Once
-	warnTelemetry      sync.Once
-	shutdownDeadline   atomic.Int64
-	accepting          atomic.Bool
-	deliveryGate       chan struct{}
-	acceptMu           sync.Mutex
-	reservations       int
-	reservationsDone   chan struct{}
-	reservationCommits bool
-	deliveryContext    context.Context
-	cancelDeliveries   context.CancelFunc
+	options             Options
+	events              chan TelemetryEvent
+	stop                chan struct{}
+	done                chan struct{}
+	once                sync.Once
+	telemetryErrorMu    sync.Mutex
+	telemetryError      error
+	sequence            atomic.Int64
+	queueOverflowDrops  atomic.Uint64
+	shutdownUndelivered atomic.Uint64
+	diagnosticsMu       sync.Mutex
+	overflowEpisode     bool
+	inFlightEvents      int
+	inFlightClaimed     bool
+	consentMu           sync.Mutex
+	consentCache        map[string]cachedConsent
+	consentLookups      map[string]struct{}
+	consentSlots        chan struct{}
+	warnCustomerRef     sync.Once
+	warnTelemetry       sync.Once
+	shutdownDeadline    atomic.Int64
+	accepting           atomic.Bool
+	deliveryGate        chan struct{}
+	acceptMu            sync.Mutex
+	reservations        int
+	reservationsDone    chan struct{}
+	reservationCommits  bool
+	deliveryContext     context.Context
+	cancelDeliveries    context.CancelFunc
+}
+
+// Diagnostics is a point-in-time snapshot of process-local telemetry loss.
+type Diagnostics struct {
+	QueueOverflowDrops  uint64
+	ShutdownUndelivered uint64
+}
+
+// Diagnostics returns a content-free snapshot of telemetry queue loss.
+func (r *Runtime) Diagnostics() Diagnostics {
+	return Diagnostics{r.queueOverflowDrops.Load(), r.shutdownUndelivered.Load()}
 }
 
 type cachedConsent struct {
@@ -741,29 +758,73 @@ func randomUUID() (string, error) {
 
 func (r *Runtime) record(event TelemetryEvent) {
 	r.acceptMu.Lock()
-	defer r.acceptMu.Unlock()
 	if !r.accepting.Load() {
+		r.acceptMu.Unlock()
 		return
 	}
-	r.enqueue(event)
+	warn := r.enqueue(event)
+	r.acceptMu.Unlock()
+	if warn {
+		r.logQueueOverflow()
+	}
 }
 
-func (r *Runtime) enqueue(event TelemetryEvent) {
+func (r *Runtime) enqueue(event TelemetryEvent) bool {
 	if event.Sequence == 0 {
 		event.Sequence = r.sequence.Add(1)
 	}
 	select {
 	case r.events <- event:
+		r.diagnosticsMu.Lock()
+		r.overflowEpisode = false
+		r.diagnosticsMu.Unlock()
+		return false
 	default:
+		// A full observation is not itself a loss: the worker may drain before
+		// we can discard. Count only events whose ownership we actually remove.
+		dropped := uint64(0)
 		select {
 		case <-r.events:
+			dropped++
 		default:
+			// The worker won the race for the observed-full item. Retry the
+			// original enqueue rather than silently abandoning the replacement.
+			select {
+			case r.events <- event:
+				r.diagnosticsMu.Lock()
+				r.overflowEpisode = false
+				r.diagnosticsMu.Unlock()
+				return false
+			default:
+				r.queueOverflowDrops.Add(1)
+				r.diagnosticsMu.Lock()
+				warn := !r.overflowEpisode
+				r.overflowEpisode = true
+				r.diagnosticsMu.Unlock()
+				return warn
+			}
 		}
 		select {
 		case r.events <- event:
 		default:
+			// The replacement was not accepted, so it too is now lost.
+			dropped++
 		}
+		r.queueOverflowDrops.Add(dropped)
+		r.diagnosticsMu.Lock()
+		warn := !r.overflowEpisode
+		r.overflowEpisode = true
+		r.diagnosticsMu.Unlock()
+		return warn
 	}
+}
+
+func (r *Runtime) logQueueOverflow() {
+	logger := r.options.Logger
+	if logger == nil {
+		logger = log.Default()
+	}
+	logger.Printf("[agent-feedback] Telemetry queue capacity was exceeded; telemetry was discarded and product responses were not affected.")
 }
 
 var mcpOperationPattern = regexp.MustCompile(`^[A-Za-z0-9/_:.*{}-]{1,160}$`)
@@ -852,11 +913,15 @@ func (r *Runtime) releaseExtraction() {
 
 func (r *Runtime) commitReserved(event TelemetryEvent) {
 	r.acceptMu.Lock()
-	defer r.acceptMu.Unlock()
 	if !r.reservationCommits {
+		r.acceptMu.Unlock()
 		return
 	}
-	r.enqueue(event)
+	warn := r.enqueue(event)
+	r.acceptMu.Unlock()
+	if warn {
+		r.logQueueOverflow()
+	}
 }
 
 // WrapMCPHandler wraps a typed framework-neutral handler. Extractor failures
@@ -919,7 +984,16 @@ func (r *Runtime) run() {
 	ticker := time.NewTicker(r.options.FlushInterval)
 	defer func() {
 		ticker.Stop()
-		_ = r.flush(context.Background())
+		for len(r.events) > 0 {
+			if err := r.flush(context.Background()); err != nil {
+				break
+			}
+		}
+		// A concurrent timeout may have claimed queued ownership while the
+		// final batch was finishing. Claim anything that remains before done.
+		if r.shutdownDeadline.Load() > 0 {
+			r.claimShutdownLoss()
+		}
 		close(r.done)
 	}()
 	for {
@@ -944,6 +1018,7 @@ func (r *Runtime) flush(ctx context.Context) error {
 
 func (r *Runtime) deliverOwned(ctx context.Context) error {
 	events := make([]TelemetryEvent, 0, 50)
+	r.diagnosticsMu.Lock()
 drain:
 	for len(events) < 50 {
 		select {
@@ -954,8 +1029,18 @@ drain:
 		}
 	}
 	if len(events) == 0 {
+		r.diagnosticsMu.Unlock()
 		return nil
 	}
+	r.inFlightEvents = len(events)
+	r.inFlightClaimed = false
+	r.diagnosticsMu.Unlock()
+	defer func() {
+		r.diagnosticsMu.Lock()
+		r.inFlightEvents = 0
+		r.inFlightClaimed = false
+		r.diagnosticsMu.Unlock()
+	}()
 	body, _ := json.Marshal(map[string]any{"events": events})
 	headers := http.Header{
 		"Authorization": []string{"Bearer " + r.options.APIKey},
@@ -967,6 +1052,25 @@ drain:
 	for attempt := 0; attempt < r.options.MaxTelemetryAttempts; attempt++ {
 		deliveryError = r.sendTelemetryAttempt(ctx, url, headers, body, len(events))
 		if deliveryError == nil {
+			r.diagnosticsMu.Lock()
+			deadline := r.shutdownDeadline.Load()
+			// Delivery completes when the runtime publishes the successful
+			// sender result while holding the ownership lock. If shutdown has
+			// already claimed the batch, or that publication misses the
+			// shutdown deadline, the batch is diagnostically undelivered.
+			if r.inFlightClaimed || (deadline > 0 && time.Now().UnixNano() > deadline) {
+				if !r.inFlightClaimed {
+					r.inFlightClaimed = true
+					r.shutdownUndelivered.Add(uint64(len(events)))
+				}
+				deliveryError = context.DeadlineExceeded
+			} else {
+				r.inFlightEvents = 0
+			}
+			r.diagnosticsMu.Unlock()
+			if deliveryError != nil {
+				break
+			}
 			r.telemetryErrorMu.Lock()
 			r.telemetryError = nil
 			r.telemetryErrorMu.Unlock()
@@ -997,6 +1101,12 @@ drain:
 	r.telemetryErrorMu.Lock()
 	r.telemetryError = deliveryError
 	r.telemetryErrorMu.Unlock()
+	r.diagnosticsMu.Lock()
+	if r.shutdownDeadline.Load() > 0 && !r.inFlightClaimed {
+		r.inFlightClaimed = true
+		r.shutdownUndelivered.Add(uint64(len(events)))
+	}
+	r.diagnosticsMu.Unlock()
 	r.warnTelemetry.Do(func() {
 		logger := r.options.Logger
 		if logger == nil {
@@ -1112,21 +1222,39 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 	r.accepting.Store(false)
 	reservationsDone := r.reservationsDone
 	r.acceptMu.Unlock()
-	shutdownCtx, cancel := context.WithTimeout(ctx, r.options.ShutdownTimeout)
+	deadline := time.Now().Add(r.options.ShutdownTimeout)
+	if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(deadline) {
+		deadline = parentDeadline
+	}
+	if ctx.Err() != nil {
+		deadline = time.Now()
+	}
+	if !r.shutdownDeadline.CompareAndSwap(0, deadline.UnixNano()) {
+		// The first shutdown caller owns the shared deadline, cancellation,
+		// stop signal, and loss claim. Later callers may stop waiting on their
+		// own contexts, but must not shorten or otherwise race that shutdown.
+		select {
+		case <-r.done:
+			r.telemetryErrorMu.Lock()
+			defer r.telemetryErrorMu.Unlock()
+			return r.telemetryError
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	shutdownCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	go func() {
 		<-shutdownCtx.Done()
 		r.cancelDeliveries()
 	}()
-	if deadline, ok := shutdownCtx.Deadline(); ok {
-		r.shutdownDeadline.CompareAndSwap(0, deadline.UnixNano())
-	}
 	select {
 	case <-reservationsDone:
 	case <-shutdownCtx.Done():
 		r.acceptMu.Lock()
 		r.reservationCommits = false
 		r.acceptMu.Unlock()
+		r.claimShutdownLoss()
 		r.once.Do(func() { close(r.stop) })
 		return shutdownCtx.Err()
 	}
@@ -1140,8 +1268,40 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 		defer r.telemetryErrorMu.Unlock()
 		return r.telemetryError
 	case <-shutdownCtx.Done():
+		select {
+		case <-r.done:
+			r.telemetryErrorMu.Lock()
+			defer r.telemetryErrorMu.Unlock()
+			return r.telemetryError
+		default:
+		}
+		r.claimShutdownLoss()
 		return shutdownCtx.Err()
 	}
+}
+
+// claimShutdownLoss transfers ownership of all queued and in-flight events to
+// shutdown accounting. Removing queued events makes concurrent/repeated calls
+// naturally idempotent; the delivery owner observes inFlightClaimed.
+func (r *Runtime) claimShutdownLoss() {
+	r.diagnosticsMu.Lock()
+	defer r.diagnosticsMu.Unlock()
+	var queued uint64
+	for {
+		select {
+		case <-r.events:
+			queued++
+		default:
+			goto drained
+		}
+	}
+drained:
+	inFlight := 0
+	if r.inFlightEvents > 0 && !r.inFlightClaimed {
+		inFlight = r.inFlightEvents
+		r.inFlightClaimed = true
+	}
+	r.shutdownUndelivered.Add(queued + uint64(inFlight))
 }
 
 type captureWriter struct {

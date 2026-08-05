@@ -30,6 +30,54 @@ func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error)
 	return fn(request)
 }
 
+func TestTelemetryQueueDiagnostics(t *testing.T) {
+	var warnings bytes.Buffer
+	r := &Runtime{events: make(chan TelemetryEvent, 1), options: Options{Logger: log.New(&warnings, "", 0)}}
+	if r.enqueue(TelemetryEvent{}) {
+		r.logQueueOverflow()
+	}
+	if r.enqueue(TelemetryEvent{}) {
+		r.logQueueOverflow()
+	}
+	if r.enqueue(TelemetryEvent{}) {
+		r.logQueueOverflow()
+	}
+	if got := r.Diagnostics(); got.QueueOverflowDrops != 2 || got.ShutdownUndelivered != 0 {
+		t.Fatalf("unexpected diagnostics: %#v", got)
+	}
+	if strings.Count(warnings.String(), "queue capacity") != 1 {
+		t.Fatalf("overflow warning was not episode-limited: %q", warnings.String())
+	}
+	<-r.events
+	if r.enqueue(TelemetryEvent{}) {
+		r.logQueueOverflow()
+	} // successful enqueue resets the episode
+	if r.enqueue(TelemetryEvent{}) {
+		r.logQueueOverflow()
+	}
+	if strings.Count(warnings.String(), "queue capacity") != 2 {
+		t.Fatalf("new overflow episode was not warned: %q", warnings.String())
+	}
+}
+
+func TestShutdownCountsUndeliveredTelemetry(t *testing.T) {
+	r, err := New(Options{APIKey: conformanceKey, FlushInterval: time.Hour, MaxTelemetryAttempts: 1, Sender: func(context.Context, string, http.Header, []byte) error {
+		return errors.New("offline")
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.enqueue(TelemetryEvent{}) {
+		r.logQueueOverflow()
+	}
+	if err := r.Shutdown(context.Background()); err == nil {
+		t.Fatal("wanted delivery failure")
+	}
+	if got := r.Diagnostics().ShutdownUndelivered; got != 1 {
+		t.Fatalf("got %d shutdown-undelivered events, want 1", got)
+	}
+}
+
 type blockingConsentTransport struct {
 	calls   atomic.Int32
 	active  atomic.Int32
@@ -1942,6 +1990,105 @@ func TestTelemetryShutdownBoundsAnInflightAttempt(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
 		t.Fatalf("shutdown exceeded its configured bound: %s", elapsed)
+	}
+}
+
+func TestTelemetrySuccessBeforeShutdownDeadlineIsNotLost(t *testing.T) {
+	runtime, err := New(Options{
+		APIKey: conformanceKey, FlushInterval: time.Hour,
+		ShutdownTimeout: time.Second,
+		Sender: func(context.Context, string, http.Header, []byte) error {
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.record(TelemetryEvent{InteractionID: "delivered-before-deadline", Surface: "http_json"})
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := runtime.Diagnostics().ShutdownUndelivered; got != 0 {
+		t.Fatalf("shutdown-undelivered events = %d, want 0", got)
+	}
+}
+
+func TestTelemetrySuccessAfterShutdownDeadlineIsCountedOnce(t *testing.T) {
+	senderExited := make(chan struct{})
+	runtime, err := New(Options{
+		APIKey: conformanceKey, FlushInterval: time.Hour,
+		ShutdownTimeout: 50 * time.Millisecond,
+		Sender: func(ctx context.Context, _ string, _ http.Header, _ []byte) error {
+			<-ctx.Done()
+			close(senderExited)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.record(TelemetryEvent{InteractionID: "delivered-after-deadline", Surface: "http_json"})
+	if err := runtime.Shutdown(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown error = %v, want deadline exceeded", err)
+	}
+	if got := runtime.Diagnostics().ShutdownUndelivered; got != 1 {
+		t.Fatalf("shutdown-undelivered events = %d, want 1", got)
+	}
+	select {
+	case <-senderExited:
+	case <-time.After(time.Second):
+		t.Fatal("sender did not exit after shutdown cancellation")
+	}
+	if got := runtime.Diagnostics().ShutdownUndelivered; got != 1 {
+		t.Fatalf("shutdown-undelivered events after sender exit = %d, want 1", got)
+	}
+}
+
+func TestConcurrentShutdownCannotShortenOwningDeadline(t *testing.T) {
+	senderStarted := make(chan struct{})
+	releaseSender := make(chan struct{})
+	senderCanceled := make(chan struct{})
+	runtime, err := New(Options{
+		APIKey: conformanceKey, FlushInterval: time.Hour,
+		ShutdownTimeout: time.Second,
+		Sender: func(ctx context.Context, _ string, _ http.Header, _ []byte) error {
+			close(senderStarted)
+			select {
+			case <-releaseSender:
+				return nil
+			case <-ctx.Done():
+				close(senderCanceled)
+				return ctx.Err()
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.record(TelemetryEvent{InteractionID: "concurrent-shutdown", Surface: "http_json"})
+	ownerResult := make(chan error, 1)
+	go func() { ownerResult <- runtime.Shutdown(context.Background()) }()
+	select {
+	case <-senderStarted:
+	case <-time.After(time.Second):
+		t.Fatal("owning shutdown did not start delivery")
+	}
+	shortCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := runtime.Shutdown(shortCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second shutdown error = %v, want its deadline exceeded", err)
+	}
+	select {
+	case <-senderCanceled:
+		t.Fatal("second shutdown canceled the owning shutdown's delivery")
+	default:
+	}
+	close(releaseSender)
+	if err := <-ownerResult; err != nil {
+		t.Fatalf("owning shutdown failed: %v", err)
+	}
+	if got := runtime.Diagnostics().ShutdownUndelivered; got != 0 {
+		t.Fatalf("shutdown-undelivered events = %d, want 0", got)
 	}
 }
 
