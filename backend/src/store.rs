@@ -9435,7 +9435,7 @@ fn enrichment_answer_action(
             let signal_types = catalog
                 .fields
                 .iter()
-                .map(|field| field.effective_type().to_owned())
+                .map(|field| field.signal_type.clone())
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();
@@ -9446,7 +9446,8 @@ fn enrichment_answer_action(
                     .iter()
                     .map(|field| EnrichmentCatalogEntry {
                         key: field.key.clone(),
-                        signal_type: field.effective_type().to_owned(),
+                        signal_type: field.signal_type.clone(),
+                        question_type: field.question_type.clone(),
                         allowed_values: field.allowed_values.clone(),
                         targeted_advertising_safe: field.targeted_advertising_safe,
                     })
@@ -10437,11 +10438,19 @@ impl EnrichmentFieldSnapshot {
     }
 }
 
-/// Product-defined context fields live in a table added by migration 0035.
-/// Rolling deploys must keep legacy behavior until the table exists.
+/// Product-defined context fields live in a table added by migration 0040;
+/// product-authored question types require the nullable column from 0042.
+/// Fail closed until both are available so a new image can boot safely before
+/// the separately managed additive expansion lands.
 async fn enrichment_fields_available(tx: &mut Transaction<'_, Postgres>) -> Result<bool, ApiError> {
     sqlx::query_scalar::<_, bool>(
-        "SELECT to_regclass('public.enrichment_field_definitions') IS NOT NULL",
+        r"SELECT to_regclass('public.enrichment_field_definitions') IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'enrichment_field_definitions'
+              AND column_name = 'question_type'
+          )",
     )
     .fetch_one(&mut **tx)
     .await
@@ -11008,6 +11017,7 @@ fn enrichment_catalog_schema() -> Vec<EnrichmentCatalogEntry> {
         .map(|definition| EnrichmentCatalogEntry {
             key: definition.key.to_owned(),
             signal_type: definition.signal_type.to_owned(),
+            question_type: None,
             allowed_values: definition
                 .allowed_values
                 .iter()
@@ -11032,7 +11042,7 @@ fn validate_enrichment_item<'a>(
         .iter()
         .find(|definition| definition.key == item.key)
         .ok_or_else(|| ApiError::bad_request("Unknown customer context catalog key"))?;
-    if definition.effective_type() != item.signal_type
+    if definition.signal_type != item.signal_type
         || !definition.allowed_values.contains(&item.value)
     {
         return Err(ApiError::bad_request(
@@ -19737,6 +19747,34 @@ mod product_tests {
     }
 
     #[test]
+    fn custom_question_snapshots_remain_compatible_with_the_previous_api() -> anyhow::Result<()> {
+        let snapshot = EnrichmentFieldSnapshot {
+            key: "journey.occasion".into(),
+            label: "Shopping occasion".into(),
+            signal_type: "preference".into(),
+            question_type: Some("customer_goal".into()),
+            allowed_values: vec!["gift".into()],
+            targeted_advertising_safe: false,
+        };
+        anyhow::ensure!(snapshot.effective_type() == "customer_goal");
+        let encoded = serde_json::to_value(&snapshot)?;
+        anyhow::ensure!(encoded["type"] == "preference");
+        anyhow::ensure!(encoded["questionType"] == "customer_goal");
+
+        let previous_snapshot: EnrichmentFieldSnapshot =
+            serde_json::from_value(serde_json::json!({
+                "key": "journey.occasion",
+                "label": "Shopping occasion",
+                "type": "preference",
+                "allowedValues": ["gift"],
+                "targetedAdvertisingSafe": false
+            }))?;
+        anyhow::ensure!(previous_snapshot.question_type.is_none());
+        anyhow::ensure!(previous_snapshot.effective_type() == "preference");
+        Ok(())
+    }
+
+    #[test]
     fn enrichment_contract_is_interaction_scoped_without_memory_and_has_exact_actions()
     -> anyhow::Result<()> {
         let workspace_id = Uuid::new_v4();
@@ -21444,7 +21482,7 @@ mod product_tests {
             let (search_consent, search_answer) = enrichment_test_approve_and_answer(
                 &pool,
                 &search_request,
-                vec![answer_item("journey.occasion", "customer_goal", "gift")],
+                vec![answer_item("journey.occasion", "preference", "gift")],
             )
             .await?;
             let submit_schema = search_consent
@@ -21456,9 +21494,10 @@ mod product_tests {
             anyhow::ensure!(
                 submit_schema.catalog.len() == 1
                     && submit_schema.catalog[0].key == "journey.occasion"
-                    && submit_schema.catalog[0].signal_type == "customer_goal"
+                    && submit_schema.catalog[0].signal_type == "preference"
+                    && submit_schema.catalog[0].question_type.as_deref() == Some("customer_goal")
             );
-            anyhow::ensure!(submit_schema.signal_types == vec!["customer_goal"]);
+            anyhow::ensure!(submit_schema.signal_types == vec!["preference"]);
             let search_answer = search_answer.map_err(test_error)?;
             anyhow::ensure!(search_answer.signals.len() == 1);
             anyhow::ensure!(search_answer.signals[0].summary == "Shopping occasion: gift");
@@ -21561,7 +21600,7 @@ mod product_tests {
                 &pool,
                 &checkout_request,
                 vec![
-                    answer_item("journey.occasion", "customer_goal", "gift"),
+                    answer_item("journey.occasion", "preference", "gift"),
                     answer_item("journey.delivery", "constraint", "fast"),
                 ],
             )

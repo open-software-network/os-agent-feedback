@@ -136,6 +136,10 @@ vocabulary; unknown combinations fail closed. Epode generates the stored summary
 storing agent-written prose. Remembered items require the matching grant. Requested expiry is clamped to the
 product retention policy.
 
+For a product-authored category, the catalog entry exposes that category as `questionType` while its `type`
+remains the canonical compatibility class the answer must submit. This keeps in-flight requests safe across a
+rolling API deploy; retrieved context still reports the product-authored category.
+
 The catalog includes bounded, non-sensitive preferences for several product categories. Current examples include:
 
 | Product category | Keys | Example values |

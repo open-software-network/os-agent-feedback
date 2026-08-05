@@ -816,6 +816,8 @@ pub(crate) struct EnrichmentCatalogEntry {
     pub key: String,
     #[serde(rename = "type")]
     pub signal_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question_type: Option<String>,
     pub allowed_values: Vec<String>,
     pub targeted_advertising_safe: bool,
 }

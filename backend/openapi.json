@@ -10750,6 +10750,12 @@
           "key": {
             "type": "string"
           },
+          "questionType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "targetedAdvertisingSafe": {
             "type": "boolean"
           },
