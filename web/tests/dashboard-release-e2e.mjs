@@ -976,30 +976,29 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await clickText(page, "Search API");
   await textVisible(page, "Epode is the agent experience and analytics layer for your product.");
 
-  await clickText(page, "Responses");
-  const responses = await fixtureRequest(
+  await clickText(page, "Journeys");
+  await textVisible(page, "Proven journeys");
+  await clickText(page, "session-42");
+  const journeyDetail = await fixtureRequest(
     state,
-    (request) =>
-      request.path.startsWith("/api/dashboard/responses?") &&
-      request.path.includes(`productId=${ids.search}`),
-    "question and answer list for Responses",
+    requestPath(`/api/dashboard/sessions/${ids.sessionOne}`),
+    "journey detail BFF route",
   );
-  assert.equal(responses.headers["x-workspace-id"], ids.workspace);
+  assert.equal(journeyDetail.headers["x-workspace-id"], ids.workspace);
   assert.equal(
-    responses.headers.host,
+    journeyDetail.headers.host,
     upstreamHost,
-    "the browser must reach responses only through the root-host BFF",
+    "the browser must reach journey detail only through the root-host BFF",
   );
   assert.ok(
-    String(responses.headers.cookie).includes(TEST_COOKIE),
-    "the responses BFF must forward the real browser session cookie",
+    String(journeyDetail.headers.cookie).includes(TEST_COOKIE),
+    "the journey detail BFF must forward the real browser session cookie",
   );
-  await textVisible(page, "Tool called");
-  await textVisible(page, "search_catalog");
+  await textVisible(page, "Shared context");
+  await textVisible(page, "What does the user need from search right now?");
   await textVisible(page, "Find the newest indexed policy");
-  await textVisible(page, "Acme workspace");
-  await textVisible(page, "session-42");
-  await page.screenshot({ path: path.join(artifactDirectory, "05-responses.png"), fullPage: true });
+  await page.screenshot({ path: path.join(artifactDirectory, "05-journey.png"), fullPage: true });
+  await page.click('button[aria-label="Close journey detail"]');
 
   await clickText(page, "Customers");
   await page.waitForSelector('input[aria-label="Search customers"]', { visible: true });
@@ -1070,12 +1069,12 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   );
   await textVisible(page, "Verify linked Sessions manually · not yet verified");
 
+  await clickText(page, "Configurations");
   await clickText(page, "Connectors");
   await textVisible(page, "Destinations");
   await textVisible(page, "Apps");
   await textVisible(page, "Code");
 
-  await clickText(page, "Configurations");
   await clickText(page, "Data controls");
   await textVisible(page, "Allowed customer information");
   await textVisible(page, "Product personalization");

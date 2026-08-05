@@ -208,9 +208,9 @@ export function QuestionsView({
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-5">
       <PageHeader
-        eyebrow="Agent experience"
-        title="Context"
-        description="What journeys teach this product. The experience graph elicits needs per task; remembered context is what you deliberately keep across journeys."
+        eyebrow="Configurations"
+        title="Memory"
+        description="What this product remembers across journeys. The experience graph elicits needs per task; remembered questions are the conclusions you deliberately keep."
         actions={
           editor ? (
             <Button type="button" onClick={() => openCreate()}>

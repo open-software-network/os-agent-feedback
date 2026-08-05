@@ -19,8 +19,10 @@ describe("ConfigurationView", () => {
 
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
       "Product",
-      "Team",
+      "Memory",
+      "Connectors",
       "Data controls",
+      "Team",
     ]);
     expect(screen.getByRole("tab", { name: "Product" })).toHaveAttribute("aria-selected", "true");
 

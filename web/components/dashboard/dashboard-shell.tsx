@@ -1,12 +1,9 @@
 "use client";
 
-import { IconChatBubbles } from "central-icons/IconChatBubbles";
 import { IconChevronGrabberVertical } from "central-icons/IconChevronGrabberVertical";
-import { IconCircleQuestionmark } from "central-icons/IconCircleQuestionmark";
 import { IconFootsteps } from "central-icons/IconFootsteps";
 import { IconHome } from "central-icons/IconHome";
 import { IconPeople } from "central-icons/IconPeople";
-import { IconPlugin2 } from "central-icons/IconPlugin2";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
 import type { ComponentType, CSSProperties, ReactNode } from "react";
 import { PageHeader } from "@/components/dashboard/page-header";
@@ -69,21 +66,6 @@ const navigation: Array<{
     view: "customers",
     label: "Customers",
     icon: IconPeople,
-  },
-  {
-    view: "responses",
-    label: "Responses",
-    icon: IconChatBubbles,
-  },
-  {
-    view: "questions",
-    label: "Context",
-    icon: IconCircleQuestionmark,
-  },
-  {
-    view: "connectors",
-    label: "Connectors",
-    icon: IconPlugin2,
   },
   {
     view: "configuration",
@@ -243,33 +225,27 @@ function AppSidebar({
         <SidebarGroup>
           <SidebarGroupContent>
             <SidebarMenu>
-              {navigation
-                .filter(
-                  (item) =>
-                    (item.view !== "connectors" && item.view !== "questions") || canCreateProduct,
-                )
-                .map((item) => {
-                  const active =
-                    view === item.view ||
-                    (item.view === "configuration" && CONFIGURATION_VIEWS.has(view)) ||
-                    (item.view === "responses" && view === "feedback") ||
-                    (item.view === "sessions" && view === "interactions");
-                  return (
-                    <SidebarMenuItem key={item.view}>
-                      <SidebarMenuButton
-                        type="button"
-                        isActive={active}
-                        tooltip={item.label}
-                        aria-current={active ? "page" : undefined}
-                        onClick={() => onNavigate(item.view)}
-                        className="data-active:shadow-[inset_2px_0_0_var(--attention)]"
-                      >
-                        <item.icon />
-                        <span>{item.label}</span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  );
-                })}
+              {navigation.map((item) => {
+                const active =
+                  view === item.view ||
+                  (item.view === "configuration" && CONFIGURATION_VIEWS.has(view)) ||
+                  (item.view === "sessions" && (view === "interactions" || view === "feedback"));
+                return (
+                  <SidebarMenuItem key={item.view}>
+                    <SidebarMenuButton
+                      type="button"
+                      isActive={active}
+                      tooltip={item.label}
+                      aria-current={active ? "page" : undefined}
+                      onClick={() => onNavigate(item.view)}
+                      className="data-active:shadow-[inset_2px_0_0_var(--attention)]"
+                    >
+                      <item.icon />
+                      <span>{item.label}</span>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                );
+              })}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
@@ -337,12 +313,11 @@ export function DashboardShell({
   const shellTitle: Record<DashboardView, string> = {
     home: "Home",
     customers: "Customers",
-    responses: "Responses",
-    feedback: "Response",
+    feedback: "Report",
     sessions: "Journeys",
     configuration: "Configurations",
     policy: "Configurations",
-    questions: "Context",
+    questions: "Memory",
     connectors: "Connectors",
     team: "Configurations",
     interactions: "Interaction",

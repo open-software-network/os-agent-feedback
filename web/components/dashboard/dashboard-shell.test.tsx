@@ -19,17 +19,12 @@ describe("DashboardShell", () => {
       </DashboardShell>,
     );
 
-    const labels = [
-      "Home",
-      "Customers",
-      "Responses",
-      "Journeys",
-      "Context",
-      "Connectors",
-      "Configurations",
-    ];
+    const labels = ["Home", "Customers", "Journeys", "Configurations"];
     for (const label of labels) expect(screen.getByRole("button", { name: label })).toBeVisible();
     for (const hidden of [
+      "Responses",
+      "Context",
+      "Connectors",
       "Insights",
       "Signals",
       "Interactions",
@@ -37,6 +32,7 @@ describe("DashboardShell", () => {
       "Evidences",
       "Setup",
       "Data controls",
+      "Memory",
     ]) {
       expect(screen.queryByRole("button", { name: hidden })).not.toBeInTheDocument();
     }
@@ -44,31 +40,11 @@ describe("DashboardShell", () => {
     const coreLabels = screen
       .getAllByRole("button")
       .map((item) => item.textContent)
-      .filter((label) => ["Home", "Journeys", "Customers", "Responses"].includes(label ?? ""));
-    expect(coreLabels).toEqual(["Home", "Journeys", "Customers", "Responses"]);
+      .filter((label) => ["Home", "Journeys", "Customers"].includes(label ?? ""));
+    expect(coreLabels).toEqual(["Home", "Journeys", "Customers"]);
   });
 
-  it("opens Context from the sidebar as a top-level destination", () => {
-    const onNavigate = vi.fn();
-    render(
-      <DashboardShell
-        data={dashboardFixture()}
-        view="home"
-        onNavigate={onNavigate}
-        onWorkspaceChange={vi.fn()}
-        onProductChange={vi.fn()}
-        onLogout={vi.fn()}
-      >
-        <div>Dashboard content</div>
-      </DashboardShell>,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "Context" }));
-
-    expect(onNavigate).toHaveBeenCalledWith("questions");
-  });
-
-  it("marks the Context sidebar entry current on the Context view", () => {
+  it("marks Configurations current while the Memory section is open", () => {
     render(
       <DashboardShell
         data={dashboardFixture()}
@@ -82,9 +58,9 @@ describe("DashboardShell", () => {
       </DashboardShell>,
     );
 
-    expect(screen.getByRole("button", { name: "Context" })).toHaveAttribute("aria-current", "page");
-    expect(screen.getByRole("button", { name: "Configurations" })).not.toHaveAttribute(
+    expect(screen.getByRole("button", { name: "Configurations" })).toHaveAttribute(
       "aria-current",
+      "page",
     );
   });
 
@@ -128,30 +104,21 @@ describe("DashboardShell", () => {
     );
   });
 
-  it("uses the main-owned Response title for a linked record", () => {
-    const data = dashboardFixture();
-    const commonProps = {
-      data,
-      onNavigate: vi.fn(),
-      onWorkspaceChange: vi.fn(),
-      onProductChange: vi.fn(),
-      onLogout: vi.fn(),
-    };
-    const { rerender } = render(
-      <DashboardShell {...commonProps} view="responses">
-        <div>Response queue</div>
+  it("uses the Report title for a linked feedback record", () => {
+    render(
+      <DashboardShell
+        data={dashboardFixture()}
+        view="feedback"
+        onNavigate={vi.fn()}
+        onWorkspaceChange={vi.fn()}
+        onProductChange={vi.fn()}
+        onLogout={vi.fn()}
+      >
+        <div>Report detail</div>
       </DashboardShell>,
     );
 
-    expect(screen.getByRole("heading", { name: "Responses" })).toBeVisible();
-
-    rerender(
-      <DashboardShell {...commonProps} view="feedback">
-        <div>Response detail</div>
-      </DashboardShell>,
-    );
-
-    expect(screen.getByRole("heading", { name: "Response" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Report" })).toBeVisible();
   });
 
   it("routes members to the read-only Product configuration tab", () => {
@@ -169,10 +136,10 @@ describe("DashboardShell", () => {
       </DashboardShell>,
     );
 
-    for (const hidden of ["Connectors", "Setup", "Data controls"]) {
+    for (const hidden of ["Connectors", "Setup", "Data controls", "Responses", "Context"]) {
       expect(screen.queryByRole("button", { name: hidden })).not.toBeInTheDocument();
     }
-    for (const label of ["Home", "Journeys", "Customers", "Responses", "Configurations"]) {
+    for (const label of ["Home", "Journeys", "Customers", "Configurations"]) {
       expect(screen.getByRole("button", { name: label })).toBeVisible();
     }
     fireEvent.click(screen.getByRole("button", { name: "Configurations" }));
