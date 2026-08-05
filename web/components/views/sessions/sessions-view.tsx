@@ -766,7 +766,7 @@ function SessionJourney({
         <dd>{interactions.length}</dd>
         <dt className="text-muted-foreground">Feedback reports</dt>
         <dd>{detail.reports.length}</dd>
-        <dt className="text-muted-foreground">Shared context</dt>
+        <dt className="text-muted-foreground">Permissioned memory</dt>
         <dd>{responses.length}</dd>
       </dl>
 
@@ -866,10 +866,11 @@ function SessionJourney({
 
       <section aria-labelledby="session-responses-heading">
         <h3 id="session-responses-heading" className="text-xs font-medium">
-          Shared context
+          Permissioned memory
         </h3>
         <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-          Context the customer agent shared during this journey.
+          Optional customer-approved memory returned alongside this journey. Current-task need state
+          stays in the observed graph path above.
         </p>
         {responses.length ? (
           <div className="mt-4 grid gap-3">
@@ -913,7 +914,8 @@ function SessionJourney({
           </div>
         ) : (
           <p className="mt-4 text-xs text-muted-foreground">
-            No context was shared during this journey.
+            No separate permissioned memory was returned. The graph path above remains the source of
+            current-task state.
           </p>
         )}
       </section>
@@ -923,9 +925,9 @@ function SessionJourney({
 
 function sessionResponseEmptyState(status: string): string {
   const labels: Record<string, string> = {
-    awaiting_answer: "Waiting for shared context.",
-    declined: "The customer agent declined to share context.",
-    no_relevant_context: "No relevant context was shared.",
+    awaiting_answer: "Waiting for permissioned memory.",
+    declined: "The customer agent declined to share permissioned memory.",
+    no_relevant_context: "No relevant permissioned memory was shared.",
   };
   return labels[status] ?? "No answer content was recorded.";
 }

@@ -994,7 +994,7 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
     String(journeyDetail.headers.cookie).includes(TEST_COOKIE),
     "the journey detail BFF must forward the real browser session cookie",
   );
-  await textVisible(page, "Shared context");
+  await textVisible(page, "Permissioned memory");
   await textVisible(page, "What does the user need from search right now?");
   await textVisible(page, "Find the newest indexed policy");
   await page.screenshot({ path: path.join(artifactDirectory, "05-journey.png"), fullPage: true });
