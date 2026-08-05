@@ -1727,6 +1727,24 @@ export interface components {
             state: string;
             submit: null | components["schemas"]["EnrichmentAnswerAction"];
         };
+        EnrichmentConstraintCatalog: {
+            hash: string;
+            version: string;
+        };
+        EnrichmentConstraintField: {
+            allowedValues: string[];
+            key: string;
+            questionType?: string | null;
+            type: string;
+        };
+        EnrichmentConstraintRetention: {
+            rememberAllowed: boolean;
+            rememberSelected: boolean;
+            /** Format: int32 */
+            rememberedMaxDays: number;
+            /** Format: date-time */
+            unrememberedExpiresAt: string;
+        };
         EnrichmentFieldDefinitionInput: {
             allowedValues: string[];
             /** @default true */
@@ -1758,6 +1776,13 @@ export interface components {
             fields: components["schemas"]["EnrichmentFieldDefinitionResponse"][];
             legacyCatalogActive: boolean;
         };
+        EnrichmentRequestConstraints: {
+            allowedFields: components["schemas"]["EnrichmentConstraintField"][];
+            catalog: components["schemas"]["EnrichmentConstraintCatalog"];
+            handlerOwner: string;
+            purpose: string;
+            retention: components["schemas"]["EnrichmentConstraintRetention"];
+        };
         EnrichmentRequestInput: {
             accountRef?: string | null;
             anonymousRef?: string | null;
@@ -1765,6 +1790,7 @@ export interface components {
             /** Format: int64 */
             durationMs?: number | null;
             fieldKeys?: string[] | null;
+            handlerOwner?: string | null;
             /** Format: uuid */
             interactionId: string;
             operation: string;
@@ -1782,6 +1808,7 @@ export interface components {
         EnrichmentRequestResponse: {
             answerInstruction: string | null;
             consent: null | components["schemas"]["EnrichmentConsentAction"];
+            constraints: components["schemas"]["EnrichmentRequestConstraints"];
             /** Format: date-time */
             expiresAt: string;
             identityLevel: string;

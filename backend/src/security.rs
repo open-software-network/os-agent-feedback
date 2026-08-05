@@ -155,6 +155,7 @@ pub(crate) fn sign_deterministic_enrichment_capability(
     interaction_id: Uuid,
     issued_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
+    contract_digest: Option<&[u8]>,
 ) -> Result<(String, Vec<u8>), ApiError> {
     let mut mac = HmacSha256::new_from_slice(key_hash).map_err(ApiError::internal)?;
     mac.update(b"epode-enrichment-capability-nonce-v1\0");
@@ -162,6 +163,10 @@ pub(crate) fn sign_deterministic_enrichment_capability(
     mac.update(interaction_id.as_bytes());
     mac.update(&issued_at.timestamp().to_be_bytes());
     mac.update(&expires_at.timestamp().to_be_bytes());
+    if let Some(digest) = contract_digest {
+        mac.update(b"\0contract-v1\0");
+        mac.update(digest);
+    }
     let nonce = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
     sign_enrichment_capability_with_nonce(
         key_id,
@@ -482,6 +487,7 @@ mod tests {
             interaction_id,
             now,
             expires_at,
+            None,
         )
         .unwrap();
         let retry = sign_deterministic_enrichment_capability(
@@ -491,6 +497,7 @@ mod tests {
             interaction_id,
             now,
             expires_at,
+            None,
         )
         .unwrap();
         let other = sign_deterministic_enrichment_capability(
@@ -500,6 +507,7 @@ mod tests {
             interaction_id,
             now,
             expires_at,
+            None,
         )
         .unwrap();
         assert_eq!(deterministic, retry);
