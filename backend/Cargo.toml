@@ -26,7 +26,10 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = [
     "metrics",
     "logs",
     "http-proto",
-    "reqwest-client",
+    # The blocking client owns its reactor, so batch processors and the
+    # periodic metric reader work from their dedicated threads. The async
+    # `reqwest-client` panics there ("no reactor running").
+    "reqwest-blocking-client",
 ] }
 opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 rand = "0.9"

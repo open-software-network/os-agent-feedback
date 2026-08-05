@@ -39,7 +39,7 @@ its peers:
 
 | Service      | Directory                   | Volume mount        | Notes |
 | ------------ | --------------------------- | ------------------- | ----- |
-| `tempo`      | `observability/tempo`       | `/tempo`            | no public domain |
+| `tempo`      | `observability/tempo`       | `/var/tempo`        | no public domain; `/tempo` is the binary, cannot mount there |
 | `loki`       | `observability/loki`        | `/loki`             | no public domain |
 | `prometheus` | `observability/prometheus`  | `/prometheus`       | no public domain |
 | `collector`  | `observability/collector`   | none                | no public domain |
