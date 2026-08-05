@@ -13,6 +13,13 @@ import {
   type ProductSurface,
   requestDiscoveryLink,
 } from "./core.js";
+import { EPODE_CONTEXT_INTERACTION_HEADER } from "./customer.js";
+import {
+  completeOperation,
+  type OperationFacts,
+  operationState,
+  prepareSharedInteraction,
+} from "./operation-state.js";
 
 export type { EpodeFastify, EpodeFastifyOptions } from "./customer-fastify.js";
 export { epode } from "./customer-fastify.js";
@@ -20,9 +27,8 @@ export { epode } from "./customer-fastify.js";
 type RequestState = {
   started: number;
   prepared?: PreparedInteraction;
+  facts?: OperationFacts;
   instrumentationSkipped?: boolean;
-  surface?: ProductSurface;
-  operation?: string;
   context: {
     accountRef?: string;
     userRef?: string;
@@ -51,6 +57,23 @@ function ensureRequestVary(reply: {
     .filter(Boolean);
   if (!tokens.some((value) => value.toLowerCase() === "agent-feedback-request")) {
     tokens.push("Agent-Feedback-Request");
+  }
+  reply.header("vary", tokens.join(", "));
+}
+
+function ensureInteractionVary(reply: {
+  header(name: string, value: string): unknown;
+  getHeader(name: string): unknown;
+}): void {
+  const current = String(reply.getHeader("vary") || "");
+  const tokens = current
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (
+    !tokens.some((value) => value.toLowerCase() === EPODE_CONTEXT_INTERACTION_HEADER.toLowerCase())
+  ) {
+    tokens.push(EPODE_CONTEXT_INTERACTION_HEADER);
   }
   reply.header("vary", tokens.join(", "));
 }
@@ -144,6 +167,7 @@ export function agentFeedback(
 
   const implementation = async (app: FastifyInstance) => {
     app.addHook("onRequest", (request, _reply, done) => {
+      operationState(request, request.headers[EPODE_CONTEXT_INTERACTION_HEADER.toLowerCase()]);
       states.set(request, {
         started: performance.now(),
         context: {},
@@ -192,12 +216,29 @@ export function agentFeedback(
       // Fastify authentication hooks.
       state.context = runtime.context(request);
       state.consentState = runtime.cachedConsent(state.context.customerRef);
-      state.prepared = runtime.prepare({
-        customerRef: state.context.customerRef,
-        consentState: state.consentState,
+      const completed = completeOperation(request, {
+        surface,
+        operation: normalizeOperation(request.routeOptions?.url || request.url),
+        statusCode: reply.statusCode,
+        durationMs: Math.max(0, Math.round(performance.now() - state.started)),
       });
-      state.surface = surface;
-      state.operation = normalizeOperation(request.routeOptions?.url || request.url);
+      if (completed.conflict) {
+        state.instrumentationSkipped = true;
+        runtime.logger.warn(
+          "[agent-feedback] Conflicting operation completion; feedback was skipped.",
+        );
+        return undefined;
+      }
+      state.prepared = prepareSharedInteraction(
+        runtime,
+        {
+          customerRef: state.context.customerRef,
+          consentState: state.consentState,
+        },
+        completed.facts.interactionId,
+      );
+      state.facts = completed.facts;
+      ensureInteractionVary(reply);
       makeResponsePrivate(reply);
       return state;
     };
@@ -290,14 +331,14 @@ export function agentFeedback(
 
     app.addHook("onResponse", async (request, reply) => {
       const state = states.get(request);
-      if (!state?.prepared || !state.surface || !state.operation || !isCompleteSuccess(reply)) {
+      if (!state?.prepared || !state.facts || !isCompleteSuccess(reply)) {
         return;
       }
       runtime.record(state.prepared, {
-        surface: state.surface,
-        operation: state.operation,
-        statusCode: reply.statusCode,
-        durationMs: Math.max(0, Math.round(performance.now() - state.started)),
+        surface: state.facts.surface,
+        operation: state.facts.operation,
+        statusCode: state.facts.statusCode,
+        durationMs: state.facts.durationMs,
         accountRef: state.context.accountRef,
         userRef: state.context.userRef,
         anonymousRef: state.context.anonymousRef,

@@ -6,6 +6,12 @@ import {
   isPlainObject,
   matchPattern,
 } from "./core.js";
+import {
+  beginOperation,
+  completeOperation,
+  endOperation,
+  prepareSharedInteraction,
+} from "./operation-state.js";
 
 export type { EpodeMcp, EpodeMcpContext, EpodeMcpOptions } from "./customer-mcp.js";
 export { epode } from "./customer-mcp.js";
@@ -105,6 +111,13 @@ type RegisterTool = (
 ) => unknown;
 
 type FailureGuidance = { retryable: boolean; text: string };
+
+const EPODE_CONTROL_TOOLS = new Set([
+  "report_product_feedback",
+  "record_product_feedback_consent",
+  "record_customer_context_consent",
+  "share_customer_context",
+]);
 
 const MCP_OPERATION_PATTERN = /^[A-Za-z0-9/_:.*{}-]{1,160}$/;
 const MCP_REFERENCE_PATTERN = /^[A-Za-z0-9_.:-]{1,160}$/;
@@ -250,7 +263,7 @@ function instrumentServer(
     configuration: Record<string, unknown>,
     handler: McpHandlerWithoutInput | McpHandlerWithInput,
   ) => {
-    if (name === "report_product_feedback" || name === "record_product_feedback_consent") {
+    if (EPODE_CONTROL_TOOLS.has(name)) {
       return originalRegister(name, configuration, handler);
     }
     const invokeInstrumented = async (
@@ -306,23 +319,35 @@ function instrumentServer(
         if (runtime.enabled && observed) {
           const { sessionRef, accountRef, userRef, anonymousRef, customerRef, runtimeHint } =
             contextValues();
-          const prepared = runtime.prepare({ customerRef, consentState: "unavailable" });
-          runtime.record(prepared, {
+          const completed = completeOperation(context, {
             surface: "mcp",
             operation: name,
             statusCode: 500,
             durationMs: Math.max(0, Math.round(performance.now() - started)),
-            classification: "confirmed",
-            confirmationMethod: "mcp",
-            accountRef,
-            userRef,
-            anonymousRef,
-            customerRef,
-            runtimeHint,
-            runtimeHintSource: runtimeHint ? "mcp" : undefined,
-            sessionRef,
-            sessionSource: sessionRef ? "mcp" : undefined,
           });
+          if (!completed.conflict) {
+            const prepared = prepareSharedInteraction(
+              runtime,
+              { customerRef, consentState: "unavailable" },
+              completed.facts.interactionId,
+            );
+            runtime.record(prepared, {
+              surface: completed.facts.surface,
+              operation: completed.facts.operation,
+              statusCode: completed.facts.statusCode,
+              durationMs: completed.facts.durationMs,
+              classification: "confirmed",
+              confirmationMethod: "mcp",
+              accountRef,
+              userRef,
+              anonymousRef,
+              customerRef,
+              runtimeHint,
+              runtimeHintSource: runtimeHint ? "mcp" : undefined,
+              sessionRef,
+              sessionSource: sessionRef ? "mcp" : undefined,
+            });
+          }
         }
         throw error;
       }
@@ -360,12 +385,28 @@ function instrumentServer(
       const consentState = shouldRequestFeedback
         ? runtime.cachedConsent(customerRef)
         : "unavailable";
-      const prepared = runtime.prepare({ customerRef, consentState });
-      runtime.record(prepared, {
+      const completed = completeOperation(context, {
         surface: "mcp",
         operation: name,
         statusCode: result.isError ? 500 : 200,
         durationMs: Math.max(0, Math.round(performance.now() - started)),
+      });
+      if (completed.conflict) {
+        runtime.logger.warn(
+          "[agent-feedback] Conflicting operation completion; feedback was skipped.",
+        );
+        return result;
+      }
+      const prepared = prepareSharedInteraction(
+        runtime,
+        { customerRef, consentState },
+        completed.facts.interactionId,
+      );
+      runtime.record(prepared, {
+        surface: completed.facts.surface,
+        operation: completed.facts.operation,
+        statusCode: completed.facts.statusCode,
+        durationMs: completed.facts.durationMs,
         classification: "confirmed",
         confirmationMethod: "mcp",
         accountRef,
@@ -478,12 +519,26 @@ function instrumentServer(
     // the position promised by the MCP API.
     const instrumentedHandler =
       configuration.inputSchema === undefined
-        ? async (context: McpContext) =>
-            invokeInstrumented({}, context, () => (handler as McpHandlerWithoutInput)(context))
-        : async (arguments_: unknown, context: McpContext) =>
-            invokeInstrumented(arguments_, context, () =>
-              (handler as McpHandlerWithInput)(arguments_, context),
-            );
+        ? async (context: McpContext) => {
+            beginOperation(context);
+            try {
+              return await invokeInstrumented({}, context, () =>
+                (handler as McpHandlerWithoutInput)(context),
+              );
+            } finally {
+              endOperation(context);
+            }
+          }
+        : async (arguments_: unknown, context: McpContext) => {
+            beginOperation(context);
+            try {
+              return await invokeInstrumented(arguments_, context, () =>
+                (handler as McpHandlerWithInput)(arguments_, context),
+              );
+            } finally {
+              endOperation(context);
+            }
+          };
     return originalRegister(name, configuration, instrumentedHandler);
   }) as RegisterTool;
 

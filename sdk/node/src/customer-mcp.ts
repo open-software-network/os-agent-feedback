@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import { z } from "zod";
 import { isPlainObject, matchPattern } from "./core.js";
 import {
@@ -13,6 +11,12 @@ import {
   type RelayResponse,
   sameOriginEnrichmentRequest,
 } from "./customer.js";
+import {
+  beginOperation,
+  completeOperation,
+  endOperation,
+  operationTimer,
+} from "./operation-state.js";
 
 export type EpodeMcpContext = Record<string, unknown> & {
   http?: { authInfo?: { extra?: Record<string, unknown> } };
@@ -40,6 +44,13 @@ type RegisterTool = (
   handler: (...arguments_: never[]) => unknown,
 ) => unknown;
 type McpServer = { registerTool: (...arguments_: never[]) => unknown };
+
+const EPODE_CONTROL_TOOLS = new Set([
+  "report_product_feedback",
+  "record_product_feedback_consent",
+  "record_customer_context_consent",
+  "share_customer_context",
+]);
 
 export interface EpodeMcpOptions extends EpodeClientOptions {
   includeTools: string[];
@@ -214,7 +225,7 @@ export function epode(options: EpodeMcpOptions): EpodeMcp {
         configuration: Record<string, unknown>,
         handler: McpHandlerWithoutInput | McpHandlerWithInput,
       ) => {
-        if (name === "record_customer_context_consent" || name === "share_customer_context") {
+        if (EPODE_CONTROL_TOOLS.has(name)) {
           return originalRegister(name, configuration, handler);
         }
         const invoke = async (
@@ -222,7 +233,7 @@ export function epode(options: EpodeMcpOptions): EpodeMcp {
           context: EpodeMcpContext,
           business: () => Promise<McpResult> | McpResult,
         ): Promise<McpResult> => {
-          const startedAt = Date.now();
+          const durationMs = operationTimer();
           const result = await business();
           if (!isCompleteSuccess(result) || !included(name, options)) return result;
           if (options.shouldRequest) {
@@ -285,14 +296,26 @@ export function epode(options: EpodeMcpOptions): EpodeMcp {
               identity.anonymousRef ||
               identity.customerRef,
           );
+          const completed = completeOperation(context, {
+            surface: "mcp",
+            operation: name,
+            statusCode: 200,
+            durationMs: durationMs(),
+          });
+          if (completed.conflict) {
+            client.logger.warn(
+              "[epode] Conflicting operation completion; optional enrichment was skipped.",
+            );
+            return result;
+          }
           const request = await client.enrichment.request({
             ...identity,
-            interactionId: randomUUID(),
-            operation: name,
+            interactionId: completed.facts.interactionId,
+            operation: completed.facts.operation,
             ...(fieldKeys?.length ? { fieldKeys } : {}),
             surface: "mcp",
-            statusCode: 200,
-            durationMs: Math.min(Date.now() - startedAt, 86_400_000),
+            statusCode: completed.facts.statusCode,
+            durationMs: completed.facts.durationMs,
             ...(sessionRef ? { sessionRef } : {}),
             ...(runtimeHint ? { runtimeHint } : {}),
             purpose: options.purpose || "product_personalization",
@@ -304,12 +327,26 @@ export function epode(options: EpodeMcpOptions): EpodeMcp {
         };
         const instrumented =
           configuration.inputSchema === undefined
-            ? async (context: EpodeMcpContext) =>
-                invoke({}, context, () => (handler as McpHandlerWithoutInput)(context))
-            : async (arguments_: unknown, context: EpodeMcpContext) =>
-                invoke(arguments_, context, () =>
-                  (handler as McpHandlerWithInput)(arguments_, context),
-                );
+            ? async (context: EpodeMcpContext) => {
+                beginOperation(context);
+                try {
+                  return await invoke({}, context, () =>
+                    (handler as McpHandlerWithoutInput)(context),
+                  );
+                } finally {
+                  endOperation(context);
+                }
+              }
+            : async (arguments_: unknown, context: EpodeMcpContext) => {
+                beginOperation(context);
+                try {
+                  return await invoke(arguments_, context, () =>
+                    (handler as McpHandlerWithInput)(arguments_, context),
+                  );
+                } finally {
+                  endOperation(context);
+                }
+              };
         return originalRegister(name, configuration, instrumented);
       }) as RegisterTool;
 
