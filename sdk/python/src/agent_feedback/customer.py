@@ -605,7 +605,8 @@ def _valid_answer_item(value: Any) -> bool:
         isinstance(value.get("key"), str)
         and bool(_KEY.fullmatch(value["key"]))
         and not _sensitive_key(value["key"])
-        and value.get("type") in _SIGNAL_TYPES
+        and isinstance(value.get("type"), str)
+        and _SIGNAL_TYPE.fullmatch(value["type"]) is not None
         and isinstance(value.get("value"), str)
         and 1 <= len(value["value"]) <= 160
         and not _sensitive_text(value["value"])
