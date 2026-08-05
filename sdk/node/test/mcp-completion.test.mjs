@@ -235,6 +235,7 @@ test("retryable telemetry reuses the exact event and payload", async () => {
   const runtime = harness({
     maxTelemetryAttempts: 2,
     fetch: async (_url, init) => {
+      assert.equal(init.redirect, "manual");
       bodies.push(init.body);
       attempt += 1;
       return new Response("{}", { status: attempt === 1 ? 503 : 202 });

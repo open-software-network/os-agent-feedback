@@ -195,6 +195,7 @@ test("Express resolves verified identity established by downstream authenticatio
     include: ["/search"],
     flushIntervalMs: 1,
     fetch: async (url, init) => {
+      assert.equal(init.redirect, "manual");
       if (String(url).endsWith("/api/v2/consent/state")) {
         return new Response('{"state":"unknown","revision":0}', {
           status: 200,

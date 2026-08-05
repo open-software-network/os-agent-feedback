@@ -43,7 +43,7 @@ import {
 import type { DashboardData } from "@/lib/api/dashboard";
 import { isEditor } from "@/lib/dashboard/format";
 
-const FIELD_TYPES = ["intent", "preference", "constraint"] as const;
+const FIELD_TYPES = ["intent", "preference", "constraint", "interest"] as const;
 
 type FieldFormState = {
   key: string;

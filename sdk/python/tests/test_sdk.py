@@ -22,7 +22,7 @@ from agent_feedback import (
     submit_feedback_consent,
     submit_product_feedback,
 )
-from agent_feedback.core import _key_parts, inject_html, match_pattern
+from agent_feedback.core import _NoRedirect, _key_parts, inject_html, match_pattern
 
 KEY = "af_live_0123456789abcdef0123456789abcdef_conformance_secret_0123456789abcdef"
 TOKEN = "afr2_0123456789abcdef0123456789abcdef.eyJ2IjoxLCJpIjoiMDE4ZjFmMmUtN2I0YS03YzEyLTljOGQtMTIzNDU2Nzg5YWJjIiwiaWF0IjoxNzE1MDAwMDAwLCJleHAiOjE3MTUwMDcyMDAsIm4iOiJBUUlEQkFVR0J3Z0pDZ3NNRFE0UEVCRVMifQ.wxJ0YGS21x9eW-Cn33t9V1INhyGNj1_U3qoQns3vdWA"
@@ -535,6 +535,10 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(options.max_telemetry_attempts, 6)
         self.assertEqual(options.shutdown_timeout, 10.0)
 
+    def test_control_plane_redirects_are_rejected(self) -> None:
+        handler = _NoRedirect()
+        self.assertIsNone(handler.redirect_request(None, None, 307, "redirect", {}, "https://other.test"))
+
     def test_ask_once_without_customer_ref_warns_once(self) -> None:
         runtime = AgentFeedback(
             AgentFeedbackOptions(api_key=KEY, feedback_mode="ask_once", sender=lambda *_: None)
@@ -680,7 +684,10 @@ class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
             duration_ms=1,
         )
         with (
-            patch("urllib.request.urlopen", side_effect=partial_urlopen),
+            patch(
+                "agent_feedback.core._NO_REDIRECT_OPENER.open",
+                side_effect=partial_urlopen,
+            ),
             self.assertLogs("agent_feedback", level="WARNING") as captured,
         ):
             self.assertFalse(runtime.shutdown())

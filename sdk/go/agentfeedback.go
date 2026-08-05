@@ -344,6 +344,7 @@ func New(options Options) (*Runtime, error) {
 	if options.HTTPClient == nil {
 		options.HTTPClient = &http.Client{Timeout: options.TelemetryTimeout}
 	}
+	options.HTTPClient = noRedirectClient(options.HTTPClient)
 	if options.ConsentTimeout <= 0 {
 		if milliseconds, err := strconv.Atoi(os.Getenv("AGENT_FEEDBACK_CONSENT_TIMEOUT_MS")); err == nil && milliseconds > 0 {
 			options.ConsentTimeout = time.Duration(milliseconds) * time.Millisecond
@@ -377,6 +378,14 @@ func New(options Options) (*Runtime, error) {
 	runtime.accepting.Store(true)
 	go runtime.run()
 	return runtime, nil
+}
+
+func noRedirectClient(client *http.Client) *http.Client {
+	clone := *client
+	clone.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &clone
 }
 
 func (r *Runtime) enabled() bool {

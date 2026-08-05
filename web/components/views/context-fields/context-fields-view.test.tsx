@@ -142,6 +142,9 @@ describe("ContextFieldsView", () => {
     await screen.findByRole("row", { name: /journey\.occasion/ });
 
     fireEvent.click(screen.getByRole("button", { name: /Add field/ }));
+    expect(
+      within(await screen.findByLabelText("Type")).getByRole("option", { name: "interest" }),
+    ).toBeVisible();
     fireEvent.change(await screen.findByLabelText("Field key"), {
       target: { value: "journey.priority" },
     });

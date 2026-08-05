@@ -599,10 +599,16 @@ impl Runtime {
     }
 
     async fn lookup_consent_subject(&self, subject: String) -> ConsentSnapshot {
-        let client = reqwest::Client::builder()
+        let Ok(client) = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(self.options.consent_timeout)
             .build()
-            .unwrap_or_default();
+        else {
+            return ConsentSnapshot {
+                state: "unavailable",
+                revision: 0,
+            };
+        };
         let response = client
             .post(format!("{}/api/v2/consent/state", self.options.endpoint))
             .bearer_auth(&self.options.api_key)
@@ -890,10 +896,14 @@ async fn telemetry_worker(
     )>,
     mut shutdown_watch: watch::Receiver<Option<tokio::time::Instant>>,
 ) {
-    let client = reqwest::Client::builder()
+    let Ok(client) = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(options.telemetry_timeout)
         .build()
-        .unwrap_or_default();
+    else {
+        eprintln!("[agent-feedback] Telemetry client setup failed; telemetry was not delivered.");
+        return;
+    };
     let mut pending = VecDeque::new();
     let mut interval = tokio::time::interval(options.flush_interval);
     let mut warned_delivery_failure = false;

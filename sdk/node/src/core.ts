@@ -363,6 +363,7 @@ class TelemetryQueue {
     try {
       const response = await this.#fetch(`${this.#endpoint}/api/v2/telemetry/batches`, {
         method: "POST",
+        redirect: "manual",
         headers: {
           authorization: `Bearer ${this.#apiKey}`,
           "content-type": "application/json",
@@ -583,6 +584,7 @@ export class AgentFeedbackRuntime<Request = unknown> {
         `${this.endpoint}/api/v2/consent/state`,
         {
           method: "POST",
+          redirect: "manual",
           headers: {
             authorization: `Bearer ${this.options.apiKey}`,
             "content-type": "application/json",

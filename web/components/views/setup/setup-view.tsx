@@ -122,16 +122,6 @@ export function SetupView({
   );
 
   useEffect(() => {
-    const environmentId = environment?.id;
-    if (!environmentId || !editor) return;
-    if (writeKeys.length) {
-      finishWriteKeyEnsure(environmentId);
-      return;
-    }
-    void createWriteKey(false);
-  }, [createWriteKey, editor, environment?.id, writeKeys.length]);
-
-  useEffect(() => {
     if (!stacks.includes(stack)) setStack(stacks[0]);
   }, [stack, stacks]);
 
@@ -214,7 +204,7 @@ const result = answers.available
       />
       <Metrics
         items={[
-          { label: "Product key", value: writeKey ? "Ready" : "Preparing" },
+          { label: "Product key", value: writeKey ? "Ready" : "Missing" },
           { label: "SDK connected", value: opportunityActivated ? "Complete" : "Waiting" },
           { label: "Answers stored", value: contextLearned.toLocaleString() },
           { label: "Customers with answers", value: customersWithContext.toLocaleString() },
@@ -251,6 +241,7 @@ const result = answers.available
               key={item}
               type="button"
               variant={surface === item ? "default" : "outline"}
+              aria-pressed={surface === item}
               onClick={() => setSurface(item)}
             >
               {SETUP_SURFACES[item].name}
@@ -265,6 +256,7 @@ const result = answers.available
               type="button"
               size="sm"
               variant={stack === item ? "secondary" : "outline"}
+              aria-pressed={stack === item}
               onClick={() => setStack(item)}
             >
               {stackName(item)}
