@@ -56,6 +56,10 @@
     "./experience-graph": {
       "types": "./dist/experience-graph.d.ts",
       "import": "./dist/experience-graph.js"
+    },
+    "./product-graph": {
+      "types": "./dist/product-graph.d.ts",
+      "import": "./dist/product-graph.js"
     }
   },
   "files": [

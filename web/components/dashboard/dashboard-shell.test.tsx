@@ -24,7 +24,7 @@ describe("DashboardShell", () => {
       "Customers",
       "Responses",
       "Journeys",
-      "Questions",
+      "Context",
       "Connectors",
       "Configurations",
     ];
@@ -48,7 +48,7 @@ describe("DashboardShell", () => {
     expect(coreLabels).toEqual(["Home", "Journeys", "Customers", "Responses"]);
   });
 
-  it("opens Questions from the sidebar as a top-level destination", () => {
+  it("opens Context from the sidebar as a top-level destination", () => {
     const onNavigate = vi.fn();
     render(
       <DashboardShell
@@ -63,12 +63,12 @@ describe("DashboardShell", () => {
       </DashboardShell>,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Questions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Context" }));
 
     expect(onNavigate).toHaveBeenCalledWith("questions");
   });
 
-  it("marks the Questions sidebar entry current on the Questions view", () => {
+  it("marks the Context sidebar entry current on the Context view", () => {
     render(
       <DashboardShell
         data={dashboardFixture()}
@@ -82,10 +82,7 @@ describe("DashboardShell", () => {
       </DashboardShell>,
     );
 
-    expect(screen.getByRole("button", { name: "Questions" })).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
+    expect(screen.getByRole("button", { name: "Context" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("button", { name: "Configurations" })).not.toHaveAttribute(
       "aria-current",
     );

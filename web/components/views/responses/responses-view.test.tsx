@@ -31,7 +31,9 @@ describe("ResponsesView", () => {
     expect(openSession).toHaveBeenCalledWith("33333333-3333-4333-8333-333333333333");
     expect(screen.getByRole("columnheader", { name: "Answer" })).toBeVisible();
     expect(screen.getByRole("columnheader", { name: "Tool called" })).toBeVisible();
+    expect(screen.getByRole("columnheader", { name: "Journey" })).toBeVisible();
     expect(screen.queryByRole("columnheader", { name: "Question" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "Session" })).not.toBeInTheDocument();
   });
 
   it("persists search without promoting response protocol states into filters", async () => {
@@ -108,7 +110,9 @@ describe("ResponsesView", () => {
 
     expect(await screen.findByText("No responses yet")).toBeVisible();
     expect(
-      screen.getByText("Answers will appear here after a customer agent shares relevant context."),
+      screen.getByText(
+        "Answers appear here when a customer agent shares context during a journey.",
+      ),
     ).toBeVisible();
   });
 });

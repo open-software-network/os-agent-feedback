@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { dashboardFixture } from "@/components/dashboard/test-fixture";
 import type { ContextFieldDefinition } from "@/lib/api/context-fields";
+import type { ProductInteraction } from "@/lib/api/dashboard";
 
 import { QuestionsView } from "./context-fields-view";
 
@@ -241,4 +242,89 @@ describe("QuestionsView", () => {
     expect(screen.queryByRole("button", { name: "Edit journey.occasion" })).not.toBeInTheDocument();
     expect(screen.getByText(/Only a team owner or admin/)).toBeVisible();
   });
+
+  it("shows the journey-dimension empty state without graph telemetry", async () => {
+    const { fetchMock } = mockApi();
+    renderView(fetchMock);
+
+    await screen.findByRole("row", { name: /journey\.occasion/ });
+    expect(screen.getByRole("heading", { name: "Journey dimensions" })).toBeVisible();
+    expect(screen.getByText(/No experience-graph journeys observed yet/)).toBeVisible();
+  });
+
+  it("summarizes experience-graph categories and promotes one to a remembered question", async () => {
+    const { fetchMock } = mockApi();
+    const interactions: ProductInteraction[] = [
+      graphInteraction("/agent-guide", "session-1", 200, "2026-08-04T10:00:00Z"),
+      graphInteraction("/agent-negotiate/lamp", "session-1", 200, "2026-08-04T10:01:00Z"),
+      graphInteraction("/agent-negotiate/lamp", "session-1", 200, "2026-08-04T10:02:00Z"),
+      graphInteraction("/agent-decide/lamp", "session-1", 200, "2026-08-04T10:03:00Z"),
+      graphInteraction("/agent-item", "session-1", 200, "2026-08-04T10:04:00Z"),
+      graphInteraction("/agent-negotiate/lamp", "session-2", 200, "2026-08-04T11:00:00Z"),
+      graphInteraction("/agent-decide/lamp", "session-2", 422, "2026-08-04T11:01:00Z"),
+    ];
+    renderView(fetchMock, { data: dashboardFixture({ interactions }) });
+
+    const lampRow = await screen.findByRole("row", { name: /lamp/ });
+    expect(within(lampRow).getByText("Lamp")).toBeVisible();
+    expect(within(lampRow).getByText("3")).toBeVisible();
+    expect(within(lampRow).getByText("1 decided · 1 counterfactual")).toBeVisible();
+
+    fireEvent.click(within(lampRow).getByRole("button", { name: "Remember as question" }));
+
+    expect(await screen.findByLabelText("Key")).toHaveValue("journey.lamp");
+    expect(screen.getByLabelText("Question topic")).toHaveValue("Lamp journey need");
+    expect(screen.getByLabelText("Operations")).toHaveValue(
+      "/agent-negotiate/lamp, /agent-decide/lamp",
+    );
+  });
+
+  it("marks a dimension as remembered when its question already exists", async () => {
+    const remembered: ContextFieldDefinition = {
+      ...occasion,
+      key: "journey.lamp",
+      label: "Lamp journey need",
+      operations: ["/agent-negotiate/lamp", "/agent-decide/lamp"],
+    };
+    const { fetchMock } = mockApi([remembered]);
+    const interactions: ProductInteraction[] = [
+      graphInteraction("/agent-negotiate/lamp", "session-1", 200, "2026-08-04T10:01:00Z"),
+      graphInteraction("/agent-decide/lamp", "session-1", 200, "2026-08-04T10:03:00Z"),
+    ];
+    renderView(fetchMock, { data: dashboardFixture({ interactions }) });
+
+    const lampRow = await screen.findByRole("row", { name: /lamp/ });
+    expect(within(lampRow).getByText("Remembered")).toBeVisible();
+    expect(
+      within(lampRow).queryByRole("button", { name: "Remember as question" }),
+    ).not.toBeInTheDocument();
+  });
 });
+
+function graphInteraction(
+  operation: string,
+  sessionId: string,
+  statusCode: number,
+  occurredAt: string,
+): ProductInteraction {
+  return {
+    id: `${operation}-${sessionId}-${occurredAt}`,
+    apiKeyId: null,
+    classification: "unclassified",
+    confirmationMethod: null,
+    createdAt: occurredAt,
+    customerId: null,
+    customerRef: null,
+    durationMs: 12,
+    environmentId: "env-1",
+    occurredAt,
+    operation,
+    runtimeHint: null,
+    runtimeHintSource: null,
+    sessionId,
+    statusCode,
+    surface: "http_json",
+    updatedAt: occurredAt,
+    workspaceId: "workspace-1",
+  };
+}

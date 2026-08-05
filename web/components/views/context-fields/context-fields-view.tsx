@@ -3,7 +3,7 @@
 import { IconEditSmall2 } from "central-icons/IconEditSmall2";
 import { IconPlusSmall } from "central-icons/IconPlusSmall";
 import { IconTrashCanSimple } from "central-icons/IconTrashCanSimple";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { PageHeader, Panel, StatusMessage } from "@/components/dashboard/view-primitives";
 import { Badge } from "@/components/ui/badge";
@@ -36,7 +36,11 @@ import {
   saveContextField,
 } from "@/lib/api/context-fields";
 import type { DashboardData } from "@/lib/api/dashboard";
-import { isEditor } from "@/lib/dashboard/format";
+import {
+  contextKeyForCategory,
+  summarizeExperienceActivity,
+} from "@/lib/dashboard/experience-activity";
+import { isEditor, relativeDate, titleCase } from "@/lib/dashboard/format";
 
 type FieldFormState = {
   key: string;
@@ -144,9 +148,9 @@ export function QuestionsView({
     return <Panel>No product is selected.</Panel>;
   }
 
-  function openCreate() {
+  function openCreate(prefill?: Partial<FieldFormState>) {
     setEditing(null);
-    setForm(emptyForm);
+    setForm({ ...emptyForm, ...prefill });
     setFormError("");
     setSheetOpen(true);
   }
@@ -204,12 +208,12 @@ export function QuestionsView({
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-5">
       <PageHeader
-        eyebrow="Customer enrichment"
-        title="Questions"
-        description="Define exactly what this product may ask a customer's agent. You choose the question, its semantic type, and every allowed answer."
+        eyebrow="Agent experience"
+        title="Context"
+        description="What journeys teach this product. The experience graph elicits needs per task; remembered context is what you deliberately keep across journeys."
         actions={
           editor ? (
-            <Button type="button" onClick={openCreate}>
+            <Button type="button" onClick={() => openCreate()}>
               <IconPlusSmall />
               Add question
             </Button>
@@ -217,6 +221,22 @@ export function QuestionsView({
         }
       />
       {error ? <StatusMessage tone="error">{error}</StatusMessage> : null}
+      <JourneyDimensions
+        data={data}
+        editor={editor}
+        rememberedKeys={new Set((fields ?? []).map((field) => field.key))}
+        onRemember={(category) => {
+          const needsKey = contextKeyForCategory(category);
+          openCreate({
+            key: needsKey,
+            label: `${titleCase(category)} journey need`,
+            type: "preference",
+            allowedValues: "",
+            operations: `/agent-negotiate/${category}, /agent-decide/${category}`,
+            enabled: true,
+          });
+        }}
+      />
       {legacyCatalogActive ? (
         <Panel title="Default questions in use">
           <p className="text-sm text-muted-foreground">
@@ -482,5 +502,101 @@ export function QuestionsView({
         </SheetContent>
       </Sheet>
     </div>
+  );
+}
+
+function JourneyDimensions({
+  data,
+  editor,
+  rememberedKeys,
+  onRemember,
+}: {
+  data: DashboardData;
+  editor: boolean;
+  rememberedKeys: Set<string>;
+  onRemember: (category: string) => void;
+}) {
+  const activity = useMemo(
+    () => summarizeExperienceActivity(data.interactions),
+    [data.interactions],
+  );
+
+  return (
+    <Panel title="Journey dimensions">
+      <p className="text-sm text-muted-foreground">
+        Needs the experience graph elicits per task, computed from recent journey telemetry. When a
+        dimension keeps deciding journeys, remember it as a question so future journeys start with
+        it already answered.
+      </p>
+      {activity.length === 0 ? (
+        <p className="text-sm text-muted-foreground">
+          No experience-graph journeys observed yet. When agents negotiate needs through your graph,
+          per-dimension activity appears here.
+        </p>
+      ) : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Dimension</TableHead>
+              <TableHead>Journeys</TableHead>
+              <TableHead>Negotiations</TableHead>
+              <TableHead>Decisions</TableHead>
+              <TableHead>Decision outcomes</TableHead>
+              <TableHead>Item views</TableHead>
+              <TableHead>Last seen</TableHead>
+              {editor ? <TableHead className="w-40" /> : null}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {activity.map((dimension) => {
+              const rememberedKey = contextKeyForCategory(dimension.category);
+              const remembered = rememberedKeys.has(rememberedKey);
+              return (
+                <TableRow key={dimension.category}>
+                  <TableCell>
+                    <div className="flex flex-col">
+                      <span className="text-sm">{titleCase(dimension.category)}</span>
+                      <code className="text-xs text-muted-foreground">{dimension.category}</code>
+                    </div>
+                  </TableCell>
+                  <TableCell>{dimension.journeys}</TableCell>
+                  <TableCell>{dimension.negotiations}</TableCell>
+                  <TableCell>{dimension.decisions}</TableCell>
+                  <TableCell>
+                    {dimension.decisions === 0 ? (
+                      <span className="text-muted-foreground">No decisions yet</span>
+                    ) : (
+                      <span>
+                        {dimension.decided} decided · {dimension.counterfactuals} counterfactual
+                      </span>
+                    )}
+                  </TableCell>
+                  <TableCell>{dimension.itemViews}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {dimension.lastSeenAt ? relativeDate(dimension.lastSeenAt) : "—"}
+                  </TableCell>
+                  {editor ? (
+                    <TableCell>
+                      {remembered ? (
+                        <Badge variant="secondary">Remembered</Badge>
+                      ) : (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => onRemember(dimension.category)}
+                        >
+                          Remember as question
+                        </Button>
+                      )}
+                    </TableCell>
+                  ) : null}
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
+      )}
+    </Panel>
   );
 }

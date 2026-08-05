@@ -77,7 +77,7 @@ const navigation: Array<{
   },
   {
     view: "questions",
-    label: "Questions",
+    label: "Context",
     icon: IconCircleQuestionmark,
   },
   {
@@ -342,7 +342,7 @@ export function DashboardShell({
     sessions: "Journeys",
     configuration: "Configurations",
     policy: "Configurations",
-    questions: "Questions",
+    questions: "Context",
     connectors: "Connectors",
     team: "Configurations",
     interactions: "Interaction",
