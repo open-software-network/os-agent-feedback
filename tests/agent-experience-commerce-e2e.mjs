@@ -32,7 +32,9 @@ test("agent experience commerce e2e: guide → negotiate → decide → detail",
     assert.equal(agentHome.status, 200);
     const guide = await agentHome.text();
     assert.match(guide, /Agent experience guide/);
-    const lampUrl = guide.match(/lamp: (http:\/\/127\.0\.0\.1:\d+\/agent-negotiate\/j-[a-f0-9-]+\/lamp)/i)?.[1];
+    const lampUrl = guide.match(
+      /lamp: (http:\/\/127\.0\.0\.1:\d+\/agent-negotiate\/j-[a-f0-9-]+\/lamp)/i,
+    )?.[1];
     assert.ok(lampUrl, "guide must include a concrete lamp negotiation URL");
 
     const journeyPath = lampUrl.replace(base, "");
@@ -47,7 +49,9 @@ test("agent experience commerce e2e: guide → negotiate → decide → detail",
     assert.equal(node.needState.requestedDimension, "budget");
     assert.equal(node.nextQuestion.dimension, "budget");
 
-    const hard150 = node.nextQuestion.choices.find((choice) => choice.value === "150" && choice.strength === "hard");
+    const hard150 = node.nextQuestion.choices.find(
+      (choice) => choice.value === "150" && choice.strength === "hard",
+    );
     ({ response, body: node } = await fetchJson(base, hard150.url.replace(base, "")));
     assert.equal(node.stage, "express_more_or_decide");
     assert.equal(node.needState.values.budget.value, "150");

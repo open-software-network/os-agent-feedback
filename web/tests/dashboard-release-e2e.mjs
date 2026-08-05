@@ -33,7 +33,12 @@ const ids = {
 };
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const artifactDirectory = path.resolve(repositoryRoot, "..", ".artifacts", "real-dashboard-screenshots");
+const artifactDirectory = path.resolve(
+  repositoryRoot,
+  "..",
+  ".artifacts",
+  "real-dashboard-screenshots",
+);
 
 function product(id, name) {
   return {
@@ -1043,7 +1048,10 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
 
   await clickText(page, "Home");
   await textVisible(page, "Connect Search API");
-  await textVisible(page, "Install Epode once to serve an agent experience graph and optional permissioned context.");
+  await textVisible(
+    page,
+    "Install Epode once to serve an agent experience graph and optional permissioned context.",
+  );
   await textVisible(page, "Agent experience graph");
   await metricVisible(page, "Product key", "Ready");
   await metricVisible(page, "SDK connected", "Complete");

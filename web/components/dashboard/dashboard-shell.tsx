@@ -1,9 +1,9 @@
 "use client";
 
 import { IconChatBubbles } from "central-icons/IconChatBubbles";
-import { IconFootsteps } from "central-icons/IconFootsteps";
 import { IconChevronGrabberVertical } from "central-icons/IconChevronGrabberVertical";
 import { IconCircleQuestionmark } from "central-icons/IconCircleQuestionmark";
+import { IconFootsteps } from "central-icons/IconFootsteps";
 import { IconHome } from "central-icons/IconHome";
 import { IconPeople } from "central-icons/IconPeople";
 import { IconPlugin2 } from "central-icons/IconPlugin2";

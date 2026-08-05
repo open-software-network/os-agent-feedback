@@ -316,7 +316,8 @@ export function SessionsView({
         ]}
       />
       <p className="border-b bg-muted/25 px-4 py-2 text-xs text-muted-foreground">
-        Journeys exist only when the product supplies a stable experience-graph or session reference.
+        Journeys exist only when the product supplies a stable experience-graph or session
+        reference.
       </p>
       <div className="flex shrink-0 flex-col gap-2 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <InputGroup className="w-full bg-background sm:w-80 sm:flex-none">
@@ -750,7 +751,8 @@ function SessionJourney({
         {detail.session.refHint}
       </h2>
       <p className="mt-2 text-xs leading-5 text-muted-foreground">
-        Grouped from the stable journey reference supplied by the product experience graph or session handle.
+        Grouped from the stable journey reference supplied by the product experience graph or
+        session handle.
       </p>
 
       <dl className="mt-5 grid grid-cols-[100px_1fr] gap-x-3 gap-y-3 text-xs">

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-
+import { AgentFeedbackRuntime } from "../dist/core.js";
 import {
   createExperienceGraph,
   createLightingExperienceCatalog,
@@ -9,7 +9,6 @@ import {
   isValidJourneyId,
   parseNeedTokens,
 } from "../dist/experience-graph.js";
-import { AgentFeedbackRuntime } from "../dist/core.js";
 
 const origin = "http://localhost:4311";
 const journeyId = "j-00000000-0000-4000-8000-000000000000";
@@ -38,7 +37,9 @@ test("negotiation starts with generic dimensions and withholds results", () => {
   assert.equal(node.nextQuestion?.dimension, "decision_anchor");
   assert.equal(node.resultsUrl, null);
   assert.equal(node.sufficiency.sufficientForResults, false);
-  assert.ok(node.availableNeedEdges[0].choices.every((choice) => choice.token.startsWith("consider-")));
+  assert.ok(
+    node.availableNeedEdges[0].choices.every((choice) => choice.token.startsWith("consider-")),
+  );
 });
 
 test("purpose-unknown alone is not enough for ranked results", () => {
@@ -74,7 +75,9 @@ test("negotiation progressively captures budget, purpose, color, and priority", 
   assert.equal(node.needState.values.purpose?.value, "coding");
   assert.equal(node.needState.values.color?.value, "orange");
   assert.equal(node.needState.values.priority?.value, "price");
-  assert.ok(node.resultsUrl?.includes("budget-hard-150/purpose-coding/color-prefer-orange/priority-price"));
+  assert.ok(
+    node.resultsUrl?.includes("budget-hard-150/purpose-coding/color-prefer-orange/priority-price"),
+  );
 });
 
 test("decision support refuses results before one decision input exists", () => {
@@ -89,12 +92,7 @@ test("decision support ranks exact matches and suppresses upsell counterfactuals
     origin,
     journeyId,
     searchId: "search-1",
-    tokens: [
-      "budget-hard-150",
-      "purpose-coding",
-      "color-prefer-orange",
-      "evidence-glare-control",
-    ],
+    tokens: ["budget-hard-150", "purpose-coding", "color-prefer-orange", "evidence-glare-control"],
   });
   assert.equal(decision.stage, "decision_support");
   assert.equal(decision.exactMatchCount, 1);
@@ -117,7 +115,9 @@ test("counterfactuals appear only when hard requirements produce zero exact matc
   });
   assert.equal(decision.exactMatchCount, 0);
   assert.ok((decision.counterfactuals?.length ?? 0) > 0);
-  assert.ok(decision.counterfactuals?.every((entry) => entry.change && entry.effect && entry.detailUrl));
+  assert.ok(
+    decision.counterfactuals?.every((entry) => entry.change && entry.effect && entry.detailUrl),
+  );
 });
 
 test("hard color constraints exclude non-matching items from exact matches", () => {

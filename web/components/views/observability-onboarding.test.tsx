@@ -110,7 +110,9 @@ describe("observability onboarding states", () => {
     renderWithQuery(sessionsView(data));
 
     expect(screen.getByText("No proven journeys yet")).toBeVisible();
-    expect(screen.getByText(/experience graph or the product supplies a stable session reference/i)).toBeVisible();
+    expect(
+      screen.getByText(/experience graph or the product supplies a stable session reference/i),
+    ).toBeVisible();
     expect(screen.queryByRole("button", { name: "Clear filters" })).not.toBeInTheDocument();
   });
 

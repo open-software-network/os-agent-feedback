@@ -216,8 +216,8 @@ const result = answers.available
         ]}
       />
       <StatusMessage>
-        Install Epode once to serve an agent experience graph and optional permissioned context. Your
-        customers do not need an Epode account, app, plugin, or SDK.
+        Install Epode once to serve an agent experience graph and optional permissioned context.
+        Your customers do not need an Epode account, app, plugin, or SDK.
       </StatusMessage>
       {error ? <StatusMessage tone="error">{error}</StatusMessage> : null}
       {legacyKey ? (

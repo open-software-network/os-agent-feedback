@@ -5,7 +5,6 @@ import { SETUP_SURFACES, setupAgentPrompt, setupInstructions } from "./instructi
 const origin = "https://app.epode.ai";
 
 describe("company-side customer enrichment setup", () => {
-
   it("configures the agent experience graph surface with journey telemetry", () => {
     const instructions = setupInstructions("node-experience", "experience", origin);
     expect(instructions.install).toContain("@epode/node@0.4");

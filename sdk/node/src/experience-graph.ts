@@ -11,12 +11,7 @@
 
 export type ConstraintStrength = "hard" | "preference" | "target";
 
-export type ExperienceDimensionKind =
-  | "enum"
-  | "budget"
-  | "priority"
-  | "evidence"
-  | "flexibility";
+export type ExperienceDimensionKind = "enum" | "budget" | "priority" | "evidence" | "flexibility";
 
 export interface ExperienceChoice {
   /** Token segment written into the need path. */
@@ -160,10 +155,10 @@ export interface DecisionNode {
   invalidTokens: string[];
   negotiateUrl?: string;
   exactMatchCount?: number;
-  exactMatches?: Array<RecordedMatch>;
+  exactMatches?: RecordedMatch[];
   nearMissCount?: number;
-  nearMisses?: Array<RecordedMatch>;
-  counterfactuals?: Array<RecordedCounterfactual>;
+  nearMisses?: RecordedMatch[];
+  counterfactuals?: RecordedCounterfactual[];
   operation: string;
 }
 
@@ -204,7 +199,10 @@ const TOKEN_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const JOURNEY_RE = /^j-[a-z0-9-]+$/i;
 
 function snake(value: string): string {
-  return value.trim().toLowerCase().replace(/[\s_]+/g, "-");
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, "-");
 }
 
 function append(base: string, token: string): string {
@@ -325,18 +323,12 @@ function nonDecisionSet(definition: ExperienceGraphDefinition): Set<string> {
   );
 }
 
-export function hasDecisionInput(
-  definition: ExperienceGraphDefinition,
-  state: NeedState,
-): boolean {
+export function hasDecisionInput(definition: ExperienceGraphDefinition, state: NeedState): boolean {
   const blocked = nonDecisionSet(definition);
   return state.expressedDimensions.some((dimension) => !blocked.has(dimension));
 }
 
-function choiceLinks(
-  base: string,
-  dimension: ExperienceDimension,
-): ExperienceChoiceLink[] {
+function choiceLinks(base: string, dimension: ExperienceDimension): ExperienceChoiceLink[] {
   return dimension.choices.map((choice) => ({
     value: choice.value,
     meaning: choice.meaning,
@@ -431,7 +423,11 @@ function availableNeedEdges(
       state.values[dimension.key] !== undefined ||
       state.expressedDimensions.includes(`${dimension.key}_unknown`);
     if (expressed) continue;
-    if (state.requestedDimension && state.requestedDimension !== dimension.key && state.expressedDimensions.length === 0) {
+    if (
+      state.requestedDimension &&
+      state.requestedDimension !== dimension.key &&
+      state.expressedDimensions.length === 0
+    ) {
       // After consider-*, only that dimension's values are meaningful next.
       continue;
     }
@@ -548,7 +544,7 @@ function evaluateItem(
       evidence: values.length ? `catalog: ${values.join(", ")}` : "not specified",
     });
     if (match) {
-      const boost = priority && priorityWeights[priority] ? priorityWeights[priority]! : 0;
+      const boost = priority ? (priorityWeights[priority] ?? 0) : 0;
       score += dimension.kind === "enum" ? 6 + boost : 3 + boost;
     } else if (expression.strength === "hard") {
       hardFailures.push({
@@ -628,7 +624,9 @@ function buildCounterfactuals(
   if (budget?.known && budget.strength === "hard" && budget.value) {
     const ceiling = Number(budget.value);
     const cheapestOver = evaluated
-      .filter((entry) => entry.item.price?.amount !== undefined && entry.item.price.amount > ceiling)
+      .filter(
+        (entry) => entry.item.price?.amount !== undefined && entry.item.price.amount > ceiling,
+      )
       .sort((a, b) => (a.item.price?.amount ?? 0) - (b.item.price?.amount ?? 0))[0];
     if (cheapestOver?.item.price) {
       counterfactuals.push({
@@ -680,9 +678,10 @@ export function createExperienceGraph(definition: ExperienceGraphDefinition) {
     throw new Error("items must contain at least one entry");
   }
 
-  const category = snake(definition.category).replace(/-/g, "_") === definition.category
-    ? definition.category
-    : snake(definition.category);
+  const category =
+    snake(definition.category).replace(/-/g, "_") === definition.category
+      ? definition.category
+      : snake(definition.category);
 
   const normalized: ExperienceGraphDefinition = {
     ...definition,
@@ -1047,7 +1046,8 @@ export function createLightingExperienceCatalog(): ExperienceGraphDefinition {
         key: "evidence",
         kind: "evidence",
         question: "Should a functional claim require explicit catalog evidence?",
-        whyItMatters: "Evidence thresholds stop seller language from masquerading as functional proof.",
+        whyItMatters:
+          "Evidence thresholds stop seller language from masquerading as functional proof.",
         anchorMeaning: "An evidence threshold is known",
         optional: true,
         choices: [
