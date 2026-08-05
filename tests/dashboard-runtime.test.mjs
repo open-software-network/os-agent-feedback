@@ -95,6 +95,7 @@ const dashboard = {
       operation: "search",
       statusCode: 200,
       durationMs: 190,
+      customerId: "customer-resolved-3",
       customerRef: null,
       classification: "unclassified",
       confirmationMethod: null,
@@ -334,6 +335,61 @@ test("feedback, interaction, and session explorers render and preserve linked co
   await handlers.click({ target: { closest: () => button({ interaction: "interaction-2" }) } });
   assert.match(page.innerHTML, /What proves this interaction/);
   assert.match(page.innerHTML, /Open feedback/);
+});
+
+test("interaction detail displays resolved customer linkage when the raw customer ref is absent", async () => {
+  const { handlers, page } = await loadDashboard();
+  await handlers.click({ target: { closest: () => button({ view: "interactions" }) } });
+  await handlers.click({ target: { closest: () => button({ interaction: "interaction-3" }) } });
+  assert.match(page.innerHTML, /customer-resolved-3/);
+  assert.doesNotMatch(page.innerHTML, /<dt>Customer<\/dt><dd>Not linked<\/dd>/);
+});
+
+test("product customer refs remain the display fallback when resolved IDs coexist", async () => {
+  const state = structuredClone(dashboard);
+  state.sessions[0].customerId = "customer-internal-session";
+  state.sessions[0].customerRef = "acct_42";
+  state.interactions[1].customerId = "customer-internal-interaction";
+  const { handlers, page } = await loadDashboard({
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => structuredClone(state) }),
+  });
+
+  await handlers.click({ target: { closest: () => button({ view: "sessions" }) } });
+  assert.match(page.innerHTML, /acct_42/);
+  assert.doesNotMatch(page.innerHTML, /customer-internal-session/);
+  await handlers.click({ target: { closest: () => button({ session: "session-1" }) } });
+  assert.match(page.innerHTML, /<dt>Customer<\/dt><dd>acct_42<\/dd>/);
+  assert.doesNotMatch(page.innerHTML, /customer-internal-session/);
+
+  await handlers.click({ target: { closest: () => button({ interaction: "interaction-2" }) } });
+  assert.match(page.innerHTML, /<dt>Customer<\/dt><dd>acct_42<\/dd>/);
+  assert.doesNotMatch(page.innerHTML, /customer-internal-interaction/);
+});
+
+test("session summary displays resolved customer linkage outside the interaction window", async () => {
+  const state = structuredClone(dashboard);
+  state.sessions.push({
+    id: "session-outside-window",
+    source: "mcp",
+    refHint: "sess_resolved",
+    startedAt: iso(-40),
+    lastSeenAt: iso(-30),
+    interactionCount: 2,
+    reportCount: 0,
+    customerId: "customer-resolved-session",
+    customerDisplayName: "Anonymous customer",
+    customerRef: null,
+  });
+  const { handlers, page } = await loadDashboard({
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => structuredClone(state) }),
+  });
+  await handlers.click({ target: { closest: () => button({ view: "sessions" }) } });
+  assert.match(page.innerHTML, /Anonymous customer/);
+  await handlers.click({
+    target: { closest: () => button({ session: "session-outside-window" }) },
+  });
+  assert.match(page.innerHTML, /<dt>Customer<\/dt><dd>Anonymous customer<\/dd>/);
+  assert.doesNotMatch(page.innerHTML, /<dt>Customer<\/dt><dd>Not linked<\/dd>/);
 });
 
 test("the latest team navigation wins when dashboard responses arrive out of order", async () => {

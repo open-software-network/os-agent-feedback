@@ -19,6 +19,7 @@ import { formatDate, isEditor, titleCase } from "@/lib/dashboard/format";
 import { cn } from "@/lib/utils";
 
 import {
+  LINKED_SESSION_VERIFICATION,
   SETUP_SURFACES,
   type SetupStack,
   type SetupSurface,
@@ -392,8 +393,33 @@ const result = answers.available
               ? "The company-side connection works. Next: complete one real customer-agent journey."
               : !contextRetrieved
                 ? "Answers are ready. Retrieve them from your server and personalize the experience."
-                : "Setup complete: Epode received customer answers and your product retrieved them."}
+                : "Answer activation loop complete; linked Sessions still require the manual checks below."}
         </StatusMessage>
+        <div className="rounded-lg border p-4">
+          <h3 className="text-sm font-medium">
+            Verify linked Sessions manually · not yet verified
+          </h3>
+          <p className="mt-2 text-sm text-muted-foreground">{LINKED_SESSION_VERIFICATION}</p>
+          <ul className="mt-3 list-disc space-y-1 pl-5 text-sm">
+            <li>
+              Same Customer; Run A create, cache/dedup replay, and ordered follow-up appear in
+              Session A.
+            </li>
+            <li>Run B and its ordered follow-up appear in a separate Session B, with no mixing.</li>
+            <li>Missing or invalid ownership proof remains unlinked.</li>
+            <li>Product calls survive an Epode outage.</li>
+            <li>
+              No plaintext typed identity or Session refs, arguments, prompts, results, credentials,
+              or exceptions are stored or shown.
+            </li>
+          </ul>
+          <p className="mt-2 text-xs text-muted-foreground">
+            Use Customers and Sessions for resolved linkage and ordered timelines, response records
+            for unlinked evidence, the product client for outage behavior, and a
+            persistence/dashboard audit for privacy. Current activation totals prove transport and
+            answer milestones, not exact Session correlation.
+          </p>
+        </div>
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" onClick={() => void refresh()}>
             Check now
