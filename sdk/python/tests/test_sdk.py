@@ -22,7 +22,7 @@ from agent_feedback import (
     submit_feedback_consent,
     submit_product_feedback,
 )
-from agent_feedback.core import _NoRedirect, _key_parts, inject_html, match_pattern
+from agent_feedback.core import _NoRedirect, _TelemetryQueue, _key_parts, inject_html, match_pattern
 
 KEY = "af_live_0123456789abcdef0123456789abcdef_conformance_secret_0123456789abcdef"
 TOKEN = "afr2_0123456789abcdef0123456789abcdef.eyJ2IjoxLCJpIjoiMDE4ZjFmMmUtN2I0YS03YzEyLTljOGQtMTIzNDU2Nzg5YWJjIiwiaWF0IjoxNzE1MDAwMDAwLCJleHAiOjE3MTUwMDcyMDAsIm4iOiJBUUlEQkFVR0J3Z0pDZ3NNRFE0UEVCRVMifQ.wxJ0YGS21x9eW-Cn33t9V1INhyGNj1_U3qoQns3vdWA"
@@ -52,6 +52,34 @@ def capability_claims(authorization: str) -> dict:
 
 
 class AgentFeedbackTests(unittest.IsolatedAsyncioTestCase):
+    def test_late_sender_success_is_shutdown_loss(self) -> None:
+        telemetry = _TelemetryQueue(
+            AgentFeedbackOptions(api_key=KEY, sender=lambda *_args: None)
+        )
+        telemetry.events.put_nowait({"sequence": 1})
+        telemetry._shutdown_deadline = time.monotonic() - 1
+
+        self.assertFalse(telemetry.flush())
+        self.assertEqual(telemetry.diagnostics().shutdown_undelivered, 1)
+        self.assertTrue(telemetry._delivery_failed)
+
+    def test_telemetry_queue_diagnostics_and_episode_warning(self) -> None:
+        telemetry = _TelemetryQueue(AgentFeedbackOptions(api_key=KEY, max_queue_size=1))
+        with patch("agent_feedback.core.threading.Thread.start"):
+            with self.assertLogs("agent_feedback", level="WARNING") as captured:
+                telemetry.push({"sequence": 1})
+                telemetry.push({"sequence": 2})
+                telemetry.push({"sequence": 3})
+                self.assertEqual(telemetry.diagnostics().queue_overflow_drops, 2)
+                self.assertEqual(sum("queue capacity" in line for line in captured.output), 1)
+                telemetry.events.get_nowait()
+                telemetry.push({"sequence": 4})
+                telemetry.push({"sequence": 5})
+                self.assertEqual(sum("queue capacity" in line for line in captured.output), 2)
+        telemetry._worker_done = True
+        self.assertFalse(telemetry.shutdown())
+        self.assertEqual(telemetry.diagnostics().shutdown_undelivered, 1)
+
     def test_base_package_does_not_import_optional_mcp(self) -> None:
         completed = subprocess.run(
             [sys.executable, "-c", "import agent_feedback,sys; assert 'mcp' not in sys.modules; assert 'agent_feedback.mcp' not in sys.modules"],

@@ -157,34 +157,56 @@ class AgentFeedbackOptions:
     sender: Callable[[str, dict[str, str], bytes], None] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class TelemetryDiagnostics:
+    queue_overflow_drops: int = 0
+    shutdown_undelivered: int = 0
+
+
 class _TelemetryQueue:
     def __init__(self, options: AgentFeedbackOptions):
         self.options = options
-        self.events: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=options.max_queue_size)
+        self.events: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=max(1, options.max_queue_size))
         self.stop = threading.Event()
         self.thread: threading.Thread | None = None
         self._condition = threading.Condition()
         self._flush_lock = threading.Lock()
         self._in_flight = 0
+        self._in_flight_events = 0
+        self._in_flight_claimed = False
         self._delivery_failed = False
         self._warned_delivery_failure = False
         self._shutdown_deadline: float | None = None
         self._worker_done = False
+        self._queue_overflow_drops = 0
+        self._shutdown_undelivered = 0
+        self._overflow_episode = False
+
+    def diagnostics(self) -> TelemetryDiagnostics:
+        with self._condition:
+            return TelemetryDiagnostics(self._queue_overflow_drops, self._shutdown_undelivered)
 
     def push(self, event: dict[str, Any]) -> None:
+        warn_overflow = False
         with self._condition:
             if self.stop.is_set():
                 return
             try:
                 self.events.put_nowait(event)
+                self._overflow_episode = False
             except queue.Full:
                 try:
                     self.events.get_nowait()
                 except queue.Empty:
-                    pass
+                    return
+                self._queue_overflow_drops += 1
+                if not self._overflow_episode:
+                    warn_overflow = True
+                    self._overflow_episode = True
                 try:
                     self.events.put_nowait(event)
                 except queue.Full:
+                    self._queue_overflow_drops += 1
                     return
             if self.thread is None:
                 self.thread = threading.Thread(
@@ -196,6 +218,11 @@ class _TelemetryQueue:
                     self.thread = None
                     raise
             self._condition.notify_all()
+        if warn_overflow:
+            logger.warning(
+                "[agent-feedback] Telemetry queue capacity was exceeded; telemetry was "
+                "discarded and product responses were not affected."
+            )
 
     def _run(self) -> None:
         try:
@@ -226,6 +253,8 @@ class _TelemetryQueue:
                 if not batch:
                     return True
                 self._in_flight += 1
+                self._in_flight_events += len(batch)
+                self._in_flight_claimed = False
                 self._condition.notify_all()
 
             delivered = False
@@ -261,6 +290,10 @@ class _TelemetryQueue:
                                 or receipt.get("dropped") != 0
                             ):
                                 raise RuntimeError("telemetry batch was not fully accepted")
+                        with self._condition:
+                            deadline = self._shutdown_deadline
+                        if deadline is not None and time.monotonic() >= deadline:
+                            return False
                         delivered = True
                         return True
                     except urllib.error.HTTPError as error:
@@ -281,17 +314,33 @@ class _TelemetryQueue:
                             self.stop.wait(delay)
                 return False
             finally:
+                warn_delivery_failure = False
                 with self._condition:
                     self._in_flight -= 1
+                    self._in_flight_events -= len(batch)
+                    deadline_expired = (
+                        self._shutdown_deadline is not None
+                        and time.monotonic() >= self._shutdown_deadline
+                    )
+                    if deadline_expired and not self._in_flight_claimed:
+                        self._shutdown_undelivered += len(batch)
+                        self._in_flight_claimed = True
+                        delivered = False
                     if not delivered:
                         self._delivery_failed = True
+                        if self._shutdown_deadline is not None and not self._in_flight_claimed:
+                            self._shutdown_undelivered += len(batch)
+                    self._in_flight_claimed = False
+                    if not delivered:
                         if not self._warned_delivery_failure:
-                            logger.warning(
-                                "[agent-feedback] Telemetry delivery failed after bounded "
-                                "retries; product responses were not affected."
-                            )
+                            warn_delivery_failure = True
                             self._warned_delivery_failure = True
                     self._condition.notify_all()
+                if warn_delivery_failure:
+                    logger.warning(
+                        "[agent-feedback] Telemetry delivery failed after bounded "
+                        "retries; product responses were not affected."
+                    )
 
     def shutdown(self) -> bool:
         """Flush remaining telemetry. Returns False if any batch was lost."""
@@ -301,17 +350,34 @@ class _TelemetryQueue:
             self.stop.set()
             self._condition.notify_all()
             while True:
+                remaining = self._shutdown_deadline - time.monotonic()
+                if remaining <= 0:
+                    self._delivery_failed = True
+                    # Deadline semantics are ownership based: anything still
+                    # owned now is undelivered, even if a custom sender returns
+                    # successfully after this call.
+                    self._claim_shutdown_loss_locked(include_in_flight=True)
+                    return False
                 pending = not self.events.empty()
                 if not pending and self._in_flight == 0:
                     return not self._delivery_failed
                 if pending and (self.thread is None or self._worker_done):
                     self._delivery_failed = True
-                    return False
-                remaining = self._shutdown_deadline - time.monotonic()
-                if remaining <= 0:
-                    self._delivery_failed = True
+                    self._claim_shutdown_loss_locked(include_in_flight=True)
                     return False
                 self._condition.wait(remaining)
+
+    def _claim_shutdown_loss_locked(self, *, include_in_flight: bool) -> None:
+        """Drain/claim each event once. Caller holds ``_condition``."""
+        while True:
+            try:
+                self.events.get_nowait()
+            except queue.Empty:
+                break
+            self._shutdown_undelivered += 1
+        if include_in_flight and self._in_flight_events and not self._in_flight_claimed:
+            self._shutdown_undelivered += self._in_flight_events
+            self._in_flight_claimed = True
 
 
 class AgentFeedback:
@@ -799,6 +865,11 @@ class AgentFeedback:
     def shutdown(self) -> bool:
         """Flush pending telemetry. Returns False when a flush terminally failed."""
         return self.telemetry.shutdown()
+
+    @property
+    def diagnostics(self) -> TelemetryDiagnostics:
+        """Return a content-free, immutable snapshot of telemetry queue loss."""
+        return self.telemetry.diagnostics()
 
 
 def encoded_envelope(envelope: Mapping[str, Any]) -> str:
