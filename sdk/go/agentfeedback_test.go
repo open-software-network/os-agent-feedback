@@ -1761,6 +1761,34 @@ func TestTelemetryRetriesTransientHTTPStatus(t *testing.T) {
 	}
 }
 
+func TestTelemetryRejectsRedirectsWithoutForwardingTheBatch(t *testing.T) {
+	var redirectedRequests atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		redirectedRequests.Add(1)
+		response.WriteHeader(http.StatusAccepted)
+	}))
+	defer target.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Location", target.URL)
+		response.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+
+	runtime, err := New(Options{
+		APIKey: conformanceKey, Endpoint: redirect.URL, FlushInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.record(TelemetryEvent{InteractionID: "redirect-test", Surface: "http_json"})
+	if err := runtime.Shutdown(context.Background()); err == nil || !strings.Contains(err.Error(), "HTTP 307") {
+		t.Fatalf("redirect was not rejected: %v", err)
+	}
+	if redirectedRequests.Load() != 0 {
+		t.Fatalf("telemetry batch was forwarded to redirect target %d times", redirectedRequests.Load())
+	}
+}
+
 func TestTelemetryDeliveryDefaults(t *testing.T) {
 	runtime, err := New(Options{APIKey: conformanceKey})
 	if err != nil {

@@ -55,6 +55,16 @@ SHARED_CACHE_CONTROL = re.compile(
     r"(?:^|,)\s*(?:public|s-maxage\s*=|max-age\s*=|immutable|stale-while-revalidate\s*=)",
     re.IGNORECASE,
 )
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> None:
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect)
 SHARED_CACHE_HEADER_NAMES = frozenset(
     {
         "cache-control",
@@ -243,7 +253,7 @@ class _TelemetryQueue:
                             request = urllib.request.Request(
                                 url, data=body, headers=headers, method="POST"
                             )
-                            with urllib.request.urlopen(request, timeout=timeout) as response:
+                            with _NO_REDIRECT_OPENER.open(request, timeout=timeout) as response:
                                 receipt = json.loads(response.read())
                             if (
                                 not isinstance(receipt, dict)
@@ -548,7 +558,9 @@ class AgentFeedback:
                 headers={"authorization": f"Bearer {self.options.api_key}", "content-type": "application/json", "user-agent": "agent-feedback-python/0.4.0"},
                 method="POST",
             )
-            with urllib.request.urlopen(request, timeout=self.options.consent_timeout) as response:
+            with _NO_REDIRECT_OPENER.open(
+                request, timeout=self.options.consent_timeout
+            ) as response:
                 payload = json.loads(response.read())
                 state = payload.get("state")
                 revision = payload.get("revision")

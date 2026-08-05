@@ -89,6 +89,7 @@ describe("dashboard data flow", () => {
       </Providers>,
     );
 
+    fireEvent.click(await screen.findByRole("button", { name: "Create product key" }));
     expect((await screen.findAllByText(secret)).length).toBeGreaterThan(0);
     const storedValues = Array.from({ length: window.sessionStorage.length }, (_, index) => {
       const key = window.sessionStorage.key(index);

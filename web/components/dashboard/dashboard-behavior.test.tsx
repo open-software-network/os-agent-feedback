@@ -942,7 +942,7 @@ describe("dashboard view behavior", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("creates a missing write key and passes its shown-once secret to the controller", async () => {
+  it("creates a missing write key only after an explicit action", async () => {
     const base = dashboardFixture();
     const data = dashboardFixture({ apiKeys: [] });
     const rememberSecret = vi.fn();
@@ -968,6 +968,8 @@ describe("dashboard view behavior", () => {
       />,
     );
 
+    expect(fetch).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Create product key" }));
     await waitFor(() =>
       expect(rememberSecret).toHaveBeenCalledWith("write", "af_live_full_secret"),
     );
@@ -987,6 +989,8 @@ describe("dashboard view behavior", () => {
     };
 
     const firstMount = renderWithQuery(<SetupView {...props} />);
+    expect(fetchMock).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Create product key" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     firstMount.unmount();
     renderWithQuery(<SetupView {...props} />);
