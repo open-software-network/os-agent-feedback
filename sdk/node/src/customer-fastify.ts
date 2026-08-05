@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import type { FastifyPluginCallback, FastifyReply, FastifyRequest } from "fastify";
 import fastifyPlugin from "fastify-plugin";
 import { isPlainObject, matchPattern, normalizeOperation } from "./core.js";
@@ -16,6 +14,7 @@ import {
   injectCustomerContextHtml,
   sameOriginEnrichmentRequest,
 } from "./customer.js";
+import { completeOperation, operationState } from "./operation-state.js";
 
 export interface EpodeFastifyOptions extends EpodeClientOptions {
   include: string[];
@@ -109,6 +108,7 @@ export function epode(options: EpodeFastifyOptions): EpodeFastify {
   const identity = (request: FastifyRequest): CustomerIdentity => options.identify?.(request) || {};
   const implementation: FastifyPluginCallback = (app, _pluginOptions, done) => {
     app.addHook("onRequest", (request, _reply, next) => {
+      operationState(request, request.headers[EPODE_CONTEXT_INTERACTION_HEADER.toLowerCase()]);
       startedAt.set(request, Date.now());
       next();
     });
@@ -181,13 +181,25 @@ export function epode(options: EpodeFastifyOptions): EpodeFastify {
       );
       const operation =
         options.operation?.(request)?.trim() || request.routeOptions?.url || pathOf(request);
-      const enrichment = await client.enrichment.request({
-        ...identity,
-        interactionId: interactionId(request) || randomUUID(),
-        operation: normalizeOperation(operation),
+      const completed = completeOperation(request, {
         surface: "http_json",
+        operation: normalizeOperation(operation),
         statusCode: reply.statusCode,
         durationMs: Math.min(Date.now() - (startedAt.get(request) ?? Date.now()), 86_400_000),
+      });
+      if (completed.conflict) {
+        client.logger.warn(
+          "[epode] Conflicting operation completion; optional enrichment was skipped.",
+        );
+        return payload;
+      }
+      const enrichment = await client.enrichment.request({
+        ...identity,
+        interactionId: completed.facts.interactionId,
+        operation: completed.facts.operation,
+        surface: "http_json",
+        statusCode: completed.facts.statusCode,
+        durationMs: completed.facts.durationMs,
         requestObservation: requestObservation(request),
         ...(sessionRef ? { sessionRef } : {}),
         ...(runtimeHint ? { runtimeHint } : {}),
@@ -244,13 +256,25 @@ export function epode(options: EpodeFastifyOptions): EpodeFastify {
       );
       const operation =
         options.operation?.(request)?.trim() || request.routeOptions?.url || pathOf(request);
-      const enrichment = await client.enrichment.request({
-        ...resolvedIdentity,
-        interactionId: interactionId(request) || randomUUID(),
+      const completed = completeOperation(request, {
+        surface: "http_html",
         operation: normalizeOperation(operation),
-        surface: "html",
         statusCode: reply.statusCode,
         durationMs: Math.min(Date.now() - (startedAt.get(request) ?? Date.now()), 86_400_000),
+      });
+      if (completed.conflict) {
+        client.logger.warn(
+          "[epode] Conflicting operation completion; optional enrichment was skipped.",
+        );
+        return payload;
+      }
+      const enrichment = await client.enrichment.request({
+        ...resolvedIdentity,
+        interactionId: completed.facts.interactionId,
+        operation: completed.facts.operation,
+        surface: "html",
+        statusCode: completed.facts.statusCode,
+        durationMs: completed.facts.durationMs,
         requestObservation: requestObservation(request),
         ...(sessionRef ? { sessionRef } : {}),
         ...(runtimeHint ? { runtimeHint } : {}),

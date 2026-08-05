@@ -12,6 +12,13 @@ import {
   type ProductSurface,
   requestDiscoveryLink,
 } from "./core.js";
+import { EPODE_CONTEXT_INTERACTION_HEADER } from "./customer.js";
+import {
+  completeOperation,
+  type OperationFacts,
+  operationState,
+  prepareSharedInteraction,
+} from "./operation-state.js";
 
 export type { EpodeExpress, EpodeExpressOptions } from "./customer-express.js";
 export { epode } from "./customer-express.js";
@@ -21,8 +28,7 @@ const operationOverride = Symbol("agent-feedback-operation");
 type InstrumentedRequest = Request & { [operationOverride]?: string };
 type Instrumentation = {
   prepared: PreparedInteraction;
-  surface: ProductSurface;
-  operation: string;
+  facts: OperationFacts;
   context: {
     accountRef?: string;
     userRef?: string;
@@ -42,6 +48,10 @@ export type AgentFeedbackExpress = RequestHandler & {
 
 function ensureRequestVary(response: Response): void {
   response.vary("Agent-Feedback-Request");
+}
+
+function ensureInteractionVary(response: Response): void {
+  response.vary(EPODE_CONTEXT_INTERACTION_HEADER);
 }
 
 function appendLink(response: Response, value: string): void {
@@ -95,6 +105,7 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
   const runtime = new AgentFeedbackRuntime(options);
 
   const middleware = ((request: InstrumentedRequest, response: Response, next: NextFunction) => {
+    operationState(request, request.get(EPODE_CONTEXT_INTERACTION_HEADER));
     const started = performance.now();
     const matched = runtime.matches(request.originalUrl || request.url);
     if (matched && runtime.cacheMode === "request") ensureRequestVary(response);
@@ -157,15 +168,33 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
       // response. This lets authentication middleware mounted after Epode add
       // verified request context before Ask once chooses its consent subject.
       const context = runtime.context(request);
-      instrumentation = {
-        prepared: runtime.prepare({
-          customerRef: context.customerRef,
-          consentState: runtime.cachedConsent(context.customerRef),
-        }),
+      const operation = request[operationOverride] || normalizeOperation(routePath());
+      const completed = completeOperation(request, {
         surface,
-        operation: request[operationOverride] || normalizeOperation(routePath()),
+        operation,
+        statusCode: response.statusCode,
+        durationMs: Math.max(0, Math.round(performance.now() - started)),
+      });
+      if (completed.conflict) {
+        instrumentationSkipped = true;
+        runtime.logger.warn(
+          "[agent-feedback] Conflicting operation completion; feedback was skipped.",
+        );
+        return undefined;
+      }
+      instrumentation = {
+        prepared: prepareSharedInteraction(
+          runtime,
+          {
+            customerRef: context.customerRef,
+            consentState: runtime.cachedConsent(context.customerRef),
+          },
+          completed.facts.interactionId,
+        ),
+        facts: completed.facts,
         context,
       };
+      ensureInteractionVary(response);
       makeResponsePrivate(response);
       return instrumentation;
     };
@@ -251,10 +280,10 @@ export function agentFeedback(options: AgentFeedbackOptions<Request>): AgentFeed
       }
       recorded = true;
       runtime.record(instrumentation.prepared, {
-        surface: instrumentation.surface,
-        operation: instrumentation.operation,
-        statusCode: response.statusCode,
-        durationMs: Math.max(0, Math.round(performance.now() - started)),
+        surface: instrumentation.facts.surface,
+        operation: instrumentation.facts.operation,
+        statusCode: instrumentation.facts.statusCode,
+        durationMs: instrumentation.facts.durationMs,
         accountRef: instrumentation.context.accountRef,
         userRef: instrumentation.context.userRef,
         anonymousRef: instrumentation.context.anonymousRef,

@@ -1,5 +1,7 @@
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 
+import { registerSharedPreparer } from "./operation-state.js";
+
 export type FeedbackMode = "never_ask" | "ask_once" | "ask_always" | "off";
 export type FeedbackModeInput = FeedbackMode;
 export type ConsentPolicy = "none" | "once" | "always";
@@ -186,6 +188,7 @@ const DEFAULT_EXCLUDE = [
   "/favicon.ico",
   "/robots.txt",
   "/_agent-feedback/*",
+  "/_epode/**",
   "/api/v2/reports",
   "/api/v2/consent/*",
 ];
@@ -503,6 +506,9 @@ export class AgentFeedbackRuntime<Request = unknown> {
     this.exclude = [...DEFAULT_EXCLUDE, ...(options.exclude || [])];
     this.logger = options.logger || console;
     this.#queue = new TelemetryQueue(options);
+    registerSharedPreparer(this, (input, interactionId) =>
+      this.#prepareOwned(input, interactionId),
+    );
   }
 
   get enabled(): boolean {
@@ -689,9 +695,15 @@ export class AgentFeedbackRuntime<Request = unknown> {
   prepare(
     input: Date | { now?: Date; customerRef?: string; consentState?: ConsentState } = {},
   ): PreparedInteraction {
+    return this.#prepareOwned(input, randomUUID());
+  }
+
+  #prepareOwned(
+    input: Date | { now?: Date; customerRef?: string; consentState?: ConsentState },
+    interactionId: string,
+  ): PreparedInteraction {
     const values = input instanceof Date ? { now: input } : input;
     const now = values.now || new Date();
-    const interactionId = randomUUID();
     const mode = this.feedbackMode === "off" ? "never_ask" : this.feedbackMode;
     const subject =
       mode === "ask_once" && values.customerRef
