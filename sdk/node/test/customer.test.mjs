@@ -14,6 +14,7 @@ import { epode as epodeMcp } from "../dist/customer-mcp.js";
 import { agentFeedback as feedbackExpress } from "../dist/express.js";
 import { agentFeedback as feedbackFastify } from "../dist/fastify.js";
 import { createMcpInstrumentation } from "../dist/mcp.js";
+import { operationTimer } from "../dist/operation-state.js";
 
 const key = `af_live_0123456789abcdef0123456789abcdef_${"x".repeat(32)}`;
 const ids = {
@@ -438,6 +439,15 @@ function composedFetch(service, telemetry) {
     return service.fetch(url, init);
   };
 }
+
+test("operation timing accepts an injected clock and preserves the duration bound", () => {
+  let now = 1_000;
+  const durationMs = operationTimer(() => now, 500);
+  now = 1_125;
+  assert.equal(durationMs(), 125);
+  now = 2_000;
+  assert.equal(durationMs(), 500);
+});
 
 let customerMcpRequestId = 0;
 

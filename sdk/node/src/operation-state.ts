@@ -31,6 +31,11 @@ const sharedPreparers = new WeakMap<
   ) => PreparedInteraction
 >();
 
+export function operationTimer(now: () => number = Date.now, maximumMs = 86_400_000): () => number {
+  const startedAt = now();
+  return () => Math.min(now() - startedAt, maximumMs);
+}
+
 export function registerSharedPreparer<Request>(
   runtime: AgentFeedbackRuntime<Request>,
   prepare: (

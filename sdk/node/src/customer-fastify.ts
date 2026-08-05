@@ -14,7 +14,7 @@ import {
   injectCustomerContextHtml,
   sameOriginEnrichmentRequest,
 } from "./customer.js";
-import { completeOperation, operationState } from "./operation-state.js";
+import { completeOperation, operationState, operationTimer } from "./operation-state.js";
 
 export interface EpodeFastifyOptions extends EpodeClientOptions {
   include: string[];
@@ -102,14 +102,14 @@ export function epode(options: EpodeFastifyOptions): EpodeFastify {
     throw new Error("Epode Fastify maxHtmlBytes must be an integer of at least 1024");
   }
   const client = createEpode(options);
-  const startedAt = new WeakMap<FastifyRequest, number>();
+  const durationMs = new WeakMap<FastifyRequest, () => number>();
   const interactionId = (request: FastifyRequest) =>
     customerContextInteractionId(request.headers[EPODE_CONTEXT_INTERACTION_HEADER.toLowerCase()]);
   const identity = (request: FastifyRequest): CustomerIdentity => options.identify?.(request) || {};
   const implementation: FastifyPluginCallback = (app, _pluginOptions, done) => {
     app.addHook("onRequest", (request, _reply, next) => {
       operationState(request, request.headers[EPODE_CONTEXT_INTERACTION_HEADER.toLowerCase()]);
-      startedAt.set(request, Date.now());
+      durationMs.set(request, operationTimer());
       next();
     });
     app.addHook("preHandler", async (request, reply) => {
@@ -185,7 +185,7 @@ export function epode(options: EpodeFastifyOptions): EpodeFastify {
         surface: "http_json",
         operation: normalizeOperation(operation),
         statusCode: reply.statusCode,
-        durationMs: Math.min(Date.now() - (startedAt.get(request) ?? Date.now()), 86_400_000),
+        durationMs: durationMs.get(request)?.() ?? 0,
       });
       if (completed.conflict) {
         client.logger.warn(
@@ -260,7 +260,7 @@ export function epode(options: EpodeFastifyOptions): EpodeFastify {
         surface: "http_html",
         operation: normalizeOperation(operation),
         statusCode: reply.statusCode,
-        durationMs: Math.min(Date.now() - (startedAt.get(request) ?? Date.now()), 86_400_000),
+        durationMs: durationMs.get(request)?.() ?? 0,
       });
       if (completed.conflict) {
         client.logger.warn(

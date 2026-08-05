@@ -14,7 +14,7 @@ import {
   injectCustomerContextHtml,
   sameOriginEnrichmentRequest,
 } from "./customer.js";
-import { completeOperation, operationState } from "./operation-state.js";
+import { completeOperation, operationState, operationTimer } from "./operation-state.js";
 
 export interface EpodeExpressOptions extends EpodeClientOptions {
   /** Explicit product routes on which Epode may request useful customer context. */
@@ -107,7 +107,7 @@ export function epode(options: EpodeExpressOptions): EpodeExpress {
   const identity = (request: Request): CustomerIdentity => options.identify?.(request) || {};
   const middleware = ((request: Request, response: Response, next: NextFunction) => {
     operationState(request, request.get(EPODE_CONTEXT_INTERACTION_HEADER));
-    const startedAt = Date.now();
+    const durationMs = operationTimer();
     const path = requestPath(request);
     if (
       request.method === "POST" &&
@@ -179,7 +179,7 @@ export function epode(options: EpodeExpressOptions): EpodeExpress {
           surface: surface === "html" ? "http_html" : surface,
           operation: routeOperation(request, options),
           statusCode: response.statusCode,
-          durationMs: Math.min(Date.now() - startedAt, 86_400_000),
+          durationMs: durationMs(),
         });
         if (completed.conflict) {
           client.logger.warn(

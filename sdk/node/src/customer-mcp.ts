@@ -11,7 +11,12 @@ import {
   type RelayResponse,
   sameOriginEnrichmentRequest,
 } from "./customer.js";
-import { beginOperation, completeOperation, endOperation } from "./operation-state.js";
+import {
+  beginOperation,
+  completeOperation,
+  endOperation,
+  operationTimer,
+} from "./operation-state.js";
 
 export type EpodeMcpContext = Record<string, unknown> & {
   http?: { authInfo?: { extra?: Record<string, unknown> } };
@@ -228,7 +233,7 @@ export function epode(options: EpodeMcpOptions): EpodeMcp {
           context: EpodeMcpContext,
           business: () => Promise<McpResult> | McpResult,
         ): Promise<McpResult> => {
-          const startedAt = Date.now();
+          const durationMs = operationTimer();
           const result = await business();
           if (!isCompleteSuccess(result) || !included(name, options)) return result;
           if (options.shouldRequest) {
@@ -295,7 +300,7 @@ export function epode(options: EpodeMcpOptions): EpodeMcp {
             surface: "mcp",
             operation: name,
             statusCode: 200,
-            durationMs: Math.min(Date.now() - startedAt, 86_400_000),
+            durationMs: durationMs(),
           });
           if (completed.conflict) {
             client.logger.warn(
