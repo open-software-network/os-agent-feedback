@@ -212,5 +212,46 @@
         "expectedEvent": null
       }
     ]
+  },
+  "mcpLinkedJourney": {
+    "version": 1,
+    "identity": {
+      "accountRef": "account_linked_20",
+      "userRef": "user_linked_20",
+      "anonymousRef": "installation_linked_20"
+    },
+    "runtimeHint": "conformance-mcp 1.0",
+    "privateContentSentinel": "PRIVATE-LINKED-JOURNEY-CONTENT-MUST-NOT-LEAK",
+    "runs": [
+      {
+        "name": "A",
+        "sessionRef": "summary:session_a",
+        "completions": [
+          { "operation": "summarize", "outcome": "success" },
+          { "operation": "get_summary", "outcome": "success" },
+          { "operation": "get_summary", "outcome": "success" },
+          { "operation": "get_summary", "outcome": "success" }
+        ]
+      },
+      {
+        "name": "B",
+        "sessionRef": "summary:session_b",
+        "completions": [
+          { "operation": "summarize", "outcome": "success" },
+          { "operation": "get_summary", "outcome": "success" },
+          { "operation": "get_summary", "outcome": "success" },
+          { "operation": "get_summary", "outcome": "success" }
+        ]
+      }
+    ],
+    "unlinked": [
+      { "operation": "get_summary", "outcome": "success", "proof": "missing" },
+      {
+        "operation": "get_summary",
+        "outcome": "error",
+        "proof": "invalid",
+        "candidateSessionRef": "summary/invalid proof"
+      }
+    ]
   }
 }

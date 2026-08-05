@@ -275,9 +275,14 @@ mod tests {
                 }
                 tx.send(request[end..end + length].to_vec()).unwrap();
                 let body = if status == 202 {
-                    r#"{"accepted":1,"dropped":0}"#
+                    let accepted = serde_json::from_slice::<Value>(&request[end..end + length])
+                        .unwrap()["events"]
+                        .as_array()
+                        .unwrap()
+                        .len();
+                    format!(r#"{{"accepted":{accepted},"dropped":0}}"#)
                 } else {
-                    "{}"
+                    "{}".to_owned()
                 };
                 write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             }
@@ -356,6 +361,108 @@ mod tests {
                 assert_eq!(&event, expected, "{}", vector["name"]);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn recorder_executes_shared_linked_journey_fixture() {
+        let document: Value =
+            serde_json::from_str(include_str!("../../../protocol/v1/conformance.json")).unwrap();
+        let fixture = &document["mcpLinkedJourney"];
+        let identity = &fixture["identity"];
+        let (endpoint, bodies) = server(vec![202]);
+        let mut options = Options::new(KEY).endpoint(endpoint);
+        options.flush_interval = Duration::from_secs(3600);
+        let recorder = AgentFeedbackRecorder::new(options).unwrap();
+        let mut expected = Vec::new();
+        for run in fixture["runs"].as_array().unwrap() {
+            for item in run["completions"].as_array().unwrap() {
+                recorder
+                    .record_mcp_completion(
+                        McpCompletion::new(
+                            item["operation"].as_str().unwrap(),
+                            McpOutcome::try_from(item["outcome"].as_str().unwrap()).unwrap(),
+                        )
+                        .identity(CustomerIdentity {
+                            account_ref: text(identity, "accountRef"),
+                            user_ref: text(identity, "userRef"),
+                            anonymous_ref: text(identity, "anonymousRef"),
+                            customer_ref: None,
+                        })
+                        .session_ref(run["sessionRef"].as_str().unwrap())
+                        .runtime_hint(fixture["runtimeHint"].as_str().unwrap()),
+                    )
+                    .unwrap();
+                expected.push((
+                    item["operation"].as_str().unwrap(),
+                    item["outcome"].as_str().unwrap(),
+                    run["sessionRef"].as_str(),
+                ));
+            }
+        }
+        for item in fixture["unlinked"].as_array().unwrap() {
+            // Candidate proof is product input only; unresolved values are omitted.
+            recorder
+                .record_mcp_completion(
+                    McpCompletion::new(
+                        item["operation"].as_str().unwrap(),
+                        McpOutcome::try_from(item["outcome"].as_str().unwrap()).unwrap(),
+                    )
+                    .identity(CustomerIdentity {
+                        account_ref: text(identity, "accountRef"),
+                        user_ref: text(identity, "userRef"),
+                        anonymous_ref: text(identity, "anonymousRef"),
+                        customer_ref: None,
+                    })
+                    .runtime_hint(fixture["runtimeHint"].as_str().unwrap()),
+                )
+                .unwrap();
+            expected.push((
+                item["operation"].as_str().unwrap(),
+                item["outcome"].as_str().unwrap(),
+                None,
+            ));
+        }
+        recorder.shutdown().await.unwrap();
+        let raw = bodies.recv_timeout(Duration::from_secs(1)).unwrap();
+        let body: Value = serde_json::from_slice(&raw).unwrap();
+        let events = body["events"].as_array().unwrap();
+        assert_eq!(events.len(), expected.len());
+        let mut ids = std::collections::HashSet::new();
+        for (index, (event, (operation, outcome, session_ref))) in
+            events.iter().zip(expected).enumerate()
+        {
+            assert_eq!(event["surface"], "mcp");
+            assert_eq!(event["classification"], "confirmed");
+            assert_eq!(event["confirmationMethod"], "mcp");
+            assert_eq!(event["operation"], operation);
+            assert_eq!(
+                event["statusCode"],
+                if outcome == "success" { 200 } else { 500 }
+            );
+            assert_eq!(event.get("sessionRef").and_then(Value::as_str), session_ref);
+            assert_eq!(
+                event.get("sessionSource").and_then(Value::as_str),
+                session_ref.map(|_| "mcp")
+            );
+            if session_ref.is_none() {
+                assert!(!event.as_object().unwrap().contains_key("sessionRef"));
+                assert!(!event.as_object().unwrap().contains_key("sessionSource"));
+            }
+            assert_eq!(event["accountRef"], identity["accountRef"]);
+            assert_eq!(event["userRef"], identity["userRef"]);
+            assert_eq!(event["anonymousRef"], identity["anonymousRef"]);
+            assert_eq!(event["runtimeHint"], fixture["runtimeHint"]);
+            assert_eq!(event["runtimeHintSource"], "mcp");
+            let id = event["interactionId"].as_str().unwrap();
+            assert_eq!(Uuid::parse_str(id).unwrap().get_version_num(), 4);
+            assert!(ids.insert(id));
+            assert_eq!(event["sequence"], index + 1);
+        }
+        assert!(
+            !String::from_utf8(raw)
+                .unwrap()
+                .contains(fixture["privateContentSentinel"].as_str().unwrap())
+        );
     }
 
     #[tokio::test]

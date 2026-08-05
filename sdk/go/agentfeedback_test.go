@@ -189,6 +189,102 @@ func TestMCPCompletionConformanceVectors(t *testing.T) {
 	}
 }
 
+func TestSharedLinkedJourneyFixture(t *testing.T) {
+	data, err := os.ReadFile("../../protocol/v1/conformance.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type completion struct {
+		Operation, Outcome, CandidateSessionRef string
+	}
+	var contract struct {
+		MCPLinkedJourney struct {
+			Identity                            struct{ AccountRef, UserRef, AnonymousRef string }
+			RuntimeHint, PrivateContentSentinel string
+			Runs                                []struct {
+				Name, SessionRef string
+				Completions      []completion
+			}
+			Unlinked []completion
+		} `json:"mcpLinkedJourney"`
+	}
+	if err := json.Unmarshal(data, &contract); err != nil {
+		t.Fatal(err)
+	}
+	fixture := contract.MCPLinkedJourney
+	var body []byte
+	runtimeUnderTest, _ := New(Options{APIKey: conformanceKey, FlushInterval: time.Hour, Sender: func(_ context.Context, _ string, _ http.Header, value []byte) error {
+		body = append([]byte(nil), value...)
+		return nil
+	}})
+	type expectedCompletion struct{ operation, outcome, sessionRef string }
+	var expected []expectedCompletion
+	identity := fixture.Identity
+	for _, run := range fixture.Runs {
+		for _, item := range run.Completions {
+			err := runtimeUnderTest.RecordMCPCompletion(MCPCompletion{Operation: item.Operation, Outcome: MCPOutcome(item.Outcome), AccountRef: identity.AccountRef, UserRef: identity.UserRef, AnonymousRef: identity.AnonymousRef, SessionRef: run.SessionRef, RuntimeHint: fixture.RuntimeHint})
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected = append(expected, expectedCompletion{item.Operation, item.Outcome, run.SessionRef})
+		}
+	}
+	for _, item := range fixture.Unlinked {
+		// Candidate proof is product input only; unresolved values are omitted from the recorder.
+		err := runtimeUnderTest.RecordMCPCompletion(MCPCompletion{Operation: item.Operation, Outcome: MCPOutcome(item.Outcome), AccountRef: identity.AccountRef, UserRef: identity.UserRef, AnonymousRef: identity.AnonymousRef, RuntimeHint: fixture.RuntimeHint})
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected = append(expected, expectedCompletion{item.Operation, item.Outcome, ""})
+	}
+	if err := runtimeUnderTest.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Events []map[string]any `json:"events"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Events) != len(expected) {
+		t.Fatalf("got %d events, want %d", len(payload.Events), len(expected))
+	}
+	ids := make(map[string]bool)
+	for index, event := range payload.Events {
+		want := expected[index]
+		if event["operation"] != want.operation || event["statusCode"] != map[string]float64{"success": 200, "error": 500}[want.outcome] {
+			t.Fatalf("completion %d mismatch: %#v", index, event)
+		}
+		if want.sessionRef != "" && (event["sessionRef"] != want.sessionRef || event["sessionSource"] != "mcp") {
+			t.Fatalf("completion %d linked session mismatch: %#v", index, event)
+		}
+		if want.sessionRef == "" {
+			_, hasRef := event["sessionRef"]
+			_, hasSource := event["sessionSource"]
+			if hasRef || hasSource {
+				t.Fatalf("completion %d unlinked session fields were not omitted: %#v", index, event)
+			}
+		}
+		if event["surface"] != "mcp" || event["classification"] != "confirmed" || event["confirmationMethod"] != "mcp" {
+			t.Fatalf("completion %d session source mismatch: %#v", index, event)
+		}
+		if event["accountRef"] != identity.AccountRef || event["userRef"] != identity.UserRef || event["anonymousRef"] != identity.AnonymousRef || event["runtimeHint"] != fixture.RuntimeHint || event["runtimeHintSource"] != "mcp" {
+			t.Fatalf("completion %d metadata mismatch: %#v", index, event)
+		}
+		id, _ := event["interactionId"].(string)
+		if len(id) != 36 || id[8] != '-' || id[13] != '-' || id[14] != '4' || id[18] != '-' || !strings.ContainsRune("89abAB", rune(id[19])) || id[23] != '-' || ids[id] {
+			t.Fatalf("completion %d invalid or repeated UUID: %q", index, id)
+		}
+		ids[id] = true
+		if event["sequence"] != float64(index+1) {
+			t.Fatalf("completion %d sequence mismatch: %#v", index, event["sequence"])
+		}
+	}
+	if bytes.Contains(body, []byte(fixture.PrivateContentSentinel)) {
+		t.Fatal("private linked-journey content entered telemetry")
+	}
+}
+
 func TestTypedMCPHandlerCanonicalSessionAndPreservation(t *testing.T) {
 	type input struct{ Candidate string }
 	type result struct {
