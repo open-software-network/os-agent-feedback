@@ -34,7 +34,7 @@ describe("dashboard data flow", () => {
       "Customers",
       "Responses",
       "Journeys",
-      "Questions",
+      "Context",
       "Connectors",
       "Configurations",
     ]) {
@@ -190,7 +190,7 @@ describe("dashboard data flow", () => {
     expect(screen.getByRole("button", { name: "Configurations" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Setup" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Data controls" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Questions" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Context" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Connectors" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "New product" })).not.toBeInTheDocument();
     await waitFor(() => expect(window.location.search).not.toContain("view=connectors"));
@@ -350,7 +350,7 @@ describe("dashboard data flow", () => {
     expect(new URL(window.location.href).searchParams.get("view")).toBeNull();
   });
 
-  it("opens Questions from the sidebar as a top-level view", async () => {
+  it("opens Context from the sidebar as a top-level view", async () => {
     const data = dashboardFixture();
     vi.stubGlobal(
       "fetch",
@@ -370,15 +370,10 @@ describe("dashboard data flow", () => {
       </Providers>,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Questions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Context" }));
 
-    expect((await screen.findAllByRole("heading", { name: "Questions" })).length).toBeGreaterThan(
-      0,
-    );
-    expect(screen.getByRole("button", { name: "Questions" })).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
+    expect((await screen.findAllByRole("heading", { name: "Context" })).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Context" })).toHaveAttribute("aria-current", "page");
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
     expect(new URL(window.location.href).searchParams.get("view")).toBe("questions");
   });

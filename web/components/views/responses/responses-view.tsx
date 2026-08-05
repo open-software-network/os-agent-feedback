@@ -91,6 +91,9 @@ export function ResponsesView({
           />
         </InputGroup>
       </div>
+      <p className="border-b bg-muted/25 px-4 py-2 text-xs text-muted-foreground">
+        The audit log of context shared by customer agents, linked to the journey that used it.
+      </p>
 
       <div className="min-h-0 flex-1 overflow-auto">
         {pages.isError ? (
@@ -107,7 +110,7 @@ export function ResponsesView({
                   <TableHead className="w-[42%] pl-4">Answer</TableHead>
                   <TableHead className="w-[18%]">Tool called</TableHead>
                   <TableHead>Customer</TableHead>
-                  <TableHead>Session</TableHead>
+                  <TableHead>Journey</TableHead>
                   <TableHead className="pr-4 text-right">Recorded</TableHead>
                 </TableRow>
               </TableHeader>
@@ -141,7 +144,7 @@ export function ResponsesView({
               description={
                 query
                   ? "Try a different search."
-                  : "Answers will appear here after a customer agent shares relevant context."
+                  : "Answers appear here when a customer agent shares context during a journey."
               }
             />
           </div>
@@ -201,7 +204,7 @@ function ResponseRow({
             className="h-auto justify-start p-0 text-left"
             onClick={() => openSession(response.sessionId as string)}
           >
-            {response.sessionRef ?? "Open session"}
+            {response.sessionRef ?? "Open journey"}
           </Button>
         ) : (
           <span className="text-sm text-muted-foreground">—</span>

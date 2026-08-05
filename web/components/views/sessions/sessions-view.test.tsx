@@ -142,7 +142,7 @@ describe("SessionsView", () => {
       />,
     );
 
-    const responses = await screen.findByRole("region", { name: "Questions and answers" });
+    const responses = await screen.findByRole("region", { name: "Shared context" });
     const journey = screen.getByRole("region", { name: "Observed journey" });
     expect(journey.compareDocumentPosition(responses) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
@@ -202,7 +202,7 @@ describe("SessionsView", () => {
       />,
     );
 
-    const responses = await screen.findByRole("region", { name: "Questions and answers" });
+    const responses = await screen.findByRole("region", { name: "Shared context" });
     expect(
       within(responses).getByText("The customer agent declined to share context."),
     ).toBeVisible();

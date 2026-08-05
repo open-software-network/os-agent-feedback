@@ -766,7 +766,7 @@ function SessionJourney({
         <dd>{interactions.length}</dd>
         <dt className="text-muted-foreground">Feedback reports</dt>
         <dd>{detail.reports.length}</dd>
-        <dt className="text-muted-foreground">Questions</dt>
+        <dt className="text-muted-foreground">Shared context</dt>
         <dd>{responses.length}</dd>
       </dl>
 
@@ -866,10 +866,10 @@ function SessionJourney({
 
       <section aria-labelledby="session-responses-heading">
         <h3 id="session-responses-heading" className="text-xs font-medium">
-          Questions and answers
+          Shared context
         </h3>
         <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-          Canonical Epode questions and bounded answers associated with this session.
+          Context the customer agent shared during this journey.
         </p>
         {responses.length ? (
           <div className="mt-4 grid gap-3">
@@ -913,7 +913,7 @@ function SessionJourney({
           </div>
         ) : (
           <p className="mt-4 text-xs text-muted-foreground">
-            No enrichment questions were associated with this session.
+            No context was shared during this journey.
           </p>
         )}
       </section>
