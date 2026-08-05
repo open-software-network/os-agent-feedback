@@ -1,6 +1,8 @@
-.PHONY: help install node-install backend-install node-version-check dev-env dev-setup dev-bootstrap dev-compose-check dev-db dev-db-stop dev-observability dev-observability-stop dev-backend dev-web backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test sdk-node-test sdk-rust-test web-install web-types-check web-check web-typecheck web-test web-release-e2e web-build docs-validate docs-a11y types check
+.PHONY: help install node-install backend-install node-version-check dev-env dev-setup dev-bootstrap dev-compose-check dev-db dev-db-stop dev-observability dev-observability-stop dev-backend dev-web backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test sdk-node-test sdk-rust-test linked-journey-conformance web-install web-types-check web-check web-typecheck web-test web-release-e2e web-build docs-validate docs-a11y types check
 
 .DEFAULT_GOAL := help
+
+PYTHON ?= python3
 
 help:  ## Show this help (targets with a `##` comment)
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -114,6 +116,13 @@ sdk-rust-test:  ## Format, lint, and test the Rust SDK and compile its examples
 	cd sdk/rust && cargo fmt --check && cargo clippy --locked --all-targets --all-features -- -D warnings && cargo test --locked --all-features
 	cd examples/rust-axum && cargo check --locked
 	cd examples/rust-rmcp && cargo check --locked
+
+linked-journey-conformance:  ## Run the shared linked-journey fixture in all four SDKs
+	node --test --test-name-pattern='linked journey fixture' tests/mcp-completion-contract.test.mjs
+	cd sdk/node && pnpm build && node --test --test-name-pattern='shared linked journey fixture' test/mcp-completion.test.mjs
+	cd sdk/python && PYTHONPATH=src $(PYTHON) -m unittest tests.test_mcp_recorder.MCPRecorderTests.test_shared_linked_journey_fixture
+	cd sdk/go && go test -run '^TestSharedLinkedJourneyFixture$$' ./...
+	cd sdk/rust && cargo test --locked recorder_executes_shared_linked_journey_fixture
 
 # --- Web ---
 web-install: node-version-check  ## Install the web workspace dependencies from the lockfile

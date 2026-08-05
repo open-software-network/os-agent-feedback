@@ -5,9 +5,10 @@ import test from "node:test";
 import { createMcpInstrumentation } from "../dist/mcp.js";
 
 const key = `af_live_2123456789abcdef0123456789abcdef_${"z".repeat(32)}`;
-const conformance = JSON.parse(
+const conformanceDocument = JSON.parse(
   await readFile(new URL("../../../protocol/v1/conformance.json", import.meta.url), "utf8"),
-).mcpCompletion;
+);
+const conformance = conformanceDocument.mcpCompletion;
 
 function harness(options = {}) {
   const tools = new Map();
@@ -230,6 +231,77 @@ test("product-owned journey fixture links only server-proven canonical sessions"
     events.map((_, index) => index + 1),
   );
   assert.doesNotMatch(JSON.stringify(events), new RegExp(productSecret));
+});
+
+test("shared linked journey fixture preserves cross-SDK semantics", async () => {
+  const fixture = conformanceDocument.mcpLinkedJourney;
+  const runtime = harness({
+    accountRef: () => fixture.identity.accountRef,
+    userRef: () => fixture.identity.userRef,
+    anonymousRef: () => fixture.identity.anonymousRef,
+    sessionRef: (_arguments, _context, result) => result?.structuredContent?.resolvedSessionRef,
+    runtimeHint: () => fixture.runtimeHint,
+  });
+  const expected = [];
+  for (const run of fixture.runs) {
+    for (const completion of run.completions) {
+      const tool = completion.operation;
+      const result = {
+        structuredContent: {
+          resolvedSessionRef: run.sessionRef,
+          privateContent: fixture.privateContentSentinel,
+        },
+      };
+      runtime.register(tool, async () => result);
+      await runtime.call(tool, { privateContent: fixture.privateContentSentinel });
+      expected.push({ ...completion, sessionRef: run.sessionRef });
+    }
+  }
+  for (const completion of fixture.unlinked) {
+    const tool = completion.operation;
+    const result = {
+      structuredContent: { privateContent: fixture.privateContentSentinel },
+      ...(completion.outcome === "error" ? { isError: true } : {}),
+    };
+    runtime.register(tool, async () => result);
+    await runtime.call(tool, {
+      candidateSessionRef: completion.candidateSessionRef,
+      privateContent: fixture.privateContentSentinel,
+    });
+    expected.push({ ...completion, sessionRef: undefined });
+  }
+  await runtime.instrumentation.shutdown();
+
+  const events = runtime.requests.flatMap((request) => request.events);
+  assert.deepEqual(
+    events.map(({ operation, statusCode, sessionRef }) => ({ operation, statusCode, sessionRef })),
+    expected.map(({ operation, outcome, sessionRef }) => ({
+      operation,
+      statusCode: outcome === "success" ? 200 : 500,
+      sessionRef,
+    })),
+  );
+  for (const event of events) {
+    assert.equal(event.surface, "mcp");
+    assert.equal(event.classification, "confirmed");
+    assert.equal(event.confirmationMethod, "mcp");
+    assert.equal(event.accountRef, fixture.identity.accountRef);
+    assert.equal(event.userRef, fixture.identity.userRef);
+    assert.equal(event.anonymousRef, fixture.identity.anonymousRef);
+    assert.equal(event.runtimeHint, fixture.runtimeHint);
+    assert.equal(event.runtimeHintSource, "mcp");
+    assert.equal(event.sessionSource, event.sessionRef ? "mcp" : undefined);
+    assert.match(
+      event.interactionId,
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+  }
+  assert.equal(new Set(events.map((event) => event.interactionId)).size, events.length);
+  assert.deepEqual(
+    events.map((event) => event.sequence),
+    events.map((_, index) => index + 1),
+  );
+  assert.doesNotMatch(JSON.stringify(events), new RegExp(fixture.privateContentSentinel));
 });
 
 test("retryable telemetry reuses the exact event and payload", async () => {

@@ -10,6 +10,7 @@ const readJson = async (path) =>
 const conformance = await readJson("protocol/v1/conformance.json");
 const telemetrySchema = await readJson("protocol/v1/telemetry-batch.schema.json");
 const completion = conformance.mcpCompletion;
+const linkedJourney = conformance.mcpLinkedJourney;
 
 const operationPattern = /^[A-Za-z0-9/_:.*{}-]{1,160}$/;
 const referencePattern = /^[A-Za-z0-9_.:-]{1,160}$/;
@@ -130,6 +131,43 @@ test("completed MCP interaction vectors lock the constrained caller and SDK-owne
       );
     }
   }
+});
+
+test("linked journey fixture locks the prototype session semantics", () => {
+  assert.equal(linkedJourney.version, 1);
+  assert.deepEqual(Object.keys(linkedJourney.identity).sort(), [
+    "accountRef",
+    "anonymousRef",
+    "userRef",
+  ]);
+  assert.equal(
+    Object.values(linkedJourney.identity).every((value) => value.length > 0),
+    true,
+  );
+  assert.equal(linkedJourney.runtimeHint.length > 0, true);
+  assert.equal(linkedJourney.privateContentSentinel.length > 0, true);
+  assert.deepEqual(
+    linkedJourney.runs.map(({ name }) => name),
+    ["A", "B"],
+  );
+  assert.notEqual(linkedJourney.runs[0].sessionRef, linkedJourney.runs[1].sessionRef);
+  for (const run of linkedJourney.runs) {
+    assert.deepEqual(run.completions, [
+      { operation: "summarize", outcome: "success" },
+      { operation: "get_summary", outcome: "success" },
+      { operation: "get_summary", outcome: "success" },
+      { operation: "get_summary", outcome: "success" },
+    ]);
+  }
+  assert.deepEqual(linkedJourney.unlinked, [
+    { operation: "get_summary", outcome: "success", proof: "missing" },
+    {
+      operation: "get_summary",
+      outcome: "error",
+      proof: "invalid",
+      candidateSessionRef: "summary/invalid proof",
+    },
+  ]);
 });
 
 test("every emitted completion vector is valid telemetry and keeps source fields conditional", () => {
