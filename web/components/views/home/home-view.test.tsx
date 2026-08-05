@@ -42,9 +42,6 @@ describe("HomeView", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /view customers/i }));
     expect(new URL(window.location.href).searchParams.get("view")).toBe("customers");
-
-    fireEvent.click(screen.getByRole("button", { name: /view responses/i }));
-    expect(new URL(window.location.href).searchParams.get("view")).toBe("responses");
   });
 
   it("scrolls legacy setup deep links after the embedded section mounts", () => {

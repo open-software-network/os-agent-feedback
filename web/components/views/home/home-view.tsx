@@ -73,9 +73,6 @@ export function HomeView({
             <Button variant="outline" onClick={() => navigateToDashboardView("customers")}>
               View customers
             </Button>
-            <Button variant="outline" onClick={() => navigateToDashboardView("responses")}>
-              View responses
-            </Button>
           </div>
         </div>
       </section>
@@ -94,7 +91,7 @@ export function HomeView({
   );
 }
 
-type VisibleDashboardView = "customers" | "responses" | "sessions";
+type VisibleDashboardView = "customers" | "sessions";
 
 function scrollToSetup() {
   document.getElementById("setup")?.scrollIntoView?.({ behavior: "smooth", block: "start" });

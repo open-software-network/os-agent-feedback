@@ -11,8 +11,10 @@ export type ConfigurationSection = (typeof DASHBOARD_CONFIGURATION_VIEWS)[number
 
 const sectionContent: Record<ConfigurationSection, { label: string }> = {
   configuration: { label: "Product" },
-  team: { label: "Team" },
+  questions: { label: "Memory" },
+  connectors: { label: "Connectors" },
   policy: { label: "Data controls" },
+  team: { label: "Team" },
 };
 
 const MEMBER_CONFIGURATION_VIEWS: readonly ConfigurationSection[] = ["configuration", "team"];

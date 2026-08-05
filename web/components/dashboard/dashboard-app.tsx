@@ -21,7 +21,6 @@ import { FeedbackView } from "@/components/views/feedback/feedback-view";
 import { HomeView } from "@/components/views/home/home-view";
 import { InteractionDetail } from "@/components/views/interactions/interaction-detail";
 import { PolicyView } from "@/components/views/policy/policy-view";
-import { ResponsesView } from "@/components/views/responses/responses-view";
 import { SessionsView } from "@/components/views/sessions/sessions-view";
 import { TeamView } from "@/components/views/team/team-view";
 import { ApiError, apiRequest } from "@/lib/api/client";
@@ -111,7 +110,9 @@ export function DashboardApp() {
         ? "home"
         : requestedView === "context-fields"
           ? "questions"
-          : requestedView;
+          : requestedView === "responses"
+            ? "sessions"
+            : requestedView;
     setView(
       // "insights" is a retired view name kept as a URL alias for bookmarked links.
       canonicalView === "insights"
@@ -289,16 +290,6 @@ export function DashboardApp() {
     setView("feedback");
   }
 
-  function openCustomer(customerId: string) {
-    setNotice(null);
-    historyMode.current = "push";
-    setSelectedReportId(null);
-    setSelectedSessionId(null);
-    setSelectedInteractionId(null);
-    setSelectedCustomerId(customerId);
-    setView("customers");
-  }
-
   function openSession(sessionId: string) {
     setNotice(null);
     historyMode.current = "push";
@@ -358,11 +349,7 @@ export function DashboardApp() {
   const configurationActive =
     isConfigurationSection(view) || (data.products.length === 0 && data.currentRole !== "member");
   const fullBleed =
-    configurationActive ||
-    view === "feedback" ||
-    view === "customers" ||
-    view === "responses" ||
-    view === "sessions";
+    configurationActive || view === "feedback" || view === "customers" || view === "sessions";
 
   return (
     <DashboardShell
@@ -481,10 +468,6 @@ export function DashboardApp() {
             refresh={refresh}
           />
         );
-      case "responses":
-        return (
-          <ResponsesView data={currentData} openCustomer={openCustomer} openSession={openSession} />
-        );
       case "sessions":
         return (
           <SessionsView
@@ -507,17 +490,17 @@ export function DashboardApp() {
           <PolicyView data={currentData} refresh={refresh} setNotice={showNotice} />,
         );
       case "questions":
-        return isEditor(currentData.currentRole) ? (
-          <QuestionsView data={currentData} refresh={refresh} setNotice={showNotice} />
-        ) : (
-          homePage(currentData)
-        );
+        return isEditor(currentData.currentRole)
+          ? configurationPage(
+              currentData,
+              "questions",
+              <QuestionsView data={currentData} refresh={refresh} setNotice={showNotice} />,
+            )
+          : homePage(currentData);
       case "connectors":
-        return isEditor(currentData.currentRole) ? (
-          <ConnectorsView data={currentData} />
-        ) : (
-          homePage(currentData)
-        );
+        return isEditor(currentData.currentRole)
+          ? configurationPage(currentData, "connectors", <ConnectorsView data={currentData} />)
+          : homePage(currentData);
       case "team":
         return configurationPage(
           currentData,
