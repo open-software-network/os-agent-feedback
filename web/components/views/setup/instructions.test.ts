@@ -28,6 +28,9 @@ describe("company-side customer enrichment setup", () => {
     expect(instructions.code).toContain("accountRef:");
     expect(instructions.code).toContain("userRef:");
     expect(instructions.code).toContain("anonymousRef:");
+    expect(instructions.code).toContain("sessionRef:");
+    expect(instructions.code).toContain("canonicalId");
+    expect(instructions.code).toMatch(/\}\),\n {2}sessionRef: (?:req|request) =>/);
     expect(instructions.code).not.toContain("AGENT_FEEDBACK_KEY");
     expect(instructions.code).not.toContain("af_live_");
   });
@@ -48,7 +51,17 @@ describe("company-side customer enrichment setup", () => {
     expect(instructions.code).toContain('from "@epode/node/mcp"');
     expect(instructions.code).toContain('includeTools: ["search_products"]');
     expect(instructions.code).toContain('purpose: "product_personalization"');
-    expect(instructions.code).toContain("context.http?.authInfo?.extra?.accountId");
+    expect(instructions.code).toContain("new WeakMap<object, string>()");
+    expect(instructions.code).toContain("identify: (args, context, result)");
+    expect(instructions.code).toContain("customers.fromAuthInfo(context.http?.authInfo)");
+    expect(instructions.code).toContain("workflowCandidate(args, result)");
+    expect(instructions.code).toContain("workflows.findOwned(authenticatedCustomer, candidate)");
+    expect(instructions.code).toContain(
+      "ownedWorkflowByInvocation.set(context, ownedWorkflow.canonicalId)",
+    );
+    expect(instructions.code).toContain(
+      "sessionRef: context => ownedWorkflowByInvocation.get(context)",
+    );
     expect(instructions.code).toContain("customer.instrument(server)");
     expect(instructions.verify).toMatch(/real MCP client/i);
   });
@@ -62,6 +75,13 @@ describe("company-side customer enrichment setup", () => {
     expect(prompt).toMatch(/authentication before Epode/i);
     expect(prompt).toMatch(/product-owned first-party visitor ID/i);
     expect(prompt).toMatch(/do not invent customer identity, permission, answers/i);
+    expect(prompt).toMatch(/stable typed Customer identity/i);
+    expect(prompt).toMatch(/canonical ID returned by workflow creation/i);
+    expect(prompt).toMatch(/request or trace IDs/i);
+    expect(prompt).toMatch(/Run A[\s\S]*Session A[\s\S]*Run B[\s\S]*Session B/i);
+    expect(prompt).toMatch(/missing and invalid ownership proof[\s\S]*unlinked/i);
+    expect(prompt).toMatch(/Epode outage/i);
+    expect(prompt).toMatch(/arguments, prompts, results, credentials, or exceptions/i);
     expect(prompt).not.toContain("AGENT_FEEDBACK_KEY");
     expect(prompt).not.toContain("af_live_");
     expect(prompt).not.toContain("agent-feedback-node");

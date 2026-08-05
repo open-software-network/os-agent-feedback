@@ -1050,8 +1050,9 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await clickText(page, "4. Verify the complete loop");
   await textVisible(
     page,
-    "Setup complete: Epode received customer answers and your product retrieved them.",
+    "Answer activation loop complete; linked Sessions still require the manual checks below.",
   );
+  await textVisible(page, "Verify linked Sessions manually · not yet verified");
 
   await clickText(page, "Connectors");
   await textVisible(page, "Destinations");

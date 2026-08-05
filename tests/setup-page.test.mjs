@@ -356,8 +356,10 @@ test("setup communicates the HTTP and MCP evidence models separately", () => {
   );
   assert.match(
     dashboardScript,
-    /sessionRef: \(_args, context\) => verifiedField\(context, "journeyId"\)/,
+    /sessionRef: \(args, context, result\) => ownedCanonicalWorkflowId/,
   );
+  assert.match(dashboardScript, /workflowCandidate\(args, result\)/);
+  assert.match(dashboardScript, /product-registry ownership validation/);
   assert.match(dashboardScript, /createMcpHandler/);
   assert.match(dashboardScript, /server\/discover/);
   assert.match(dashboardScript, /Mcp-Method/);
@@ -380,6 +382,58 @@ test("setup teaches progressive identity without trusting callers or agents", ()
     dashboardScript,
     /sessionRef: (?:req|request|args)[\s\S]{0,90}(?:get\("x-|\.headers|\.query|\.body|\bargs\.)/,
   );
+});
+
+test("setup teaches and verifies product-owned linked Sessions", () => {
+  assert.match(dashboardScript, /stable typed Customer identity/);
+  assert.match(dashboardScript, /stable opaque workflow ID owned by your product/);
+  assert.match(dashboardScript, /canonical ID returned by workflow creation/);
+  assert.match(dashboardScript, /request\/trace IDs/);
+  assert.match(dashboardScript, /telemetry-only cache keys/);
+  assert.match(dashboardScript, /model\/tool-proposed values/);
+  assert.match(
+    dashboardScript,
+    /customerId may show resolved linkage while raw customerRef stays absent/,
+  );
+  assert.match(dashboardScript, /Run A[\s\S]*Session A[\s\S]*Run B[\s\S]*Session B/);
+  assert.match(dashboardScript, /missing\/invalid ownership proof stays unlinked/);
+  assert.match(dashboardScript, /normal calls survive an Epode outage/);
+  assert.match(dashboardScript, /do not prove exact correlation/);
+  assert.match(dashboardScript, /Waiting for the first interaction/);
+  assert.match(dashboardScript, /Waiting for agent feedback/);
+});
+
+test("every enabled non-static legacy stack gives explicit canonical Session extraction guidance", () => {
+  const stacks = [
+    "node-mcp",
+    "manual-mcp",
+    "node-express",
+    "node-fastify",
+    "python-asgi",
+    "python-wsgi",
+    "go",
+    "rust",
+    "manual-http",
+  ];
+  for (const stack of stacks) {
+    const marker = ["go", "rust"].includes(stack) ? `    ${stack}: {` : `    "${stack}": {`;
+    const start = dashboardScript.indexOf(marker);
+    const next = dashboardScript.slice(start + marker.length).search(/\n {4}(?:"[^"]+"|\w+): \{/);
+    const block = dashboardScript.slice(
+      start,
+      next >= 0 ? start + marker.length + next : dashboardScript.indexOf("  };", start),
+    );
+    assert.ok(start >= 0, `missing ${stack}`);
+    assert.match(block, /sessionRef|session_ref|SessionRef/, stack);
+    assert.match(block, /canonical/i, stack);
+    assert.match(block, /owned|ownership/, stack);
+  }
+  const staticStart = dashboardScript.indexOf('    "static-edge": {');
+  const staticBlock = dashboardScript.slice(
+    staticStart,
+    dashboardScript.indexOf('    "manual-http": {', staticStart),
+  );
+  assert.doesNotMatch(staticBlock, /sessionRef|linked Sessions|Run A|Run B/);
 });
 
 test("every enabled setup choice has a fresh executable E2E example", async () => {

@@ -1053,6 +1053,17 @@ describe("dashboard view behavior", () => {
     expect(screen.getAllByText("Customer answers received").length).toBeGreaterThan(0);
     expect(screen.getAllByText("SDK connected").length).toBeGreaterThan(0);
     expect(screen.getByText(/3 answers are available/)).toBeVisible();
+    expect(screen.getByText("Verify linked Sessions manually · not yet verified")).toBeVisible();
+    expect(
+      screen.getByText(
+        /Run A create, cache\/dedup replay, and ordered follow-up appear in Session A/,
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        /activation totals prove transport and answer milestones, not exact Session correlation/i,
+      ),
+    ).toBeVisible();
   });
 
   it("keeps product setup connected while a rotated key overlaps its unused successor", () => {
@@ -1095,7 +1106,13 @@ describe("dashboard view behavior", () => {
     [0, 0, 0, "Not connected", /Next: deploy the product key/],
     [1, 0, 0, "SDK connected", /company-side connection works/],
     [1, 1, 0, "Customer answers received", /Answers are ready/],
-    [1, 1, 1, "Customer answers are ready for personalization", /Setup complete/],
+    [
+      1,
+      1,
+      1,
+      "Customer answers are ready for personalization",
+      /linked Sessions still require the manual checks below/,
+    ],
   ] as const)("separates SDK, learning, and retrieval activation at %i/%i/%i", (connected, learned, retrieved, description, nextAction) => {
     const base = dashboardFixture();
     const activationMilestones = base.activationMilestones;
