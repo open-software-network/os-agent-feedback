@@ -388,10 +388,7 @@ test("the Customer, Response, and Session contract fixes identity and artifact o
   assert.match(contract, /one request-owned interaction ID/);
   assert.match(contract, /Customer and Session links only from the interaction/);
   assert.match(contract, /interaction's persisted `session_id`/);
-  assert.match(
-    contract,
-    /`company_mcp`[\s\S]*`epode_companion`[\s\S]*`same_origin_best_effort`/,
-  );
+  assert.match(contract, /`company_mcp`[\s\S]*`epode_companion`[\s\S]*`same_origin_best_effort`/);
   assert.match(contract, /owner is selected before issuance and remains immutable/);
   assert.match(contract, /purpose, retention or expiry policy, `rememberAllowed`, allowed options/);
   assert.match(contract, /catalog identity and version\s+or hash/);
