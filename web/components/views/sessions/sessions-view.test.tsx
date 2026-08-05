@@ -142,7 +142,7 @@ describe("SessionsView", () => {
       />,
     );
 
-    const responses = await screen.findByRole("region", { name: "Shared context" });
+    const responses = await screen.findByRole("region", { name: "Permissioned memory" });
     const journey = screen.getByRole("region", { name: "Observed journey" });
     expect(journey.compareDocumentPosition(responses) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
@@ -202,9 +202,9 @@ describe("SessionsView", () => {
       />,
     );
 
-    const responses = await screen.findByRole("region", { name: "Shared context" });
+    const responses = await screen.findByRole("region", { name: "Permissioned memory" });
     expect(
-      within(responses).getByText("The customer agent declined to share context."),
+      within(responses).getByText("The customer agent declined to share permissioned memory."),
     ).toBeVisible();
     expect(within(responses).queryByText(/^Declined$/)).not.toBeInTheDocument();
   });
