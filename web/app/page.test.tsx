@@ -33,7 +33,7 @@ describe("dashboard data flow", () => {
       "Home",
       "Customers",
       "Responses",
-      "Sessions",
+      "Journeys",
       "Questions",
       "Connectors",
       "Configurations",

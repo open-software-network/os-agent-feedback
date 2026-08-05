@@ -56,8 +56,8 @@ export function SetupView({
   refresh: () => Promise<unknown>;
   setNotice: (message: string) => void;
 }) {
-  const [surface, setSurface] = useState<SetupSurface>("api");
-  const [stack, setStack] = useState<SetupStack>("node-express");
+  const [surface, setSurface] = useState<SetupSurface>("experience");
+  const [stack, setStack] = useState<SetupStack>("node-experience");
   const [identityExample, setIdentityExample] = useState<IdentityExample>("known");
   const [expandedSection, setExpandedSection] = useState<SetupSectionId | null>(
     () => setupSectionFromLocation() ?? "install",
@@ -208,7 +208,7 @@ const result = answers.available
           { label: "Product key", value: writeKey ? "Ready" : "Missing" },
           { label: "SDK connected", value: opportunityActivated ? "Complete" : "Waiting" },
           { label: "Answers stored", value: contextLearned.toLocaleString() },
-          { label: "Customers with answers", value: customersWithContext.toLocaleString() },
+          { label: "Customers with context", value: customersWithContext.toLocaleString() },
           { label: "Ready customers", value: personalizationReady.toLocaleString() },
           { label: "Answer retrievals", value: contextRetrieved.toLocaleString() },
           { label: "Decisions", value: personalizationDecisions.toLocaleString() },
@@ -216,8 +216,8 @@ const result = answers.available
         ]}
       />
       <StatusMessage>
-        Install Epode once in your company&apos;s product. Your customers do not need an Epode
-        account, app, plugin, or SDK.
+        Install Epode once to serve an agent experience graph and optional permissioned context.
+        Your customers do not need an Epode account, app, plugin, or SDK.
       </StatusMessage>
       {error ? <StatusMessage tone="error">{error}</StatusMessage> : null}
       {legacyKey ? (
@@ -233,8 +233,8 @@ const result = answers.available
         onToggle={() => toggleSection("install")}
       >
         <p className="max-w-3xl text-sm text-muted-foreground">
-          Choose how customers&apos; agents reach your product, then add one server-side
-          integration. If Epode is unavailable, the SDK preserves the normal product response.
+          Start with the agent experience graph for negotiation and journey telemetry, or choose an
+          enrichment surface. If Epode is unavailable, product responses stay fail-open.
         </p>
         <div className="flex flex-wrap gap-2">
           {(Object.keys(SETUP_SURFACES) as SetupSurface[]).map((item) => (
@@ -243,7 +243,10 @@ const result = answers.available
               type="button"
               variant={surface === item ? "default" : "outline"}
               aria-pressed={surface === item}
-              onClick={() => setSurface(item)}
+              onClick={() => {
+                setSurface(item);
+                setStack(SETUP_SURFACES[item].stacks[0] as SetupStack);
+              }}
             >
               {SETUP_SURFACES[item].name}
             </Button>

@@ -325,7 +325,7 @@ test("feedback, interaction, and session explorers render and preserve linked co
   await handlers.click({ target: { closest: () => button({ report: "report-1" }) } });
   assert.equal(heading.focused, true);
   assert.match(page.innerHTML, /Linked product context/);
-  assert.match(page.innerHTML, /Open session/);
+  assert.match(page.innerHTML, /Open journey/);
 
   await handlers.click({ target: { closest: () => button({ openSession: "session-1" }) } });
   assert.match(page.innerHTML, /Interaction journey/);

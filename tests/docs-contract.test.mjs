@@ -518,7 +518,7 @@ test("primary onboarding is company-only customer enrichment", async () => {
   assert.match(primary, /Customers/);
   assert.match(primary, /Home/);
   assert.match(primary, /Responses/);
-  assert.match(primary, /Sessions/);
+  assert.match(primary, /Journeys/);
   assert.match(primary, /@epode\/node/);
   assert.match(primary, /EPODE_API_KEY/);
   assert.match(primary, /\/_epode\/v1\/enrichment\/consent/);

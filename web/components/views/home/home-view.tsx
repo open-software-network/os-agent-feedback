@@ -23,6 +23,8 @@ export function HomeView({
   setNotice: (message: string) => void;
 }) {
   const needsSetup = data.insights.opportunities === 0 && isEditor(data.currentRole);
+  const journeys = data.listState.sessionsTotal;
+  const interactions = data.insights.opportunities;
 
   useEffect(() => {
     if (window.location.hash !== "#setup") return;
@@ -37,23 +39,42 @@ export function HomeView({
         <div className="p-5 md:p-6">
           <Image src="/epode-logo.svg" alt="EPODE" width={56} height={13} className="dark:invert" />
           <h2 id="home-title" className="mt-4 max-w-2xl text-2xl font-medium">
-            Epode asks customer agents questions and records their answers.
+            Epode is the agent experience and analytics layer for your product.
           </h2>
           <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">
-            Every response stays connected to the customer and session where the question was asked,
-            so your team can understand who answered, what they said, and when.
+            Serve a merchant-authored experience graph, capture current-task need state as agents
+            negotiate, personalize the product, and measure the journey from arrival to decision.
           </p>
+          <div className="mt-5 grid gap-3 sm:grid-cols-3">
+            <div className="border bg-muted/20 p-3">
+              <p className="text-xs text-muted-foreground">Proven journeys</p>
+              <p className="mt-1 text-xl font-medium">{journeys.toLocaleString()}</p>
+            </div>
+            <div className="border bg-muted/20 p-3">
+              <p className="text-xs text-muted-foreground">Observed interactions</p>
+              <p className="mt-1 text-xl font-medium">{interactions.toLocaleString()}</p>
+            </div>
+            <div className="border bg-muted/20 p-3">
+              <p className="text-xs text-muted-foreground">Loop</p>
+              <p className="mt-1 text-sm font-medium leading-5">
+                Arrive → negotiate → personalize → measure
+              </p>
+            </div>
+          </div>
           <div className="mt-6 flex flex-wrap gap-2">
             {needsSetup ? (
               <Button onClick={scrollToSetup}>Finish setup</Button>
             ) : (
-              <Button onClick={() => navigateToDashboardView("responses")}>
-                View responses
+              <Button onClick={() => navigateToDashboardView("sessions")}>
+                View journeys
                 <IconArrowUpRight data-icon="inline-end" />
               </Button>
             )}
             <Button variant="outline" onClick={() => navigateToDashboardView("customers")}>
               View customers
+            </Button>
+            <Button variant="outline" onClick={() => navigateToDashboardView("responses")}>
+              View responses
             </Button>
           </div>
         </div>

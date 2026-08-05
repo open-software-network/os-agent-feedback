@@ -1,7 +1,7 @@
 {
   "name": "@epode/node",
   "version": "0.4.0",
-  "description": "Learn permissioned customer context through customer agents, then personalize and measure the product experience.",
+  "description": "Serve agent experience graphs, learn permissioned customer context, and measure agent-mediated product outcomes.",
   "repository": {
     "type": "git",
     "url": "https://github.com/open-software-network/os-epode.git",
@@ -52,6 +52,10 @@
     "./edge": {
       "types": "./dist/edge.d.ts",
       "import": "./dist/edge.js"
+    },
+    "./experience-graph": {
+      "types": "./dist/experience-graph.d.ts",
+      "import": "./dist/experience-graph.js"
     }
   },
   "files": [
@@ -102,7 +106,9 @@
     "customer-intelligence",
     "personalization",
     "ai-agents",
-    "mcp"
+    "mcp",
+    "agent-experience",
+    "experience-graph"
   ],
   "license": "MIT",
   "publishConfig": {

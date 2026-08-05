@@ -70,7 +70,7 @@ const emptySessionConstraints: SessionConstraints = {
 };
 
 const sessionFilterLabels: Record<SessionFilter, string> = {
-  all: "All sessions",
+  all: "All journeys",
   multi: "Multi-step",
   response: "Has response",
   no_response: "No response",
@@ -309,14 +309,15 @@ export function SessionsView({
     >
       <MetricStrip
         items={[
-          { label: "Proven sessions", value: rollup.sessions.toLocaleString() },
+          { label: "Proven journeys", value: rollup.sessions.toLocaleString() },
           { label: "Interactions", value: rollup.interactions.toLocaleString() },
           { label: "Multi-step", value: rollup.multiStepSessions.toLocaleString() },
           { label: "Average", value: rollup.averageInteractions.toFixed(1) },
         ]}
       />
       <p className="border-b bg-muted/25 px-4 py-2 text-xs text-muted-foreground">
-        Sessions exist only when the product supplies a stable reference.
+        Journeys exist only when the product supplies a stable experience-graph or session
+        reference.
       </p>
       <div className="flex shrink-0 flex-col gap-2 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <InputGroup className="w-full bg-background sm:w-80 sm:flex-none">
@@ -324,10 +325,10 @@ export function SessionsView({
             <IconMagnifyingGlass />
           </InputGroupAddon>
           <InputGroupInput
-            aria-label="Search sessions"
+            aria-label="Search journeys"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search session, customer, or operation"
+            placeholder="Search journey, customer, or operation"
           />
         </InputGroup>
         <div className="flex shrink-0 items-center gap-2">
@@ -380,14 +381,14 @@ export function SessionsView({
           </Button>
         </div>
       ) : null}
-      <section className="min-h-0 flex-1 overflow-auto bg-background" aria-label="Sessions">
+      <section className="min-h-0 flex-1 overflow-auto bg-background" aria-label="Journeys">
         {sessionPages.isError ? (
           <div className="p-4 text-sm text-destructive" role="alert">
-            Sessions could not be loaded. Use Refresh to try again.
+            Journeys could not be loaded. Use Refresh to try again.
           </div>
         ) : sessionPages.isPending || searchSettling ? (
           <p className="p-4 text-sm text-muted-foreground" role="status">
-            Loading sessions…
+            Loading journeys…
           </p>
         ) : sessionRows.length ? (
           <Table className="min-w-[760px] table-fixed">
@@ -415,13 +416,13 @@ export function SessionsView({
             <EmptyState
               title={
                 data.listState.sessionsTotal === 0
-                  ? "No proven sessions yet"
-                  : "No matching sessions"
+                  ? "No proven journeys yet"
+                  : "No matching journeys"
               }
               description={
                 data.listState.sessionsTotal === 0
-                  ? "Sessions appear only after the product supplies a stable application-level reference."
-                  : "Clear the search and constraints or choose a different session view."
+                  ? "Journeys appear after an agent traverses an experience graph or the product supplies a stable session reference."
+                  : "Clear the search and constraints or choose a different journey view."
               }
               action={
                 data.listState.sessionsTotal === 0 ? null : (
@@ -446,7 +447,7 @@ export function SessionsView({
         <div className="flex shrink-0 items-center justify-between gap-3 border-t bg-background px-4 py-2 text-xs text-muted-foreground">
           <p aria-live="polite">
             Showing {sessionRows.length.toLocaleString()} of {rollup.sessions.toLocaleString()}{" "}
-            matching sessions. Filters cover all retained sessions.
+            matching journeys. Filters cover all retained journeys.
           </p>
           <Button
             variant="outline"
@@ -497,16 +498,16 @@ function SessionFilters({
       </PopoverTrigger>
       <PopoverContent align="end" className="w-[min(22rem,calc(100vw-2rem))]">
         <PopoverHeader>
-          <PopoverTitle>Filter proven sessions</PopoverTitle>
+          <PopoverTitle>Filter proven journeys</PopoverTitle>
         </PopoverHeader>
         <div className="grid gap-3">
           <fieldset className="grid gap-1.5">
-            <legend className="text-sm font-medium">Session type</legend>
+            <legend className="text-sm font-medium">Journey type</legend>
             <ToggleGroup
               orientation="vertical"
               size="sm"
               value={[draftFilter]}
-              aria-label="Session type"
+              aria-label="Journey type"
               className="w-full items-stretch gap-1"
               onValueChange={(value) => {
                 const next = value[0] as SessionFilter | undefined;
@@ -631,7 +632,7 @@ function SessionRow({
     <TableRow
       data-state={selected ? "selected" : undefined}
       aria-selected={selected}
-      aria-label={`Open session ${session.refHint}`}
+      aria-label={`Open journey ${session.refHint}`}
       tabIndex={0}
       className="cursor-pointer bg-background hover:bg-muted/40 data-[state=selected]:bg-selected data-[state=selected]:shadow-[inset_2px_0_0_var(--attention)]"
       onClick={onOpen}
@@ -694,10 +695,10 @@ function SessionInspector({
   openInteraction: (interactionId: string) => void;
 }) {
   return (
-    <DetailRail open onClose={close} label="Session detail">
+    <DetailRail open onClose={close} label="Journey detail">
       <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-4">
-        <span className="text-sm font-medium">Session</span>
-        <Button variant="ghost" size="icon-sm" aria-label="Close session detail" onClick={close}>
+        <span className="text-sm font-medium">Journey</span>
+        <Button variant="ghost" size="icon-sm" aria-label="Close journey detail" onClick={close}>
           <IconCrossSmall />
         </Button>
       </div>
@@ -706,7 +707,7 @@ function SessionInspector({
           {error ? (
             <div className="grid gap-3">
               <p className="break-all font-mono text-xs text-muted-foreground">
-                Session {requestedId}
+                Journey {requestedId}
               </p>
               <ErrorState error={error} onRetry={() => void retry()} />
             </div>
@@ -718,7 +719,7 @@ function SessionInspector({
             />
           ) : (
             <p className="text-sm text-muted-foreground" role="status">
-              Loading session <span className="font-mono">{requestedId}</span>…
+              Loading journey <span className="font-mono">{requestedId}</span>…
             </p>
           )}
         </div>
@@ -750,7 +751,8 @@ function SessionJourney({
         {detail.session.refHint}
       </h2>
       <p className="mt-2 text-xs leading-5 text-muted-foreground">
-        Grouped from the stable session reference supplied by the product.
+        Grouped from the stable journey reference supplied by the product experience graph or
+        session handle.
       </p>
 
       <dl className="mt-5 grid grid-cols-[100px_1fr] gap-x-3 gap-y-3 text-xs">

@@ -33,7 +33,12 @@ const ids = {
 };
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const artifactDirectory = path.resolve(repositoryRoot, "..", ".artifacts", "browser-release-e2e");
+const artifactDirectory = path.resolve(
+  repositoryRoot,
+  "..",
+  ".artifacts",
+  "real-dashboard-screenshots",
+);
 
 function product(id, name) {
   return {
@@ -939,6 +944,7 @@ function requestPath(pathname) {
 }
 
 async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
+  await mkdir(artifactDirectory, { recursive: true });
   const initialResponse = await page.goto(`${baseUrl}/`, { waitUntil: "networkidle0" });
   assert.match(
     initialResponse?.headers()["content-security-policy"] ?? "",
@@ -957,17 +963,18 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   );
 
   await clickText(page, "Continue");
-  await textVisible(page, "Epode asks customer agents questions and records their answers.");
+  await textVisible(page, "Epode is the agent experience and analytics layer for your product.");
   assert.equal(new URL(page.url()).pathname, "/", "the dashboard must live at the root, not /app");
   assert.equal(state.authStarts, 2, "retry should reach the same OS Accounts handoff route");
   await fixtureRequest(state, requestPath("/api/dashboard"), "initial dashboard data");
+  await page.screenshot({ path: path.join(artifactDirectory, "01-home.png"), fullPage: true });
 
   await page.click("button[aria-label*='open product menu']");
   await clickText(page, "Billing API");
-  await textVisible(page, "Epode asks customer agents questions and records their answers.");
+  await textVisible(page, "Epode is the agent experience and analytics layer for your product.");
   await page.click("button[aria-label*='open product menu']");
   await clickText(page, "Search API");
-  await textVisible(page, "Epode asks customer agents questions and records their answers.");
+  await textVisible(page, "Epode is the agent experience and analytics layer for your product.");
 
   await clickText(page, "Responses");
   const responses = await fixtureRequest(
@@ -992,6 +999,7 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await textVisible(page, "Find the newest indexed policy");
   await textVisible(page, "Acme workspace");
   await textVisible(page, "session-42");
+  await page.screenshot({ path: path.join(artifactDirectory, "05-responses.png"), fullPage: true });
 
   await clickText(page, "Customers");
   await page.waitForSelector('input[aria-label="Search customers"]', { visible: true });
@@ -1004,7 +1012,8 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await textVisible(page, "Request facts");
   await textVisible(page, "IP 203.0.113.42");
   await textVisible(page, "MAC addresses are not exposed by routed HTTP");
-  await textVisible(page, "Sessions");
+  await textVisible(page, "Journeys");
+  await page.screenshot({ path: path.join(artifactDirectory, "02-customers.png"), fullPage: true });
   const customerDetail = await fixtureRequest(
     state,
     requestPath(`/api/dashboard/customers/${ids.customerOne}`),
@@ -1021,7 +1030,9 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
     "BFF must forward the real browser session cookie to its API origin",
   );
 
-  await clickText(page, "Sessions");
+  await clickText(page, "Journeys");
+  await textVisible(page, "Proven journeys");
+  await page.screenshot({ path: path.join(artifactDirectory, "03-journeys.png"), fullPage: true });
   await clickText(page, "Filters");
   await textVisible(page, "Has response");
   await textVisible(page, "No response");
@@ -1037,13 +1048,18 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
 
   await clickText(page, "Home");
   await textVisible(page, "Connect Search API");
-  await textVisible(page, "Install Epode once in your company's product.");
+  await textVisible(
+    page,
+    "Install Epode once to serve an agent experience graph and optional permissioned context.",
+  );
+  await textVisible(page, "Agent experience graph");
   await metricVisible(page, "Product key", "Ready");
   await metricVisible(page, "SDK connected", "Complete");
   await metricVisible(page, "Answers stored", "1");
-  await metricVisible(page, "Customers with answers", "1");
+  await metricVisible(page, "Customers with context", "1");
   await metricVisible(page, "Ready customers", "1");
   await metricVisible(page, "Answer retrievals", "2");
+  await page.screenshot({ path: path.join(artifactDirectory, "04-setup.png"), fullPage: true });
   await textVisible(page, "1. Install Epode");
   await textVisible(page, "2. Identify customers when possible");
   await textVisible(page, "3. Use answers to personalize");

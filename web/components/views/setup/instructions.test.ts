@@ -5,8 +5,20 @@ import { SETUP_SURFACES, setupAgentPrompt, setupInstructions } from "./instructi
 const origin = "https://app.epode.ai";
 
 describe("company-side customer enrichment setup", () => {
-  it("offers the three implemented product surfaces", () => {
-    expect(Object.keys(SETUP_SURFACES)).toEqual(["api", "website", "mcp"]);
+  it("configures the agent experience graph surface with journey telemetry", () => {
+    const instructions = setupInstructions("node-experience", "experience", origin);
+    expect(instructions.install).toContain("@epode/node@0.4");
+    expect(instructions.code).toContain("@epode/node/experience-graph");
+    expect(instructions.code).toContain("createExperienceGraph");
+    expect(instructions.code).toContain("experienceTelemetryDetails");
+    expect(instructions.code).toContain("/agent-negotiate");
+    expect(instructions.code).toContain("/agent-decide");
+    expect(instructions.verify).toMatch(/journey session telemetry/i);
+  });
+
+  it("offers the four implemented product surfaces", () => {
+    expect(Object.keys(SETUP_SURFACES)).toEqual(["experience", "api", "website", "mcp"]);
+    expect(SETUP_SURFACES.experience.stacks).toEqual(["node-experience"]);
     expect(SETUP_SURFACES.api.stacks).toEqual(["node-express", "node-fastify"]);
     expect(SETUP_SURFACES.website.stacks).toEqual(["node-express", "node-fastify"]);
     expect(SETUP_SURFACES.mcp.stacks).toEqual(["node-mcp"]);
@@ -64,6 +76,17 @@ describe("company-side customer enrichment setup", () => {
     );
     expect(instructions.code).toContain("customer.instrument(server)");
     expect(instructions.verify).toMatch(/real MCP client/i);
+  });
+
+  it("gives coding agents an experience-graph implementation contract", () => {
+    const instructions = setupInstructions("node-experience", "experience", origin);
+    const prompt = setupAgentPrompt("experience", "node-experience", instructions, origin);
+    expect(prompt).toContain("agent experience graph");
+    expect(prompt).toContain("experienceTelemetryDetails");
+    expect(prompt).toContain("/agent-negotiate");
+    expect(prompt).toMatch(/current-task decision input/i);
+    expect(prompt).not.toContain("AGENT_FEEDBACK_KEY");
+    expect(prompt).not.toContain("af_live_");
   });
 
   it("gives coding agents an exact, privacy-bounded implementation contract", () => {

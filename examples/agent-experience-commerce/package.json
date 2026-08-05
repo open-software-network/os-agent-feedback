@@ -1,0 +1,16 @@
+{
+  "name": "epode-agent-experience-commerce",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test ../../tests/agent-experience-commerce-e2e.mjs"
+  },
+  "dependencies": {
+    "@epode/node": "file:../../sdk/node",
+    "express": "^5.2.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

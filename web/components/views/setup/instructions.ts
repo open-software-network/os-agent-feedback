@@ -1,4 +1,10 @@
 export const SETUP_SURFACES = {
+  experience: {
+    name: "Agent experience graph",
+    description:
+      "Serve a merchant-authored need negotiation graph and measure the agent journey as Epode sessions.",
+    stacks: ["node-experience"],
+  },
   api: {
     name: "HTTP API",
     description: "Add permissioned customer-answer requests to selected JSON responses.",
@@ -18,9 +24,10 @@ export const SETUP_SURFACES = {
 } as const;
 
 export type SetupSurface = keyof typeof SETUP_SURFACES;
-export type SetupStack = "node-express" | "node-fastify" | "node-mcp";
+export type SetupStack = "node-experience" | "node-express" | "node-fastify" | "node-mcp";
 
 const STACK_NAMES: Record<SetupStack, string> = {
+  "node-experience": "Node · Experience graph",
   "node-express": "Node · Express",
   "node-fastify": "Node · Fastify",
   "node-mcp": "Node · MCP",
@@ -41,6 +48,76 @@ export function setupInstructions(
   surface: SetupSurface,
   _origin: string,
 ): Instructions {
+  if (stack === "node-experience" || surface === "experience") {
+    return {
+      install: "npm install @epode/node@0.4 express",
+      code: `import { randomUUID } from "node:crypto";
+import express from "express";
+import { AgentFeedbackRuntime } from "@epode/node";
+import {
+  createExperienceGraph,
+  createLightingExperienceCatalog,
+  experienceTelemetryDetails,
+} from "@epode/node/experience-graph";
+
+const graph = createExperienceGraph(createLightingExperienceCatalog());
+const runtime = new AgentFeedbackRuntime({
+  apiKey: process.env.EPODE_API_KEY,
+  include: ["/agent-negotiate/**", "/agent-decide/**", "/agent-item"],
+  runtimeHint: () => "agent-experience/1.0",
+});
+
+const app = express();
+
+app.get("/agent-negotiate/:journeyId/:category/*tokens", (req, res) => {
+  const tokens = String(req.params.tokens || "")
+    .split("/")
+    .filter(Boolean);
+  const node = graph.buildNegotiation({
+    origin: \`\${req.protocol}://\${req.get("host")}\`,
+    journeyId: req.params.journeyId,
+    tokens,
+  });
+  runtime.record(
+    runtime.prepare(),
+    experienceTelemetryDetails({
+      operation: node.operation,
+      journeyId: node.journeyId,
+      statusCode: 200,
+      runtimeHint: "agent-experience/1.0",
+    }),
+  );
+  void runtime.flush();
+  res.json(node);
+});
+
+app.get("/agent-decide/:journeyId/:category/*tokens", (req, res) => {
+  const tokens = String(req.params.tokens || "")
+    .split("/")
+    .filter(Boolean);
+  const node = graph.buildDecision({
+    origin: \`\${req.protocol}://\${req.get("host")}\`,
+    journeyId: req.params.journeyId,
+    tokens,
+    searchId: randomUUID(),
+  });
+  runtime.record(
+    runtime.prepare(),
+    experienceTelemetryDetails({
+      operation: node.operation,
+      journeyId: node.journeyId,
+      statusCode: node.error ? 422 : 200,
+      runtimeHint: "agent-experience/1.0",
+    }),
+  );
+  void runtime.flush();
+  res.status(node.error ? 422 : 200).json(node);
+});`,
+      verify:
+        "Open / as an agent user agent, walk one supplied negotiation edge, call /agent-decide after a decision input, and confirm Epode receives journey session telemetry.",
+    };
+  }
+
   const route = surface === "website" ? "/recommendations" : "/api/recommendations";
   const install = "npm install @epode/node@0.4 express";
 
@@ -138,6 +215,30 @@ export function setupAgentPrompt(
   instructions: Instructions,
   _origin: string,
 ): string {
+  if (surface === "experience" || stack === "node-experience") {
+    return `Install Epode's agent experience graph in this repository.
+
+Surface: ${SETUP_SURFACES.experience.name}
+Stack: ${stackName(stack)}
+
+Requirements:
+- Use EPODE_API_KEY only from the server environment. Never print, log, or expose it.
+- Install exactly: ${instructions.install}
+- Serve humans/crawlers ordinary HTML and known agent clients a machine-readable guide at the same product URL.
+- Expose generic need dimensions first and only exact merchant-authored transitions.
+- Require at least one current-task decision input before ranked results.
+- Map each hop onto Epode session telemetry with experienceTelemetryDetails; do not invent free-form need-state telemetry fields.
+- Keep product responses independent of telemetry delivery.
+- Do not invent customer identity, permission, answers, or a successful verification.
+
+Reference integration:
+
+${instructions.code}
+
+Verification:
+${instructions.verify}`;
+  }
+
   const boundary =
     surface === "mcp"
       ? "Keep includeTools limited to customer-facing product tools."

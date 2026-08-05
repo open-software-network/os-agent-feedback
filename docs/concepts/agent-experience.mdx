@@ -1,0 +1,91 @@
+---
+title: "Agent experience graph"
+description: "Merchant-authored need negotiation for customer agents."
+---
+
+The agent experience graph is Epode's primary product surface for agent-mediated journeys.
+
+It is not a sitemap and not a free-form preference dump. It is a machine-readable negotiation in
+which the merchant exposes discriminating dimensions, the agent expresses only current-task
+utility, and each side progressively reduces uncertainty until a verifiable recommendation is
+possible.
+
+## Why it exists
+
+When an agent shops, books, or researches on a customer's behalf, the company often loses:
+
+- the interactive interface
+- faceted intent signals
+- trustworthy product facts
+- a measurable journey funnel
+
+The experience graph restores those without asking the agent to export a general-purpose profile.
+
+## Rules that matter
+
+1. Start with generic dimensions, not values that look like remembered profile fields.
+2. Reveal catalog-derived values only after the agent selects a relevant dimension.
+3. Require one real decision input before ranked results.
+4. Carry typed need state through exact merchant-authored transitions.
+5. Open exactly one supplied edge per hop. Never invent path segments.
+6. Separate exact matches from near misses.
+7. Offer counterfactuals only when hard requirements produce zero exact matches.
+8. Use ordinary attributed detail links as product-evaluation telemetry.
+9. Map journey hops onto Epode `sessionRef` / `operation` telemetry without extending the closed
+   telemetry schema with free-form need-state blobs.
+
+## Node SDK
+
+```ts
+import {
+  createExperienceGraph,
+  createLightingExperienceCatalog,
+  experienceTelemetryDetails,
+} from "@epode/node/experience-graph";
+import { AgentFeedbackRuntime } from "@epode/node";
+
+const graph = createExperienceGraph(createLightingExperienceCatalog());
+const runtime = new AgentFeedbackRuntime({
+  apiKey: process.env.EPODE_API_KEY!,
+  include: ["/agent-negotiate/**", "/agent-decide/**", "/agent-item"],
+});
+
+const negotiation = graph.buildNegotiation({
+  origin: "https://shop.example",
+  journeyId: "j-...",
+  tokens: ["budget-hard-150", "purpose-coding"],
+});
+
+runtime.record(
+  runtime.prepare(),
+  experienceTelemetryDetails({
+    operation: negotiation.operation,
+    journeyId: negotiation.journeyId,
+    statusCode: 200,
+    runtimeHint: "shop.example/agent-experience",
+  }),
+);
+```
+
+## Reference product
+
+`examples/agent-experience-commerce` is the Fieldnote
+commerce reference:
+
+- humans and crawlers receive HTML at `/`
+- known agent user agents receive the guide
+- `/agent-negotiate/...` captures need state one edge at a time
+- `/agent-decide/...` ranks only after a decision input exists
+- `/agent-item` returns declarative catalog facts for evaluated products
+
+Run the end-to-end suite with:
+
+```bash
+pnpm run test:agent-experience
+```
+
+## Relationship to customer context
+
+Current-task need state from the graph is interaction state. Cross-session remembered preferences
+still require Epode's permissioned customer-context flow, bounded catalogs, and purpose separation.
+Do not treat a URL-selected budget or purpose as durable identity-level memory.
