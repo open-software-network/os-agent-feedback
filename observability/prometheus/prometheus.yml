@@ -1,0 +1,12 @@
+# Prometheus receives all application metrics through the collector's OTLP
+# exporter (native OTLP ingest, enabled by flag in the Dockerfile), so the
+# only scrape job here is Prometheus itself.
+
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

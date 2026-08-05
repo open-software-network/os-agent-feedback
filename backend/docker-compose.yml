@@ -15,5 +15,28 @@ services:
     volumes:
       - agent_feedback_pg:/var/lib/postgresql/data
 
+  # Local observability stack: Grafana + Loki + Tempo + Mimir/Prometheus + an
+  # OpenTelemetry collector in one development container. Start it with
+  # `make dev-observability`; the backend and web app export to it only when
+  # OTEL_EXPORTER_OTLP_ENDPOINT is set, so this service is fully optional.
+  # This image is documented by Grafana as a development/evaluation image;
+  # production uses the per-component stack under observability/.
+  observability:
+    image: grafana/otel-lgtm:0.30.0
+    ports:
+      # Grafana UI (kept off 3000, which belongs to the Next.js dev server).
+      - "3001:3000"
+      # OTLP receivers (gRPC and HTTP).
+      - "4317:4317"
+      - "4318:4318"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/api/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+    volumes:
+      - agent_feedback_otel:/data
+
 volumes:
   agent_feedback_pg:
+  agent_feedback_otel:

@@ -1,4 +1,4 @@
-.PHONY: help install node-install backend-install node-version-check dev-env dev-setup dev-bootstrap dev-compose-check dev-db dev-db-stop dev-backend dev-web backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test sdk-node-test web-install web-types-check web-check web-typecheck web-test web-release-e2e web-build docs-validate docs-a11y types check
+.PHONY: help install node-install backend-install node-version-check dev-env dev-setup dev-bootstrap dev-compose-check dev-db dev-db-stop dev-observability dev-observability-stop dev-backend dev-web backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test sdk-node-test web-install web-types-check web-check web-typecheck web-test web-release-e2e web-build docs-validate docs-a11y types check
 
 .DEFAULT_GOAL := help
 
@@ -61,6 +61,13 @@ dev-db: dev-compose-check  ## Start the local PostgreSQL container and wait unti
 
 dev-db-stop: dev-compose-check  ## Stop local PostgreSQL without deleting its data
 	$(DEV_COMPOSE) -f backend/docker-compose.yml stop postgres
+
+dev-observability: dev-compose-check  ## Start the local Grafana OTel stack (Grafana on http://localhost:3001)
+	$(DEV_COMPOSE) -f backend/docker-compose.yml up -d --wait observability
+	@echo "Grafana is on http://localhost:3001 (admin/admin). Set OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 in backend/.env and web/.env.local to export telemetry."
+
+dev-observability-stop: dev-compose-check  ## Stop the local observability stack without deleting its data
+	$(DEV_COMPOSE) -f backend/docker-compose.yml stop observability
 
 dev-backend: dev-db  ## Start the Rust API on http://localhost:8080
 	cd backend && cargo run --locked --bin agent-feedback

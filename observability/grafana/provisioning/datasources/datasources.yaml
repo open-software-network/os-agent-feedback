@@ -1,0 +1,36 @@
+# Grafana datasources, wired for correlation: from a trace you can jump to
+# the request's logs in Loki or the service's metrics in Prometheus.
+# Hostnames use Railway private DNS and assume services named `prometheus`,
+# `loki`, and `tempo`.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus.railway.internal:9090
+    isDefault: true
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki.railway.internal:3100
+
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo.railway.internal:3200
+    jsonData:
+      nodeGraph:
+        enabled: true
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: "-5m"
+        spanEndTimeShift: "5m"
+        filterByTraceID: true
+      tracesToMetrics:
+        datasourceUid: prometheus
