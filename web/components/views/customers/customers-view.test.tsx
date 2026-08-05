@@ -74,34 +74,18 @@ describe("CustomersView", () => {
     expect(screen.getAllByText("Customer · user…0042 · acct…0042").length).toBeGreaterThan(0);
     expect(screen.queryByText(/linked user|linked to account/i)).not.toBeInTheDocument();
     expect(screen.queryByText("Known customer")).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "What we know" })).toBeVisible();
-    expect(screen.getByText("Find the newest indexed policy")).toBeVisible();
-    expect(screen.getAllByText(/search\.goal · newest_policy/).length).toBeGreaterThan(0);
-    expect(screen.getByText("shopping priority: quality")).toBeVisible();
-    expect(screen.queryByText("shopping.priority · quality")).not.toBeInTheDocument();
-    expect(screen.getAllByText(/^Customer said ·/).length).toBeGreaterThan(0);
-    expect(screen.getAllByRole("button", { name: "Open source session" }).length).toBeGreaterThan(
-      0,
-    );
-    const contextReturns = screen.getByRole("region", { name: "Context returned to product" });
-    expect(within(contextReturns).getByText("search.goal")).toBeVisible();
-    expect(within(contextReturns).queryByText("newest_policy")).not.toBeInTheDocument();
-    expect(screen.getByText("Context version:").parentElement).toHaveTextContent(
-      "ctx1_fixture_customer_context_version",
-    );
-    expect(screen.getByText("Retrieval details")).toBeInTheDocument();
-    expect(screen.getByText("Applied variant: Freshness First")).toBeVisible();
-    expect(screen.getByText("Outcome: Completion")).toBeVisible();
-    expect(screen.getByText("Used")).toBeVisible();
-    expect(screen.getByText(/Customer prompts and searches are not included/i)).toBeVisible();
-    expect(screen.queryByRole("heading", { name: "Data use" })).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Request facts" })).toBeVisible();
-    expect(screen.getByText(/IP 203\.0\.113\.42 · GET · en-US/)).toBeVisible();
-    expect(screen.queryByText(/Not mobile/)).not.toBeInTheDocument();
-    expect(screen.getByText("ExampleBrowser/1.0")).toBeVisible();
-    expect(screen.getByText(/MAC addresses are not exposed by routed HTTP/i)).toBeVisible();
-    expect(screen.getByRole("heading", { name: "Journeys" })).toBeVisible();
-    expect(screen.queryByRole("heading", { name: "Permission" })).not.toBeInTheDocument();
+    const graph = screen.getByRole("region", { name: "Experience graph" });
+    expect(within(graph).getByText("Latest observed node")).toBeVisible();
+    expect(within(graph).getByText("search")).toBeVisible();
+    expect(within(graph).getByText(/not promoted to durable memory/i)).toBeVisible();
+    const journeys = screen.getByRole("region", { name: "Graph journeys" });
+    expect(within(journeys).getByText("search")).toBeVisible();
+    expect(within(journeys).getAllByText(/1 node/).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("heading", { name: "What we know" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Find the newest indexed policy")).not.toBeInTheDocument();
+    expect(screen.queryByText("Context returned to product")).not.toBeInTheDocument();
+    expect(screen.queryByText("Request facts")).not.toBeInTheDocument();
+    expect(screen.queryByText("Permissioned memory")).not.toBeInTheDocument();
   });
 
   it("opens the exact session from the full inspector row", async () => {
@@ -112,14 +96,14 @@ describe("CustomersView", () => {
     });
 
     await screen.findByRole("heading", { name: "Acme workspace" });
-    const sessions = screen.getByRole("region", { name: "Journeys" });
+    const sessions = screen.getByRole("region", { name: "Graph journeys" });
     const sessionRow = within(sessions).getByRole("button", {
-      name: "Open journey session-42",
+      name: "Open graph journey session-42",
     });
     expect(within(sessionRow).getByText("session-42")).toBeVisible();
     expect(sessionRow).toHaveClass("px-2");
     expect(sessionRow.parentElement).toHaveClass("-mx-2");
-    expect(within(sessions).queryByText("Open journey")).not.toBeInTheDocument();
+    expect(within(sessions).queryByText("Open graph journey")).not.toBeInTheDocument();
     fireEvent.click(sessionRow);
 
     expect(openSession).toHaveBeenCalledWith("55555555-5555-4555-8555-555555555555");

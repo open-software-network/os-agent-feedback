@@ -743,7 +743,6 @@ function SessionJourney({
   const interactions = [...detail.interactions].sort((left, right) =>
     left.occurredAt.localeCompare(right.occurredAt),
   );
-  const responses = detail.responses ?? [];
 
   return (
     <>
@@ -766,8 +765,6 @@ function SessionJourney({
         <dd>{interactions.length}</dd>
         <dt className="text-muted-foreground">Feedback reports</dt>
         <dd>{detail.reports.length}</dd>
-        <dt className="text-muted-foreground">Permissioned memory</dt>
-        <dd>{responses.length}</dd>
       </dl>
 
       <Separator className="my-5" />
@@ -861,75 +858,8 @@ function SessionJourney({
           <JourneyCap label="Last observed" timestamp={detail.session.lastSeenAt} last />
         </ol>
       </section>
-
-      <Separator className="my-5" />
-
-      <section aria-labelledby="session-responses-heading">
-        <h3 id="session-responses-heading" className="text-xs font-medium">
-          Permissioned memory
-        </h3>
-        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-          Optional customer-approved memory returned alongside this journey. Current-task need state
-          stays in the observed graph path above.
-        </p>
-        {responses.length ? (
-          <div className="mt-4 grid gap-3">
-            {responses.map((response) => (
-              <article key={response.id} className="border bg-muted/20 p-3">
-                <p className="text-xs font-medium leading-5">{response.question}</p>
-                {response.answers.length ? (
-                  <dl className="mt-3 grid gap-2 border-t pt-3">
-                    {response.answers.map((answer) => (
-                      <div key={`${answer.key}-${answer.value}`}>
-                        <dt className="font-mono text-[10px] text-muted-foreground">
-                          {answer.key}
-                        </dt>
-                        <dd className="mt-0.5 break-words text-xs leading-5">{answer.value}</dd>
-                        <dd className="text-[10px] text-muted-foreground">
-                          {titleCase(answer.type)} ·{" "}
-                          {answer.remembered ? "Remembered" : "Session only"}
-                        </dd>
-                      </div>
-                    ))}
-                  </dl>
-                ) : (
-                  <p className="mt-3 border-t pt-3 text-xs text-muted-foreground">
-                    {sessionResponseEmptyState(response.status)}
-                  </p>
-                )}
-                <div className="mt-3 flex items-center justify-between gap-3 border-t pt-3">
-                  <p className="min-w-0 truncate text-[10px] text-muted-foreground">
-                    {response.customerName ?? "Unresolved customer"} · {titleCase(response.purpose)}
-                  </p>
-                  <Button
-                    variant="link"
-                    className="h-auto shrink-0 p-0 text-[11px]"
-                    onClick={() => openInteraction(response.interactionId)}
-                  >
-                    Open interaction
-                  </Button>
-                </div>
-              </article>
-            ))}
-          </div>
-        ) : (
-          <p className="mt-4 text-xs text-muted-foreground">
-            No separate permissioned memory was returned. The graph path above remains the source of
-            current-task state.
-          </p>
-        )}
-      </section>
     </>
   );
-}
-
-function sessionResponseEmptyState(status: string): string {
-  const labels: Record<string, string> = {
-    awaiting_answer: "Waiting for permissioned memory.",
-    declined: "The customer agent declined to share permissioned memory.",
-    no_relevant_context: "No relevant permissioned memory was shared.",
-  };
-  return labels[status] ?? "No answer content was recorded.";
 }
 
 function JourneyCap({
