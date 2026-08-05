@@ -10,12 +10,10 @@ import { titleCase } from "@/lib/dashboard/format";
 export type ConfigurationSection = (typeof DASHBOARD_CONFIGURATION_VIEWS)[number];
 
 const sectionContent: Record<ConfigurationSection, { label: string }> = {
-  setup: { label: "Setup" },
   configuration: { label: "Product" },
-  connectors: { label: "Connectors" },
   team: { label: "Team" },
   policy: { label: "Data controls" },
-  "context-fields": { label: "Context fields" },
+  questions: { label: "Questions" },
 };
 
 const MEMBER_CONFIGURATION_VIEWS: readonly ConfigurationSection[] = ["configuration", "team"];

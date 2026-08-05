@@ -548,7 +548,7 @@ test("company-side Express completes learn, retrieve, personalize, and measure",
       items: [
         {
           key: "budget",
-          type: "constraint",
+          type: "customer_goal",
           value: "under_150_usd",
           summary: "Customer explicitly stated a budget under $150.",
           provenance: "agent_reports_user_statement",

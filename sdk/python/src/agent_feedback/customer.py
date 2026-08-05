@@ -21,7 +21,7 @@ USER_AGENT = "@epode/python/0.4.0"
 Purpose = Literal["product_personalization", "targeted_advertising"]
 EnrichmentSurface = Literal["http_json", "html", "mcp"]
 IdentityLevel = Literal["verified", "pseudonymous", "ephemeral"]
-SignalType = Literal["intent", "preference", "constraint", "interest"]
+SignalType = str
 SignalProvenance = Literal[
     "agent_reports_user_statement", "agent_reports_current_task", "agent_inference"
 ]
@@ -30,7 +30,7 @@ OutcomeKind = Literal["conversion", "completion", "engagement", "dismissal", "ab
 Transport = Callable[[str, Mapping[str, str], bytes, float], tuple[int, bytes]]
 
 _PURPOSES = {"product_personalization", "targeted_advertising"}
-_SIGNAL_TYPES = {"intent", "preference", "constraint", "interest"}
+_SIGNAL_TYPE = re.compile(r"^[a-z][a-z0-9_]{0,47}$")
 _PROVENANCE = {
     "agent_reports_user_statement",
     "agent_reports_current_task",
@@ -793,9 +793,9 @@ def _identity_level(value: Any) -> IdentityLevel:
 
 
 def _signal_type(value: Any) -> SignalType:
-    if value not in _SIGNAL_TYPES:
+    if not isinstance(value, str) or _SIGNAL_TYPE.fullmatch(value) is None:
         raise ValueError("invalid signal type")
-    return value  # type: ignore[return-value]
+    return value
 
 
 def _provenance(value: Any) -> SignalProvenance:

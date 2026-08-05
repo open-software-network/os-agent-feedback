@@ -13,7 +13,9 @@ description: "Keep product keys private and customer context purpose-bound, perm
 - full product responses;
 - unknown report fields.
 
-Customer enrichment accepts only bounded intent, preference, constraint, and interest items. Every item has an
+Customer enrichment accepts only bounded entries from the product's effective question catalog. Built-in entries
+use intent, preference, constraint, and interest categories; product-authored categories must be lowercase
+snake_case. Every item has an
 explicit provenance. Do not request or infer sensitive characteristics, and never treat
 `agent_reports_user_statement`, `agent_reports_current_task`, and `agent_inference` as equivalent evidence.
 

@@ -202,7 +202,7 @@ class CustomerClientTests(unittest.TestCase):
             (
                 CustomerAnswerItem(
                     key="shopping.budget_band",
-                    type="constraint",
+                    type="customer_goal",
                     value="50_150",
                     provenance="agent_reports_user_statement",
                     confidence=1,

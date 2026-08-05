@@ -19,7 +19,7 @@ describe("DashboardShell", () => {
       </DashboardShell>,
     );
 
-    const labels = ["Home", "Customers", "Responses", "Sessions", "Configurations"];
+    const labels = ["Home", "Customers", "Responses", "Sessions", "Connectors", "Configurations"];
     for (const label of labels) expect(screen.getByRole("button", { name: label })).toBeVisible();
     for (const hidden of [
       "Insights",
@@ -28,7 +28,6 @@ describe("DashboardShell", () => {
       "Contexts",
       "Evidences",
       "Setup",
-      "Connectors",
       "Data controls",
     ]) {
       expect(screen.queryByRole("button", { name: hidden })).not.toBeInTheDocument();
@@ -41,7 +40,7 @@ describe("DashboardShell", () => {
     expect(coreLabels).toEqual(["Home", "Customers", "Responses", "Sessions"]);
   });
 
-  it("opens Setup from the Configurations sidebar entry for editors", () => {
+  it("opens Product from the Configurations sidebar entry", () => {
     const onNavigate = vi.fn();
     render(
       <DashboardShell
@@ -58,14 +57,14 @@ describe("DashboardShell", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Configurations" }));
 
-    expect(onNavigate).toHaveBeenCalledWith("setup");
+    expect(onNavigate).toHaveBeenCalledWith("configuration");
   });
 
   it("marks Configurations current while a configuration tab is open", () => {
     render(
       <DashboardShell
         data={dashboardFixture()}
-        view="connectors"
+        view="questions"
         onNavigate={vi.fn()}
         onWorkspaceChange={vi.fn()}
         onProductChange={vi.fn()}

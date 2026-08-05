@@ -28,6 +28,8 @@ describe("HomeView", () => {
     expect(screen.queryByRole("heading", { name: "Recent responses" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Recent customers" })).not.toBeInTheDocument();
     expect(screen.queryByText(/signals|interactions|contexts|evidences/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Setup" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Connect Search API" })).toBeVisible();
   });
 
   it("routes to the core object screens", () => {
@@ -39,16 +41,33 @@ describe("HomeView", () => {
     fireEvent.click(screen.getByRole("button", { name: /view customers/i }));
     expect(new URL(window.location.href).searchParams.get("view")).toBe("customers");
   });
+
+  it("scrolls legacy setup deep links after the embedded section mounts", () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      callback(0);
+      return 1;
+    });
+    window.history.replaceState({}, "", "/#setup");
+
+    renderHome(dashboardFixture());
+
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+  });
 });
 
 function renderHome(data: DashboardData) {
   return render(
     <HomeView
       data={data}
-      openCustomer={vi.fn()}
-      openSession={vi.fn()}
-      openFeedback={vi.fn()}
+      secrets={null}
+      rememberSecret={vi.fn()}
       refresh={vi.fn().mockResolvedValue(undefined)}
+      setNotice={vi.fn()}
     />,
   );
 }

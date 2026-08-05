@@ -15,7 +15,7 @@ import {
   ProductConfigurationView,
 } from "@/components/views/configuration/configuration-view";
 import { ConnectorsView } from "@/components/views/connectors/connectors-view";
-import { ContextFieldsView } from "@/components/views/context-fields/context-fields-view";
+import { QuestionsView } from "@/components/views/context-fields/context-fields-view";
 import { CustomersView } from "@/components/views/customers/customers-view";
 import { FeedbackView } from "@/components/views/feedback/feedback-view";
 import { HomeView } from "@/components/views/home/home-view";
@@ -23,7 +23,6 @@ import { InteractionDetail } from "@/components/views/interactions/interaction-d
 import { PolicyView } from "@/components/views/policy/policy-view";
 import { ResponsesView } from "@/components/views/responses/responses-view";
 import { SessionsView } from "@/components/views/sessions/sessions-view";
-import { SetupView } from "@/components/views/setup/setup-view";
 import { TeamView } from "@/components/views/team/team-view";
 import { ApiError, apiRequest } from "@/lib/api/client";
 import {
@@ -102,12 +101,23 @@ export function DashboardApp() {
       );
     }
     const requestedView = url.searchParams.get("view");
+    if (requestedView === "setup") {
+      url.searchParams.delete("view");
+      url.hash = "setup";
+      window.history.replaceState({}, "", url);
+    }
+    const canonicalView =
+      requestedView === "setup"
+        ? "home"
+        : requestedView === "context-fields"
+          ? "questions"
+          : requestedView;
     setView(
       // "insights" is a retired view name kept as a URL alias for bookmarked links.
-      requestedView === "insights"
+      canonicalView === "insights"
         ? "home"
-        : DASHBOARD_VIEWS.includes(requestedView as DashboardView)
-          ? (requestedView as DashboardView)
+        : DASHBOARD_VIEWS.includes(canonicalView as DashboardView)
+          ? (canonicalView as DashboardView)
           : "home",
     );
     const requestedWorkspaceId = url.searchParams.get("team");
@@ -142,7 +152,7 @@ export function DashboardApp() {
         ...limits,
       }),
     enabled: ready,
-    refetchInterval: view === "setup" ? 5_000 : false,
+    refetchInterval: view === "home" ? 5_000 : false,
     retry: (failureCount, error) => {
       if (error instanceof ApiError && error.status === 403) return false;
       return failureCount < 1;
@@ -186,7 +196,7 @@ export function DashboardApp() {
     }
     if (
       !isEditor(data.currentRole) &&
-      (view === "connectors" || view === "setup" || view === "policy")
+      (view === "connectors" || view === "policy" || view === "questions")
     ) {
       setView("home");
     }
@@ -326,7 +336,7 @@ export function DashboardApp() {
     setProductId(created.product.id);
     clearSelection();
     historyMode.current = "push";
-    setView("setup");
+    setView("home");
   }
 
   async function productDeleted() {
@@ -427,6 +437,18 @@ export function DashboardApp() {
     );
   }
 
+  function homePage(currentData: DashboardData) {
+    return (
+      <HomeView
+        data={currentData}
+        secrets={secrets}
+        rememberSecret={rememberSecret}
+        refresh={refresh}
+        setNotice={showNotice}
+      />
+    );
+  }
+
   function renderView(currentData: DashboardData) {
     switch (view) {
       case "feedback":
@@ -478,51 +500,25 @@ export function DashboardApp() {
             refresh={refresh}
           />
         );
-      case "setup":
-        return configurationPage(
-          currentData,
-          "setup",
-          <SetupView
-            data={currentData}
-            secrets={secrets}
-            rememberSecret={rememberSecret}
-            refresh={refresh}
-            setNotice={showNotice}
-          />,
-        );
       case "policy":
         return configurationPage(
           currentData,
           "policy",
           <PolicyView data={currentData} refresh={refresh} setNotice={showNotice} />,
         );
-      case "context-fields":
-        return isEditor(currentData.currentRole) ? (
-          configurationPage(
-            currentData,
-            "context-fields",
-            <ContextFieldsView data={currentData} refresh={refresh} setNotice={showNotice} />,
-          )
-        ) : (
-          <HomeView
-            data={currentData}
-            openCustomer={openCustomer}
-            openFeedback={openFeedback}
-            openSession={openSession}
-            refresh={refresh}
-          />
-        );
+      case "questions":
+        return isEditor(currentData.currentRole)
+          ? configurationPage(
+              currentData,
+              "questions",
+              <QuestionsView data={currentData} refresh={refresh} setNotice={showNotice} />,
+            )
+          : homePage(currentData);
       case "connectors":
         return isEditor(currentData.currentRole) ? (
-          configurationPage(currentData, "connectors", <ConnectorsView data={currentData} />)
+          <ConnectorsView data={currentData} />
         ) : (
-          <HomeView
-            data={currentData}
-            openCustomer={openCustomer}
-            openFeedback={openFeedback}
-            openSession={openSession}
-            refresh={refresh}
-          />
+          homePage(currentData)
         );
       case "team":
         return configurationPage(
@@ -552,15 +548,7 @@ export function DashboardApp() {
           />
         );
       default:
-        return (
-          <HomeView
-            data={currentData}
-            openCustomer={openCustomer}
-            openFeedback={openFeedback}
-            openSession={openSession}
-            refresh={refresh}
-          />
-        );
+        return homePage(currentData);
     }
   }
 }

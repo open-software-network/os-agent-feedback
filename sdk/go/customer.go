@@ -413,6 +413,7 @@ func (client *CustomerClient) post(ctx context.Context, path, authorization stri
 var customerOpaque = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,160}$`)
 var customerHandle = regexp.MustCompile(`^Bearer (aqr1_[A-Za-z0-9._-]+)$`)
 var answerKey = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
+var questionType = regexp.MustCompile(`^[a-z][a-z0-9_]{0,47}$`)
 var awsCredential = regexp.MustCompile(`(?:AKIA|ASIA)[A-Z0-9]{12}`)
 var bearerCredential = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]{20,}`)
 var emailLike = regexp.MustCompile(`[^\s@]+@[^\s@]+\.[^\s@]+`)
@@ -512,7 +513,7 @@ func validAnswerItem(raw any) bool {
 	summary, summaryExists := item["summary"]
 	provenance, provenanceOK := item["provenance"].(string)
 	_, rememberOK := item["remember"].(bool)
-	if !keyOK || !answerKey.MatchString(key) || sensitiveKey(key) || !kindOK || !oneOf(kind, "intent", "preference", "constraint", "interest") || !valueOK || len([]rune(value)) < 1 || len([]rune(value)) > 160 || sensitiveText(value) || !provenanceOK || !oneOf(provenance, "agent_reports_user_statement", "agent_reports_current_task", "agent_inference") || !rememberOK {
+	if !keyOK || !answerKey.MatchString(key) || sensitiveKey(key) || !kindOK || !questionType.MatchString(kind) || !valueOK || len([]rune(value)) < 1 || len([]rune(value)) > 160 || sensitiveText(value) || !provenanceOK || !oneOf(provenance, "agent_reports_user_statement", "agent_reports_current_task", "agent_inference") || !rememberOK {
 		return false
 	}
 	if summaryExists {

@@ -701,7 +701,7 @@ fn valid_answer_item(value: &Value) -> bool {
                 || (index > 0 && matches!(byte, b'_' | b'-' | b'.'))
         })
         || sensitive_key(key)
-        || !matches!(kind, "intent" | "preference" | "constraint" | "interest")
+        || !valid_question_type(kind)
         || !bounded(answer, 160)
         || sensitive_text(answer)
         || !matches!(
@@ -729,6 +729,15 @@ fn valid_answer_item(value: &Value) -> bool {
     !object
         .get("expiresAt")
         .is_some_and(|value| value.as_str().is_none_or(|value| !bounded(value, 64)))
+}
+
+fn valid_question_type(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 48
+        && value.as_bytes()[0].is_ascii_lowercase()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 fn sensitive_key(value: &str) -> bool {
@@ -1186,7 +1195,7 @@ mod tests {
                     status: CustomerAnswerStatus::Answered,
                     items: vec![CustomerAnswerItem {
                         key: "shopping.budget_band".into(),
-                        r#type: "constraint".into(),
+                        r#type: "customer_goal".into(),
                         value: "50_150".into(),
                         summary: None,
                         provenance: "agent_reports_user_statement".into(),

@@ -6,11 +6,11 @@ description: "The exact company and agent contracts for enrichment, retrieval, p
 Company endpoints use `Authorization: Bearer $EPODE_API_KEY`. Agent answer endpoints use only the short-lived
 `aqr1_...` request handle returned for that interaction. The company key must never enter an agent response.
 
-## Define product context fields
+## Define product questions
 
-By default a product shares Epode's built-in global field catalog. A product can instead define its own closed
-catalog; as soon as one enabled definition exists, it replaces the global catalog for that product's requests.
-Every request stores an immutable snapshot of the fields it may collect, so editing or deleting a definition
+By default a product shares Epode's built-in global question catalog. A product can instead define its own closed
+catalog; as soon as one enabled question exists, it replaces the global catalog for that product's requests.
+Every request stores an immutable snapshot of the questions it may ask, so editing or deleting a definition
 never changes an in-flight or historical request.
 
 `PUT /api/v2/enrichment/fields/{fieldKey}`
@@ -18,7 +18,7 @@ never changes an in-flight or historical request.
 ```json
 {
   "label": "Shopping occasion",
-  "type": "preference",
+  "type": "customer_goal",
   "allowedValues": ["gift", "self_purchase", "replacement"],
   "targetedAdvertisingSafe": false,
   "operations": ["/api/recommendations"],
@@ -28,7 +28,9 @@ never changes an in-flight or historical request.
 
 - `fieldKey` is a lowercase `namespace.name` pair such as `journey.occasion`; the `epode.*` namespace is
   reserved for built-in fields.
-- `type` is exactly `intent`, `preference`, or `constraint`.
+- `label` is the question topic Epode inserts into the customer permission prompt.
+- `type` is a product-authored lowercase snake_case category of 1–48 characters, such as `preference`,
+  `constraint`, or `customer_goal`.
 - `allowedValues` carries 1–32 distinct lowercase snake_case values. Free-form text, arbitrary numbers, and
   sensitive categories are never accepted.
 - `operations` optionally binds the field to specific business operations. Omit it to allow every operation. A

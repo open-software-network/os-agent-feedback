@@ -10,7 +10,7 @@ describe("ConfigurationView", () => {
     render(
       <ConfigurationView
         data={dashboardFixture()}
-        section="setup"
+        section="configuration"
         onSectionChange={onSectionChange}
       >
         <p>Configuration content</p>
@@ -18,17 +18,15 @@ describe("ConfigurationView", () => {
     );
 
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
-      "Setup",
       "Product",
-      "Connectors",
       "Team",
       "Data controls",
-      "Context fields",
+      "Questions",
     ]);
-    expect(screen.getByRole("tab", { name: "Setup" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Product" })).toHaveAttribute("aria-selected", "true");
 
-    fireEvent.click(screen.getByRole("tab", { name: "Product" }));
-    expect(onSectionChange).toHaveBeenCalledWith("configuration");
+    fireEvent.click(screen.getByRole("tab", { name: "Questions" }));
+    expect(onSectionChange).toHaveBeenCalledWith("questions");
   });
 
   it("keeps read-only product and team configuration available to members", () => {

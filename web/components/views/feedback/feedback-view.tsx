@@ -456,7 +456,8 @@ export function FeedbackView({
 
 function navigateToSetup() {
   const url = new URL(window.location.href);
-  url.searchParams.set("view", "setup");
+  url.searchParams.delete("view");
+  url.hash = "setup";
   url.searchParams.delete("report");
   url.searchParams.delete("session");
   url.searchParams.delete("interaction");
