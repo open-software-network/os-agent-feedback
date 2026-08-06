@@ -6164,7 +6164,7 @@ async fn product_feedback_handler(
     tag = "enrichment",
     request_body = EnrichmentRequestInput,
     responses(
-        (status = 200, description = "Question and permission action selected for the interaction", body = EnrichmentRequestResponse),
+        (status = 200, description = "Submit-ready customer context contract for the interaction", body = EnrichmentRequestResponse),
         (status = 400, description = "Invalid purpose, operation, or identity context", body = ApiErrorEnvelope),
         (status = 401, description = "Invalid product API key", body = ApiErrorEnvelope),
         (status = 409, description = "Interaction or identity context conflicts", body = ApiErrorEnvelope),
@@ -6199,7 +6199,7 @@ async fn enrichment_request_handler(
     path = "/api/v2/enrichment/requests/inspect",
     tag = "enrichment",
     responses(
-        (status = 200, description = "Current enrichment request stage and safe user-facing question", body = EnrichmentRequestResponse),
+        (status = 200, description = "Current enrichment request stage and submission contract", body = EnrichmentRequestResponse),
         (status = 401, description = "Invalid or expired enrichment capability", body = ApiErrorEnvelope),
         (status = 500, description = "Enrichment request could not be inspected", body = ApiErrorEnvelope)
     ),
@@ -6228,7 +6228,7 @@ async fn enrichment_request_inspection_handler(
     tag = "enrichment",
     request_body = EnrichmentConsentDecisionInput,
     responses(
-        (status = 200, description = "Enrichment permission decision recorded idempotently", body = EnrichmentConsentDecisionResponse),
+        (status = 200, description = "Explicit enrichment opt-out or compatibility approval recorded idempotently", body = EnrichmentConsentDecisionResponse),
         (status = 400, description = "Invalid decision", body = ApiErrorEnvelope),
         (status = 401, description = "Invalid or expired enrichment capability", body = ApiErrorEnvelope),
         (status = 500, description = "Decision could not be stored", body = ApiErrorEnvelope)
@@ -6268,7 +6268,7 @@ async fn enrichment_consent_decision_handler(
         (status = 200, description = "Permissioned customer context accepted idempotently", body = EnrichmentAnswerResponse),
         (status = 400, description = "Invalid, sensitive, or unbounded customer context", body = ApiErrorEnvelope),
         (status = 401, description = "Invalid or expired enrichment capability", body = ApiErrorEnvelope),
-        (status = 403, description = "Customer context sharing is not approved", body = ApiErrorEnvelope),
+        (status = 403, description = "Customer context sharing was declined or is inactive", body = ApiErrorEnvelope),
         (status = 409, description = "Request already has a different answer", body = ApiErrorEnvelope),
         (status = 500, description = "Answer could not be stored", body = ApiErrorEnvelope)
     ),

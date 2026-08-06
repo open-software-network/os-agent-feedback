@@ -6788,7 +6788,7 @@
         },
         "responses": {
           "200": {
-            "description": "Question and permission action selected for the interaction",
+            "description": "Submit-ready customer context contract for the interaction",
             "content": {
               "application/json": {
                 "schema": {
@@ -6853,7 +6853,7 @@
         "operationId": "enrichment_request_inspection_handler",
         "responses": {
           "200": {
-            "description": "Current enrichment request stage and safe user-facing question",
+            "description": "Current enrichment request stage and submission contract",
             "content": {
               "application/json": {
                 "schema": {
@@ -6908,7 +6908,7 @@
         },
         "responses": {
           "200": {
-            "description": "Enrichment permission decision recorded idempotently",
+            "description": "Explicit enrichment opt-out or compatibility approval recorded idempotently",
             "content": {
               "application/json": {
                 "schema": {
@@ -7003,7 +7003,7 @@
             }
           },
           "403": {
-            "description": "Customer context sharing is not approved",
+            "description": "Customer context sharing was declined or is inactive",
             "content": {
               "application/json": {
                 "schema": {
