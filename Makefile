@@ -1,4 +1,4 @@
-.PHONY: help install node-install backend-install node-version-check dev-env dev-setup dev-bootstrap dev-compose-check dev-db dev-db-stop dev-observability dev-observability-stop dev-backend dev-web backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test sdk-node-test sdk-rust-test linked-journey-conformance web-install web-types-check web-check web-typecheck web-test web-release-e2e web-build docs-validate docs-a11y types check
+.PHONY: help install node-install backend-install node-version-check dev-env dev-setup dev-bootstrap dev-compose-check dev-db dev-db-stop dev-observability dev-observability-stop dev-backend dev-web tunnel-setup tunnel-run tunnel-route tunnel-routes tunnel-status backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test sdk-node-test sdk-rust-test linked-journey-conformance web-install web-types-check web-check web-typecheck web-test web-release-e2e web-build docs-validate docs-a11y types check
 
 .DEFAULT_GOAL := help
 
@@ -76,6 +76,28 @@ dev-backend: dev-db  ## Start the Rust API on http://localhost:8080
 
 dev-web: node-version-check  ## Start the Next.js dashboard on http://localhost:3000
 	pnpm --filter @epode/web dev
+
+# --- Tunnel lab (public URLs for ChatGPT/Claude testing) ---
+TUNNEL_DOMAIN ?=
+TUNNEL_NAME ?=
+TUNNEL_PORT ?=
+
+tunnel-setup:  ## One-time: create the Cloudflare tunnel and wildcard DNS (requires TUNNEL_DOMAIN=lab.example.com)
+	@test -n "$(TUNNEL_DOMAIN)" || { echo "Usage: make tunnel-setup TUNNEL_DOMAIN=lab.example.com" >&2; exit 1; }
+	tunnel/tunnel.sh setup "$(TUNNEL_DOMAIN)"
+
+tunnel-run:  ## Start the tunnel router and cloudflared in the foreground (Ctrl-C stops both)
+	tunnel/tunnel.sh run
+
+tunnel-route:  ## Publish NAME=<name> on local PORT=<port> as https://<name>.<tunnel-domain>
+	@test -n "$(TUNNEL_NAME)" && test -n "$(TUNNEL_PORT)" || { echo "Usage: make tunnel-route TUNNEL_NAME=demo TUNNEL_PORT=4311" >&2; exit 1; }
+	tunnel/tunnel.sh route add "$(TUNNEL_NAME)" "$(TUNNEL_PORT)"
+
+tunnel-routes:  ## List published tunnel routes and their public URLs
+	tunnel/tunnel.sh route ls
+
+tunnel-status:  ## Show tunnel lab status (login, tunnel, router, routes)
+	tunnel/tunnel.sh status
 
 # --- Backend ---
 backend-fmt-check:  ## Check backend Rust formatting

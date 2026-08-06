@@ -20,6 +20,7 @@ import { cn } from "@/lib/utils";
 
 import {
   LINKED_SESSION_VERIFICATION,
+  SETUP_SURFACE_OPTIONS,
   SETUP_SURFACES,
   type SetupStack,
   type SetupSurface,
@@ -233,11 +234,11 @@ const result = answers.available
         onToggle={() => toggleSection("install")}
       >
         <p className="max-w-3xl text-sm text-muted-foreground">
-          Start with a guided agent experience and session telemetry, or choose an enrichment
-          surface. If Epode is unavailable, product responses stay fail-open.
+          Install the guided agent experience and session telemetry. If Epode is unavailable,
+          product responses stay fail-open.
         </p>
         <div className="flex flex-wrap gap-2">
-          {(Object.keys(SETUP_SURFACES) as SetupSurface[]).map((item) => (
+          {SETUP_SURFACE_OPTIONS.map((item) => (
             <Button
               key={item}
               type="button"

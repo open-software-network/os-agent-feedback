@@ -39,3 +39,7 @@ web/out/
 # agent coordination (shared via symlink from main checkout)
 .briefs
 .reviews
+
+# tunnel lab local state (never commit cloudflared config or runtime routes)
+tunnel/config.yml
+tunnel/routes.json

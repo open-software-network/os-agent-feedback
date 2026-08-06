@@ -4,6 +4,8 @@
     "includes": [
       "*.json",
       "tests/**/*.mjs",
+      "tunnel/**/*.mjs",
+      "tunnel/**/*.json",
       "sdk/node/src/**/*.ts",
       "sdk/node/test/**/*.mjs",
       "sdk/node/**/*.json",
@@ -58,6 +60,16 @@
   "overrides": [
     {
       "includes": ["tests/**/*.mjs", "sdk/node/test/**/*.mjs", "sdk/node/src/doctor.ts"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noConsole": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["tunnel/**/*.mjs"],
       "linter": {
         "rules": {
           "suspicious": {

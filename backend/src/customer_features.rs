@@ -16,7 +16,7 @@ use crate::{
         CustomerSignal, CustomerSummary, DashboardSessionSummary, DashboardSignalFilters,
         GithubIssueLink, InsightCount,
     },
-    store::{dashboard_customer_by_id, dashboard_signals_page},
+    store::{dashboard_customer_by_id, dashboard_signals_page, humanize_session_customer_names},
 };
 
 #[derive(Debug, Clone, Default)]
@@ -551,7 +551,7 @@ pub(crate) async fn dashboard_feature_by_key(
                 .customer,
         );
     }
-    let sessions = sqlx::query_as::<_, DashboardSessionSummary>(
+    let mut sessions = sqlx::query_as::<_, DashboardSessionSummary>(
         r"SELECT session.id, session.workspace_id, session.environment_id,
           session.source, session.ref_hint, session.started_at, session.last_seen_at,
           session.created_at, activity.interaction_count, activity.report_count,
@@ -611,6 +611,7 @@ pub(crate) async fn dashboard_feature_by_key(
     .bind(retained_since)
     .fetch_all(pool)
     .await?;
+    humanize_session_customer_names(&mut sessions);
     Ok(DashboardFeatureDetail {
         feature,
         signals,
