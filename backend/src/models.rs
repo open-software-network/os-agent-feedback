@@ -1192,6 +1192,7 @@ pub(crate) struct CustomerSummary {
     pub last_activity_at: DateTime<Utc>,
     pub outcome_health: String,
     pub signal_count: i64,
+    pub trait_count: i64,
     pub session_count: i64,
     pub active_need_count: i64,
     pub consent_state: String,

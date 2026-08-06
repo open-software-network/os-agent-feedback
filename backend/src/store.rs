@@ -3827,6 +3827,7 @@ pub(crate) async fn dashboard_customers_page(
             COALESCE(activity.last_activity_at, customer.last_seen_at) AS last_activity_at,
             COALESCE(outcome.outcome_health, 'unknown') AS outcome_health,
             COALESCE(activity.signal_count, 0)::BIGINT AS signal_count,
+            COALESCE(activity.trait_count, 0)::BIGINT AS trait_count,
             COALESCE(activity.session_count, 0)::BIGINT AS session_count,
             COALESCE(activity.active_need_count, 0)::BIGINT AS active_need_count,
             COALESCE(consent.consent_state, 'unknown') AS consent_state
@@ -3856,6 +3857,8 @@ pub(crate) async fn dashboard_customers_page(
           LEFT JOIN LATERAL (
             SELECT MAX(interaction.occurred_at) AS last_activity_at,
               COUNT(signal.id)::BIGINT AS signal_count,
+              COUNT(signal.id) FILTER (WHERE signal.signal_type IN ('intent', 'preference',
+                'constraint'))::BIGINT AS trait_count,
               COUNT(DISTINCT interaction.session_id)::BIGINT AS session_count,
               COUNT(signal.id) FILTER (WHERE signal.signal_type IN ('feature_need', 'friction')
                 AND (signal.expires_at IS NULL OR signal.expires_at > NOW()))::BIGINT
@@ -4434,6 +4437,7 @@ async fn dashboard_customer_summary_by_id(
           COALESCE(activity.last_activity_at, customer.last_seen_at) AS last_activity_at,
           COALESCE(outcome.outcome_health, 'unknown') AS outcome_health,
           COALESCE(activity.signal_count, 0)::BIGINT AS signal_count,
+          COALESCE(activity.trait_count, 0)::BIGINT AS trait_count,
           COALESCE(activity.session_count, 0)::BIGINT AS session_count,
           COALESCE(activity.active_need_count, 0)::BIGINT AS active_need_count,
           COALESCE(consent.consent_state, 'unknown') AS consent_state
@@ -4453,6 +4457,8 @@ async fn dashboard_customer_summary_by_id(
           ORDER BY identifier.created_at, identifier.id LIMIT 1) user_identifier ON TRUE
         LEFT JOIN LATERAL (SELECT MAX(interaction.occurred_at) AS last_activity_at,
           COUNT(signal.id)::BIGINT AS signal_count,
+          COUNT(signal.id) FILTER (WHERE signal.signal_type IN ('intent', 'preference',
+            'constraint'))::BIGINT AS trait_count,
           COUNT(DISTINCT interaction.session_id)::BIGINT AS session_count,
           COUNT(signal.id) FILTER (WHERE signal.signal_type IN ('feature_need', 'friction')
             AND (signal.expires_at IS NULL OR signal.expires_at > NOW()))::BIGINT active_need_count

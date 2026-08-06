@@ -218,6 +218,7 @@ const firstCustomer = {
   lastActivityAt: now,
   outcomeHealth: "blocked",
   signalCount: 1,
+  traitCount: 1,
   sessionCount: 1,
   activeNeedCount: 1,
   consentState: "approved",

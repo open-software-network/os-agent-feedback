@@ -20,9 +20,9 @@ describe("CustomersView", () => {
     renderCustomers(fetchMock);
 
     const row = await screen.findByRole("row", { name: "Open customer Acme workspace" });
-    expect(within(row).getByText("Known")).toBeVisible();
+    expect(within(row).getByText("3")).toBeVisible();
     expect(within(row).getByText("2")).toBeVisible();
-    expect(within(row).getByText("Customer · user…0042 · acct…0042")).toBeVisible();
+    expect(within(row).getByText("Known · user…0042 · acct…0042")).toBeVisible();
     expect(within(row).queryByText(/linked user|linked to account/i)).not.toBeInTheDocument();
     expect(screen.getAllByText("Anonymous")[0].parentElement).toHaveTextContent("1");
     expect(screen.queryByText("Active")).not.toBeInTheDocument();
@@ -30,7 +30,8 @@ describe("CustomersView", () => {
     expect(screen.queryByText(/Customers stay linked to their sessions/i)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Filters/ })).toBeVisible();
     expect(screen.queryByLabelText("Identity filter")).not.toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Identity" })).toBeVisible();
+    expect(screen.getByRole("columnheader", { name: "Traits" })).toBeVisible();
+    expect(screen.queryByRole("columnheader", { name: "Identity" })).not.toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "Type" })).not.toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "Sessions" })).toBeVisible();
     expect(screen.queryByRole("columnheader", { name: "Data use" })).not.toBeInTheDocument();
@@ -71,7 +72,7 @@ describe("CustomersView", () => {
       selectedCustomerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     });
     expect(await screen.findByRole("heading", { name: "Acme workspace" })).toBeVisible();
-    expect(screen.getAllByText("Customer · user…0042 · acct…0042").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Known · user…0042 · acct…0042").length).toBeGreaterThan(0);
     expect(screen.queryByText(/linked user|linked to account/i)).not.toBeInTheDocument();
     expect(screen.queryByText("Known customer")).not.toBeInTheDocument();
     const profile = screen.getByRole("region", { name: "What we've observed" });

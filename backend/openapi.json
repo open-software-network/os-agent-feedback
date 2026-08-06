@@ -9114,6 +9114,7 @@
           "lastActivityAt",
           "outcomeHealth",
           "signalCount",
+          "traitCount",
           "sessionCount",
           "activeNeedCount",
           "consentState"
@@ -9167,6 +9168,10 @@
             "format": "int64"
           },
           "signalCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "traitCount": {
             "type": "integer",
             "format": "int64"
           },
