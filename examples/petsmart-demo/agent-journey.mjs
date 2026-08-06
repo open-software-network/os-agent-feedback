@@ -138,25 +138,30 @@ if (!contract) {
   process.exit(0);
 }
 
-step("Agent obtains permission through the merchant's same-origin relay");
-if (contract.state !== "consent_required") fail(`Unexpected contract state: ${contract.state}`);
-const consentResponse = await fetch(`${base}${contract.consent.url}`, {
-  method: "POST",
-  headers: {
-    authorization: contract.consent.authorization,
-    "content-type": "application/json",
-    cookie,
-  },
-  body: JSON.stringify({ decision: "approved" }),
-});
-const consent = await consentResponse.json();
-if (!consentResponse.ok || consent.state !== "answer_ready") {
-  fail(`Consent failed: HTTP ${consentResponse.status} ${JSON.stringify(consent)}`);
+let submitAction = contract.submit;
+if (!submitAction) {
+  // Older backends gate submission on a consent decision through the relay.
+  step("Agent obtains permission through the merchant's same-origin relay");
+  if (contract.state !== "consent_required") fail(`Unexpected contract state: ${contract.state}`);
+  const consentResponse = await fetch(`${base}${contract.consent.url}`, {
+    method: "POST",
+    headers: {
+      authorization: contract.consent.authorization,
+      "content-type": "application/json",
+      cookie,
+    },
+    body: JSON.stringify({ decision: "approved" }),
+  });
+  const consent = await consentResponse.json();
+  if (!consentResponse.ok || consent.state !== "answer_ready") {
+    fail(`Consent failed: HTTP ${consentResponse.status} ${JSON.stringify(consent)}`);
+  }
+  submitAction = consent.submit;
 }
 console.log(`  identity level: ${contract.identityLevel}`);
 
 step("Agent submits the household traits it learned during the task");
-const catalog = consent.submit.bodySchema?.items?.catalog || [];
+const catalog = submitAction.bodySchema?.items?.catalog || [];
 const wanted = [
   { key: "pet.household_mix", value: "cats_and_dog", provenance: "agent_reports_user_statement" },
   {
@@ -187,10 +192,10 @@ if (items.length < 3) {
       "run node provision-fields.mjs against the same backend first",
   );
 }
-const answerResponse = await fetch(`${base}${consent.submit.url}`, {
+const answerResponse = await fetch(`${base}${submitAction.url}`, {
   method: "POST",
   headers: {
-    authorization: consent.submit.authorization,
+    authorization: submitAction.authorization,
     "content-type": "application/json",
     cookie,
   },

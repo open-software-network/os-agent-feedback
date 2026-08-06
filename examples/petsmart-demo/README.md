@@ -17,9 +17,10 @@ increased-AI-traffic terms:
    `ps_visitor`/`ps_session` cookies and links them to the agent journey
    (`product_link_click` telemetry).
 5. **Traits → signals** — the product page carries Epode's customer-context
-   contract; the agent obtains permission and submits the household traits
-   through the merchant's same-origin relay. They persist as customer signals
-   bound to the visitor.
+   contract; the agent submits the household traits through the merchant's
+   same-origin relay (completing the contract's consent step first when the
+   backend requires one). They persist as customer signals bound to the
+   visitor.
 6. **Discoverable return visit** — next time the shopper arrives, the
    homepage greets the household, features the feeder, and records a
    personalization decision; add-to-cart records a conversion outcome.
