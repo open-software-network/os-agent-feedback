@@ -14,6 +14,10 @@ import path from "node:path";
  * A slug with no configured password does not exist as far as the route is
  * concerned (fail closed, 404) — deploying report content never exposes it
  * until its password is provisioned.
+ *
+ * Report pages are React components registered in aco-reports/registry.ts and
+ * rendered by the [slug] page; this module owns the password gate, the access
+ * cookie, and the gated PNG assets read from disk at request time.
  */
 
 const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -78,15 +82,6 @@ export function passwordMatches(supplied: string, expected: string): boolean {
 
 export function tokenMatches(supplied: string, slug: string, password: string): boolean {
   return passwordMatches(supplied, accessToken(slug, password));
-}
-
-export async function reportHtml(slug: string): Promise<string | undefined> {
-  if (!validReportSlug(slug)) return undefined;
-  try {
-    return await readFile(path.join(reportsRoot(), slug, "report.html"), "utf8");
-  } catch {
-    return undefined;
-  }
 }
 
 export async function reportAsset(slug: string, asset: string): Promise<Buffer | undefined> {

@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 
+import { acoReportLoaders } from "@/aco-reports/registry";
+
 import {
   accessToken,
   passwordMatches,
   reportAsset,
-  reportHtml,
   reportPassword,
   tokenMatches,
   validReportSlug,
@@ -53,16 +54,22 @@ describe("access tokens", () => {
   });
 });
 
-describe("report content", () => {
-  it("loads the committed petsmart report and assets", async () => {
-    const html = await reportHtml("petsmart");
-    expect(html).toContain("AI Commerce Optimization Report");
+describe("report registry", () => {
+  it("loads the committed petsmart report component", async () => {
+    const loader = acoReportLoaders.petsmart;
+    expect(loader).toBeDefined();
+    const module = await loader();
+    expect(module.default).toBeTypeOf("function");
+  });
+});
+
+describe("report assets", () => {
+  it("loads committed report assets", async () => {
     const asset = await reportAsset("petsmart", "1-agent-guide.png");
     expect(asset?.subarray(1, 4).toString()).toBe("PNG");
   });
 
   it("refuses traversal and unknown files", async () => {
-    expect(await reportHtml("missing")).toBeUndefined();
     expect(await reportAsset("petsmart", "../report.html")).toBeUndefined();
     expect(await reportAsset("petsmart", "report.html")).toBeUndefined();
     expect(await reportAsset("petsmart", "nope.png")).toBeUndefined();
