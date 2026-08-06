@@ -187,6 +187,14 @@ event as an `http_html` interaction with `customerLinkSource: "product_link_clic
 `requestObservation` values such as IP address, user-agent, language, platform, and referrer origin are
 retained only as traits. They never identify a customer and cannot claim a session on their own.
 
+An experience-graph hop may attach an optional `experience` object describing the hop in aggregate-safe
+terms: the graph `stage`, which need dimensions were expressed or explicitly unknown (dimension keys only,
+never customer values), decision quality (`exactMatchCount`, `nearMissCount`, per-item
+`violatedHardConstraints` with bounded requested/actual strings, and zero-match `counterfactuals` with
+numeric deltas), and search attribution (`searchId`, numeric `resultPosition`). These fields power
+lost-demand, drop-off, and rank-position insight aggregations. They are decision evidence about the
+merchant's own catalog and the stated need shape — never free text from the customer or agent.
+
 ### Completed MCP interaction contract
 
 SDKs that support customer-owned MCP integrations expose an idiomatic, framework-neutral operation for

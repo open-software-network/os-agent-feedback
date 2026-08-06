@@ -208,3 +208,143 @@ test("experience telemetry maps onto the closed Epode telemetry schema", async (
   // Closed schema: no free-form need-state blob.
   assert.equal(Object.hasOwn(event, "needState"), false);
 });
+
+const overBudgetGraph = createExperienceGraph({
+  category: "chair",
+  dimensions: [
+    {
+      key: "budget",
+      kind: "budget",
+      question: "What budget value and strength are known for this purchase?",
+      whyItMatters: "A hard ceiling excludes products.",
+      anchorMeaning: "A budget ceiling is known",
+      choices: [
+        {
+          token: "budget-hard-100",
+          value: "100",
+          meaning: "$100 absolute maximum",
+          strength: "hard",
+        },
+      ],
+    },
+  ],
+  items: [
+    {
+      id: "everyday-chair",
+      title: "Everyday Chair",
+      brand: "Fieldnote",
+      price: { amount: 158, currency: "USD" },
+    },
+    {
+      id: "luxe-chair",
+      title: "Luxe Chair",
+      brand: "Fieldnote",
+      price: { amount: 250, currency: "USD" },
+    },
+  ],
+});
+
+test("experienceTelemetryForNode maps decision quality into the aggregate-safe payload", async () => {
+  const { experienceTelemetryForNode } = await import("../dist/experience-graph.js");
+  const node = overBudgetGraph.buildDecision({
+    origin,
+    journeyId,
+    tokens: ["budget-hard-100"],
+    searchId: "search-experience",
+  });
+  const payload = experienceTelemetryForNode(node);
+  assert.equal(payload.stage, "decision_support");
+  assert.deepEqual(payload.needState.expressedDimensions, ["budget"]);
+  assert.equal(payload.needState.unknownDimensions, undefined);
+  assert.equal(payload.decision.exactMatchCount, 0);
+  assert.equal(payload.decision.nearMissCount, 2);
+  assert.equal(payload.decision.violatedHardConstraints.length, 2);
+  for (const violation of payload.decision.violatedHardConstraints) {
+    assert.equal(violation.dimension, "budget");
+    assert.ok(violation.itemId);
+    assert.ok(violation.requested.length <= 120);
+    assert.ok(violation.actual.length <= 120);
+  }
+  const [counterfactual] = payload.decision.counterfactuals;
+  assert.match(counterfactual.change, /raise_budget_from_100_to_158/);
+  assert.equal(counterfactual.delta, 58);
+});
+
+test("experienceTelemetryForNode reports explicit unknowns without leaking values", async () => {
+  const { experienceTelemetryForNode } = await import("../dist/experience-graph.js");
+  const node = graph.buildNegotiation({ origin, journeyId, tokens: ["purpose-unknown"] });
+  const payload = experienceTelemetryForNode(node);
+  assert.equal(payload.stage, "decision_input_required");
+  assert.deepEqual(payload.needState.unknownDimensions, ["purpose"]);
+  assert.equal(payload.needState.expressedDimensions, undefined);
+  assert.equal(payload.decision, undefined);
+});
+
+test("experienceTelemetryForNode keeps only numeric search positions", async () => {
+  const { experienceTelemetryForNode } = await import("../dist/experience-graph.js");
+  const ranked = experienceTelemetryForNode(
+    graph.itemDetail("halo-portable-lamp", "search-9", "2"),
+  );
+  assert.deepEqual(ranked.search, { searchId: "search-9", resultPosition: 2 });
+  const nearMiss = experienceTelemetryForNode(
+    graph.itemDetail("halo-portable-lamp", "search-9", "near-1"),
+  );
+  assert.deepEqual(nearMiss.search, { searchId: "search-9" });
+  assert.equal(experienceTelemetryForNode(null), undefined);
+  assert.equal(experienceTelemetryForNode({}), undefined);
+});
+
+test("experience payloads ride telemetry events end to end", async () => {
+  const batches = [];
+  const runtime = new AgentFeedbackRuntime({
+    apiKey: "af_live_0123456789abcdef0123456789abcdef_secretsecretsecretsecretsecretse",
+    endpoint: "https://collector.example",
+    feedbackMode: "never_ask",
+    fetch: async (input, init) => {
+      batches.push({ url: String(input), body: JSON.parse(String(init?.body ?? "{}")) });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    },
+  });
+  const { experienceTelemetryForNode } = await import("../dist/experience-graph.js");
+  const node = overBudgetGraph.buildDecision({
+    origin,
+    journeyId,
+    tokens: ["budget-hard-100"],
+    searchId: "search-experience",
+  });
+  runtime.record(
+    runtime.prepare(),
+    experienceTelemetryDetails({
+      operation: node.operation,
+      journeyId,
+      statusCode: 200,
+      experience: experienceTelemetryForNode(node),
+    }),
+  );
+  await runtime.flush();
+  await runtime.shutdown();
+  assert.equal(batches.length, 1);
+  const event = batches[0].body.events[0];
+  assert.equal(event.experience.decision.exactMatchCount, 0);
+  assert.equal(event.experience.decision.counterfactuals[0].delta, 58);
+  assert.deepEqual(event.experience.needState.expressedDimensions, ["budget"]);
+});
+
+test("experienceTelemetryForNode maps domain deltas and clamps oversized values", async () => {
+  const { experienceTelemetryForNode } = await import("../dist/experience-graph.js");
+  const domainCounterfactual = experienceTelemetryForNode({
+    exactMatchCount: 0,
+    nearMissCount: 1,
+    counterfactuals: [
+      { change: "allow_red", effect: "Cheap Red becomes eligible", detailUrl: "x", deltaUsd: 20 },
+    ],
+  });
+  assert.equal(domainCounterfactual.decision.counterfactuals[0].delta, 20);
+
+  const clamped = experienceTelemetryForNode({
+    exactMatchCount: 2_000_000,
+    searchAttribution: { searchId: "s-1", resultPosition: 999_999 },
+  });
+  assert.equal(clamped.decision.exactMatchCount, 100_000);
+  assert.deepEqual(clamped.search, { searchId: "s-1" });
+});

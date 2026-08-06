@@ -180,6 +180,7 @@ export interface TelemetryEvent {
   sessionRef?: string;
   sessionSource?: "customer" | "mcp" | "continuation";
   occurredAt: string;
+  experience?: import("./experience-graph.js").ExperienceTelemetry;
 }
 
 export interface PreparedInteraction {

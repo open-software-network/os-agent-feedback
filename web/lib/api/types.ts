@@ -971,6 +971,14 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description Unverified runtime evidence grouped into assistant-vendor families. */
+        AgentVendorInsight: {
+            /** Format: int64 */
+            interactions: number;
+            /** Format: int64 */
+            sessions: number;
+            vendor: string;
+        };
         ApiErrorEnvelope: {
             error: string;
         };
@@ -1831,6 +1839,45 @@ export interface components {
         EnvironmentResponse: {
             environment: components["schemas"]["ProductEnvironment"];
         };
+        ExperienceCounterfactualInput: {
+            change: string;
+            /** Format: double */
+            delta?: number | null;
+            itemId?: string | null;
+        };
+        ExperienceDecisionInput: {
+            counterfactuals?: components["schemas"]["ExperienceCounterfactualInput"][] | null;
+            /** Format: int64 */
+            exactMatchCount?: number | null;
+            /** Format: int64 */
+            nearMissCount?: number | null;
+            violatedHardConstraints?: components["schemas"]["ExperienceViolationInput"][] | null;
+        };
+        ExperienceNeedStateInput: {
+            expressedDimensions?: string[] | null;
+            unknownDimensions?: string[] | null;
+        };
+        ExperienceSearchInput: {
+            /** Format: int64 */
+            resultPosition?: number | null;
+            searchId?: string | null;
+        };
+        /**
+         * @description Aggregate-safe experience-graph hop evidence. Dimension keys and
+         *     decision-quality numbers only — never free-text customer or agent values.
+         */
+        ExperienceTelemetryInput: {
+            decision?: null | components["schemas"]["ExperienceDecisionInput"];
+            needState?: null | components["schemas"]["ExperienceNeedStateInput"];
+            search?: null | components["schemas"]["ExperienceSearchInput"];
+            stage?: string | null;
+        };
+        ExperienceViolationInput: {
+            actual?: string | null;
+            dimension: string;
+            itemId?: string | null;
+            requested?: string | null;
+        };
         FeatureFacets: {
             impact: components["schemas"]["InsightCount"][];
             segment: components["schemas"]["InsightCount"][];
@@ -2007,6 +2054,21 @@ export interface components {
             /** @description Whether GitHub marks the repository as private. */
             private: boolean;
         };
+        /**
+         * @description Agent→human handoff: `product_link_click` navigations and their rate across
+         *     proven sessions.
+         */
+        HandoffInsights: {
+            /** Format: int64 */
+            handoffClicks: number;
+            /** Format: int64 */
+            handoffRate: number;
+            landingOperations: components["schemas"]["InsightCount"][];
+            /** Format: int64 */
+            sessions: number;
+            /** Format: int64 */
+            sessionsWithHandoff: number;
+        };
         HealthResponse: {
             database: string;
             service: string;
@@ -2018,6 +2080,7 @@ export interface components {
             name: string;
         };
         Insights: {
+            agentVendors: components["schemas"]["AgentVendorInsight"][];
             blockingTopics: components["schemas"]["InsightCount"][];
             /** Format: int32 */
             comparisonDays: number;
@@ -2032,7 +2095,10 @@ export interface components {
             /** Format: int64 */
             customersWithContext: number;
             findingKinds: components["schemas"]["InsightCount"][];
+            handoff: components["schemas"]["HandoffInsights"];
             impacts: components["schemas"]["InsightCount"][];
+            journeyFlow: components["schemas"]["JourneyFlowInsights"];
+            lostDemand: components["schemas"]["LostDemandInsights"];
             /** Format: int64 */
             opportunities: number;
             /** Format: int64 */
@@ -2051,6 +2117,7 @@ export interface components {
             previousOpportunities: number;
             /** Format: int64 */
             previousReports: number;
+            rankPositions: components["schemas"]["InsightCount"][];
             /** Format: int64 */
             recentConfirmedInteractions: number;
             /** Format: int64 */
@@ -2065,9 +2132,12 @@ export interface components {
             reportsWithWorkarounds: number;
             /** Format: int64 */
             reviewRate: number;
+            signalOutcomes: components["schemas"]["SignalOutcomeInsight"][];
             surfaces: components["schemas"]["InsightCount"][];
             topOperations: components["schemas"]["InsightCount"][];
             topics: components["schemas"]["InsightCount"][];
+            unansweredQuestions: components["schemas"]["InsightCount"][];
+            unknownDimensions: components["schemas"]["InsightCount"][];
             /** Format: int32 */
             windowDays: number;
         };
@@ -2087,6 +2157,7 @@ export interface components {
             customerRef?: string | null;
             /** Format: int64 */
             durationMs?: number | null;
+            experience?: null | components["schemas"]["ExperienceTelemetryInput"];
             /** Format: uuid */
             interactionId: string;
             /** Format: date-time */
@@ -2103,6 +2174,32 @@ export interface components {
             statusCode?: number | null;
             surface: string;
             userRef?: string | null;
+        };
+        JourneyEdgeInsight: {
+            fromOperation: string;
+            toOperation: string;
+            /** Format: int64 */
+            traversals: number;
+        };
+        /** @description Session-proven operation transitions and where journeys end. */
+        JourneyFlowInsights: {
+            edges: components["schemas"]["JourneyEdgeInsight"][];
+            exitOperations: components["schemas"]["InsightCount"][];
+        };
+        /**
+         * @description What agents asked for and could not get: stated-demand aggregates from
+         *     experience-graph decision evidence.
+         */
+        LostDemandInsights: {
+            counterfactualChanges: components["schemas"]["InsightCount"][];
+            /** Format: int64 */
+            decisionInteractions: number;
+            expressedDimensions: components["schemas"]["InsightCount"][];
+            /** Format: double */
+            medianCounterfactualDelta: number | null;
+            violatedDimensions: components["schemas"]["InsightCount"][];
+            /** Format: int64 */
+            zeroMatchDecisions: number;
         };
         McpDiscovery: {
             discoveryMethod: string;
@@ -2433,6 +2530,19 @@ export interface components {
         };
         RevokedResponse: {
             revoked: boolean;
+        };
+        /**
+         * @description Which customer signals were cited by personalization decisions and what
+         *     outcomes followed.
+         */
+        SignalOutcomeInsight: {
+            /** Format: int64 */
+            conversions: number;
+            /** Format: int64 */
+            decisions: number;
+            /** Format: int64 */
+            outcomes: number;
+            signal: string;
         };
         TeamInvitation: {
             /** Format: date-time */

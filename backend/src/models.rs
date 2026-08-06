@@ -705,12 +705,81 @@ pub(crate) struct InteractionTelemetryInput {
     pub session_ref: Option<String>,
     pub session_source: Option<String>,
     pub occurred_at: Option<DateTime<Utc>>,
+    pub experience: Option<ExperienceTelemetryInput>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CustomerLinkSource {
     ProductLinkClick,
+}
+
+/// Aggregate-safe experience-graph hop evidence. Dimension keys and
+/// decision-quality numbers only — never free-text customer or agent values.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ExperienceTelemetryInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub need_state: Option<ExperienceNeedStateInput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision: Option<ExperienceDecisionInput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search: Option<ExperienceSearchInput>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ExperienceNeedStateInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expressed_dimensions: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unknown_dimensions: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ExperienceDecisionInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_match_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub near_miss_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub violated_hard_constraints: Option<Vec<ExperienceViolationInput>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counterfactuals: Option<Vec<ExperienceCounterfactualInput>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ExperienceViolationInput {
+    pub dimension: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ExperienceCounterfactualInput {
+    pub change: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ExperienceSearchInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_position: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
@@ -1537,6 +1606,68 @@ pub(crate) struct InsightCount {
     pub count: i64,
 }
 
+/// What agents asked for and could not get: stated-demand aggregates from
+/// experience-graph decision evidence.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LostDemandInsights {
+    pub decision_interactions: i64,
+    pub zero_match_decisions: i64,
+    pub expressed_dimensions: Vec<InsightCount>,
+    pub violated_dimensions: Vec<InsightCount>,
+    pub counterfactual_changes: Vec<InsightCount>,
+    #[schema(required = true, nullable)]
+    pub median_counterfactual_delta: Option<f64>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JourneyEdgeInsight {
+    pub from_operation: String,
+    pub to_operation: String,
+    pub traversals: i64,
+}
+
+/// Session-proven operation transitions and where journeys end.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JourneyFlowInsights {
+    pub edges: Vec<JourneyEdgeInsight>,
+    pub exit_operations: Vec<InsightCount>,
+}
+
+/// Agent→human handoff: `product_link_click` navigations and their rate across
+/// proven sessions.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HandoffInsights {
+    pub handoff_clicks: i64,
+    pub sessions_with_handoff: i64,
+    pub sessions: i64,
+    pub handoff_rate: i64,
+    pub landing_operations: Vec<InsightCount>,
+}
+
+/// Which customer signals were cited by personalization decisions and what
+/// outcomes followed.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SignalOutcomeInsight {
+    pub signal: String,
+    pub decisions: i64,
+    pub outcomes: i64,
+    pub conversions: i64,
+}
+
+/// Unverified runtime evidence grouped into assistant-vendor families.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AgentVendorInsight {
+    pub vendor: String,
+    pub interactions: i64,
+    pub sessions: i64,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Insights {
@@ -1571,6 +1702,14 @@ pub(crate) struct Insights {
     pub finding_kinds: Vec<InsightCount>,
     pub topics: Vec<InsightCount>,
     pub blocking_topics: Vec<InsightCount>,
+    pub lost_demand: LostDemandInsights,
+    pub journey_flow: JourneyFlowInsights,
+    pub handoff: HandoffInsights,
+    pub signal_outcomes: Vec<SignalOutcomeInsight>,
+    pub agent_vendors: Vec<AgentVendorInsight>,
+    pub rank_positions: Vec<InsightCount>,
+    pub unknown_dimensions: Vec<InsightCount>,
+    pub unanswered_questions: Vec<InsightCount>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

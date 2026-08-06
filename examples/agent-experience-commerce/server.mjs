@@ -7,6 +7,7 @@ import { AgentFeedbackRuntime } from "@epode/node";
 import {
   createExperienceGraph,
   experienceTelemetryDetails,
+  experienceTelemetryForNode,
 } from "@epode/node/experience-graph";
 
 import {
@@ -64,7 +65,7 @@ function originFor(request) {
   return `${proto}://${host}`;
 }
 
-function recordHop(operation, journeyId, statusCode, durationMs) {
+function recordHop(operation, journeyId, statusCode, durationMs, experience) {
   if (!runtime) return;
   try {
     const prepared = runtime.prepare();
@@ -76,6 +77,7 @@ function recordHop(operation, journeyId, statusCode, durationMs) {
         statusCode,
         durationMs,
         runtimeHint: "agent-experience-commerce/1.0",
+        experience,
       }),
     );
     void runtime.flush().catch(() => {});
@@ -170,7 +172,13 @@ export function createApp() {
         journeyId: parsed.journeyId,
         tokens: parsed.tokens,
       });
-      recordHop(node.operation, parsed.journeyId, 200, Math.round(performance.now() - started));
+      recordHop(
+        node.operation,
+        parsed.journeyId,
+        200,
+        Math.round(performance.now() - started),
+        experienceTelemetryForNode(node),
+      );
       return json(response, 200, node);
     } catch (error) {
       return json(response, 400, { error: "invalid_negotiation", message: String(error) });
@@ -195,7 +203,13 @@ export function createApp() {
         searchId: randomUUID(),
       });
       const status = node.error ? 422 : 200;
-      recordHop(node.operation, parsed.journeyId, status, Math.round(performance.now() - started));
+      recordHop(
+        node.operation,
+        parsed.journeyId,
+        status,
+        Math.round(performance.now() - started),
+        experienceTelemetryForNode(node),
+      );
       return json(response, status, node);
     } catch (error) {
       return json(response, 400, { error: "invalid_decision", message: String(error) });
@@ -235,10 +249,11 @@ export function createApp() {
       }
       const status = node.error === "alternatives_not_applicable" ? 409 : node.error ? 422 : 200;
       recordHop(
-        "/agent-product/lamp",
+        node.operation,
         parsed.journeyId,
         status,
         Math.round(performance.now() - started),
+        experienceTelemetryForNode(node),
       );
       return json(response, status, node);
     } catch (error) {
@@ -254,7 +269,13 @@ export function createApp() {
     const detail = graph.itemDetail(itemId, searchId, position);
     const status = detail.error ? 404 : 200;
     const journeyId = searchId ? `j-search-${searchId.slice(0, 8)}` : `j-item-${itemId || "unknown"}`;
-    recordHop(detail.operation || "/agent-item", journeyId, status, Math.round(performance.now() - started));
+    recordHop(
+      detail.operation || "/agent-item",
+      journeyId,
+      status,
+      Math.round(performance.now() - started),
+      experienceTelemetryForNode(detail),
+    );
     if (detail.error) return json(response, status, detail);
     const productJourneyId = `j-${randomUUID()}`;
     const productBase = `${originFor(request)}/agent-product/${productJourneyId}/${encodeURIComponent(itemId)}`;

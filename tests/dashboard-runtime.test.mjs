@@ -206,6 +206,45 @@ const dashboard = {
       { name: "document_access", count: 1 },
     ],
     blockingTopics: [{ name: "document_access", count: 1 }],
+    lostDemand: {
+      decisionInteractions: 4,
+      zeroMatchDecisions: 1,
+      expressedDimensions: [
+        { name: "budget", count: 3 },
+        { name: "color", count: 2 },
+      ],
+      violatedDimensions: [{ name: "budget", count: 2 }],
+      counterfactualChanges: [{ name: "raise_budget_from_150_to_164", count: 1 }],
+      medianCounterfactualDelta: 14,
+    },
+    journeyFlow: {
+      edges: [
+        {
+          fromOperation: "/agent-negotiate/lamp",
+          toOperation: "/agent-decide/lamp",
+          traversals: 3,
+        },
+      ],
+      exitOperations: [{ name: "/agent-decide/lamp", count: 2 }],
+    },
+    handoff: {
+      handoffClicks: 2,
+      sessionsWithHandoff: 1,
+      sessions: 3,
+      handoffRate: 33,
+      landingOperations: [{ name: "/product/feeder", count: 2 }],
+    },
+    signalOutcomes: [{ signal: "constraint/budget", decisions: 3, outcomes: 2, conversions: 1 }],
+    agentVendors: [
+      { vendor: "claude", interactions: 5, sessions: 2 },
+      { vendor: "openai", interactions: 2, sessions: 1 },
+    ],
+    rankPositions: [
+      { name: "1", count: 4 },
+      { name: "2", count: 1 },
+    ],
+    unknownDimensions: [{ name: "commute", count: 2 }],
+    unansweredQuestions: [{ name: "budget · declined", count: 1 }],
   },
   listState: {
     interactionsTotal: 3,
@@ -778,4 +817,54 @@ test("the product root opens a Home overview with recent feedback and usage", as
   assert.match(page.innerHTML, /Top operations/);
   assert.match(page.innerHTML, /Where to look next/);
   assert.match(page.innerHTML, /The document could not be opened/);
+});
+
+test("the Home overview surfaces lost demand, journey flow, handoff, context ROI, agent mix, rank, and unknowns", async () => {
+  const { page } = await loadDashboard({ href: "https://app.epode.ai/" });
+  assert.match(page.innerHTML, /LOST DEMAND/);
+  assert.match(page.innerHTML, /What agents asked for and could not get/);
+  assert.match(page.innerHTML, /Zero exact matches \(25%\)/);
+  assert.match(page.innerHTML, /Dealbreaker dimensions/);
+  assert.match(page.innerHTML, /Cheapest fixes/);
+  assert.match(page.innerHTML, /JOURNEY FLOW/);
+  assert.match(page.innerHTML, /\/agent-negotiate\/lamp → \/agent-decide\/lamp/i);
+  assert.match(page.innerHTML, /Where journeys end/);
+  assert.match(page.innerHTML, /HANDOFF/);
+  assert.match(page.innerHTML, /Sessions with a handoff \(33%\)/);
+  assert.match(page.innerHTML, /Handoff landing pages/);
+  assert.match(page.innerHTML, /CONTEXT ROI/);
+  assert.match(page.innerHTML, /3 decisions · 2 outcomes · 1 conversions/);
+  assert.match(page.innerHTML, /AGENT MIX/);
+  assert.match(page.innerHTML, /Claude/);
+  assert.match(page.innerHTML, /Result position views/);
+  assert.match(page.innerHTML, /Position 1/);
+  assert.match(page.innerHTML, /Unknown dimensions/);
+  assert.match(page.innerHTML, /Unanswered questions/);
+});
+
+test("the Home overview renders safe empty states when new insight groups are absent", async () => {
+  const { page } = await loadDashboard({
+    href: "https://app.epode.ai/",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        const legacy = structuredClone(dashboard);
+        delete legacy.insights.lostDemand;
+        delete legacy.insights.journeyFlow;
+        delete legacy.insights.handoff;
+        delete legacy.insights.signalOutcomes;
+        delete legacy.insights.agentVendors;
+        delete legacy.insights.rankPositions;
+        delete legacy.insights.unknownDimensions;
+        delete legacy.insights.unansweredQuestions;
+        return legacy;
+      },
+    }),
+  });
+  assert.match(page.innerHTML, /LOST DEMAND/);
+  assert.match(page.innerHTML, /No expressed dimensions yet\./);
+  assert.match(page.innerHTML, /Transitions appear when journeys carry a session reference\./);
+  assert.match(page.innerHTML, /No personalization decisions cited customer signals yet\./);
+  assert.match(page.innerHTML, /Runtime evidence has not named an assistant yet\./);
 });

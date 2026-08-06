@@ -180,3 +180,16 @@ test("product fit refuses a verdict before decision input", () => {
   assert.equal(fit.error, "decision_input_required");
   assert.equal(fit.itemFit, undefined);
 });
+
+test("product nodes map to telemetry payloads with their evaluate stages", async () => {
+  const { experienceTelemetryForNode } = await import("../dist/experience-graph.js");
+  const bare = graph.buildProductGraph({ origin, journeyId, itemId: "current", tokens: [] });
+  assert.equal(experienceTelemetryForNode(bare).stage, "decision_input_required");
+  const ready = graph.buildProductGraph({
+    origin,
+    journeyId,
+    itemId: "current",
+    tokens: ["need-fact"],
+  });
+  assert.equal(experienceTelemetryForNode(ready).stage, "ready_to_evaluate");
+});

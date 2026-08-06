@@ -27,9 +27,9 @@ use crate::{
         IssueCount, IssueFindingRollup, IssueTemplateData, contains_sensitive_report_text,
     },
     models::{
-        ApiKeyPublic, CapabilityInspectionResponse, ConsentDecisionInput, ConsentEventSummary,
-        ConsentGrant, ConsentStateInput, ConsentStateResponse, CreateProductInput,
-        CreateTeamInvitationInput, CustomerContextInput, CustomerContextItem,
+        AgentVendorInsight, ApiKeyPublic, CapabilityInspectionResponse, ConsentDecisionInput,
+        ConsentEventSummary, ConsentGrant, ConsentStateInput, ConsentStateResponse,
+        CreateProductInput, CreateTeamInvitationInput, CustomerContextInput, CustomerContextItem,
         CustomerContextResponse, CustomerDetailCounts, CustomerFacets, CustomerIdentifier,
         CustomerLinkSource, CustomerRequestObservation, CustomerRequestObservationInput,
         CustomerRollup, CustomerSignal, CustomerSummary, DashboardContext,
@@ -48,19 +48,20 @@ use crate::{
         EnrichmentConstraintRetention, EnrichmentFieldDefinitionInput,
         EnrichmentFieldDefinitionResponse, EnrichmentFieldListResponse,
         EnrichmentRequestConstraints, EnrichmentRequestInput, EnrichmentRequestResponse,
-        FeedbackFindingInput, FeedbackInteractionItem, FeedbackInteractionsPage,
-        FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackOperationSummary,
-        FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse, FeedbackSummary,
-        FeedbackSurfaceSummary, FeedbackWindow, GithubIssueLink, InsightCount, Insights,
-        InteractionTelemetryInput, MergeReportGroupsResponse, PersonalizationDecision,
+        ExperienceTelemetryInput, FeedbackFindingInput, FeedbackInteractionItem,
+        FeedbackInteractionsPage, FeedbackListInteractionsInput, FeedbackListReportsInput,
+        FeedbackOperationSummary, FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse,
+        FeedbackSummary, FeedbackSurfaceSummary, FeedbackWindow, GithubIssueLink, HandoffInsights,
+        InsightCount, Insights, InteractionTelemetryInput, JourneyEdgeInsight, JourneyFlowInsights,
+        LostDemandInsights, MergeReportGroupsResponse, PersonalizationDecision,
         PersonalizationDecisionInput, PersonalizationDecisionResponse, PersonalizationOutcome,
         PersonalizationOutcomeInput, PersonalizationOutcomeResponse, PolicyInput, Product,
         ProductActivationMilestones, ProductAuth, ProductEnvironment, ProductFeedbackReport,
         ProductFeedbackReportInput, ProductFeedbackReportWithInteraction, ProductGithubRepo,
         ProductGithubRepoInput, ProductInteraction, ProductReportGroup, ProductSession,
-        TeamInvitation, TeamMember, TelemetryBatchInput, TelemetryBatchResult,
-        UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput, Workspace,
-        WorkspaceMembership,
+        SignalOutcomeInsight, TeamInvitation, TeamMember, TelemetryBatchInput,
+        TelemetryBatchResult, UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput,
+        Workspace, WorkspaceMembership,
     },
     os_accounts::OsUser,
     security::{
@@ -5575,6 +5576,249 @@ async fn dashboard_insights(
         .fetch_all(pool)
         .await?,
     );
+    let decision_counts = sqlx::query_as::<_, (i64, i64)>(
+        r"SELECT
+          COUNT(*) FILTER (WHERE experience ? 'decision'),
+          COUNT(*) FILTER (WHERE (experience -> 'decision' ->> 'exactMatchCount')::BIGINT = 0)
+        FROM interactions_v2
+        WHERE environment_id = $1 AND occurred_at >= $2 AND experience IS NOT NULL",
+    )
+    .bind(environment_id)
+    .bind(window_start)
+    .fetch_one(pool)
+    .await?;
+    let expressed_dimensions = insight_counts(
+        sqlx::query_as::<_, (String, i64)>(
+            r"SELECT dimension.value, COUNT(*)
+            FROM interactions_v2 i,
+            LATERAL jsonb_array_elements_text(i.experience -> 'needState' -> 'expressedDimensions') dimension
+            WHERE i.environment_id = $1 AND i.occurred_at >= $2
+              AND i.experience -> 'needState' -> 'expressedDimensions' IS NOT NULL
+            GROUP BY dimension.value ORDER BY COUNT(*) DESC, dimension.value LIMIT 8",
+        )
+        .bind(environment_id)
+        .bind(window_start)
+        .fetch_all(pool)
+        .await?,
+    );
+    let violated_dimensions = insight_counts(
+        sqlx::query_as::<_, (String, i64)>(
+            r"SELECT violation ->> 'dimension', COUNT(*)
+            FROM interactions_v2 i,
+            LATERAL jsonb_array_elements(i.experience -> 'decision' -> 'violatedHardConstraints') violation
+            WHERE i.environment_id = $1 AND i.occurred_at >= $2
+              AND i.experience -> 'decision' -> 'violatedHardConstraints' IS NOT NULL
+            GROUP BY violation ->> 'dimension'
+            ORDER BY COUNT(*) DESC, violation ->> 'dimension' LIMIT 8",
+        )
+        .bind(environment_id)
+        .bind(window_start)
+        .fetch_all(pool)
+        .await?,
+    );
+    let counterfactual_changes = insight_counts(
+        sqlx::query_as::<_, (String, i64)>(
+            r"SELECT counterfactual ->> 'change', COUNT(*)
+            FROM interactions_v2 i,
+            LATERAL jsonb_array_elements(i.experience -> 'decision' -> 'counterfactuals') counterfactual
+            WHERE i.environment_id = $1 AND i.occurred_at >= $2
+              AND i.experience -> 'decision' -> 'counterfactuals' IS NOT NULL
+            GROUP BY counterfactual ->> 'change'
+            ORDER BY COUNT(*) DESC, counterfactual ->> 'change' LIMIT 8",
+        )
+        .bind(environment_id)
+        .bind(window_start)
+        .fetch_all(pool)
+        .await?,
+    );
+    let median_counterfactual_delta = sqlx::query_scalar::<_, Option<f64>>(
+        r"SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (
+            ORDER BY (counterfactual ->> 'delta')::DOUBLE PRECISION)
+        FROM interactions_v2 i,
+        LATERAL jsonb_array_elements(i.experience -> 'decision' -> 'counterfactuals') counterfactual
+        WHERE i.environment_id = $1 AND i.occurred_at >= $2
+          AND i.experience -> 'decision' -> 'counterfactuals' IS NOT NULL
+          AND counterfactual ? 'delta'",
+    )
+    .bind(environment_id)
+    .bind(window_start)
+    .fetch_one(pool)
+    .await?;
+    let journey_edges = sqlx::query_as::<_, (String, String, i64)>(
+        r"WITH ordered AS (
+          SELECT operation, LEAD(operation) OVER (
+            PARTITION BY session_id
+            ORDER BY occurred_at, client_sequence NULLS LAST, id
+          ) AS next_operation
+          FROM interactions_v2
+          WHERE environment_id = $1 AND occurred_at >= $2 AND session_id IS NOT NULL
+        )
+        SELECT operation, next_operation, COUNT(*)
+        FROM ordered WHERE next_operation IS NOT NULL
+        GROUP BY operation, next_operation
+        ORDER BY COUNT(*) DESC, operation, next_operation LIMIT 12",
+    )
+    .bind(environment_id)
+    .bind(window_start)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(
+        |(from_operation, to_operation, traversals)| JourneyEdgeInsight {
+            from_operation,
+            to_operation,
+            traversals,
+        },
+    )
+    .collect::<Vec<_>>();
+    let exit_operations = insight_counts(
+        sqlx::query_as::<_, (String, i64)>(
+            r"WITH ordered AS (
+              SELECT operation, LEAD(operation) OVER (
+                PARTITION BY session_id
+                ORDER BY occurred_at, client_sequence NULLS LAST, id
+              ) AS next_operation
+              FROM interactions_v2
+              WHERE environment_id = $1 AND occurred_at >= $2 AND session_id IS NOT NULL
+            )
+            SELECT operation, COUNT(*)
+            FROM ordered WHERE next_operation IS NULL
+            GROUP BY operation ORDER BY COUNT(*) DESC, operation LIMIT 8",
+        )
+        .bind(environment_id)
+        .bind(window_start)
+        .fetch_all(pool)
+        .await?,
+    );
+    let handoff_counts = sqlx::query_as::<_, (i64, i64, i64)>(
+        r"SELECT
+          COUNT(*) FILTER (WHERE customer_link_source = 'product_link_click'),
+          COUNT(DISTINCT session_id) FILTER (
+            WHERE customer_link_source = 'product_link_click' AND session_id IS NOT NULL),
+          COUNT(DISTINCT session_id) FILTER (WHERE session_id IS NOT NULL)
+        FROM interactions_v2
+        WHERE environment_id = $1 AND occurred_at >= $2",
+    )
+    .bind(environment_id)
+    .bind(window_start)
+    .fetch_one(pool)
+    .await?;
+    let landing_operations = insight_counts(
+        sqlx::query_as::<_, (String, i64)>(
+            r"SELECT operation, COUNT(*) FROM interactions_v2
+            WHERE environment_id = $1 AND occurred_at >= $2
+              AND customer_link_source = 'product_link_click'
+            GROUP BY operation ORDER BY COUNT(*) DESC, operation LIMIT 8",
+        )
+        .bind(environment_id)
+        .bind(window_start)
+        .fetch_all(pool)
+        .await?,
+    );
+    let signal_outcomes = sqlx::query_as::<_, (String, i64, i64, i64)>(
+        r"SELECT signal.signal_type || '/' || signal.source_item_key,
+          COUNT(DISTINCT decision.id),
+          COUNT(outcome.id),
+          COUNT(outcome.id) FILTER (WHERE outcome.outcome IN ('conversion', 'completion'))
+        FROM personalization_decision_signals link
+        JOIN personalization_decisions decision ON decision.id = link.decision_id
+          AND decision.workspace_id = link.workspace_id
+        JOIN customer_signals signal ON signal.id = link.signal_id
+        LEFT JOIN personalization_outcomes outcome ON outcome.decision_id = decision.id
+        WHERE decision.environment_id = $1 AND decision.created_at >= $2
+        GROUP BY signal.signal_type || '/' || signal.source_item_key
+        ORDER BY COUNT(outcome.id) FILTER (WHERE outcome.outcome IN ('conversion', 'completion')) DESC,
+          COUNT(DISTINCT decision.id) DESC, signal.signal_type || '/' || signal.source_item_key
+        LIMIT 8",
+    )
+    .bind(environment_id)
+    .bind(window_start)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|(signal, decisions, outcomes, conversions)| SignalOutcomeInsight {
+        signal,
+        decisions,
+        outcomes,
+        conversions,
+    })
+    .collect::<Vec<_>>();
+    let agent_vendors = sqlx::query_as::<_, (String, i64, i64)>(
+        r"SELECT CASE
+            WHEN source.evidence ~* '(claude|anthropic)' THEN 'claude'
+            WHEN source.evidence ~* '(chatgpt|openai|gpt-)' THEN 'openai'
+            WHEN source.evidence ~* 'perplexity' THEN 'perplexity'
+            WHEN source.evidence ~* '(gemini|google-extended)' THEN 'gemini'
+            WHEN source.evidence ~* 'cohere' THEN 'cohere'
+            WHEN source.evidence ~* 'copilot' THEN 'copilot'
+            ELSE 'other'
+          END,
+          COUNT(*),
+          COUNT(DISTINCT source.session_id) FILTER (WHERE source.session_id IS NOT NULL)
+        FROM (
+          SELECT i.id, i.session_id,
+            COALESCE(observation.user_agent, i.runtime_hint, '') AS evidence
+          FROM interactions_v2 i
+          LEFT JOIN customer_request_observations observation
+            ON observation.interaction_id = i.id
+          WHERE i.environment_id = $1 AND i.occurred_at >= $2
+        ) source
+        WHERE source.evidence <> ''
+        GROUP BY 1 ORDER BY COUNT(*) DESC, 1 LIMIT 8",
+    )
+    .bind(environment_id)
+    .bind(window_start)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|(vendor, interactions, sessions)| AgentVendorInsight {
+        vendor,
+        interactions,
+        sessions,
+    })
+    .collect::<Vec<_>>();
+    let rank_positions = insight_counts(
+        sqlx::query_as::<_, (String, i64)>(
+            r"SELECT i.experience -> 'search' ->> 'resultPosition', COUNT(*)
+            FROM interactions_v2 i
+            WHERE i.environment_id = $1 AND i.occurred_at >= $2
+              AND i.experience -> 'search' ->> 'resultPosition' ~ '^[0-9]+$'
+            GROUP BY i.experience -> 'search' ->> 'resultPosition'
+            ORDER BY (i.experience -> 'search' ->> 'resultPosition')::BIGINT LIMIT 12",
+        )
+        .bind(environment_id)
+        .bind(window_start)
+        .fetch_all(pool)
+        .await?,
+    );
+    let unknown_dimensions = insight_counts(
+        sqlx::query_as::<_, (String, i64)>(
+            r"SELECT dimension.value, COUNT(*)
+            FROM interactions_v2 i,
+            LATERAL jsonb_array_elements_text(i.experience -> 'needState' -> 'unknownDimensions') dimension
+            WHERE i.environment_id = $1 AND i.occurred_at >= $2
+              AND i.experience -> 'needState' -> 'unknownDimensions' IS NOT NULL
+            GROUP BY dimension.value ORDER BY COUNT(*) DESC, dimension.value LIMIT 8",
+        )
+        .bind(environment_id)
+        .bind(window_start)
+        .fetch_all(pool)
+        .await?,
+    );
+    let unanswered_questions = insight_counts(
+        sqlx::query_as::<_, (String, i64)>(
+            r"SELECT question_key || ' · ' || state, COUNT(*)
+            FROM enrichment_requests
+            WHERE environment_id = $1 AND created_at >= $2
+              AND state IN ('declined', 'no_relevant_context')
+            GROUP BY question_key || ' · ' || state
+            ORDER BY COUNT(*) DESC, question_key || ' · ' || state LIMIT 8",
+        )
+        .bind(environment_id)
+        .bind(window_start)
+        .fetch_all(pool)
+        .await?,
+    );
     Ok(Insights {
         window_days: WINDOW_DAYS,
         comparison_days: COMPARISON_DAYS,
@@ -5613,6 +5857,34 @@ async fn dashboard_insights(
         finding_kinds,
         topics,
         blocking_topics,
+        lost_demand: LostDemandInsights {
+            decision_interactions: decision_counts.0,
+            zero_match_decisions: decision_counts.1,
+            expressed_dimensions,
+            violated_dimensions,
+            counterfactual_changes,
+            median_counterfactual_delta,
+        },
+        journey_flow: JourneyFlowInsights {
+            edges: journey_edges,
+            exit_operations,
+        },
+        handoff: HandoffInsights {
+            handoff_clicks: handoff_counts.0,
+            sessions_with_handoff: handoff_counts.1,
+            sessions: handoff_counts.2,
+            handoff_rate: if handoff_counts.2 == 0 {
+                0
+            } else {
+                (handoff_counts.1 as f64 / handoff_counts.2 as f64 * 100.0).round() as i64
+            },
+            landing_operations,
+        },
+        signal_outcomes,
+        agent_vendors,
+        rank_positions,
+        unknown_dimensions,
+        unanswered_questions,
     })
 }
 
@@ -6958,7 +7230,136 @@ async fn resolve_telemetry_customer(
     }
 }
 
+const EXPERIENCE_STAGES: [&str; 8] = [
+    "decision_input_required",
+    "express_more_or_decide",
+    "ready_to_decide",
+    "decision_support",
+    "express_more_or_evaluate",
+    "ready_to_evaluate",
+    "item",
+    "product",
+];
+
+fn valid_experience_label(value: &str, max: usize) -> bool {
+    // `:` admits namespaced dimensions like the SDK's `evidence:glare_control`.
+    !value.is_empty()
+        && value.chars().count() <= max
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "_.:-".contains(character))
+}
+
+fn valid_experience_text(value: &str, max: usize) -> bool {
+    !value.trim().is_empty()
+        && value.chars().count() <= max
+        && !value.chars().any(char::is_control)
+        && !contains_sensitive_report_text(value)
+}
+
+fn validate_experience_dimensions(dimensions: Option<&Vec<String>>) -> Result<(), ApiError> {
+    if let Some(dimensions) = dimensions
+        && (dimensions.len() > 24
+            || dimensions
+                .iter()
+                .any(|dimension| !valid_experience_label(dimension, 80)))
+    {
+        return Err(ApiError::bad_request(
+            "experience dimensions must be at most 24 bounded dimension keys",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_experience(input: Option<&ExperienceTelemetryInput>) -> Result<(), ApiError> {
+    let Some(experience) = input else {
+        return Ok(());
+    };
+    if let Some(stage) = experience.stage.as_deref()
+        && !EXPERIENCE_STAGES.contains(&stage)
+    {
+        return Err(ApiError::bad_request("Invalid experience stage"));
+    }
+    if let Some(need_state) = experience.need_state.as_ref() {
+        validate_experience_dimensions(need_state.expressed_dimensions.as_ref())?;
+        validate_experience_dimensions(need_state.unknown_dimensions.as_ref())?;
+    }
+    if let Some(decision) = experience.decision.as_ref() {
+        if decision
+            .exact_match_count
+            .is_some_and(|value| !(0..=100_000).contains(&value))
+            || decision
+                .near_miss_count
+                .is_some_and(|value| !(0..=100_000).contains(&value))
+        {
+            return Err(ApiError::bad_request("Invalid experience match counts"));
+        }
+        if let Some(violations) = decision.violated_hard_constraints.as_ref() {
+            if violations.len() > 40 {
+                return Err(ApiError::bad_request(
+                    "experience violations must contain at most 40 entries",
+                ));
+            }
+            for violation in violations {
+                if !valid_experience_label(&violation.dimension, 80)
+                    || violation
+                        .requested
+                        .as_deref()
+                        .is_some_and(|value| !valid_experience_text(value, 120))
+                    || violation
+                        .actual
+                        .as_deref()
+                        .is_some_and(|value| !valid_experience_text(value, 120))
+                    || violation
+                        .item_id
+                        .as_deref()
+                        .is_some_and(|value| !valid_experience_label(value, 120))
+                {
+                    return Err(ApiError::bad_request(
+                        "experience violations must use bounded dimension keys and values",
+                    ));
+                }
+            }
+        }
+        if let Some(counterfactuals) = decision.counterfactuals.as_ref() {
+            if counterfactuals.len() > 8 {
+                return Err(ApiError::bad_request(
+                    "experience counterfactuals must contain at most 8 entries",
+                ));
+            }
+            for counterfactual in counterfactuals {
+                if !valid_experience_text(&counterfactual.change, 160)
+                    || counterfactual.delta.is_some_and(|value| !value.is_finite())
+                    || counterfactual
+                        .item_id
+                        .as_deref()
+                        .is_some_and(|value| !valid_experience_label(value, 120))
+                {
+                    return Err(ApiError::bad_request(
+                        "experience counterfactuals must be bounded change descriptions",
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(search) = experience.search.as_ref()
+        && (search
+            .search_id
+            .as_deref()
+            .is_some_and(|value| !valid_experience_label(value, 120))
+            || search
+                .result_position
+                .is_some_and(|value| !(1..=100_000).contains(&value)))
+    {
+        return Err(ApiError::bad_request(
+            "Invalid experience search attribution",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_telemetry(input: &InteractionTelemetryInput) -> Result<(), ApiError> {
+    validate_experience(input.experience.as_ref())?;
     validate_identity_refs(input)?;
     if !["http_json", "http_html", "http_headers", "mcp"].contains(&input.surface.as_str()) {
         return Err(ApiError::bad_request("Invalid interaction surface"));
@@ -7212,6 +7613,12 @@ async fn ingest_telemetry_event(
         resolve_telemetry_customer(tx, auth, identity_hmac_secret, &identity_refs, occurred_at)
             .await?;
     let customer_ref = identity_refs.customer_ref;
+    let experience_json = event
+        .experience
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|_| ApiError::internal("experience payload serialization failed"))?;
     let confirmed = event.surface == "mcp";
     let classification = if confirmed {
         "confirmed".to_string()
@@ -7232,9 +7639,9 @@ async fn ingest_telemetry_event(
           INSERT INTO interactions_v2
         (id, workspace_id, environment_id, api_key_id, session_id, surface, operation, status_code,
          duration_ms, customer_ref, customer_id, classification, confirmation_method, runtime_hint,
-         runtime_hint_source, client_sequence, occurred_at)
+         runtime_hint_source, client_sequence, occurred_at, experience, customer_link_source)
         SELECT COALESCE(p.id, input.id), $2, $3, $4, $5, $6, $7, $8,
-          $9, $10, $11, $12, $13, $14, $15, $16, $17
+          $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
         FROM (VALUES ($1::uuid)) AS input(id)
         LEFT JOIN previous p ON p.id = input.id
         ON CONFLICT (id) DO UPDATE SET
@@ -7252,6 +7659,8 @@ async fn ingest_telemetry_event(
           runtime_hint = COALESCE(interactions_v2.runtime_hint, EXCLUDED.runtime_hint),
           runtime_hint_source = COALESCE(interactions_v2.runtime_hint_source, EXCLUDED.runtime_hint_source),
           client_sequence = COALESCE(interactions_v2.client_sequence, EXCLUDED.client_sequence),
+          experience = COALESCE(interactions_v2.experience, EXCLUDED.experience),
+          customer_link_source = COALESCE(interactions_v2.customer_link_source, EXCLUDED.customer_link_source),
           occurred_at = CASE
             WHEN interactions_v2.surface = 'unknown' AND interactions_v2.operation = 'pending'
               THEN EXCLUDED.occurred_at
@@ -7291,6 +7700,8 @@ async fn ingest_telemetry_event(
     .bind(event.runtime_hint_source)
     .bind(event.sequence)
     .bind(occurred_at)
+    .bind(experience_json)
+    .bind(customer_link_source.as_deref())
     .fetch_optional(&mut **tx)
     .await?;
     let row =
@@ -12393,6 +12804,10 @@ mod product_tests {
     };
 
     use super::*;
+    use crate::models::{
+        ExperienceCounterfactualInput, ExperienceDecisionInput, ExperienceNeedStateInput,
+        ExperienceSearchInput, ExperienceViolationInput,
+    };
 
     const TEST_IDENTITY_HMAC_SECRET: &[u8] = b"epode-test-identity-hmac-secret-32-bytes-minimum";
 
@@ -12688,6 +13103,7 @@ mod product_tests {
             session_ref: None,
             session_source: None,
             occurred_at: Some(Utc::now()),
+            experience: None,
         }
     }
 
@@ -12715,6 +13131,7 @@ mod product_tests {
             session_ref: None,
             session_source: None,
             occurred_at: Some(occurred_at),
+            experience: None,
         }
     }
 
@@ -12830,6 +13247,7 @@ mod product_tests {
             session_ref: session_ref.map(str::to_owned),
             session_source: session_source.map(str::to_owned),
             occurred_at: Some(occurred_at),
+            experience: None,
         }
     }
 
@@ -17411,6 +17829,7 @@ mod product_tests {
                 session_ref: None,
                 session_source: None,
                 occurred_at: None,
+                experience: None,
             }
         };
         assert!(validate_telemetry(&event("http_json", None, None)).is_ok());
@@ -17643,6 +18062,393 @@ mod product_tests {
             .fetch_one(&pool)
             .await?;
             anyhow::ensure!(legacy_constraint_present);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[test]
+    fn experience_validation_accepts_all_sdk_emitted_shapes() {
+        let payload = |stage: &str, dimension: &str| ExperienceTelemetryInput {
+            stage: Some(stage.into()),
+            need_state: None,
+            decision: Some(ExperienceDecisionInput {
+                exact_match_count: Some(0),
+                near_miss_count: Some(1),
+                violated_hard_constraints: Some(vec![ExperienceViolationInput {
+                    dimension: dimension.into(),
+                    requested: Some("glare_control".into()),
+                    actual: Some("[\"warm orange\"]".into()),
+                    item_id: Some("forma-one-table-lamp".into()),
+                }]),
+                counterfactuals: Some(vec![ExperienceCounterfactualInput {
+                    change: "raise_budget_from_150_to_164".into(),
+                    delta: Some(14.0),
+                    item_id: None,
+                }]),
+            }),
+            search: None,
+        };
+        // Every stage the SDK builders emit, including the product-graph
+        // evaluate stages, and the namespaced evidence dimension.
+        for stage in EXPERIENCE_STAGES {
+            validate_experience(Some(&payload(stage, "evidence:glare_control")))
+                .expect("SDK-emitted stages and namespaced dimensions must be accepted");
+        }
+        assert!(validate_experience(Some(&payload("bogus_stage", "budget"))).is_err());
+        assert!(validate_experience(Some(&payload("item", "bad dimension"))).is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn experience_telemetry_powers_dashboard_insights_end_to_end() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Experience insights e2e").await?;
+        let result = async {
+            let (_, auth) =
+                telemetry_test_product(&pool, &workspace, "Experience insights product").await?;
+            let base = Utc::now() - Duration::minutes(10);
+            let journey = "j-insights-e2e";
+            let event = |operation: &str, offset: i64, experience| InteractionTelemetryInput {
+                interaction_id: Uuid::new_v4(),
+                sequence: Some(offset + 1),
+                surface: "http_json".into(),
+                operation: operation.into(),
+                status_code: Some(200),
+                duration_ms: Some(12),
+                customer_ref: None,
+                account_ref: None,
+                user_ref: None,
+                anonymous_ref: None,
+                customer_link_source: None,
+                request_observation: None,
+                classification: Some("unclassified".into()),
+                confirmation_method: None,
+                runtime_hint: Some("claude-code/1.0".into()),
+                runtime_hint_source: Some("http".into()),
+                session_ref: Some(journey.into()),
+                session_source: Some("customer".into()),
+                occurred_at: Some(base + Duration::seconds(offset)),
+                experience,
+            };
+            let negotiate = event(
+                "/agent-negotiate/lamp",
+                0,
+                Some(ExperienceTelemetryInput {
+                    stage: Some("express_more_or_decide".into()),
+                    need_state: Some(ExperienceNeedStateInput {
+                        expressed_dimensions: Some(vec!["budget".into()]),
+                        unknown_dimensions: Some(vec!["purpose".into()]),
+                    }),
+                    decision: None,
+                    search: None,
+                }),
+            );
+            let negotiate_id = negotiate.interaction_id;
+            let decide = event(
+                "/agent-decide/lamp",
+                1,
+                Some(ExperienceTelemetryInput {
+                    stage: Some("decision_support".into()),
+                    need_state: Some(ExperienceNeedStateInput {
+                        expressed_dimensions: Some(vec!["budget".into()]),
+                        unknown_dimensions: None,
+                    }),
+                    decision: Some(ExperienceDecisionInput {
+                        exact_match_count: Some(0),
+                        near_miss_count: Some(2),
+                        violated_hard_constraints: Some(vec![
+                            ExperienceViolationInput {
+                                dimension: "budget".into(),
+                                requested: Some("100".into()),
+                                actual: Some("158".into()),
+                                item_id: Some("everyday-chair".into()),
+                            },
+                            ExperienceViolationInput {
+                                dimension: "budget".into(),
+                                requested: Some("100".into()),
+                                actual: Some("250".into()),
+                                item_id: Some("luxe-chair".into()),
+                            },
+                            ExperienceViolationInput {
+                                dimension: "evidence:glare_control".into(),
+                                requested: Some("glare_control".into()),
+                                actual: Some("not_specified".into()),
+                                item_id: Some("luxe-chair".into()),
+                            },
+                        ]),
+                        counterfactuals: Some(vec![ExperienceCounterfactualInput {
+                            change: "raise_budget_from_100_to_158".into(),
+                            delta: Some(58.0),
+                            item_id: Some("everyday-chair".into()),
+                        }]),
+                    }),
+                    search: None,
+                }),
+            );
+            let item = event(
+                "/agent-item",
+                2,
+                Some(ExperienceTelemetryInput {
+                    stage: Some("item".into()),
+                    need_state: None,
+                    decision: None,
+                    search: Some(ExperienceSearchInput {
+                        search_id: Some("search-1".into()),
+                        result_position: Some(1),
+                    }),
+                }),
+            );
+            let mut click = event("/product/feeder", 3, None);
+            click.surface = "http_html".into();
+            click.customer_link_source = Some(CustomerLinkSource::ProductLinkClick);
+            click.anonymous_ref = Some("anon-insights".into());
+            click.runtime_hint = None;
+            click.runtime_hint_source = None;
+            click.request_observation = Some(CustomerRequestObservationInput {
+                client_ip: Some("203.0.113.9".into()),
+                method: Some("GET".into()),
+                user_agent: Some("Mozilla/5.0 Claude-User/1.0".into()),
+                accept_language: None,
+                referrer_origin: None,
+                sec_ch_ua: None,
+                sec_ch_ua_platform: None,
+                sec_ch_ua_mobile: None,
+            });
+            let accepted = ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![negotiate, decide, item, click],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(accepted.accepted == 4 && accepted.dropped == 0);
+
+            let mut invalid = event("/agent-decide/lamp", 4, None);
+            invalid.experience = Some(ExperienceTelemetryInput {
+                stage: Some("bogus_stage".into()),
+                need_state: None,
+                decision: None,
+                search: None,
+            });
+            let rejected = ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![invalid],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(rejected.accepted == 0 && rejected.dropped == 1);
+
+            sqlx::query(
+                r"INSERT INTO enrichment_requests
+                (id, workspace_id, product_id, environment_id, interaction_id, surface,
+                 purpose, remember, consent_subject, expected_consent_revision, identity_level,
+                 state, operation, question_key, question, request_hash, capability_nonce_hash,
+                 expires_at)
+                VALUES ($1, $2, $3, $4, $5, 'http_json', 'product_personalization', FALSE,
+                  $6, 0, 'ephemeral', 'declined', '/agent-negotiate/lamp', 'budget',
+                  'What budget applies to this purchase?', $7, $8, NOW() + INTERVAL '1 hour')",
+            )
+            .bind(Uuid::new_v4())
+            .bind(workspace.id)
+            .bind(auth.environment.product_id)
+            .bind(auth.environment.id)
+            .bind(negotiate_id)
+            .bind(format!("afint1_{}", Uuid::new_v4().simple()))
+            .bind(vec![0u8; 32])
+            .bind(vec![1u8; 32])
+            .execute(&pool)
+            .await?;
+
+            let signal_id = Uuid::new_v4();
+            sqlx::query(
+                r"INSERT INTO customer_signals
+                (id, workspace_id, product_id, interaction_id, source_item_key, signal_type,
+                 summary, provenance, collection_basis, collected_at)
+                VALUES ($1, $2, $3, $4, 'budget', 'constraint', 'Hard budget of $100',
+                  'agent_reports_current_task', 'required_product_data', NOW())",
+            )
+            .bind(signal_id)
+            .bind(workspace.id)
+            .bind(auth.environment.product_id)
+            .bind(negotiate_id)
+            .execute(&pool)
+            .await?;
+            let retrieval_id = Uuid::new_v4();
+            sqlx::query(
+                r"INSERT INTO customer_context_retrievals
+                (id, workspace_id, product_id, environment_id, interaction_id, purpose,
+                 identity_level, context_version, item_count)
+                VALUES ($1, $2, $3, $4, $5, 'product_personalization', 'ephemeral',
+                  'ctxv-insights-e2e-0001', 1)",
+            )
+            .bind(retrieval_id)
+            .bind(workspace.id)
+            .bind(auth.environment.product_id)
+            .bind(auth.environment.id)
+            .bind(negotiate_id)
+            .execute(&pool)
+            .await?;
+            let decision_id = Uuid::new_v4();
+            sqlx::query(
+                r"INSERT INTO personalization_decisions
+                (id, workspace_id, product_id, environment_id, retrieval_id,
+                 external_decision_id, purpose, variant, payload_hash)
+                VALUES ($1, $2, $3, $4, $5, 'dec-insights-1', 'product_personalization',
+                  'hero-a', $6)",
+            )
+            .bind(decision_id)
+            .bind(workspace.id)
+            .bind(auth.environment.product_id)
+            .bind(auth.environment.id)
+            .bind(retrieval_id)
+            .bind(vec![2u8; 32])
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                r"INSERT INTO personalization_decision_signals (workspace_id, decision_id, signal_id)
+                VALUES ($1, $2, $3)",
+            )
+            .bind(workspace.id)
+            .bind(decision_id)
+            .bind(signal_id)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                r"INSERT INTO personalization_outcomes
+                (id, workspace_id, product_id, decision_id, external_outcome_id, outcome,
+                 payload_hash, occurred_at)
+                VALUES ($1, $2, $3, $4, 'out-insights-1', 'conversion', $5, NOW())",
+            )
+            .bind(Uuid::new_v4())
+            .bind(workspace.id)
+            .bind(auth.environment.product_id)
+            .bind(decision_id)
+            .bind(vec![3u8; 32])
+            .execute(&pool)
+            .await?;
+
+            let insights = dashboard_insights(&pool, Some(auth.environment.id), None)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(insights.lost_demand.decision_interactions == 1);
+            anyhow::ensure!(insights.lost_demand.zero_match_decisions == 1);
+            anyhow::ensure!(
+                insights
+                    .lost_demand
+                    .expressed_dimensions
+                    .iter()
+                    .any(|row| row.name == "budget" && row.count == 2)
+            );
+            anyhow::ensure!(
+                insights
+                    .lost_demand
+                    .violated_dimensions
+                    .iter()
+                    .any(|row| row.name == "budget" && row.count == 2)
+            );
+            anyhow::ensure!(
+                insights
+                    .lost_demand
+                    .violated_dimensions
+                    .iter()
+                    .any(|row| row.name == "evidence:glare_control" && row.count == 1),
+                "namespaced evidence dimensions must aggregate: {:?}",
+                insights.lost_demand.violated_dimensions
+            );
+            anyhow::ensure!(
+                insights
+                    .lost_demand
+                    .counterfactual_changes
+                    .iter()
+                    .any(|row| row.name == "raise_budget_from_100_to_158" && row.count == 1)
+            );
+            anyhow::ensure!(
+                insights.lost_demand.median_counterfactual_delta == Some(58.0),
+                "median counterfactual delta should be 58, got {:?}",
+                insights.lost_demand.median_counterfactual_delta
+            );
+            anyhow::ensure!(
+                insights
+                    .unknown_dimensions
+                    .iter()
+                    .any(|row| row.name == "purpose" && row.count == 1)
+            );
+            anyhow::ensure!(
+                insights.journey_flow.edges.iter().any(|edge| {
+                    edge.from_operation == "/agent-negotiate/lamp"
+                        && edge.to_operation == "/agent-decide/lamp"
+                        && edge.traversals == 1
+                }),
+                "journey edges should include negotiate → decide: {:?}",
+                insights.journey_flow.edges
+            );
+            anyhow::ensure!(
+                insights
+                    .journey_flow
+                    .exit_operations
+                    .iter()
+                    .any(|row| row.name == "/product/feeder")
+            );
+            anyhow::ensure!(insights.handoff.handoff_clicks == 1);
+            anyhow::ensure!(insights.handoff.sessions_with_handoff == 1);
+            anyhow::ensure!(insights.handoff.sessions >= 1);
+            anyhow::ensure!(insights.handoff.handoff_rate >= 1);
+            anyhow::ensure!(
+                insights
+                    .handoff
+                    .landing_operations
+                    .iter()
+                    .any(|row| row.name == "/product/feeder" && row.count == 1)
+            );
+            anyhow::ensure!(
+                insights
+                    .rank_positions
+                    .iter()
+                    .any(|row| row.name == "1" && row.count == 1)
+            );
+            anyhow::ensure!(
+                insights
+                    .agent_vendors
+                    .iter()
+                    .any(|row| row.vendor == "claude" && row.interactions == 4),
+                "agent vendors should classify claude evidence: {:?}",
+                insights.agent_vendors
+            );
+            anyhow::ensure!(
+                insights.signal_outcomes.iter().any(|row| {
+                    row.signal == "constraint/budget"
+                        && row.decisions == 1
+                        && row.outcomes == 1
+                        && row.conversions == 1
+                }),
+                "signal outcomes should attribute the conversion: {:?}",
+                insights.signal_outcomes
+            );
+            anyhow::ensure!(
+                insights
+                    .unanswered_questions
+                    .iter()
+                    .any(|row| row.name == "budget \u{b7} declined" && row.count == 1),
+                "unanswered questions should surface the declined budget question: {:?}",
+                insights.unanswered_questions
+            );
             Ok::<(), anyhow::Error>(())
         }
         .await;
@@ -19657,6 +20463,7 @@ mod product_tests {
                         session_ref: None,
                         session_source: None,
                         occurred_at: Some(Utc::now()),
+                        experience: None,
                     }],
                 },
             )
