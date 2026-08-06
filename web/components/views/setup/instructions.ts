@@ -26,6 +26,8 @@ export const SETUP_SURFACES = {
 export type SetupSurface = keyof typeof SETUP_SURFACES;
 export type SetupStack = "node-experience" | "node-express" | "node-fastify" | "node-mcp";
 
+export const SETUP_SURFACE_OPTIONS = ["experience"] as const satisfies readonly SetupSurface[];
+
 const STACK_NAMES: Record<SetupStack, string> = {
   "node-experience": "JavaScript · Guided experience",
   "node-express": "Node · Express",
