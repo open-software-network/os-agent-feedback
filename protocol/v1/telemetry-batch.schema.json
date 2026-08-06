@@ -83,7 +83,84 @@
             "pattern": "^[A-Za-z0-9_.:-]+$"
           },
           "sessionSource": { "enum": ["customer", "mcp", "continuation"] },
-          "occurredAt": { "type": "string", "format": "date-time" }
+          "occurredAt": { "type": "string", "format": "date-time" },
+          "experience": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "stage": {
+                "enum": [
+                  "decision_input_required",
+                  "express_more_or_decide",
+                  "ready_to_decide",
+                  "decision_support",
+                  "item",
+                  "product"
+                ]
+              },
+              "needState": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "expressedDimensions": {
+                    "type": "array",
+                    "maxItems": 24,
+                    "items": { "type": "string", "minLength": 1, "maxLength": 80 }
+                  },
+                  "unknownDimensions": {
+                    "type": "array",
+                    "maxItems": 24,
+                    "items": { "type": "string", "minLength": 1, "maxLength": 80 }
+                  }
+                }
+              },
+              "decision": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "exactMatchCount": { "type": "integer", "minimum": 0, "maximum": 100000 },
+                  "nearMissCount": { "type": "integer", "minimum": 0, "maximum": 100000 },
+                  "violatedHardConstraints": {
+                    "type": "array",
+                    "maxItems": 40,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["dimension"],
+                      "properties": {
+                        "dimension": { "type": "string", "minLength": 1, "maxLength": 80 },
+                        "requested": { "type": "string", "maxLength": 120 },
+                        "actual": { "type": "string", "maxLength": 120 },
+                        "itemId": { "type": "string", "maxLength": 120 }
+                      }
+                    }
+                  },
+                  "counterfactuals": {
+                    "type": "array",
+                    "maxItems": 8,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["change"],
+                      "properties": {
+                        "change": { "type": "string", "minLength": 1, "maxLength": 160 },
+                        "delta": { "type": "number" },
+                        "itemId": { "type": "string", "maxLength": 120 }
+                      }
+                    }
+                  }
+                }
+              },
+              "search": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "searchId": { "type": "string", "minLength": 1, "maxLength": 120 },
+                  "resultPosition": { "type": "integer", "minimum": 1, "maximum": 100000 }
+                }
+              }
+            }
+          }
         },
         "allOf": [
           {

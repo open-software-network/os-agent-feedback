@@ -284,7 +284,7 @@ function buildProductFitInternal<State>(
         { ...options, tokens: [] },
         [],
       ),
-      operation: `/agent-product/${definition.slug}`,
+      operation: `/agent-product/${definition.slug}/evaluate-fit`,
     };
   }
 
@@ -305,7 +305,7 @@ function buildProductFitInternal<State>(
     needState: definition.publicState(parsed.state),
     invalidTokens: parsed.invalidTokens,
     ...(itemFit.verdict !== "suitable" ? { alternativesUrl: append(base, "alternatives") } : {}),
-    operation: `/agent-product/${definition.slug}`,
+    operation: `/agent-product/${definition.slug}/evaluate-fit`,
   };
 }
 
@@ -329,7 +329,7 @@ function buildProductAlternativesInternal<State>(
       needState: definition.publicState(parsed.state),
       invalidTokens: parsed.invalidTokens,
       negotiateUrl: base,
-      operation: `/agent-product/${definition.slug}`,
+      operation: `/agent-product/${definition.slug}/alternatives`,
     };
   }
 
@@ -349,7 +349,7 @@ function buildProductAlternativesInternal<State>(
         productBase(definition as ProductGraphDefinition<unknown>, options, tokens),
         "evaluate-fit",
       ),
-      operation: `/agent-product/${definition.slug}`,
+      operation: `/agent-product/${definition.slug}/alternatives`,
     };
   }
 
@@ -391,7 +391,7 @@ function buildProductAlternativesInternal<State>(
     alternatives: viable.map((alternative, index) => serialize(alternative, index + 1)),
     excludedCount: excluded.length,
     excluded: excluded.map((alternative, index) => serialize(alternative, `excluded-${index + 1}`)),
-    operation: `/agent-product/${definition.slug}`,
+    operation: `/agent-product/${definition.slug}/alternatives`,
   };
 }
 

@@ -1286,9 +1286,124 @@ function cryptoRandomId(): string {
 }
 
 /**
- * Map a negotiation/decision hop onto Epode telemetry fields without extending
- * the closed telemetry schema. Need state remains in the product response and
- * can be reconstructed from the merchant-authored path.
+ * Aggregate-safe hop evidence carried on telemetry events. Dimension keys and
+ * decision-quality numbers only — never free-text customer or agent values.
+ */
+export interface ExperienceTelemetry {
+  stage?: string;
+  needState?: {
+    expressedDimensions?: string[];
+    unknownDimensions?: string[];
+  };
+  decision?: {
+    exactMatchCount?: number;
+    nearMissCount?: number;
+    violatedHardConstraints?: Array<{
+      dimension: string;
+      requested?: string;
+      actual?: string;
+      itemId?: string;
+    }>;
+    counterfactuals?: Array<{ change: string; delta?: number; itemId?: string }>;
+  };
+  search?: { searchId?: string; resultPosition?: number };
+}
+
+const EXPERIENCE_DIMENSION_LIMIT = 24;
+const EXPERIENCE_VIOLATION_LIMIT = 40;
+const EXPERIENCE_COUNTERFACTUAL_LIMIT = 8;
+
+function boundedValueText(value: unknown, limit: number): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return text ? text.slice(0, limit) : undefined;
+}
+
+/**
+ * Derive the aggregate-safe experience payload from a built graph node. Accepts
+ * negotiation, decision, item, and product-node shapes from both the token and
+ * programmable-domain builders; unrecognized shapes yield undefined.
+ */
+export function experienceTelemetryForNode(node: unknown): ExperienceTelemetry | undefined {
+  if (typeof node !== "object" || node === null) return undefined;
+  const source = node as {
+    stage?: unknown;
+    needState?: NeedState;
+    exactMatchCount?: unknown;
+    nearMissCount?: unknown;
+    nearMisses?: RecordedMatch[];
+    counterfactuals?: RecordedCounterfactual[];
+    searchAttribution?: { searchId?: unknown; resultPosition?: unknown } | null;
+  };
+  const experience: ExperienceTelemetry = {};
+
+  if (typeof source.stage === "string" && source.stage) {
+    experience.stage = source.stage.slice(0, 40);
+  }
+
+  if (source.needState && Array.isArray(source.needState.expressedDimensions)) {
+    const expressed = source.needState.expressedDimensions
+      .filter((dimension) => typeof dimension === "string" && !dimension.endsWith("_unknown"))
+      .slice(0, EXPERIENCE_DIMENSION_LIMIT)
+      .map((dimension) => dimension.slice(0, 80));
+    const unknown = Object.entries(source.needState.values ?? {})
+      .filter(([, value]) => value?.known === false)
+      .map(([dimension]) => dimension.slice(0, 80))
+      .slice(0, EXPERIENCE_DIMENSION_LIMIT);
+    if (expressed.length || unknown.length) {
+      experience.needState = {
+        ...(expressed.length ? { expressedDimensions: expressed } : {}),
+        ...(unknown.length ? { unknownDimensions: unknown } : {}),
+      };
+    }
+  }
+
+  if (typeof source.exactMatchCount === "number" || typeof source.nearMissCount === "number") {
+    const violations = (source.nearMisses ?? [])
+      .flatMap((match) =>
+        (match.violatedHardConstraints ?? []).map((violation) => ({
+          dimension: String(violation.dimension).slice(0, 80),
+          requested: boundedValueText(violation.requested, 120),
+          actual: boundedValueText(violation.actual, 120),
+          itemId: match.itemId ? String(match.itemId).slice(0, 120) : undefined,
+        })),
+      )
+      .slice(0, EXPERIENCE_VIOLATION_LIMIT);
+    const counterfactuals = (source.counterfactuals ?? [])
+      .slice(0, EXPERIENCE_COUNTERFACTUAL_LIMIT)
+      .map((counterfactual) => ({
+        change: String(counterfactual.change).slice(0, 160),
+        ...(typeof counterfactual.delta === "number" && Number.isFinite(counterfactual.delta)
+          ? { delta: counterfactual.delta }
+          : {}),
+      }));
+    experience.decision = {
+      ...(typeof source.exactMatchCount === "number"
+        ? { exactMatchCount: source.exactMatchCount }
+        : {}),
+      ...(typeof source.nearMissCount === "number" ? { nearMissCount: source.nearMissCount } : {}),
+      ...(violations.length ? { violatedHardConstraints: violations } : {}),
+      ...(counterfactuals.length ? { counterfactuals } : {}),
+    };
+  }
+
+  if (source.searchAttribution && typeof source.searchAttribution === "object") {
+    const { searchId, resultPosition } = source.searchAttribution;
+    const position = Number(resultPosition);
+    const search = {
+      ...(typeof searchId === "string" && searchId ? { searchId: searchId.slice(0, 120) } : {}),
+      ...(Number.isInteger(position) && position >= 1 ? { resultPosition: position } : {}),
+    };
+    if (Object.keys(search).length) experience.search = search;
+  }
+
+  return Object.keys(experience).length ? experience : undefined;
+}
+
+/**
+ * Map a negotiation/decision hop onto Epode telemetry fields. Need state and
+ * decision quality travel in the aggregate-safe `experience` payload; raw
+ * customer values remain in the product response only.
  */
 export function experienceTelemetryDetails(input: {
   operation: string;
@@ -1296,6 +1411,7 @@ export function experienceTelemetryDetails(input: {
   statusCode?: number;
   durationMs?: number;
   runtimeHint?: string;
+  experience?: ExperienceTelemetry;
 }): {
   surface: "http_json";
   operation: string;
@@ -1306,6 +1422,7 @@ export function experienceTelemetryDetails(input: {
   runtimeHintSource?: "http";
   sessionRef: string;
   sessionSource: "customer";
+  experience?: ExperienceTelemetry;
 } {
   return {
     surface: "http_json",
@@ -1317,6 +1434,7 @@ export function experienceTelemetryDetails(input: {
     runtimeHintSource: input.runtimeHint ? "http" : undefined,
     sessionRef: input.journeyId.slice(0, 160),
     sessionSource: "customer",
+    experience: input.experience,
   };
 }
 

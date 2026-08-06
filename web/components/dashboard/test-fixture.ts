@@ -218,6 +218,27 @@ export function dashboardFixture(overrides: Partial<DashboardData> = {}): Dashbo
       blockingTopics: [],
       surfaces: [{ name: "http", count: 1 }],
       topOperations: [{ name: "search", count: 1 }],
+      lostDemand: {
+        decisionInteractions: 0,
+        zeroMatchDecisions: 0,
+        expressedDimensions: [],
+        violatedDimensions: [],
+        counterfactualChanges: [],
+        medianCounterfactualDelta: null,
+      },
+      journeyFlow: { edges: [], exitOperations: [] },
+      handoff: {
+        handoffClicks: 0,
+        sessionsWithHandoff: 0,
+        sessions: 1,
+        handoffRate: 0,
+        landingOperations: [],
+      },
+      signalOutcomes: [],
+      agentVendors: [],
+      rankPositions: [],
+      unknownDimensions: [],
+      unansweredQuestions: [],
     } as DashboardData["insights"] & {
       customerContextItems: number;
       customersWithContext: number;

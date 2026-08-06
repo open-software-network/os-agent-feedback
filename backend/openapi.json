@@ -8031,6 +8031,28 @@
   },
   "components": {
     "schemas": {
+      "AgentVendorInsight": {
+        "type": "object",
+        "description": "Unverified runtime evidence grouped into assistant-vendor families.",
+        "required": [
+          "vendor",
+          "interactions",
+          "sessions"
+        ],
+        "properties": {
+          "interactions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sessions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "vendor": {
+            "type": "string"
+          }
+        }
+      },
       "ApiErrorEnvelope": {
         "type": "object",
         "required": [
@@ -11294,6 +11316,185 @@
           }
         }
       },
+      "ExperienceCounterfactualInput": {
+        "type": "object",
+        "required": [
+          "change"
+        ],
+        "properties": {
+          "change": {
+            "type": "string"
+          },
+          "delta": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "itemId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExperienceDecisionInput": {
+        "type": "object",
+        "properties": {
+          "counterfactuals": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ExperienceCounterfactualInput"
+            }
+          },
+          "exactMatchCount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "nearMissCount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "violatedHardConstraints": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ExperienceViolationInput"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExperienceNeedStateInput": {
+        "type": "object",
+        "properties": {
+          "expressedDimensions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "unknownDimensions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExperienceSearchInput": {
+        "type": "object",
+        "properties": {
+          "resultPosition": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "searchId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExperienceTelemetryInput": {
+        "type": "object",
+        "description": "Aggregate-safe experience-graph hop evidence. Dimension keys and\ndecision-quality numbers only — never free-text customer or agent values.",
+        "properties": {
+          "decision": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExperienceDecisionInput"
+              }
+            ]
+          },
+          "needState": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExperienceNeedStateInput"
+              }
+            ]
+          },
+          "search": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExperienceSearchInput"
+              }
+            ]
+          },
+          "stage": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExperienceViolationInput": {
+        "type": "object",
+        "required": [
+          "dimension"
+        ],
+        "properties": {
+          "actual": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dimension": {
+            "type": "string"
+          },
+          "itemId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requested": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "FeatureFacets": {
         "type": "object",
         "required": [
@@ -11899,6 +12100,41 @@
           }
         }
       },
+      "HandoffInsights": {
+        "type": "object",
+        "description": "Agent→human handoff: `product_link_click` navigations and their rate across\nproven sessions.",
+        "required": [
+          "handoffClicks",
+          "sessionsWithHandoff",
+          "sessions",
+          "handoffRate",
+          "landingOperations"
+        ],
+        "properties": {
+          "handoffClicks": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "handoffRate": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "landingOperations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "sessions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sessionsWithHandoff": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "HealthResponse": {
         "type": "object",
         "required": [
@@ -11965,9 +12201,23 @@
           "impacts",
           "findingKinds",
           "topics",
-          "blockingTopics"
+          "blockingTopics",
+          "lostDemand",
+          "journeyFlow",
+          "handoff",
+          "signalOutcomes",
+          "agentVendors",
+          "rankPositions",
+          "unknownDimensions",
+          "unansweredQuestions"
         ],
         "properties": {
+          "agentVendors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentVendorInsight"
+            }
+          },
           "blockingTopics": {
             "type": "array",
             "items": {
@@ -12004,11 +12254,20 @@
               "$ref": "#/components/schemas/InsightCount"
             }
           },
+          "handoff": {
+            "$ref": "#/components/schemas/HandoffInsights"
+          },
           "impacts": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/InsightCount"
             }
+          },
+          "journeyFlow": {
+            "$ref": "#/components/schemas/JourneyFlowInsights"
+          },
+          "lostDemand": {
+            "$ref": "#/components/schemas/LostDemandInsights"
           },
           "opportunities": {
             "type": "integer",
@@ -12052,6 +12311,12 @@
             "type": "integer",
             "format": "int64"
           },
+          "rankPositions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
           "recentConfirmedInteractions": {
             "type": "integer",
             "format": "int64"
@@ -12080,6 +12345,12 @@
             "type": "integer",
             "format": "int64"
           },
+          "signalOutcomes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SignalOutcomeInsight"
+            }
+          },
           "surfaces": {
             "type": "array",
             "items": {
@@ -12093,6 +12364,18 @@
             }
           },
           "topics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "unansweredQuestions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "unknownDimensions": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/InsightCount"
@@ -12186,6 +12469,16 @@
             ],
             "format": "int64"
           },
+          "experience": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExperienceTelemetryInput"
+              }
+            ]
+          },
           "interactionId": {
             "type": "string",
             "format": "uuid"
@@ -12259,6 +12552,95 @@
           }
         },
         "additionalProperties": false
+      },
+      "JourneyEdgeInsight": {
+        "type": "object",
+        "required": [
+          "fromOperation",
+          "toOperation",
+          "traversals"
+        ],
+        "properties": {
+          "fromOperation": {
+            "type": "string"
+          },
+          "toOperation": {
+            "type": "string"
+          },
+          "traversals": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "JourneyFlowInsights": {
+        "type": "object",
+        "description": "Session-proven operation transitions and where journeys end.",
+        "required": [
+          "edges",
+          "exitOperations"
+        ],
+        "properties": {
+          "edges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JourneyEdgeInsight"
+            }
+          },
+          "exitOperations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          }
+        }
+      },
+      "LostDemandInsights": {
+        "type": "object",
+        "description": "What agents asked for and could not get: stated-demand aggregates from\nexperience-graph decision evidence.",
+        "required": [
+          "decisionInteractions",
+          "zeroMatchDecisions",
+          "expressedDimensions",
+          "violatedDimensions",
+          "counterfactualChanges",
+          "medianCounterfactualDelta"
+        ],
+        "properties": {
+          "counterfactualChanges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "decisionInteractions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "expressedDimensions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "medianCounterfactualDelta": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "violatedDimensions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "zeroMatchDecisions": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
       },
       "McpDiscovery": {
         "type": "object",
@@ -13478,6 +13860,33 @@
         "properties": {
           "revoked": {
             "type": "boolean"
+          }
+        }
+      },
+      "SignalOutcomeInsight": {
+        "type": "object",
+        "description": "Which customer signals were cited by personalization decisions and what\noutcomes followed.",
+        "required": [
+          "signal",
+          "decisions",
+          "outcomes",
+          "conversions"
+        ],
+        "properties": {
+          "conversions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "decisions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "outcomes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "signal": {
+            "type": "string"
           }
         }
       },
