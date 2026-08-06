@@ -1277,6 +1277,8 @@ export interface components {
             sessionCount: number;
             /** Format: int64 */
             signalCount: number;
+            /** Format: int64 */
+            traitCount: number;
             userRefHint: string | null;
         };
         DashboardContextReturnedItem: {

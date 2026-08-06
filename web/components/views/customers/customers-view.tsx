@@ -236,7 +236,7 @@ export function CustomersView({
             <TableHeader className="sticky top-0 z-[1] bg-background">
               <TableRow className="hover:bg-background">
                 <TableHead className="h-9 w-[42%] pl-5 text-xs">Customer</TableHead>
-                <TableHead className="h-9 w-[22%] text-xs">Identity</TableHead>
+                <TableHead className="h-9 w-[22%] text-xs">Traits</TableHead>
                 <TableHead className="h-9 w-[18%] text-xs">Sessions</TableHead>
                 <TableHead className="h-9 w-[18%] pr-5 text-right text-xs">Updated</TableHead>
               </TableRow>
@@ -430,11 +430,12 @@ function CustomerRow({
           {customer.displayName}
         </Button>
         <p className="mt-1 truncate text-xs text-muted-foreground">
-          Customer{referenceHints.length ? ` · ${referenceHints.join(" · ")}` : ""}
+          {identityLabel(customer.identityLevel)}
+          {referenceHints.length ? ` · ${referenceHints.join(" · ")}` : ""}
         </p>
       </TableCell>
       <TableCell>
-        <IdentityBadge level={customer.identityLevel} />
+        <span className="text-xs">{customer.traitCount.toLocaleString()}</span>
       </TableCell>
       <TableCell className="text-xs">{customer.sessionCount.toLocaleString()}</TableCell>
       <TableCell

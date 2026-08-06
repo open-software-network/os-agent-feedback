@@ -39,6 +39,7 @@ export type CustomerSummary = {
   lastActivityAt: string;
   outcomeHealth: string;
   signalCount: number;
+  traitCount: number;
   sessionCount: number;
   activeNeedCount: number;
   consentState: string;
