@@ -153,7 +153,7 @@ const consent = await consentResponse.json();
 if (!consentResponse.ok || consent.state !== "answer_ready") {
   fail(`Consent failed: HTTP ${consentResponse.status} ${JSON.stringify(consent)}`);
 }
-console.log(`  identity level: ${consent.identityLevel}`);
+console.log(`  identity level: ${contract.identityLevel}`);
 
 step("Agent submits the household traits it learned during the task");
 const catalog = consent.submit.bodySchema?.items?.catalog || [];

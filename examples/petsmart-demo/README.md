@@ -49,14 +49,25 @@ From the repo root:
 make dev-backend
 ```
 
+If Docker is unavailable, any local PostgreSQL works — create a dedicated
+database and start the backend directly (startup owns migrations):
+
+```sh
+createdb epode_petsmart_demo
+cd backend && DATABASE_URL=postgres://$USER@127.0.0.1:5432/epode_petsmart_demo \
+PUBLIC_BASE_URL=http://127.0.0.1:8080 PORT=8080 \
+cargo run --locked --bin agent-feedback
+```
+
 ```sh
 # 2. Provision a PetSmart product + API key in your dashboard team.
 #    Sign in to the dashboard first (dev auth: see CLAUDE.md) so your team
-#    exists, then:
+#    exists, then (Docker default DATABASE_URL shown; use your own otherwise):
 cd backend
-DATABASE_URL=postgres://... \
+DATABASE_URL=postgres://postgres:postgres@127.0.0.1:54329/agent_feedback \
 PLAYGROUND_OWNER_EMAIL=you@example.com \
 PLAYGROUND_PRODUCT_NAME="PetSmart" \
+PLAYGROUND_KEY_LABEL="PetSmart demo" \
 cargo run --bin provision_agent_playground -- provision
 # prints the af_live_… key on stdout
 ```
