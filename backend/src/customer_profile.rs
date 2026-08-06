@@ -146,12 +146,7 @@ fn parse_operation(operation: &str) -> Vec<FactSeed> {
     let Some((domain, tokens)) = operation_state_tokens(&segments) else {
         return Vec::new();
     };
-    let token_count = if operation.chars().count() == 160 {
-        tokens.len().saturating_sub(1)
-    } else {
-        tokens.len()
-    };
-    tokens[..token_count]
+    tokens
         .iter()
         .filter_map(|token| parse_token(domain, token))
         .collect()
@@ -675,25 +670,23 @@ mod tests {
     }
 
     #[test]
-    fn drops_a_possibly_clipped_final_token_from_max_length_operations() {
+    fn preserves_a_complete_final_token_at_the_operation_length_limit() {
         let session = Uuid::new_v4();
-        let prefix = "/agent-decide/apartments/beds-2/";
-        let clipped = format!("{prefix}purpose-{}", "x".repeat(160 - prefix.len() - 8));
-        assert_eq!(clipped.len(), 160);
+        let prefix = "/agent-decide/lamps/";
+        let suffix = "/purpose-coding";
+        let operation = format!(
+            "{prefix}{}{suffix}",
+            "x".repeat(160 - prefix.len() - suffix.len())
+        );
+        assert_eq!(operation.len(), 160);
 
-        let profile = derive_observed_customer_profile(vec![node(session, &clipped, 0)]);
+        let profile = derive_observed_customer_profile(vec![node(session, &operation, 0)]);
 
         assert!(
             profile
                 .facts
                 .iter()
-                .any(|fact| fact.key == "apartments.beds")
-        );
-        assert!(
-            !profile
-                .facts
-                .iter()
-                .any(|fact| fact.key == "apartments.purpose")
+                .any(|fact| fact.key == "lamps.purpose" && fact.value == "Coding")
         );
     }
 }
