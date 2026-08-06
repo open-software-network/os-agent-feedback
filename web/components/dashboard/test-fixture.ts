@@ -351,6 +351,56 @@ export function customerDetailFixture(): CustomerDetail {
   const customer = customersPageFixture().customers[0];
   return {
     customer,
+    observedProfile: {
+      journeyCount: 2,
+      nodeCount: 7,
+      truncated: false,
+      lastObservedAt: "2026-07-30T12:00:00Z",
+      facts: [
+        {
+          key: "apartments.budget",
+          domain: "apartments",
+          label: "Budget",
+          value: "$4,000/month",
+          kind: "constraint",
+          strength: "hard",
+          status: "observed",
+          journeyCount: 2,
+          observationCount: 3,
+          firstObservedAt: "2026-07-29T12:00:00Z",
+          lastObservedAt: "2026-07-30T12:00:00Z",
+          evidence: [
+            {
+              sessionId: dashboard.sessions[0].id,
+              sessionRef: dashboard.sessions[0].refHint,
+              operation: "/agent-decide/apartments/beds-2/has-cat/budget-hard-4000",
+              observedAt: "2026-07-30T12:00:00Z",
+            },
+          ],
+        },
+        {
+          key: "apartments.pets",
+          domain: "apartments",
+          label: "Pets",
+          value: "Cat",
+          kind: "context",
+          strength: null,
+          status: "observed",
+          journeyCount: 1,
+          observationCount: 1,
+          firstObservedAt: "2026-07-30T12:00:00Z",
+          lastObservedAt: "2026-07-30T12:00:00Z",
+          evidence: [
+            {
+              sessionId: dashboard.sessions[0].id,
+              sessionRef: dashboard.sessions[0].refHint,
+              operation: "/agent-decide/apartments/beds-2/has-cat/budget-hard-4000",
+              observedAt: "2026-07-30T12:00:00Z",
+            },
+          ],
+        },
+      ],
+    },
     identifiers: [
       {
         id: "identifier-user-1",

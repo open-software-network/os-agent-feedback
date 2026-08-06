@@ -493,6 +493,21 @@ function graphNode(operation: string | null) {
   return operation?.trim() || "No graph node observed";
 }
 
+function observedFactKind(kind: string) {
+  if (kind === "context") return "Context";
+  if (kind === "intent") return "Intent";
+  if (kind === "constraint") return "Constraint";
+  if (kind === "preference") return "Preference";
+  if (kind === "unknown") return "Unknown";
+  return titleCase(kind);
+}
+
+function observedDomain(domain: string) {
+  if (domain === "saas") return "SaaS";
+  if (domain === "petsmart") return "PetSmart";
+  return titleCase(domain);
+}
+
 function CustomerDetailContent({
   detail,
   openSession,
@@ -507,6 +522,13 @@ function CustomerDetailContent({
     0,
   );
   const latestSession = detail.sessions[0];
+  const observedProfile = detail.observedProfile ?? {
+    journeyCount: 0,
+    nodeCount: 0,
+    truncated: false,
+    lastObservedAt: null,
+    facts: [],
+  };
 
   return (
     <>
@@ -531,6 +553,86 @@ function CustomerDetailContent({
           ))}
         </div>
       ) : null}
+
+      <Separator className="my-5" />
+      <section
+        aria-labelledby="customer-observed-profile-heading"
+        aria-label="Observed customer profile"
+      >
+        <div className="flex items-center justify-between gap-3">
+          <h3 id="customer-observed-profile-heading" className="text-xs font-medium">
+            What we&apos;ve observed
+          </h3>
+          <span className="text-[11px] text-muted-foreground">
+            {observedProfile.facts.length.toLocaleString()}{" "}
+            {observedProfile.facts.length === 1 ? "fact" : "facts"}
+          </span>
+        </div>
+        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+          A live profile derived only from graph nodes Epode witnessed. Each value remains
+          journey-scoped evidence, not a claim that it is permanently true.
+        </p>
+        {observedProfile.truncated ? (
+          <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+            Showing facts from the latest {observedProfile.nodeCount.toLocaleString()} retained
+            nodes.
+          </p>
+        ) : null}
+        {observedProfile.facts.length ? (
+          <ol className="mt-3 space-y-2">
+            {observedProfile.facts.map((fact) => {
+              const latestEvidence = fact.evidence[0];
+              const content = (
+                <span className="block min-w-0 text-left">
+                  <span className="flex flex-wrap items-center gap-1">
+                    <Badge variant="outline">{observedDomain(fact.domain)}</Badge>
+                    <Badge variant="secondary">{observedFactKind(fact.kind)}</Badge>
+                    {fact.strength ? (
+                      <span className="text-[10px] text-muted-foreground">
+                        {titleCase(fact.strength)}
+                      </span>
+                    ) : null}
+                  </span>
+                  <span className="mt-2 block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                    {fact.label}
+                  </span>
+                  <span className="mt-0.5 block text-sm leading-5">{fact.value}</span>
+                  <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
+                    Seen in {fact.journeyCount.toLocaleString()}{" "}
+                    {fact.journeyCount === 1 ? "journey" : "journeys"}
+                    {fact.observationCount > fact.journeyCount
+                      ? ` · ${fact.observationCount.toLocaleString()} nodes`
+                      : ""}
+                    {` · ${relativeDate(fact.lastObservedAt)}`}
+                  </span>
+                </span>
+              );
+              return (
+                <li key={`${fact.key}:${fact.value}:${fact.strength ?? "none"}`}>
+                  {latestEvidence ? (
+                    <Button
+                      variant="ghost"
+                      className="h-auto w-full justify-start rounded-md border bg-muted/20 p-3 font-normal whitespace-normal hover:bg-muted/40"
+                      aria-label={`Open evidence for ${fact.label}: ${fact.value}`}
+                      title={latestEvidence.operation}
+                      onClick={() => openSession(latestEvidence.sessionId)}
+                    >
+                      {content}
+                    </Button>
+                  ) : (
+                    <div className="border bg-muted/20 p-3">{content}</div>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
+        ) : (
+          <p className="mt-3 text-sm text-muted-foreground">
+            No needs, preferences, constraints, or customer context have been expressed in the
+            observed graph paths yet.
+          </p>
+        )}
+      </section>
 
       <Separator className="my-5" />
       <section aria-labelledby="customer-experience-graph-heading">

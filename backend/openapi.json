@@ -3130,7 +3130,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Customer identity, evidence, context returned to the product, linked personalization use, sessions, and scoped consent",
+            "description": "Customer identity plus an evidence-backed profile derived from retained experience-graph journeys",
             "content": {
               "application/json": {
                 "schema": {
@@ -9281,6 +9281,7 @@
         "type": "object",
         "required": [
           "customer",
+          "observedProfile",
           "identifiers",
           "requestObservations",
           "signals",
@@ -9320,6 +9321,9 @@
             "items": {
               "$ref": "#/components/schemas/CustomerIdentifier"
             }
+          },
+          "observedProfile": {
+            "$ref": "#/components/schemas/ObservedCustomerProfile"
           },
           "requestObservations": {
             "type": "array",
@@ -12206,6 +12210,132 @@
           },
           "targetGroupKey": {
             "type": "string"
+          }
+        }
+      },
+      "ObservedCustomerFact": {
+        "type": "object",
+        "required": [
+          "key",
+          "domain",
+          "label",
+          "value",
+          "kind",
+          "strength",
+          "status",
+          "journeyCount",
+          "observationCount",
+          "firstObservedAt",
+          "lastObservedAt",
+          "evidence"
+        ],
+        "properties": {
+          "domain": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ObservedCustomerFactEvidence"
+            }
+          },
+          "firstObservedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "journeyCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "key": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "lastObservedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "observationCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "status": {
+            "type": "string"
+          },
+          "strength": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "ObservedCustomerFactEvidence": {
+        "type": "object",
+        "required": [
+          "sessionId",
+          "sessionRef",
+          "operation",
+          "observedAt"
+        ],
+        "properties": {
+          "observedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "operation": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sessionRef": {
+            "type": "string"
+          }
+        }
+      },
+      "ObservedCustomerProfile": {
+        "type": "object",
+        "required": [
+          "journeyCount",
+          "nodeCount",
+          "truncated",
+          "lastObservedAt",
+          "facts"
+        ],
+        "properties": {
+          "facts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ObservedCustomerFact"
+            }
+          },
+          "journeyCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "lastObservedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "nodeCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "truncated": {
+            "type": "boolean"
           }
         }
       },

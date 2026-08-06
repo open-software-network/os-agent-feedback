@@ -1312,6 +1312,7 @@ export interface components {
             counts: components["schemas"]["CustomerDetailCounts"];
             customer: components["schemas"]["CustomerSummary"];
             identifiers: components["schemas"]["CustomerIdentifier"][];
+            observedProfile: components["schemas"]["ObservedCustomerProfile"];
             requestObservations: components["schemas"]["CustomerRequestObservation"][];
             sessions: components["schemas"]["DashboardSessionSummary"][];
             signals: components["schemas"]["CustomerSignal"][];
@@ -2092,6 +2093,42 @@ export interface components {
             /** Format: int64 */
             reportsMoved: number;
             targetGroupKey: string;
+        };
+        ObservedCustomerFact: {
+            domain: string;
+            evidence: components["schemas"]["ObservedCustomerFactEvidence"][];
+            /** Format: date-time */
+            firstObservedAt: string;
+            /** Format: int64 */
+            journeyCount: number;
+            key: string;
+            kind: string;
+            label: string;
+            /** Format: date-time */
+            lastObservedAt: string;
+            /** Format: int64 */
+            observationCount: number;
+            status: string;
+            strength: string | null;
+            value: string;
+        };
+        ObservedCustomerFactEvidence: {
+            /** Format: date-time */
+            observedAt: string;
+            operation: string;
+            /** Format: uuid */
+            sessionId: string;
+            sessionRef: string;
+        };
+        ObservedCustomerProfile: {
+            facts: components["schemas"]["ObservedCustomerFact"][];
+            /** Format: int64 */
+            journeyCount: number;
+            /** Format: date-time */
+            lastObservedAt: string | null;
+            /** Format: int64 */
+            nodeCount: number;
+            truncated: boolean;
         };
         /** @description Opaque JSON object whose fields depend on the MCP JSON-RPC method. */
         OpaqueJsonObject: Record<string, never>;
@@ -4545,7 +4582,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Customer identity, evidence, context returned to the product, linked personalization use, sessions, and scoped consent */
+            /** @description Customer identity plus an evidence-backed profile derived from retained experience-graph journeys */
             200: {
                 headers: {
                     [name: string]: unknown;

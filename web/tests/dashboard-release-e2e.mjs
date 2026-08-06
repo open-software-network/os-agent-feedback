@@ -516,6 +516,35 @@ function createFixture() {
     if (url.pathname === `/api/dashboard/customers/${ids.customerOne}`) {
       json(response, 200, {
         customer: firstCustomer,
+        observedProfile: {
+          journeyCount: 1,
+          nodeCount: 4,
+          truncated: false,
+          lastObservedAt: now,
+          facts: [
+            {
+              key: "search.priority",
+              domain: "search",
+              label: "Priority",
+              value: "Freshness",
+              kind: "preference",
+              strength: "preferred",
+              status: "observed",
+              journeyCount: 1,
+              observationCount: 2,
+              firstObservedAt: now,
+              lastObservedAt: now,
+              evidence: [
+                {
+                  sessionId: ids.sessionOne,
+                  sessionRef: firstSession.refHint,
+                  operation: "/agent-decide/search/priority-freshness",
+                  observedAt: now,
+                },
+              ],
+            },
+          ],
+        },
         identifiers: [
           {
             id: "identifier-1",
@@ -1006,6 +1035,8 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await clickText(page, "Acme workspace");
   await textVisible(page, "Experience graph");
   await textVisible(page, "Latest observed node");
+  await textVisible(page, "What we've observed");
+  await textVisible(page, "Freshness");
   await textVisible(page, "Graph journeys");
   await textVisible(page, "not promoted to durable memory");
   await page.screenshot({ path: path.join(artifactDirectory, "02-customers.png"), fullPage: true });

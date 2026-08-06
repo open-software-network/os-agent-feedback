@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::{
     code_match::CodeMatchVerificationOutcome,
+    customer_profile::{ObservedGraphNode, PROFILE_NODE_LIMIT, derive_observed_customer_profile},
     error::ApiError,
     github::validate_repo_full_name,
     grouping::{GroupInput, ReportGrouper},
@@ -4830,6 +4831,30 @@ pub(crate) async fn dashboard_customer_by_id(
     .bind(retained_since)
     .fetch_all(pool)
     .await?;
+    let observed_profile = derive_observed_customer_profile(
+        sqlx::query_as::<_, ObservedGraphNode>(
+            r"SELECT interaction.session_id, session.ref_hint AS session_ref,
+              interaction.operation, interaction.occurred_at AS observed_at
+            FROM interactions_v2 interaction
+            JOIN sessions_v2 session ON session.id = interaction.session_id
+              AND session.workspace_id = interaction.workspace_id
+            WHERE interaction.workspace_id = $1 AND interaction.customer_id = $3
+              AND interaction.environment_id IN (SELECT id FROM product_environments
+                WHERE workspace_id = $1 AND product_id = $2)
+              AND interaction.occurred_at >= $4
+              AND interaction.operation LIKE '/agent-%'
+            ORDER BY interaction.occurred_at DESC,
+              interaction.client_sequence DESC NULLS LAST, interaction.id DESC
+            LIMIT $5",
+        )
+        .bind(workspace_id)
+        .bind(product_id)
+        .bind(customer_id)
+        .bind(retained_since)
+        .bind(i64::try_from(PROFILE_NODE_LIMIT + 1).map_err(ApiError::internal)?)
+        .fetch_all(pool)
+        .await?,
+    );
     let consent = sqlx::query_as::<_, ConsentGrant>(
         r"SELECT id, scope, enrichment_purpose,
           CASE WHEN state <> 'revoked' AND expires_at <= NOW() THEN 'expired' ELSE state END AS state,
@@ -4915,6 +4940,7 @@ pub(crate) async fn dashboard_customer_by_id(
             request_observations: request_observation_count,
         },
         customer,
+        observed_profile,
         identifiers,
         request_observations,
         signals: signal_page.signals,

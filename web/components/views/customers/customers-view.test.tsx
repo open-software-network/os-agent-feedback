@@ -74,6 +74,11 @@ describe("CustomersView", () => {
     expect(screen.getAllByText("Customer · user…0042 · acct…0042").length).toBeGreaterThan(0);
     expect(screen.queryByText(/linked user|linked to account/i)).not.toBeInTheDocument();
     expect(screen.queryByText("Known customer")).not.toBeInTheDocument();
+    const profile = screen.getByRole("region", { name: "What we've observed" });
+    expect(within(profile).getByRole("heading", { name: "What we've observed" })).toBeVisible();
+    expect(within(profile).getByText("$4,000/month")).toBeVisible();
+    expect(within(profile).getByText("Cat")).toBeVisible();
+    expect(within(profile).getByText(/journey-scoped evidence/i)).toBeVisible();
     const graph = screen.getByRole("region", { name: "Experience graph" });
     expect(within(graph).getByText("Latest observed node")).toBeVisible();
     expect(within(graph).getByText("search")).toBeVisible();
@@ -105,6 +110,23 @@ describe("CustomersView", () => {
     expect(sessionRow.parentElement).toHaveClass("-mx-2");
     expect(within(sessions).queryByText("Open graph journey")).not.toBeInTheDocument();
     fireEvent.click(sessionRow);
+
+    expect(openSession).toHaveBeenCalledWith("55555555-5555-4555-8555-555555555555");
+  });
+
+  it("opens the exact journey that supports an observed customer fact", async () => {
+    const openSession = vi.fn();
+    renderCustomers(mockCustomers(), {
+      selectedCustomerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      openSession,
+    });
+
+    const profile = await screen.findByRole("region", { name: "What we've observed" });
+    fireEvent.click(
+      within(profile).getByRole("button", {
+        name: "Open evidence for Budget: $4,000/month",
+      }),
+    );
 
     expect(openSession).toHaveBeenCalledWith("55555555-5555-4555-8555-555555555555");
   });
