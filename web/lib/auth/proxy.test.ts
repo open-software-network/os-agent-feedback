@@ -94,4 +94,12 @@ describe("auth plumbing proxy", () => {
     expectNext(proxy(new NextRequest("https://app.epode.ai/static/agent-feedback-sdk.tgz")));
     expectNext(proxy(new NextRequest("https://app.epode.ai/static/agent_feedback_sdk.whl")));
   });
+
+  it("leaves ACO report routes to their own password gate", () => {
+    expectNext(proxy(new NextRequest("https://app.epode.ai/aco-report")));
+    expectNext(proxy(new NextRequest("https://app.epode.ai/aco-report/petsmart")));
+    expectNext(
+      proxy(new NextRequest("https://app.epode.ai/aco-report/petsmart/assets/1-agent-guide.png")),
+    );
+  });
 });
