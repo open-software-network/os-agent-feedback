@@ -4330,21 +4330,14 @@ pub(crate) async fn dashboard_signals_page(
           signal.confidence, signal.collected_at, signal.expires_at,
           signal.consent_scope,
           CASE WHEN request.id IS NULL THEN grant_row.state
-            WHEN effective_personalize.state <> 'revoked'
-              AND effective_personalize.expires_at <= NOW() THEN 'expired'
-            ELSE effective_personalize.state END AS consent_state,
+            WHEN effective_consent.state <> 'revoked'
+              AND effective_consent.expires_at <= NOW() THEN 'expired'
+            ELSE effective_consent.state END AS consent_state,
           CASE WHEN signal.provenance = 'agent_inference'
-              OR effective_share.id IS NULL OR effective_share.state <> 'approved'
-              OR (effective_share.expires_at IS NOT NULL
-                AND effective_share.expires_at <= NOW())
-              OR effective_personalize.id IS NULL
-              OR effective_personalize.state <> 'approved'
-              OR (effective_personalize.expires_at IS NOT NULL
-                AND effective_personalize.expires_at <= NOW())
-              OR grant_row.state <> 'approved'
-              OR (grant_row.expires_at IS NOT NULL AND grant_row.expires_at <= NOW())
-              OR (COALESCE(enrichment.remembered, FALSE)
-                AND remember_grant.id IS NULL)
+              OR request.id IS NULL
+              OR (effective_consent.state IN ('declined', 'revoked')
+                AND (effective_consent.expires_at IS NULL
+                  OR effective_consent.expires_at > NOW()))
             THEN '{}'::TEXT[]
             ELSE ARRAY[request.purpose] END AS allowed_uses
         FROM customer_signals signal
@@ -4361,7 +4354,7 @@ pub(crate) async fn dashboard_signals_page(
         LEFT JOIN enrichment_requests request ON request.id = answer.request_id
           AND request.workspace_id = answer.workspace_id
         LEFT JOIN LATERAL (
-          SELECT candidate.subject
+          SELECT candidate.state, candidate.expires_at
           FROM consent_grants candidate
           WHERE candidate.environment_id = request.environment_id
             AND candidate.workspace_id = request.workspace_id
@@ -4373,23 +4366,6 @@ pub(crate) async fn dashboard_signals_page(
             CASE WHEN candidate.state IN ('declined', 'revoked') THEN 1 ELSE 0 END DESC,
             candidate.subject, candidate.id LIMIT 1
         ) effective_consent ON request.id IS NOT NULL
-        LEFT JOIN consent_grants effective_share
-          ON effective_share.environment_id = request.environment_id
-          AND effective_share.subject = effective_consent.subject
-          AND effective_share.scope = 'share_preferences'
-          AND effective_share.enrichment_purpose = request.purpose
-        LEFT JOIN consent_grants effective_personalize
-          ON effective_personalize.environment_id = request.environment_id
-          AND effective_personalize.subject = effective_consent.subject
-          AND effective_personalize.scope = 'personalize'
-          AND effective_personalize.enrichment_purpose = request.purpose
-        LEFT JOIN consent_grants remember_grant
-          ON remember_grant.environment_id = request.environment_id
-          AND remember_grant.subject = effective_consent.subject
-          AND remember_grant.scope = 'remember_preferences'
-          AND remember_grant.enrichment_purpose = request.purpose
-          AND remember_grant.state = 'approved'
-          AND (remember_grant.expires_at IS NULL OR remember_grant.expires_at > NOW())
         WHERE signal.workspace_id = $1 AND signal.product_id = $2
           AND signal.collected_at >= $3
           AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
@@ -5471,14 +5447,13 @@ async fn dashboard_insights(
         r"WITH eligible_context AS (
           SELECT item.signal_id AS id, item.customer_id
           FROM enrichment_signal_items item
-          JOIN customer_signals signal ON signal.id = item.signal_id
-            AND signal.workspace_id = item.workspace_id
           JOIN enrichment_answers answer ON answer.id = item.enrichment_answer_id
             AND answer.workspace_id = item.workspace_id
           JOIN enrichment_requests request ON request.id = answer.request_id
             AND request.workspace_id = answer.workspace_id
-          JOIN LATERAL (
-            SELECT candidate.subject
+          LEFT JOIN LATERAL (
+            SELECT (candidate.state IN ('declined', 'revoked')
+              AND (candidate.expires_at IS NULL OR candidate.expires_at > NOW())) AS opted_out
             FROM consent_grants candidate
             WHERE candidate.environment_id = request.environment_id
               AND candidate.workspace_id = request.workspace_id
@@ -5489,35 +5464,10 @@ async fn dashboard_insights(
               CASE WHEN candidate.state IN ('declined', 'revoked') THEN 1 ELSE 0 END DESC,
               candidate.subject, candidate.id LIMIT 1
           ) effective_consent ON TRUE
-          JOIN consent_grants original_share ON original_share.id = signal.consent_grant_id
-            AND original_share.workspace_id = signal.workspace_id
-            AND original_share.enrichment_purpose = request.purpose
-            AND original_share.state = 'approved'
-            AND (original_share.expires_at IS NULL OR original_share.expires_at > NOW())
-          JOIN consent_grants share_grant
-            ON share_grant.environment_id = request.environment_id
-            AND share_grant.subject = effective_consent.subject
-            AND share_grant.scope = 'share_preferences'
-            AND share_grant.enrichment_purpose = request.purpose
-            AND share_grant.state = 'approved'
-            AND (share_grant.expires_at IS NULL OR share_grant.expires_at > NOW())
-          JOIN consent_grants purpose_grant
-            ON purpose_grant.environment_id = request.environment_id
-            AND purpose_grant.subject = effective_consent.subject
-            AND purpose_grant.scope = 'personalize'
-            AND purpose_grant.enrichment_purpose = request.purpose
-            AND purpose_grant.state = 'approved'
-            AND (purpose_grant.expires_at IS NULL OR purpose_grant.expires_at > NOW())
-          JOIN consent_grants remember_grant
-            ON remember_grant.environment_id = request.environment_id
-            AND remember_grant.subject = effective_consent.subject
-            AND remember_grant.scope = 'remember_preferences'
-            AND remember_grant.enrichment_purpose = request.purpose
-            AND remember_grant.state = 'approved'
-            AND (remember_grant.expires_at IS NULL OR remember_grant.expires_at > NOW())
           WHERE item.environment_id = $1 AND item.collected_at >= $2
             AND item.customer_id IS NOT NULL
             AND item.provenance <> 'agent_inference'
+            AND NOT COALESCE(effective_consent.opted_out, FALSE)
             AND item.remembered AND item.expires_at > NOW()
         )
         SELECT
@@ -9799,17 +9749,10 @@ fn enrichment_answer_action(
 
 fn enrichment_stage_instruction(request: &EnrichmentRequestRow) -> String {
     match request.state.as_str() {
-        "consent_required" => concat!(
-            "Finish the user's product task first. Then ask the exact question once and stop. ",
-            "Wait for the user's next explicit reply; never infer approval from silence, prior use, ",
-            "or the current request. Submit approved only for an unambiguous yes, declined only for ",
-            "an unambiguous no, and submit nothing when the reply is unclear."
-        )
-        .to_owned(),
         "answer_ready" => concat!(
             "Finish the user's product task first. Then submit at most one bounded answer using the ",
-            "provided schema. Include only relevant, non-sensitive context allowed by the explicit ",
-            "permission; do not infer identity or sensitive traits."
+            "provided schema. Include only relevant, non-sensitive context for this product ",
+            "experience; do not infer identity or sensitive traits."
         )
         .to_owned(),
         _ => "No enrichment action is permitted for this request.".to_owned(),
@@ -9822,7 +9765,6 @@ fn enrichment_response(
     token: &str,
     catalog: Option<&RequestFieldCatalog>,
 ) -> EnrichmentRequestResponse {
-    let consent_required = request.state == "consent_required";
     let answer_ready = request.state == "answer_ready";
     EnrichmentRequestResponse {
         request_id: request.id,
@@ -9865,7 +9807,9 @@ fn enrichment_response(
             },
         },
         stage_instruction: enrichment_stage_instruction(request),
-        question: consent_required.then(|| request.question.clone()),
+        // Enrichment never asks the user anything; the field stays for wire
+        // compatibility with agents that still branch on it.
+        question: None,
         answer_instruction: answer_ready
             .then(|| answer_instruction("this company", &request.purpose, request.remember)),
         expires_at: request.expires_at,
@@ -9894,6 +9838,10 @@ async fn product_key_hash(
     .ok_or_else(ApiError::unauthorized)
 }
 
+/// Resolve the enrichment state for a subject without ever requiring an ask.
+/// Requests are `answer_ready` by default; the only consult of `consent_grants`
+/// is to honor an explicitly recorded no — an active `declined` or `revoked`
+/// grant for the effective subject keeps the request `declined`.
 async fn current_enrichment_consent(
     tx: &mut Transaction<'_, Postgres>,
     auth: &ProductAuth,
@@ -9941,15 +9889,7 @@ async fn current_enrichment_consent(
     {
         return Ok(("declined".to_owned(), revision, resolved_subject));
     }
-    if required.iter().all(|scope| {
-        effective_rows
-            .iter()
-            .any(|row| row.0 == *scope && row.1 == "approved" && row.3)
-    }) {
-        Ok(("answer_ready".to_owned(), revision, resolved_subject))
-    } else {
-        Ok(("consent_required".to_owned(), revision, resolved_subject))
-    }
+    Ok(("answer_ready".to_owned(), revision, resolved_subject))
 }
 
 pub(crate) async fn create_enrichment_request(
@@ -10694,9 +10634,9 @@ pub(crate) async fn decide_enrichment_consent(
                 "Consent cannot widen the request retention contract",
             ));
         }
-        if request.state != "consent_required" {
+        if request.state != "answer_ready" {
             return Err(ApiError::conflict(
-                "Retention cannot change after customer context is approved",
+                "Retention cannot change after customer context is resolved",
             ));
         }
         let subject = enrichment_subject(
@@ -11643,15 +11583,16 @@ async fn context_items_for_answer(
     .map_err(Into::into)
 }
 
-async fn active_enrichment_share_grant(
+/// Answers no longer require a prior consent grant. This check only honors an
+/// explicitly recorded no: an active `declined` or `revoked` grant for the
+/// request subject blocks submission. When an explicit approval exists
+/// (compatibility with agents that still POST a consent decision), the
+/// `share_preferences` grant id is linked to the stored signals.
+async fn enrichment_share_grant(
     tx: &mut Transaction<'_, Postgres>,
     request: &EnrichmentRequestRow,
-    require_remember: bool,
-) -> Result<Uuid, ApiError> {
-    let mut required = vec!["share_preferences", "personalize"];
-    if require_remember {
-        required.push("remember_preferences");
-    }
+) -> Result<Option<Uuid>, ApiError> {
+    let scopes = vec!["share_preferences", "personalize", "remember_preferences"];
     let rows = sqlx::query_as::<_, (Uuid, String, String, bool)>(
         r"SELECT id, scope, state, (expires_at IS NULL OR expires_at > NOW()) AS active
         FROM consent_grants
@@ -11662,22 +11603,22 @@ async fn active_enrichment_share_grant(
     .bind(request.workspace_id)
     .bind(request.environment_id)
     .bind(&request.consent_subject)
-    .bind(&required)
+    .bind(&scopes)
     .bind(&request.purpose)
     .fetch_all(&mut **tx)
     .await?;
-    if !required.iter().all(|scope| {
-        rows.iter()
-            .any(|row| row.1 == *scope && row.2 == "approved" && row.3)
-    }) {
+    if rows
+        .iter()
+        .any(|row| row.3 && (row.2 == "declined" || row.2 == "revoked"))
+    {
         return Err(ApiError::forbidden(
-            "Customer context permission is no longer active",
+            "Customer context sharing was declined for this customer",
         ));
     }
-    rows.into_iter()
-        .find(|row| row.1 == "share_preferences")
-        .map(|row| row.0)
-        .ok_or_else(|| ApiError::forbidden("Preference sharing permission is not active"))
+    Ok(rows
+        .into_iter()
+        .find(|row| row.1 == "share_preferences" && row.2 == "approved" && row.3)
+        .map(|row| row.0))
 }
 
 pub(crate) async fn submit_enrichment_answer(
@@ -11712,12 +11653,7 @@ pub(crate) async fn submit_enrichment_answer(
             "Customer context sharing is not approved for this request",
         ));
     }
-    let share_grant_id = active_enrichment_share_grant(
-        &mut tx,
-        &request,
-        input.items.iter().any(|item| item.remember),
-    )
-    .await?;
+    let share_grant_id = enrichment_share_grant(&mut tx, &request).await?;
     if let Some((answer_id, _, existing_hash)) = existing {
         if existing_hash != payload_hash {
             return Err(ApiError::conflict(
@@ -11799,7 +11735,7 @@ pub(crate) async fn submit_enrichment_answer(
              collection_basis, consent_grant_id, consent_scope, collected_at,
              expires_at)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
-              'user_consent',$12,'share_preferences',$13,$14)",
+              'user_consent',$12,$13,$14,$15)",
         )
         .bind(signal_id)
         .bind(request.workspace_id)
@@ -11818,6 +11754,7 @@ pub(crate) async fn submit_enrichment_answer(
         .bind(&item.provenance)
         .bind(item.confidence)
         .bind(share_grant_id)
+        .bind(share_grant_id.map(|_| "share_preferences"))
         .bind(collected_at)
         .bind(expires_at)
         .execute(&mut *tx)
@@ -12063,8 +12000,9 @@ pub(crate) async fn retrieve_customer_context(
           AND answer.workspace_id = item.workspace_id
         JOIN enrichment_requests request ON request.id = answer.request_id
           AND request.workspace_id = answer.workspace_id
-        JOIN LATERAL (
-          SELECT candidate.subject
+        LEFT JOIN LATERAL (
+          SELECT (candidate.state IN ('declined', 'revoked')
+            AND (candidate.expires_at IS NULL OR candidate.expires_at > NOW())) AS opted_out
           FROM consent_grants candidate
           WHERE candidate.environment_id = request.environment_id
             AND candidate.workspace_id = request.workspace_id
@@ -12076,37 +12014,13 @@ pub(crate) async fn retrieve_customer_context(
             candidate.subject, candidate.id
           LIMIT 1
         ) effective_consent ON TRUE
-        JOIN consent_grants original_share ON original_share.id = signal.consent_grant_id
-          AND original_share.workspace_id = signal.workspace_id
-          AND original_share.enrichment_purpose = request.purpose
-          AND original_share.state = 'approved'
-          AND (original_share.expires_at IS NULL OR original_share.expires_at > NOW())
-        JOIN consent_grants share_grant ON share_grant.environment_id = request.environment_id
-          AND share_grant.subject = effective_consent.subject
-          AND share_grant.scope = 'share_preferences'
-          AND share_grant.enrichment_purpose = request.purpose
-          AND share_grant.state = 'approved'
-          AND (share_grant.expires_at IS NULL OR share_grant.expires_at > NOW())
-        JOIN consent_grants purpose_grant ON purpose_grant.environment_id = request.environment_id
-          AND purpose_grant.subject = effective_consent.subject
-          AND purpose_grant.scope = 'personalize'
-          AND purpose_grant.enrichment_purpose = request.purpose
-          AND purpose_grant.state = 'approved'
-          AND (purpose_grant.expires_at IS NULL OR purpose_grant.expires_at > NOW())
-        LEFT JOIN consent_grants remember_grant
-          ON remember_grant.environment_id = request.environment_id
-          AND remember_grant.subject = effective_consent.subject
-          AND remember_grant.scope = 'remember_preferences'
-          AND remember_grant.enrichment_purpose = request.purpose
-          AND remember_grant.state = 'approved'
-          AND (remember_grant.expires_at IS NULL OR remember_grant.expires_at > NOW())
         WHERE item.workspace_id = $1 AND item.product_id = $2
           AND item.environment_id = $3 AND item.purpose = $4
           AND item.provenance <> 'agent_inference' AND item.expires_at > NOW()
+          AND NOT COALESCE(effective_consent.opted_out, FALSE)
           AND (($5::UUID IS NOT NULL AND item.interaction_id = $5)
             OR ($6::UUID IS NOT NULL AND item.customer_id = $6
-              AND item.remembered
-              AND remember_grant.id IS NOT NULL))
+              AND item.remembered))
         ORDER BY item.signal_key, item.collected_at DESC, item.signal_id DESC
         LIMIT 100",
     )
@@ -12271,14 +12185,13 @@ pub(crate) async fn record_personalization_decision(
         r"SELECT link.signal_id FROM customer_context_retrieval_signals link
         JOIN enrichment_signal_items item ON item.signal_id = link.signal_id
           AND item.workspace_id = link.workspace_id
-        JOIN customer_signals signal ON signal.id = item.signal_id
-          AND signal.workspace_id = link.workspace_id
         JOIN enrichment_answers answer ON answer.id = item.enrichment_answer_id
-          AND answer.workspace_id = signal.workspace_id
+          AND answer.workspace_id = item.workspace_id
         JOIN enrichment_requests request ON request.id = answer.request_id
           AND request.workspace_id = answer.workspace_id
-        JOIN LATERAL (
-          SELECT candidate.subject
+        LEFT JOIN LATERAL (
+          SELECT (candidate.state IN ('declined', 'revoked')
+            AND (candidate.expires_at IS NULL OR candidate.expires_at > NOW())) AS opted_out
           FROM consent_grants candidate
           WHERE candidate.environment_id = request.environment_id
             AND candidate.workspace_id = request.workspace_id
@@ -12289,37 +12202,10 @@ pub(crate) async fn record_personalization_decision(
             CASE WHEN candidate.state IN ('declined', 'revoked') THEN 1 ELSE 0 END DESC,
             candidate.subject, candidate.id LIMIT 1
         ) effective_consent ON TRUE
-        JOIN consent_grants original_share ON original_share.id = signal.consent_grant_id
-          AND original_share.workspace_id = signal.workspace_id
-          AND original_share.enrichment_purpose = request.purpose
-          AND original_share.state = 'approved'
-          AND (original_share.expires_at IS NULL OR original_share.expires_at > NOW())
-        JOIN consent_grants share_grant ON share_grant.environment_id = request.environment_id
-          AND share_grant.subject = effective_consent.subject
-          AND share_grant.scope = 'share_preferences'
-          AND share_grant.enrichment_purpose = request.purpose
-          AND share_grant.state = 'approved'
-          AND (share_grant.expires_at IS NULL OR share_grant.expires_at > NOW())
-        JOIN consent_grants purpose_grant ON purpose_grant.environment_id = request.environment_id
-          AND purpose_grant.subject = effective_consent.subject
-          AND purpose_grant.scope = 'personalize'
-          AND purpose_grant.enrichment_purpose = request.purpose
-          AND purpose_grant.state = 'approved'
-          AND (purpose_grant.expires_at IS NULL OR purpose_grant.expires_at > NOW())
-        LEFT JOIN consent_grants remember_grant
-          ON remember_grant.environment_id = request.environment_id
-          AND remember_grant.subject = effective_consent.subject
-          AND remember_grant.scope = 'remember_preferences'
-          AND remember_grant.enrichment_purpose = request.purpose
-          AND remember_grant.state = 'approved'
-          AND (remember_grant.expires_at IS NULL OR remember_grant.expires_at > NOW())
         WHERE link.workspace_id = $1 AND link.retrieval_id = $2
           AND link.signal_id = ANY($3)
           AND item.provenance <> 'agent_inference'
-          AND (
-            NOT item.remembered
-            OR remember_grant.id IS NOT NULL
-          )
+          AND NOT COALESCE(effective_consent.opted_out, FALSE)
           AND item.expires_at > NOW()",
     )
     .bind(auth.workspace.id)
@@ -20421,32 +20307,26 @@ mod product_tests {
             consent_subject: transient,
             expected_consent_revision: 0,
             identity_level: "verified".into(),
-            state: "consent_required".into(),
+            state: "answer_ready".into(),
             question: "May I share context?".into(),
             request_hash: vec![0; 32],
             capability_nonce_hash: vec![0; 32],
             expires_at: Utc::now() + Duration::hours(2),
             created_at: Utc::now(),
         };
-        let response = enrichment_response("https://app.tryintents.com", &row, "aqr1_test", None);
-        let json = serde_json::to_value(response)?;
-        anyhow::ensure!(
-            json["consent"]["bodySchema"]["decision"]
-                == serde_json::json!(["approved", "declined"])
-        );
-        anyhow::ensure!(
-            json["stageInstruction"]
-                .as_str()
-                .is_some_and(|value| value.contains("never infer approval"))
-        );
-        anyhow::ensure!(json["submit"].is_null());
-        row.state = "answer_ready".into();
         let answer_json = serde_json::to_value(enrichment_response(
             "https://app.tryintents.com",
             &row,
             "aqr1_test",
             None,
         ))?;
+        // Enrichment requests are submit-ready immediately: no ask happens, no
+        // question is surfaced, and the opt-out endpoint stays advertised.
+        anyhow::ensure!(
+            answer_json["consent"]["bodySchema"]["decision"]
+                == serde_json::json!(["approved", "declined"])
+        );
+        anyhow::ensure!(answer_json["question"].is_null());
         anyhow::ensure!(
             answer_json["submit"]["bodySchema"]["status"]
                 == serde_json::json!(["answered", "declined", "no_relevant_context"])
@@ -20456,6 +20336,27 @@ mod product_tests {
             answer_json["stageInstruction"]
                 .as_str()
                 .is_some_and(|value| value.contains("submit at most one bounded answer"))
+        );
+        anyhow::ensure!(
+            answer_json["stageInstruction"]
+                .as_str()
+                .is_some_and(|value| !value.contains("permission"))
+        );
+        // Legacy rows persisted in the pre-consentless ask state stay inert:
+        // no question, no submit action, and no instruction implying an ask.
+        row.state = "consent_required".into();
+        let legacy_json = serde_json::to_value(enrichment_response(
+            "https://app.epode.ai",
+            &row,
+            "aqr1_test",
+            None,
+        ))?;
+        anyhow::ensure!(legacy_json["question"].is_null());
+        anyhow::ensure!(legacy_json["submit"].is_null());
+        anyhow::ensure!(
+            legacy_json["stageInstruction"]
+                .as_str()
+                .is_some_and(|value| value.contains("No enrichment action is permitted"))
         );
         row.state = "declined".into();
         let declined_json = serde_json::to_value(enrichment_response(
@@ -20535,10 +20436,13 @@ mod product_tests {
                         .as_ref()
                         .map(|action| &action.authorization)
             );
-            anyhow::ensure!(request.state == "consent_required");
+            anyhow::ensure!(request.state == "answer_ready");
             anyhow::ensure!(request.identity_level == "pseudonymous");
             anyhow::ensure!(request.surface == "html");
-            anyhow::ensure!(request.submit.is_none() && request.consent.is_some());
+            // The very first response is submit-ready and still advertises the
+            // explicit opt-out endpoint.
+            anyhow::ensure!(request.submit.is_some() && request.consent.is_some());
+            anyhow::ensure!(request.question.is_none());
 
             // Simulate a row created before the immutable contract columns were
             // available. Its request hash uses the original v1 material, and
@@ -20750,9 +20654,9 @@ mod product_tests {
             let session_response = &session_detail.responses[0];
             anyhow::ensure!(session_response.id == request.request_id);
             anyhow::ensure!(session_response.interaction_id == interaction_id);
-            anyhow::ensure!(
-                request.question.as_deref() == Some(session_response.question.as_str())
-            );
+            // The API never surfaces a question, but the dashboard read model
+            // still shows the stored request description.
+            anyhow::ensure!(!session_response.question.is_empty());
             anyhow::ensure!(session_response.status == "answered");
             anyhow::ensure!(session_response.answers.len() == 2);
             anyhow::ensure!(
@@ -21190,7 +21094,7 @@ mod product_tests {
             )
             .await
             .map_err(test_error)?;
-            anyhow::ensure!(transient_known.state == "consent_required");
+            anyhow::ensure!(transient_known.state == "answer_ready");
             let transient_subject = sqlx::query_scalar::<_, String>(
                 "SELECT consent_subject FROM enrichment_requests WHERE id = $1",
             )
@@ -21251,7 +21155,8 @@ mod product_tests {
             )
             .await
             .map_err(test_error)?;
-            anyhow::ensure!(second_transient_known.state == "consent_required");
+            anyhow::ensure!(second_transient_known.state == "answer_ready");
+            anyhow::ensure!(second_transient_known.submit.is_some());
             sqlx::query(
                 r"UPDATE consent_grants SET state = 'revoked', revoked_at = NOW(), updated_at = NOW()
                 WHERE environment_id = $1 AND subject = $2 AND scope = $3",
@@ -21800,21 +21705,16 @@ mod product_tests {
             .await
             .map_err(test_error)?;
             anyhow::ensure!(ephemeral.identity_level == "ephemeral");
-            anyhow::ensure!(
-                ephemeral
-                    .question
-                    .as_deref()
-                    .is_some_and(|question| question.contains("for this interaction only"))
-            );
-            anyhow::ensure!(
-                sqlx::query_as::<_, (Option<Uuid>, bool)>(
-                    "SELECT customer_id, remember FROM enrichment_requests WHERE id = $1",
+            anyhow::ensure!(ephemeral.question.is_none());
+            let (ephemeral_customer, ephemeral_remember, ephemeral_question) =
+                sqlx::query_as::<_, (Option<Uuid>, bool, String)>(
+                    "SELECT customer_id, remember, question FROM enrichment_requests WHERE id = $1",
                 )
                 .bind(ephemeral.request_id)
                 .fetch_one(&pool)
-                .await?
-                    == (None, false)
-            );
+                .await?;
+            anyhow::ensure!(ephemeral_customer.is_none() && !ephemeral_remember);
+            anyhow::ensure!(ephemeral_question.contains("for this interaction only"));
             let ephemeral_capability = ephemeral
                 .consent
                 .as_ref()
@@ -21952,6 +21852,21 @@ mod product_tests {
         )
         .await;
         Ok((consent, answer))
+    }
+
+    /// The API response never carries a question anymore; the stored request
+    /// description still names the frozen field selection for dashboards.
+    async fn stored_enrichment_question(
+        pool: &PgPool,
+        request: &EnrichmentRequestResponse,
+    ) -> anyhow::Result<String> {
+        anyhow::ensure!(request.question.is_none());
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT question FROM enrichment_requests WHERE id = $1",
+        )
+        .bind(request.request_id)
+        .fetch_one(pool)
+        .await?)
     }
 
     #[tokio::test]
@@ -22105,10 +22020,8 @@ mod product_tests {
             .await
             .map_err(test_error)?;
             anyhow::ensure!(
-                search_request.question.as_deref()
-                    == Some(
-                        "May I share your Shopping occasion with Journey Co so it can personalize your product experience for this interaction only?"
-                    )
+                stored_enrichment_question(&pool, &search_request).await?
+                    == "May I share your Shopping occasion with Journey Co so it can personalize your product experience for this interaction only?"
             );
             let (version, snapshot) = sqlx::query_as::<_, (String, serde_json::Value)>(
                 "SELECT catalog_version, snapshot FROM enrichment_request_fields
@@ -22217,10 +22130,8 @@ mod product_tests {
             .await
             .map_err(test_error)?;
             anyhow::ensure!(
-                checkout_request.question.as_deref()
-                    == Some(
-                        "May I share your Shopping occasion and Delivery timing with Journey Co so it can personalize your product experience for this interaction only?"
-                    )
+                stored_enrichment_question(&pool, &checkout_request).await?
+                    == "May I share your Shopping occasion and Delivery timing with Journey Co so it can personalize your product experience for this interaction only?"
             );
             // Editing the definition must not change the in-flight request.
             upsert_enrichment_field(
@@ -22287,10 +22198,8 @@ mod product_tests {
             .await
             .map_err(test_error)?;
             anyhow::ensure!(
-                subset_request.question.as_deref()
-                    == Some(
-                        "May I share your shopping priority and shopping budget band with Legacy Co so it can personalize your product experience for this interaction only?"
-                    )
+                stored_enrichment_question(&pool, &subset_request).await?
+                    == "May I share your shopping priority and shopping budget band with Legacy Co so it can personalize your product experience for this interaction only?"
             );
             let retry_request = create_enrichment_request(
                 &pool,
@@ -22352,9 +22261,9 @@ mod product_tests {
             .await
             .map_err(test_error)?;
             anyhow::ensure!(
-                legacy_request.question.as_deref().is_some_and(|question| {
-                    question.contains("relevant, non-sensitive preferences")
-                })
+                stored_enrichment_question(&pool, &legacy_request)
+                    .await?
+                    .contains("relevant, non-sensitive preferences")
             );
             let (legacy_version, legacy_snapshot, legacy_hash) =
                 sqlx::query_as::<_, (String, serde_json::Value, Vec<u8>)>(

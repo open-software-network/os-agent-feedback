@@ -216,37 +216,15 @@ try {
     assert.equal(result.structuredContent.operation, name);
     return result.structuredContent._epode.customerContext;
   };
-  const share = async (contract, choice, items, identity, sessionRef, runtimeHint) => {
-    const answer = {
-      requestHandle: contract.requestHandle,
-      status: "answered",
-      items,
-    };
-    const intermediate = await callTool(
+  // Consentless enrichment: sharing needs no elicitation round-trip. The tool
+  // submits the bounded answer in a single call.
+  const share = (contract, items, identity, sessionRef, runtimeHint) =>
+    callTool(
       server,
       "share_customer_context",
-      answer,
+      { requestHandle: contract.requestHandle, status: "answered", items },
       mcpContext({ identity, sessionRef, runtimeHint }),
     );
-    assert.equal(intermediate.resultType, "input_required");
-    assert.equal(
-      intermediate.inputRequests.customer_context_permission.method,
-      "elicitation/create",
-    );
-    return callTool(
-      server,
-      "share_customer_context",
-      answer,
-      mcpContext({
-        identity,
-        sessionRef,
-        runtimeHint,
-        inputResponses: {
-          customer_context_permission: { action: "accept", content: { choice } },
-        },
-      }),
-    );
-  };
 
   const durableIdentity = customer("shop_household_42", "shopper_7");
   const durableRequest = await search(
@@ -255,10 +233,11 @@ try {
     "shop_journey_1",
     "mcp-matrix/claude-like",
   );
-  assert.equal(durableRequest.state, "consent_required");
+  assert.equal(durableRequest.state, "answer_ready");
+  assert.equal(durableRequest.question, undefined);
+  assert.ok(durableRequest.requestHandle, "the first contract must already be submit-ready");
   const durableShare = await share(
     durableRequest,
-    "always_allow",
     [
       item("shopping.priority", "preference", "sustainability"),
       item("shopping.budget_band", "constraint", "50_150", "agent_reports_current_task"),
@@ -293,10 +272,10 @@ try {
     "paris_planning_1",
     "mcp-matrix/claude-like",
   );
+  assert.equal(sessionRequest.state, "answer_ready");
   const sessionShare = await share(
     sessionRequest,
-    "this_session_only",
-    [item("shopping.budget_band", "constraint", "150_500")],
+    [{ ...item("shopping.budget_band", "constraint", "150_500"), remember: false }],
     sessionIdentity,
     "paris_planning_1",
     "mcp-matrix/claude-like",
@@ -322,8 +301,10 @@ try {
     "tokyo_planning_2",
     "mcp-matrix/chatgpt-like",
   );
-  assert.equal(nextSessionRequest.state, "consent_required");
+  assert.equal(nextSessionRequest.state, "answer_ready");
 
+  // An explicitly recorded no is still honored: the compatibility consent tool
+  // records the opt-out, sharing is refused, and later requests stay declined.
   const declineIdentity = customer("finance_account_8", "investor_14");
   const declineRequest = await search(
     "compare_funds",
@@ -331,15 +312,26 @@ try {
     "research_1",
     "mcp-matrix/claude-like",
   );
-  const declined = await share(
+  const declined = await callTool(
+    server,
+    "record_customer_context_consent",
+    { requestHandle: declineRequest.requestHandle, decision: "declined" },
+    mcpContext({
+      identity: declineIdentity,
+      sessionRef: "research_1",
+      runtimeHint: "mcp-matrix/claude-like",
+    }),
+  );
+  assert.equal(declined.structuredContent.state, "declined");
+  const declinedShare = await share(
     declineRequest,
-    "dont_allow",
     [item("content.topic_depth", "preference", "practical")],
     declineIdentity,
     "research_1",
     "mcp-matrix/claude-like",
   );
-  assert.equal(declined.structuredContent.state, "declined");
+  assert.equal(declinedShare.structuredContent.state, "declined");
+  assert.equal(declinedShare.structuredContent.accepted, false);
   const declinedAgain = await search(
     "compare_funds",
     declineIdentity,
@@ -362,7 +354,6 @@ try {
   );
   const sensitive = await share(
     sensitiveRequest,
-    "always_allow",
     [item("creditworthiness", "constraint", "excellent")],
     sensitiveIdentity,
     "research_sensitive",
@@ -391,7 +382,9 @@ try {
   const sessionStoredRequest = stored.requests.find(
     (request) => request.interactionId === sessionRequest.interactionId,
   );
-  assert.equal(sessionStoredRequest.remember, false);
+  // The retention contract still allows remembering; the agent kept this
+  // submission interaction-scoped at the item level.
+  assert.equal(sessionStoredRequest.remember, true);
   assert.ok(
     stored.signals.some(
       (signal) =>

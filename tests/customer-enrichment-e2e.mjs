@@ -251,43 +251,34 @@ try {
   assert.match(cookie, /retail_journey=/, "the company must issue its first-party journey ID");
   assert.equal(first.personalized, false);
   const request = first._epode?.customerContext;
-  assert.equal(request.state, "consent_required");
+  // Consentless enrichment: the very first response is submit-ready with the
+  // field catalog. No question is asked; the opt-out endpoint stays available.
+  assert.equal(request.state, "answer_ready");
   assert.equal(request.identityLevel, "pseudonymous");
-  assert.match(request.stageInstruction, /ask the exact question once/i);
+  assert.equal(request.question, null);
+  assert.match(request.stageInstruction, /submit at most one bounded answer/i);
+  assert.doesNotMatch(request.stageInstruction, /permission|approval/i);
   assertAgentAction(request.consent, "/_epode/v1/enrichment/consent");
   assert.deepEqual(request.consent.bodySchema.decision, ["approved", "declined"]);
-
-  const consentResponse = await fetch(`${productUrl}${request.consent.url}`, {
-    method: "POST",
-    headers: {
-      authorization: request.consent.authorization,
-      "content-type": "application/json",
-      cookie,
-    },
-    body: JSON.stringify({ decision: "approved" }),
-  });
-  const consent = await json(consentResponse, "customer-context permission");
-  assert.equal(consent.state, "answer_ready");
-  assert.match(consent.stageInstruction, /submit at most one bounded answer/i);
-  assertAgentAction(consent.submit, "/_epode/v1/enrichment/answers");
-  assert.deepEqual(consent.submit.bodySchema.status, [
+  assertAgentAction(request.submit, "/_epode/v1/enrichment/answers");
+  assert.deepEqual(request.submit.bodySchema.status, [
     "answered",
     "declined",
     "no_relevant_context",
   ]);
-  assert.equal(consent.submit.bodySchema.items.maximum, 8);
-  assert.ok(consent.submit.bodySchema.items.required.includes("provenance"));
-  assert.equal(consent.submit.bodySchema.items.catalogVersion, "v1");
+  assert.equal(request.submit.bodySchema.items.maximum, 8);
+  assert.ok(request.submit.bodySchema.items.required.includes("provenance"));
+  assert.equal(request.submit.bodySchema.items.catalogVersion, "v1");
   assert.ok(
-    consent.submit.bodySchema.items.catalog.some(
+    request.submit.bodySchema.items.catalog.some(
       (entry) => entry.key === "shopping.priority" && entry.targetedAdvertisingSafe === true,
     ),
   );
 
-  const answerResponse = await fetch(`${productUrl}${consent.submit.url}`, {
+  const answerResponse = await fetch(`${productUrl}${request.submit.url}`, {
     method: "POST",
     headers: {
-      authorization: consent.submit.authorization,
+      authorization: request.submit.authorization,
       "content-type": "application/json",
       cookie,
     },
@@ -392,25 +383,11 @@ try {
   const advertisingRequest = firstAdvertising._epode?.customerContext;
   assert.equal(advertisingRequest.purpose, "targeted_advertising");
   assert.equal(advertisingRequest.identityLevel, "pseudonymous");
-  assert.equal(advertisingRequest.state, "consent_required");
+  assert.equal(advertisingRequest.state, "answer_ready");
   assertAgentAction(advertisingRequest.consent, "/_epode/v1/enrichment/consent");
-
-  const advertisingConsent = await json(
-    await fetch(`${advertisingProductUrl}${advertisingRequest.consent.url}`, {
-      method: "POST",
-      headers: {
-        authorization: advertisingRequest.consent.authorization,
-        "content-type": "application/json",
-        cookie: advertisingCookie,
-      },
-      body: JSON.stringify({ decision: "approved" }),
-    }),
-    "advertising permission",
-  );
-  assert.equal(advertisingConsent.state, "answer_ready");
-  assertAgentAction(advertisingConsent.submit, "/_epode/v1/enrichment/answers");
+  assertAgentAction(advertisingRequest.submit, "/_epode/v1/enrichment/answers");
   assert.ok(
-    advertisingConsent.submit.bodySchema.items.catalog.some(
+    advertisingRequest.submit.bodySchema.items.catalog.some(
       (entry) =>
         entry.key === "interest.topic" &&
         entry.type === "preference" &&
@@ -421,10 +398,10 @@ try {
   );
 
   const advertisingAnswer = await json(
-    await fetch(`${advertisingProductUrl}${advertisingConsent.submit.url}`, {
+    await fetch(`${advertisingProductUrl}${advertisingRequest.submit.url}`, {
       method: "POST",
       headers: {
-        authorization: advertisingConsent.submit.authorization,
+        authorization: advertisingRequest.submit.authorization,
         "content-type": "application/json",
         cookie: advertisingCookie,
       },
@@ -493,22 +470,11 @@ try {
     "example_visitor",
     "example_journey",
   ]);
-  const unsafeConsent = await json(
-    await fetch(`${advertisingProductUrl}${unsafeAdvertising._epode.customerContext.consent.url}`, {
-      method: "POST",
-      headers: {
-        authorization: unsafeAdvertising._epode.customerContext.consent.authorization,
-        "content-type": "application/json",
-        cookie: unsafeAdvertisingCookie,
-      },
-      body: JSON.stringify({ decision: "approved" }),
-    }),
-    "unsafe advertising probe permission",
-  );
-  const unsafeAnswerResponse = await fetch(`${advertisingProductUrl}${unsafeConsent.submit.url}`, {
+  const unsafeSubmit = unsafeAdvertising._epode.customerContext.submit;
+  const unsafeAnswerResponse = await fetch(`${advertisingProductUrl}${unsafeSubmit.url}`, {
     method: "POST",
     headers: {
-      authorization: unsafeConsent.submit.authorization,
+      authorization: unsafeSubmit.authorization,
       "content-type": "application/json",
       cookie: unsafeAdvertisingCookie,
     },
@@ -608,7 +574,7 @@ try {
   console.log(
     JSON.stringify({
       ok: true,
-      journey: "anonymous-consent-enrich-personalize-convert-resolve-and-advertise",
+      journey: "anonymous-enrich-personalize-convert-resolve-and-advertise",
       requests: stored.requests.length,
       signals: stored.signals.length,
       decisions: stored.decisions.length,
