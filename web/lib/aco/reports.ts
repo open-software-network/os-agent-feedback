@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -18,7 +19,22 @@ import path from "node:path";
 const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const ASSET_PATTERN = /^[a-z0-9][a-z0-9.-]{0,127}\.png$/;
 
-const reportsRoot = path.join(process.cwd(), "aco-reports");
+/**
+ * The working directory differs between `next dev` (web/) and the standalone
+ * runtime (whose server may or may not chdir into web/ before our code runs),
+ * so resolve the report tree by probing both layouts instead of trusting cwd.
+ */
+let resolvedReportsRoot: string | undefined;
+function reportsRoot(): string {
+  if (!resolvedReportsRoot) {
+    const candidates = [
+      path.join(process.cwd(), "aco-reports"),
+      path.join(process.cwd(), "web", "aco-reports"),
+    ];
+    resolvedReportsRoot = candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
+  }
+  return resolvedReportsRoot;
+}
 
 export function validReportSlug(slug: string): boolean {
   return SLUG_PATTERN.test(slug);
@@ -67,7 +83,7 @@ export function tokenMatches(supplied: string, slug: string, password: string): 
 export async function reportHtml(slug: string): Promise<string | undefined> {
   if (!validReportSlug(slug)) return undefined;
   try {
-    return await readFile(path.join(reportsRoot, slug, "report.html"), "utf8");
+    return await readFile(path.join(reportsRoot(), slug, "report.html"), "utf8");
   } catch {
     return undefined;
   }
@@ -75,7 +91,7 @@ export async function reportHtml(slug: string): Promise<string | undefined> {
 
 export async function reportAsset(slug: string, asset: string): Promise<Buffer | undefined> {
   if (!validReportSlug(slug) || !ASSET_PATTERN.test(asset)) return undefined;
-  const assetsDir = path.join(reportsRoot, slug, "assets");
+  const assetsDir = path.join(reportsRoot(), slug, "assets");
   try {
     const names = await readdir(assetsDir);
     if (!names.includes(asset)) return undefined;
