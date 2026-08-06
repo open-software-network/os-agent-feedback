@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { SETUP_SURFACES, setupAgentPrompt, setupInstructions } from "./instructions";
+import {
+  SETUP_SURFACE_OPTIONS,
+  SETUP_SURFACES,
+  setupAgentPrompt,
+  setupInstructions,
+} from "./instructions";
 
 const origin = "https://app.epode.ai";
 
@@ -16,7 +21,11 @@ describe("company-side customer enrichment setup", () => {
     expect(instructions.verify).toMatch(/session telemetry/i);
   });
 
-  it("offers the four implemented product surfaces", () => {
+  it("offers only the guided agent experience in product setup", () => {
+    expect(SETUP_SURFACE_OPTIONS).toEqual(["experience"]);
+  });
+
+  it("keeps the implemented integration recipes available", () => {
     expect(Object.keys(SETUP_SURFACES)).toEqual(["experience", "api", "website", "mcp"]);
     expect(SETUP_SURFACES.experience.stacks).toEqual(["node-experience"]);
     expect(SETUP_SURFACES.api.stacks).toEqual(["node-express", "node-fastify"]);

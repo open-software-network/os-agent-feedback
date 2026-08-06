@@ -34,6 +34,17 @@ describe("SetupView sections", () => {
     expect(identify).toHaveAttribute("aria-expanded", "false");
   });
 
+  it("does not offer obsolete product surfaces", () => {
+    renderSetup();
+
+    expect(screen.getByRole("button", { name: "Guided agent experience" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "HTTP API" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Server-rendered website" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "MCP server" })).not.toBeInTheDocument();
+  });
+
   it("replaces the hash when a section opens", () => {
     renderSetup();
 
