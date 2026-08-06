@@ -5,6 +5,7 @@ mod customer_profile;
 mod destinations;
 mod dev_auth;
 mod error;
+mod friendly_names;
 mod github;
 mod grouping;
 mod issue_template;

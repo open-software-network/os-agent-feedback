@@ -3607,6 +3607,7 @@ pub(crate) async fn dashboard_sessions_page(
     .bind(limit + 1)
     .fetch_all(pool)
     .await?;
+    humanize_session_customer_names(&mut sessions);
     let next_cursor = if sessions.len() > page_size {
         let last = &sessions[page_size - 1];
         Some(encode_feedback_cursor(last.last_seen_at, last.id)?)
@@ -3959,6 +3960,9 @@ pub(crate) async fn dashboard_customers_page(
     .bind(limit + 1)
     .fetch_all(pool)
     .await?;
+    for customer in &mut customers {
+        humanize_customer_summary_name(customer);
+    }
     let next_cursor = if customers.len() > page_size {
         let last = &customers[page_size - 1];
         Some(encode_feedback_cursor(last.last_activity_at, last.id)?)
@@ -4200,6 +4204,9 @@ pub(crate) async fn dashboard_responses_page(
     .bind(limit + 1)
     .fetch_all(pool)
     .await?;
+    for response in &mut responses {
+        humanize_response_customer_name(response.customer_id, &mut response.customer_name);
+    }
 
     let next_cursor = if responses.len() > page_size {
         let last = &responses[page_size - 1];
@@ -4439,7 +4446,7 @@ async fn dashboard_customer_summary_by_id(
     customer_id: Uuid,
     retained_since: DateTime<Utc>,
 ) -> Result<CustomerSummary, ApiError> {
-    sqlx::query_as::<_, CustomerSummary>(
+    let mut customer = sqlx::query_as::<_, CustomerSummary>(
         r"SELECT customer.id,
           COALESCE(customer.display_name, user_identifier.display_hint,
             account_identifier.display_hint, any_identifier.display_hint,
@@ -4530,7 +4537,9 @@ async fn dashboard_customer_summary_by_id(
     .bind(retained_since)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(|| ApiError::not_found("Customer not found for product"))
+    .ok_or_else(|| ApiError::not_found("Customer not found for product"))?;
+    humanize_customer_summary_name(&mut customer);
+    Ok(customer)
 }
 
 async fn dashboard_customer_context_returns(
@@ -4778,7 +4787,7 @@ pub(crate) async fn dashboard_customer_by_id(
         retained_since,
     )
     .await?;
-    let sessions = sqlx::query_as::<_, DashboardSessionSummary>(
+    let mut sessions = sqlx::query_as::<_, DashboardSessionSummary>(
         r"SELECT session.id, session.workspace_id, session.environment_id,
           session.source, session.ref_hint, session.started_at, session.last_seen_at,
           session.created_at, activity.interaction_count, activity.report_count,
@@ -4833,6 +4842,7 @@ pub(crate) async fn dashboard_customer_by_id(
     .bind(retained_since)
     .fetch_all(pool)
     .await?;
+    humanize_session_customer_names(&mut sessions);
     let observed_profile = derive_observed_customer_profile(
         sqlx::query_as::<_, ObservedActivity>(
             r"SELECT interaction.session_id, session.ref_hint AS session_ref,
@@ -5805,7 +5815,7 @@ pub(crate) async fn dashboard_with_limits(
     .bind(report_limit)
     .fetch_all(pool)
     .await?;
-    let sessions = sqlx::query_as::<_, DashboardSessionSummary>(
+    let mut sessions = sqlx::query_as::<_, DashboardSessionSummary>(
         r"WITH selected_sessions AS (
           SELECT id, workspace_id, environment_id, source, ref_hint,
             started_at, last_seen_at, created_at
@@ -5874,6 +5884,7 @@ pub(crate) async fn dashboard_with_limits(
     .bind(session_limit)
     .fetch_all(pool)
     .await?;
+    humanize_session_customer_names(&mut sessions);
     let insights = dashboard_insights(pool, environment_id, retained_since).await?;
     let (interactions_total, reports_total, sessions_total) =
         sqlx::query_as::<_, (i64, i64, i64)>(
@@ -6264,6 +6275,9 @@ pub(crate) async fn dashboard_session_by_id(
     .bind(product_id)
     .fetch_all(pool)
     .await?;
+    for response in &mut responses {
+        humanize_response_customer_name(response.customer_id, &mut response.customer_name);
+    }
     let request_ids = responses
         .iter()
         .map(|response| response.id)
@@ -6489,6 +6503,42 @@ fn customer_identifier_hash(
 fn customer_identifier_hint(kind: &str, ref_hash: &[u8]) -> String {
     let encoded = URL_SAFE_NO_PAD.encode(ref_hash);
     format!("{}-{}", kind.trim_end_matches("_ref"), &encoded[..8])
+}
+
+/// Replaces auto-generated anonymous placeholder labels ("anonymous-XXXXXXXX"
+/// hints and the "Anonymous customer" fallback) with a deterministic,
+/// human-friendly `<Adjective> <Animal>` label derived from the customer id.
+/// Real product-provided names and hints are kept as-is.
+pub(crate) fn humanize_session_customer_names(sessions: &mut [DashboardSessionSummary]) {
+    for session in sessions {
+        if let Some(label) = crate::friendly_names::friendly_label_for(
+            session.identity_level.as_deref(),
+            session.customer_id,
+            session.customer_display_name.as_deref(),
+        ) {
+            session.customer_display_name = Some(label);
+        }
+    }
+}
+
+pub(crate) fn humanize_customer_summary_name(customer: &mut CustomerSummary) {
+    if let Some(label) = crate::friendly_names::friendly_label_for(
+        Some(customer.identity_level.as_str()),
+        Some(customer.id),
+        Some(customer.display_name.as_str()),
+    ) {
+        customer.display_name = label;
+    }
+}
+
+/// Same humanization for read models that only carry a customer name and id,
+/// without the identity level. Only generated placeholder labels are replaced.
+fn humanize_response_customer_name(customer_id: Option<Uuid>, customer_name: &mut Option<String>) {
+    if let Some(label) =
+        crate::friendly_names::friendly_label_for_placeholder(customer_id, customer_name.as_deref())
+    {
+        *customer_name = Some(label);
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -20378,7 +20428,7 @@ mod product_tests {
             expires_at: Utc::now() + Duration::hours(2),
             created_at: Utc::now(),
         };
-        let response = enrichment_response("https://app.epode.ai", &row, "aqr1_test", None);
+        let response = enrichment_response("https://app.tryintents.com", &row, "aqr1_test", None);
         let json = serde_json::to_value(response)?;
         anyhow::ensure!(
             json["consent"]["bodySchema"]["decision"]
@@ -20392,7 +20442,7 @@ mod product_tests {
         anyhow::ensure!(json["submit"].is_null());
         row.state = "answer_ready".into();
         let answer_json = serde_json::to_value(enrichment_response(
-            "https://app.epode.ai",
+            "https://app.tryintents.com",
             &row,
             "aqr1_test",
             None,
@@ -20409,7 +20459,7 @@ mod product_tests {
         );
         row.state = "declined".into();
         let declined_json = serde_json::to_value(enrichment_response(
-            "https://app.epode.ai",
+            "https://app.tryintents.com",
             &row,
             "aqr1_test",
             None,
@@ -20464,14 +20514,14 @@ mod product_tests {
                     &pool,
                     &auth_a,
                     TEST_IDENTITY_HMAC_SECRET,
-                    "https://app.epode.ai",
+                    "https://app.tryintents.com",
                     request_input.clone(),
                 ),
                 create_enrichment_request(
                     &pool,
                     &auth_a,
                     TEST_IDENTITY_HMAC_SECRET,
-                    "https://app.epode.ai",
+                    "https://app.tryintents.com",
                     request_input.clone(),
                 )
             );
@@ -20530,7 +20580,7 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 request_input.clone(),
             )
             .await
@@ -20563,7 +20613,7 @@ mod product_tests {
             let consent = decide_enrichment_consent(
                 &pool,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 capability,
                 EnrichmentConsentDecisionInput {
                     decision: "approved".into(),
@@ -20739,7 +20789,7 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 EnrichmentRequestInput {
                     interaction_id: mcp_interaction_id,
                     handler_owner: None,
@@ -20854,7 +20904,7 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 EnrichmentRequestInput {
                     interaction_id: resolved_interaction_id,
                     handler_owner: None,
@@ -20996,7 +21046,7 @@ mod product_tests {
             let revoked = decide_enrichment_consent(
                 &pool,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 revoke_capability,
                 EnrichmentConsentDecisionInput {
                     decision: "declined".into(),
@@ -21047,7 +21097,7 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 EnrichmentRequestInput {
                     interaction_id: Uuid::new_v4(),
                     handler_owner: None,
@@ -21077,7 +21127,7 @@ mod product_tests {
             let session_choice_consent = decide_enrichment_consent(
                 &pool,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 session_choice_capability,
                 EnrichmentConsentDecisionInput {
                     decision: "approved".into(),
@@ -21118,7 +21168,7 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 EnrichmentRequestInput {
                     interaction_id: transient_known_interaction,
                     handler_owner: None,
@@ -21156,7 +21206,7 @@ mod product_tests {
             decide_enrichment_consent(
                 &pool,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 transient_capability,
                 EnrichmentConsentDecisionInput {
                     decision: "approved".into(),
@@ -21179,7 +21229,7 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 EnrichmentRequestInput {
                     interaction_id: Uuid::new_v4(),
                     handler_owner: None,
@@ -21238,7 +21288,7 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 EnrichmentRequestInput {
                     interaction_id: transient_anonymous_interaction,
                     handler_owner: None,
@@ -21331,7 +21381,7 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 preexisting_input.clone(),
             )
             .await
@@ -21349,7 +21399,7 @@ mod product_tests {
                     &pool,
                     &auth_a,
                     TEST_IDENTITY_HMAC_SECRET,
-                    "https://app.epode.ai",
+                    "https://app.tryintents.com",
                     mismatched_preexisting,
                 )
                 .await
@@ -21369,7 +21419,7 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 EnrichmentRequestInput {
                     interaction_id: Uuid::new_v4(),
                     handler_owner: None,
@@ -21399,7 +21449,7 @@ mod product_tests {
             decide_enrichment_consent(
                 &pool,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 merge_anonymous_capability,
                 EnrichmentConsentDecisionInput {
                     decision: "approved".into(),
@@ -21456,7 +21506,7 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 EnrichmentRequestInput {
                     interaction_id: Uuid::new_v4(),
                     handler_owner: None,
@@ -21486,7 +21536,7 @@ mod product_tests {
             decide_enrichment_consent(
                 &pool,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 merge_known_capability,
                 EnrichmentConsentDecisionInput {
                     decision: "declined".into(),
@@ -21499,7 +21549,7 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 EnrichmentRequestInput {
                     interaction_id: Uuid::new_v4(),
                     handler_owner: None,
@@ -21586,7 +21636,7 @@ mod product_tests {
             let stale_replay = decide_enrichment_consent(
                 &pool,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 merge_anonymous_capability,
                 EnrichmentConsentDecisionInput {
                     decision: "approved".into(),
@@ -21640,14 +21690,14 @@ mod product_tests {
                     &pool,
                     &auth_a,
                     TEST_IDENTITY_HMAC_SECRET,
-                    "https://app.epode.ai",
+                    "https://app.tryintents.com",
                     conflicting_request.clone(),
                 ),
                 create_enrichment_request(
                     &pool,
                     &auth_a,
                     TEST_IDENTITY_HMAC_SECRET,
-                    "https://app.epode.ai",
+                    "https://app.tryintents.com",
                     different_payload.clone(),
                 )
             );
@@ -21670,14 +21720,14 @@ mod product_tests {
                     &pool,
                     &auth_a,
                     TEST_IDENTITY_HMAC_SECRET,
-                    "https://app.epode.ai",
+                    "https://app.tryintents.com",
                     conflicting_request,
                 ),
                 create_enrichment_request(
                     &pool,
                     &auth_a,
                     TEST_IDENTITY_HMAC_SECRET,
-                    "https://app.epode.ai",
+                    "https://app.tryintents.com",
                     different_payload,
                 )
             );
@@ -21727,7 +21777,7 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 EnrichmentRequestInput {
                     interaction_id: ephemeral_interaction_id,
                     handler_owner: None,
@@ -21773,7 +21823,7 @@ mod product_tests {
             decide_enrichment_consent(
                 &pool,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 ephemeral_capability,
                 EnrichmentConsentDecisionInput {
                     decision: "approved".into(),
@@ -21883,7 +21933,7 @@ mod product_tests {
         let consent = decide_enrichment_consent(
             pool,
             TEST_IDENTITY_HMAC_SECRET,
-            "https://app.epode.ai",
+            "https://app.tryintents.com",
             &capability,
             EnrichmentConsentDecisionInput {
                 decision: "approved".into(),
@@ -22049,7 +22099,7 @@ mod product_tests {
                 &pool,
                 &auth,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 request_input("/search", None),
             )
             .await
@@ -22116,7 +22166,7 @@ mod product_tests {
                 &pool,
                 &auth,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 request_input("/search", None),
             )
             .await
@@ -22135,7 +22185,7 @@ mod product_tests {
                 &pool,
                 &auth,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 request_input("/search", Some(vec!["journey.delivery".into()])),
             )
             .await
@@ -22146,7 +22196,7 @@ mod product_tests {
                 &pool,
                 &auth,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 request_input("/support", None),
             )
             .await
@@ -22158,7 +22208,7 @@ mod product_tests {
                 &pool,
                 &auth,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 request_input(
                     "/checkout",
                     Some(vec!["journey.occasion".into(), "journey.delivery".into()]),
@@ -22231,7 +22281,7 @@ mod product_tests {
                 &pool,
                 &legacy_auth,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 subset_input.clone(),
             )
             .await
@@ -22246,7 +22296,7 @@ mod product_tests {
                 &pool,
                 &legacy_auth,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 subset_input,
             )
             .await
@@ -22261,7 +22311,7 @@ mod product_tests {
                 &pool,
                 &legacy_auth,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 conflicting_input,
             )
             .await
@@ -22296,7 +22346,7 @@ mod product_tests {
                 &pool,
                 &legacy_auth,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 request_input("/search", None),
             )
             .await
