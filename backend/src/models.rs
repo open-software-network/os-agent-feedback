@@ -711,6 +711,8 @@ pub(crate) struct EnrichmentRequestInput {
     pub interaction_id: Uuid,
     pub operation: String,
     #[serde(default)]
+    pub handler_owner: Option<String>,
+    #[serde(default)]
     pub field_keys: Option<Vec<String>>,
     #[serde(default = "default_enrichment_surface")]
     #[schema(default = "http_json")]
@@ -858,6 +860,7 @@ pub(crate) struct EnrichmentRequestResponse {
     pub purpose: String,
     pub surface: String,
     pub identity_level: String,
+    pub constraints: EnrichmentRequestConstraints,
     pub stage_instruction: String,
     #[schema(required = true, nullable)]
     pub question: Option<String>,
@@ -868,6 +871,43 @@ pub(crate) struct EnrichmentRequestResponse {
     pub consent: Option<EnrichmentConsentAction>,
     #[schema(required = true, nullable)]
     pub submit: Option<EnrichmentAnswerAction>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnrichmentRequestConstraints {
+    pub handler_owner: String,
+    pub purpose: String,
+    pub catalog: EnrichmentConstraintCatalog,
+    pub allowed_fields: Vec<EnrichmentConstraintField>,
+    pub retention: EnrichmentConstraintRetention,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnrichmentConstraintCatalog {
+    pub version: String,
+    pub hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnrichmentConstraintField {
+    pub key: String,
+    #[serde(rename = "type")]
+    pub signal_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question_type: Option<String>,
+    pub allowed_values: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnrichmentConstraintRetention {
+    pub remember_allowed: bool,
+    pub remember_selected: bool,
+    pub remembered_max_days: i32,
+    pub unremembered_expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]

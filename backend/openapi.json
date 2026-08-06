@@ -10865,6 +10865,74 @@
           }
         }
       },
+      "EnrichmentConstraintCatalog": {
+        "type": "object",
+        "required": [
+          "version",
+          "hash"
+        ],
+        "properties": {
+          "hash": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "EnrichmentConstraintField": {
+        "type": "object",
+        "required": [
+          "key",
+          "type",
+          "allowedValues"
+        ],
+        "properties": {
+          "allowedValues": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "key": {
+            "type": "string"
+          },
+          "questionType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "EnrichmentConstraintRetention": {
+        "type": "object",
+        "required": [
+          "rememberAllowed",
+          "rememberSelected",
+          "rememberedMaxDays",
+          "unrememberedExpiresAt"
+        ],
+        "properties": {
+          "rememberAllowed": {
+            "type": "boolean"
+          },
+          "rememberSelected": {
+            "type": "boolean"
+          },
+          "rememberedMaxDays": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "unrememberedExpiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "EnrichmentFieldDefinitionInput": {
         "type": "object",
         "required": [
@@ -10984,6 +11052,36 @@
           }
         }
       },
+      "EnrichmentRequestConstraints": {
+        "type": "object",
+        "required": [
+          "handlerOwner",
+          "purpose",
+          "catalog",
+          "allowedFields",
+          "retention"
+        ],
+        "properties": {
+          "allowedFields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EnrichmentConstraintField"
+            }
+          },
+          "catalog": {
+            "$ref": "#/components/schemas/EnrichmentConstraintCatalog"
+          },
+          "handlerOwner": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "retention": {
+            "$ref": "#/components/schemas/EnrichmentConstraintRetention"
+          }
+        }
+      },
       "EnrichmentRequestInput": {
         "type": "object",
         "required": [
@@ -11026,6 +11124,12 @@
             "items": {
               "type": "string"
             }
+          },
+          "handlerOwner": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "interactionId": {
             "type": "string",
@@ -11091,6 +11195,7 @@
           "purpose",
           "surface",
           "identityLevel",
+          "constraints",
           "stageInstruction",
           "question",
           "answerInstruction",
@@ -11114,6 +11219,9 @@
                 "$ref": "#/components/schemas/EnrichmentConsentAction"
               }
             ]
+          },
+          "constraints": {
+            "$ref": "#/components/schemas/EnrichmentRequestConstraints"
           },
           "expiresAt": {
             "type": "string",
