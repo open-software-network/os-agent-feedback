@@ -8,6 +8,7 @@ import {
   hasDecisionInput,
   isValidJourneyId,
   parseNeedTokens,
+  productLinkClickTelemetryDetails,
 } from "../dist/experience-graph.js";
 
 const origin = "http://localhost:4311";
@@ -29,6 +30,28 @@ test("journey ids and need tokens are tightly validated", () => {
   assert.equal(parsed.state.values.budget?.strength, "hard");
   assert.equal(parsed.state.values.purpose?.value, "coding");
   assert.equal(parsed.state.values.color?.strength, "preference");
+});
+
+test("a product link click separates first-party identity from request traits", () => {
+  const details = productLinkClickTelemetryDetails({
+    operation: "/attributed-product-visit/petsmart",
+    sessionRef: journeyId,
+    anonymousRef: "s-first-party-browser",
+    requestObservation: {
+      clientIp: "203.0.113.10",
+      method: "GET",
+      userAgent: "Mozilla/5.0 Browser",
+    },
+  });
+  assert.equal(details.surface, "http_html");
+  assert.equal(details.customerLinkSource, "product_link_click");
+  assert.equal(details.sessionRef, journeyId);
+  assert.equal(details.anonymousRef, "s-first-party-browser");
+  assert.deepEqual(details.requestObservation, {
+    clientIp: "203.0.113.10",
+    method: "GET",
+    userAgent: "Mozilla/5.0 Browser",
+  });
 });
 
 test("negotiation starts with generic dimensions and withholds results", () => {

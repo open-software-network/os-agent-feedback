@@ -1320,6 +1320,45 @@ export function experienceTelemetryDetails(input: {
   };
 }
 
+/**
+ * Report a human navigation through a product-generated session link. The
+ * first-party browser reference is identity evidence; request IP and
+ * user-agent values remain observations and are never identity.
+ */
+export function productLinkClickTelemetryDetails(input: {
+  operation: string;
+  sessionRef: string;
+  anonymousRef: string;
+  requestObservation?: {
+    clientIp?: string;
+    method?: string;
+    userAgent?: string;
+    acceptLanguage?: string;
+    referrerOrigin?: string;
+    secChUa?: string;
+    secChUaPlatform?: string;
+    secChUaMobile?: string;
+  };
+  statusCode?: number;
+  durationMs?: number;
+  runtimeHint?: string;
+}) {
+  return {
+    surface: "http_html" as const,
+    operation: input.operation.slice(0, 160),
+    statusCode: input.statusCode ?? 200,
+    durationMs: input.durationMs,
+    anonymousRef: input.anonymousRef.slice(0, 160),
+    customerLinkSource: "product_link_click" as const,
+    requestObservation: input.requestObservation,
+    classification: "unclassified" as const,
+    runtimeHint: input.runtimeHint,
+    runtimeHintSource: input.runtimeHint ? ("http" as const) : undefined,
+    sessionRef: input.sessionRef.slice(0, 160),
+    sessionSource: "customer" as const,
+  };
+}
+
 export function createLightingExperienceCatalog(): ExperienceGraphDefinition {
   return {
     protocol: "epode-agent-experience/1.0",

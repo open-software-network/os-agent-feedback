@@ -201,7 +201,7 @@ export type ObservedCustomerFact = {
   kind: "constraint" | "preference" | "intent" | "context" | "unknown" | string;
   strength: string | null;
   status: "observed" | "unknown" | string;
-  journeyCount: number;
+  sessionCount: number;
   observationCount: number;
   firstObservedAt: string;
   lastObservedAt: string;
@@ -209,8 +209,8 @@ export type ObservedCustomerFact = {
 };
 
 export type ObservedCustomerProfile = {
-  journeyCount: number;
-  nodeCount: number;
+  sessionCount: number;
+  activityCount: number;
   truncated: boolean;
   lastObservedAt: string | null;
   facts: ObservedCustomerFact[];

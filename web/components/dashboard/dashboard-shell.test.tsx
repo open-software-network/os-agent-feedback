@@ -19,7 +19,7 @@ describe("DashboardShell", () => {
       </DashboardShell>,
     );
 
-    const labels = ["Home", "Customers", "Journeys", "Configurations"];
+    const labels = ["Home", "Customers", "Sessions", "Configurations"];
     for (const label of labels) expect(screen.getByRole("button", { name: label })).toBeVisible();
     for (const hidden of [
       "Responses",
@@ -40,8 +40,8 @@ describe("DashboardShell", () => {
     const coreLabels = screen
       .getAllByRole("button")
       .map((item) => item.textContent)
-      .filter((label) => ["Home", "Journeys", "Customers"].includes(label ?? ""));
-    expect(coreLabels).toEqual(["Home", "Journeys", "Customers"]);
+      .filter((label) => ["Home", "Sessions", "Customers"].includes(label ?? ""));
+    expect(coreLabels).toEqual(["Home", "Sessions", "Customers"]);
   });
 
   it("marks Configurations current while the Memory section is open", () => {
@@ -139,7 +139,7 @@ describe("DashboardShell", () => {
     for (const hidden of ["Connectors", "Setup", "Data controls", "Responses", "Context"]) {
       expect(screen.queryByRole("button", { name: hidden })).not.toBeInTheDocument();
     }
-    for (const label of ["Home", "Journeys", "Customers", "Configurations"]) {
+    for (const label of ["Home", "Sessions", "Customers", "Configurations"]) {
       expect(screen.getByRole("button", { name: label })).toBeVisible();
     }
     fireEvent.click(screen.getByRole("button", { name: "Configurations" }));

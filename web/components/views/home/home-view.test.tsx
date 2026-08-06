@@ -29,7 +29,7 @@ describe("HomeView", () => {
     expect(screen.queryByRole("heading", { name: "Recent customers" })).not.toBeInTheDocument();
     expect(screen.queryByText(/signals|contexts|evidences/i)).not.toBeInTheDocument();
     expect(screen.getByText("Observed interactions")).toBeVisible();
-    expect(screen.getByText("Proven journeys")).toBeVisible();
+    expect(screen.getByText("Sessions")).toBeVisible();
     expect(screen.getByRole("region", { name: "Setup" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "Connect Search API" })).toBeVisible();
   });
@@ -37,7 +37,7 @@ describe("HomeView", () => {
   it("routes to the core object screens", () => {
     renderHome(dashboardFixture());
 
-    fireEvent.click(screen.getByRole("button", { name: /view journeys/i }));
+    fireEvent.click(screen.getByRole("button", { name: /view sessions/i }));
     expect(new URL(window.location.href).searchParams.get("view")).toBe("sessions");
 
     fireEvent.click(screen.getByRole("button", { name: /view customers/i }));

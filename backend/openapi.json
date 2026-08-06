@@ -8800,6 +8800,12 @@
           }
         }
       },
+      "CustomerLinkSource": {
+        "type": "string",
+        "enum": [
+          "product_link_click"
+        ]
+      },
       "CustomerRequestObservation": {
         "type": "object",
         "required": [
@@ -12044,6 +12050,16 @@
               "null"
             ]
           },
+          "customerLinkSource": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CustomerLinkSource"
+              }
+            ]
+          },
           "customerRef": {
             "type": [
               "string",
@@ -12070,6 +12086,16 @@
           },
           "operation": {
             "type": "string"
+          },
+          "requestObservation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CustomerRequestObservationInput"
+              }
+            ]
           },
           "runtimeHint": {
             "type": [
@@ -12223,7 +12249,7 @@
           "kind",
           "strength",
           "status",
-          "journeyCount",
+          "sessionCount",
           "observationCount",
           "firstObservedAt",
           "lastObservedAt",
@@ -12243,10 +12269,6 @@
             "type": "string",
             "format": "date-time"
           },
-          "journeyCount": {
-            "type": "integer",
-            "format": "int64"
-          },
           "key": {
             "type": "string"
           },
@@ -12261,6 +12283,10 @@
             "format": "date-time"
           },
           "observationCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sessionCount": {
             "type": "integer",
             "format": "int64"
           },
@@ -12306,22 +12332,22 @@
       "ObservedCustomerProfile": {
         "type": "object",
         "required": [
-          "journeyCount",
-          "nodeCount",
+          "sessionCount",
+          "activityCount",
           "truncated",
           "lastObservedAt",
           "facts"
         ],
         "properties": {
+          "activityCount": {
+            "type": "integer",
+            "format": "int64"
+          },
           "facts": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ObservedCustomerFact"
             }
-          },
-          "journeyCount": {
-            "type": "integer",
-            "format": "int64"
           },
           "lastObservedAt": {
             "type": [
@@ -12330,7 +12356,7 @@
             ],
             "format": "date-time"
           },
-          "nodeCount": {
+          "sessionCount": {
             "type": "integer",
             "format": "int64"
           },

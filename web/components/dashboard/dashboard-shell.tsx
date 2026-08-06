@@ -59,7 +59,7 @@ const navigation: Array<{
   },
   {
     view: "sessions",
-    label: "Journeys",
+    label: "Sessions",
     icon: IconFootsteps,
   },
   {
@@ -314,7 +314,7 @@ export function DashboardShell({
     home: "Home",
     customers: "Customers",
     feedback: "Report",
-    sessions: "Journeys",
+    sessions: "Sessions",
     configuration: "Configurations",
     policy: "Configurations",
     questions: "Memory",

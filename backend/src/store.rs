@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::{
     code_match::CodeMatchVerificationOutcome,
-    customer_profile::{ObservedGraphNode, PROFILE_NODE_LIMIT, derive_observed_customer_profile},
+    customer_profile::{ObservedActivity, PROFILE_NODE_LIMIT, derive_observed_customer_profile},
     error::ApiError,
     github::validate_repo_full_name,
     grouping::{GroupInput, ReportGrouper},
@@ -31,19 +31,19 @@ use crate::{
         ConsentGrant, ConsentStateInput, ConsentStateResponse, CreateProductInput,
         CreateTeamInvitationInput, CustomerContextInput, CustomerContextItem,
         CustomerContextResponse, CustomerDetailCounts, CustomerFacets, CustomerIdentifier,
-        CustomerRequestObservation, CustomerRequestObservationInput, CustomerRollup,
-        CustomerSignal, CustomerSummary, DashboardContext, DashboardContextReturnedItem,
-        DashboardCustomerContextReturn, DashboardCustomerDetail, DashboardCustomerFilters,
-        DashboardCustomersPage, DashboardData, DashboardFeedbackFacets, DashboardFeedbackFilters,
-        DashboardFeedbackPage, DashboardListState, DashboardPersonalizationDecision,
-        DashboardPersonalizationOutcome, DashboardResponseAnswer, DashboardResponseFilters,
-        DashboardResponseRollup, DashboardResponseSummary, DashboardResponsesPage,
-        DashboardSessionDetail, DashboardSessionFilters, DashboardSessionResponse,
-        DashboardSessionRollup, DashboardSessionSummary, DashboardSessionsPage,
-        DashboardSignalFilters, DashboardSignalsPage, DeleteProductInput, EnrichmentAnswerAction,
-        EnrichmentAnswerBodySchema, EnrichmentAnswerInput, EnrichmentAnswerItemsSchema,
-        EnrichmentAnswerResponse, EnrichmentCatalogEntry, EnrichmentConsentAction,
-        EnrichmentConsentBodySchema, EnrichmentConsentDecisionInput,
+        CustomerLinkSource, CustomerRequestObservation, CustomerRequestObservationInput,
+        CustomerRollup, CustomerSignal, CustomerSummary, DashboardContext,
+        DashboardContextReturnedItem, DashboardCustomerContextReturn, DashboardCustomerDetail,
+        DashboardCustomerFilters, DashboardCustomersPage, DashboardData, DashboardFeedbackFacets,
+        DashboardFeedbackFilters, DashboardFeedbackPage, DashboardListState,
+        DashboardPersonalizationDecision, DashboardPersonalizationOutcome, DashboardResponseAnswer,
+        DashboardResponseFilters, DashboardResponseRollup, DashboardResponseSummary,
+        DashboardResponsesPage, DashboardSessionDetail, DashboardSessionFilters,
+        DashboardSessionResponse, DashboardSessionRollup, DashboardSessionSummary,
+        DashboardSessionsPage, DashboardSignalFilters, DashboardSignalsPage, DeleteProductInput,
+        EnrichmentAnswerAction, EnrichmentAnswerBodySchema, EnrichmentAnswerInput,
+        EnrichmentAnswerItemsSchema, EnrichmentAnswerResponse, EnrichmentCatalogEntry,
+        EnrichmentConsentAction, EnrichmentConsentBodySchema, EnrichmentConsentDecisionInput,
         EnrichmentConsentDecisionResponse, EnrichmentFieldDefinitionInput,
         EnrichmentFieldDefinitionResponse, EnrichmentFieldListResponse, EnrichmentRequestInput,
         EnrichmentRequestResponse, FeedbackFindingInput, FeedbackInteractionItem,
@@ -4832,7 +4832,7 @@ pub(crate) async fn dashboard_customer_by_id(
     .fetch_all(pool)
     .await?;
     let observed_profile = derive_observed_customer_profile(
-        sqlx::query_as::<_, ObservedGraphNode>(
+        sqlx::query_as::<_, ObservedActivity>(
             r"SELECT interaction.session_id, session.ref_hint AS session_ref,
               interaction.operation, interaction.occurred_at AS observed_at
             FROM interactions_v2 interaction
@@ -7054,6 +7054,7 @@ pub(crate) async fn ingest_telemetry_batch(
     let mut accepted_interaction_ids = Vec::with_capacity(event_count);
     let mut changed_interaction_ids = Vec::with_capacity(event_count);
     let mut session_evidence_by_interaction = BTreeMap::new();
+    let mut product_link_claims = Vec::new();
     let mut events = input.events;
     events.sort_by_key(|event| event.interaction_id);
     let mut tx = pool.begin().await?;
@@ -7070,7 +7071,16 @@ pub(crate) async fn ingest_telemetry_batch(
                     .entry(result.interaction_id)
                     .or_insert(None);
                 if evidence.is_none() {
-                    *evidence = result.session_evidence;
+                    evidence.clone_from(&result.session_evidence);
+                }
+                if result.customer_link_source.as_deref() == Some("product_link_click") {
+                    let (session_ref, source) = result.session_evidence.ok_or_else(|| {
+                        ApiError::internal("accepted product link click has no session evidence")
+                    })?;
+                    let customer_id = result.customer_id.ok_or_else(|| {
+                        ApiError::internal("accepted product link click has no customer")
+                    })?;
+                    product_link_claims.push((source, sha256(&session_ref), customer_id));
                 }
                 accepted_confirmed_interaction |= result.confirmed;
                 accepted += 1;
@@ -7088,6 +7098,11 @@ pub(crate) async fn ingest_telemetry_batch(
         }
     }
     correlate_telemetry_sessions(&mut tx, auth, session_evidence_by_interaction).await?;
+    product_link_claims.sort();
+    product_link_claims.dedup();
+    for (source, session_ref_hash, customer_id) in product_link_claims {
+        claim_product_link_session(&mut tx, auth, &source, &session_ref_hash, customer_id).await?;
+    }
     reconcile_signal_links_for_interactions(&mut tx, auth, &accepted_interaction_ids).await?;
     regroup_changed_interaction_reports(&mut tx, &changed_interaction_ids).await?;
     if accepted > 0 {
@@ -7147,6 +7162,8 @@ struct AcceptedTelemetryEvent {
     confirmed: bool,
     grouping_facts_changed: bool,
     session_evidence: Option<(String, String)>,
+    customer_link_source: Option<String>,
+    customer_id: Option<Uuid>,
 }
 
 async fn ingest_telemetry_event(
@@ -7165,7 +7182,24 @@ async fn ingest_telemetry_event(
         ));
     }
     let identity_refs = validate_identity_refs(&event)?;
+    let request_observation =
+        validate_request_observation(&event.surface, event.request_observation.as_ref())?;
     let session_evidence = session_evidence(event.session_ref, event.session_source)?;
+    let customer_link_source = match event.customer_link_source {
+        None => None,
+        Some(CustomerLinkSource::ProductLinkClick)
+            if event.surface == "http_html"
+                && session_evidence.is_some()
+                && identity_refs.anonymous_ref.is_some() =>
+        {
+            Some("product_link_click".to_owned())
+        }
+        Some(CustomerLinkSource::ProductLinkClick) => {
+            return Err(ApiError::bad_request(
+                "product_link_click requires an HTTP HTML event with sessionRef and anonymousRef",
+            ));
+        }
+    };
     let customer_id =
         resolve_telemetry_customer(tx, auth, identity_hmac_secret, &identity_refs, occurred_at)
             .await?;
@@ -7253,12 +7287,69 @@ async fn ingest_telemetry_event(
     .await?;
     let row =
         row.ok_or_else(|| ApiError::conflict("interactionId belongs to another workspace"))?;
+    if let Some(observation) = request_observation.as_ref() {
+        insert_customer_request_observation(
+            tx,
+            auth,
+            row.id,
+            customer_id,
+            observation,
+            occurred_at,
+        )
+        .await?;
+    }
     Ok(AcceptedTelemetryEvent {
         interaction_id: row.id,
         confirmed,
         grouping_facts_changed: row.grouping_facts_changed,
         session_evidence,
+        customer_link_source,
+        customer_id,
     })
+}
+
+async fn insert_customer_request_observation(
+    tx: &mut Transaction<'_, Postgres>,
+    auth: &ProductAuth,
+    interaction_id: Uuid,
+    customer_id: Option<Uuid>,
+    observation: &ValidatedRequestObservation,
+    observed_at: DateTime<Utc>,
+) -> Result<(), ApiError> {
+    let available = sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('public.customer_request_observations') IS NOT NULL",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    if !available {
+        return Ok(());
+    }
+    sqlx::query(
+        r"INSERT INTO customer_request_observations
+        (id, workspace_id, product_id, environment_id, customer_id, interaction_id,
+         client_ip, request_method, user_agent, accept_language, referrer_origin,
+         sec_ch_ua, sec_ch_ua_platform, sec_ch_ua_mobile, observed_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        ON CONFLICT (interaction_id) DO NOTHING",
+    )
+    .bind(Uuid::new_v4())
+    .bind(auth.workspace.id)
+    .bind(auth.environment.product_id)
+    .bind(auth.environment.id)
+    .bind(customer_id)
+    .bind(interaction_id)
+    .bind(&observation.client_ip)
+    .bind(&observation.method)
+    .bind(&observation.user_agent)
+    .bind(&observation.accept_language)
+    .bind(&observation.referrer_origin)
+    .bind(&observation.sec_ch_ua)
+    .bind(&observation.sec_ch_ua_platform)
+    .bind(&observation.sec_ch_ua_mobile)
+    .bind(observed_at)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -7394,6 +7485,110 @@ async fn correlate_telemetry_sessions(
         .execute(&mut **tx)
         .await?;
     }
+    Ok(())
+}
+
+/// A browser identifier may claim earlier unowned activity only when the
+/// authenticated product explicitly reports a human navigation through a
+/// product-generated session link. Network and user-agent observations never
+/// enter this path and cannot resolve a customer.
+async fn claim_product_link_session(
+    tx: &mut Transaction<'_, Postgres>,
+    auth: &ProductAuth,
+    source: &str,
+    session_ref_hash: &[u8],
+    customer_id: Uuid,
+) -> Result<(), ApiError> {
+    let unowned_scope = customer_scope_hash(None, None);
+    let target_scope = customer_scope_hash(None, Some(customer_id));
+    let source_session = sqlx::query_as::<_, (Uuid, DateTime<Utc>, DateTime<Utc>)>(
+        r"SELECT id, started_at, last_seen_at FROM sessions_v2
+        WHERE workspace_id = $1 AND environment_id = $2 AND source = $3
+          AND raw_ref_hash = $4 AND customer_scope_hash = $5
+        FOR UPDATE",
+    )
+    .bind(auth.workspace.id)
+    .bind(auth.environment.id)
+    .bind(source)
+    .bind(session_ref_hash)
+    .bind(&unowned_scope)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((source_session_id, started_at, last_seen_at)) = source_session else {
+        return Ok(());
+    };
+
+    let target_session_id = resolve_v2_session(
+        tx,
+        auth.workspace.id,
+        auth.environment.id,
+        &target_scope,
+        session_ref_hash,
+        source,
+        started_at,
+    )
+    .await?;
+    let observations_available = sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('public.customer_request_observations') IS NOT NULL",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    if observations_available {
+        sqlx::query(
+            r"UPDATE customer_request_observations observation SET customer_id = $1
+            WHERE observation.workspace_id = $2 AND observation.product_id = $3
+              AND observation.interaction_id IN (
+                SELECT id FROM interactions_v2
+                WHERE workspace_id = $2 AND session_id = $4
+              )",
+        )
+        .bind(customer_id)
+        .bind(auth.workspace.id)
+        .bind(auth.environment.product_id)
+        .bind(source_session_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    sqlx::query(
+        r"UPDATE interactions_v2 SET session_id = $1, customer_id = $2, updated_at = NOW()
+        WHERE workspace_id = $3 AND environment_id = $4 AND session_id = $5
+          AND customer_id IS NULL",
+    )
+    .bind(target_session_id)
+    .bind(customer_id)
+    .bind(auth.workspace.id)
+    .bind(auth.environment.id)
+    .bind(source_session_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r"UPDATE customer_signals SET session_id = $1,
+          customer_id = COALESCE(customer_id, $2)
+        WHERE workspace_id = $3 AND product_id = $4 AND session_id = $5",
+    )
+    .bind(target_session_id)
+    .bind(customer_id)
+    .bind(auth.workspace.id)
+    .bind(auth.environment.product_id)
+    .bind(source_session_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r"UPDATE sessions_v2 SET started_at = LEAST(started_at, $2),
+          last_seen_at = GREATEST(last_seen_at, $3)
+        WHERE id = $1 AND workspace_id = $4",
+    )
+    .bind(target_session_id)
+    .bind(started_at)
+    .bind(last_seen_at)
+    .bind(auth.workspace.id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("DELETE FROM sessions_v2 WHERE id = $1 AND workspace_id = $2")
+        .bind(source_session_id)
+        .bind(auth.workspace.id)
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 
@@ -12268,6 +12463,8 @@ mod product_tests {
             account_ref: None,
             user_ref: None,
             anonymous_ref: None,
+            customer_link_source: None,
+            request_observation: None,
             classification: Some("confirmed".into()),
             confirmation_method: Some("mcp".into()),
             runtime_hint: None,
@@ -12293,6 +12490,8 @@ mod product_tests {
             account_ref: None,
             user_ref: None,
             anonymous_ref: None,
+            customer_link_source: None,
+            request_observation: None,
             classification: None,
             confirmation_method: None,
             runtime_hint: None,
@@ -12406,6 +12605,8 @@ mod product_tests {
             account_ref: None,
             user_ref: None,
             anonymous_ref: None,
+            customer_link_source: None,
+            request_observation: None,
             classification: Some("confirmed".into()),
             confirmation_method: Some("mcp".into()),
             runtime_hint: None,
@@ -16965,6 +17166,8 @@ mod product_tests {
                 account_ref: None,
                 user_ref: None,
                 anonymous_ref: None,
+                customer_link_source: None,
+                request_observation: None,
                 classification: classification.map(str::to_owned),
                 confirmation_method: method.map(str::to_owned),
                 runtime_hint: None,
@@ -19209,6 +19412,8 @@ mod product_tests {
                         account_ref: None,
                         user_ref: None,
                         anonymous_ref: None,
+                        customer_link_source: None,
+                        request_observation: None,
                         classification: Some("unclassified".into()),
                         confirmation_method: None,
                         runtime_hint: None,
@@ -21770,6 +21975,129 @@ mod product_tests {
                 .execute(&pool)
                 .await?;
         }
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn product_link_click_claims_unowned_session_without_using_request_traits_as_identity()
+    -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Product link attribution").await?;
+        let (_product, auth) =
+            telemetry_test_product(&pool, &workspace, "Product link attribution").await?;
+
+        let result = async {
+            let session_ref = "session_link_claim_1";
+            let agent_interaction_id = Uuid::new_v4();
+            let mut agent =
+                http_telemetry_event(agent_interaction_id, Utc::now() - Duration::seconds(2));
+            agent.session_ref = Some(session_ref.into());
+            agent.session_source = Some("customer".into());
+            agent.request_observation = Some(CustomerRequestObservationInput {
+                client_ip: Some("203.0.113.10".into()),
+                method: Some("GET".into()),
+                user_agent: Some("claude-user/1.0".into()),
+                accept_language: None,
+                referrer_origin: None,
+                sec_ch_ua: None,
+                sec_ch_ua_platform: None,
+                sec_ch_ua_mobile: None,
+            });
+            ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![agent],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, Option<Uuid>>(
+                    "SELECT customer_id FROM interactions_v2 WHERE id = $1",
+                )
+                .bind(agent_interaction_id)
+                .fetch_one(&pool)
+                .await?
+                .is_none()
+            );
+
+            let click_interaction_id = Uuid::new_v4();
+            let mut click = http_telemetry_event(click_interaction_id, Utc::now());
+            click.surface = "http_html".into();
+            click.operation = "/attributed-product-visit/petsmart".into();
+            click.session_ref = Some(session_ref.into());
+            click.session_source = Some("customer".into());
+            click.anonymous_ref = Some("s-first-party-browser".into());
+            click.customer_link_source = Some(CustomerLinkSource::ProductLinkClick);
+            click.request_observation = Some(CustomerRequestObservationInput {
+                client_ip: Some("198.51.100.20".into()),
+                method: Some("GET".into()),
+                user_agent: Some("Mozilla/5.0 Browser".into()),
+                accept_language: Some("en-US".into()),
+                referrer_origin: Some("https://customer.example".into()),
+                sec_ch_ua: None,
+                sec_ch_ua_platform: Some("\"macOS\"".into()),
+                sec_ch_ua_mobile: Some("?0".into()),
+            });
+            ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![click],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+
+            let linked = sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT customer_id, session_id FROM interactions_v2 WHERE id = $1",
+            )
+            .bind(agent_interaction_id)
+            .fetch_one(&pool)
+            .await?;
+            let clicked = sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT customer_id, session_id FROM interactions_v2 WHERE id = $1",
+            )
+            .bind(click_interaction_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(linked == clicked);
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM customer_identifiers
+                    WHERE workspace_id = $1 AND product_id = $2 AND customer_id = $3",
+                )
+                .bind(workspace.id)
+                .bind(auth.environment.product_id)
+                .bind(linked.0)
+                .fetch_one(&pool)
+                .await?
+                    == 1
+            );
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM customer_request_observations
+                    WHERE customer_id = $1 AND client_ip IN ('203.0.113.10', '198.51.100.20')",
+                )
+                .bind(linked.0)
+                .fetch_one(&pool)
+                .await?
+                    == 2
+            );
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
+            .execute(&pool)
+            .await?;
         result
     }
 

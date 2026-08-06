@@ -14,7 +14,7 @@ const MAX_FACT_EVIDENCE: usize = 3;
 pub(crate) const PROFILE_NODE_LIMIT: usize = 5_000;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
-pub(crate) struct ObservedGraphNode {
+pub(crate) struct ObservedActivity {
     pub session_id: Uuid,
     pub session_ref: String,
     pub operation: String,
@@ -34,65 +34,65 @@ struct FactSeed {
 
 struct FactAccumulator {
     seed: FactSeed,
-    journeys: BTreeSet<Uuid>,
+    sessions: BTreeSet<Uuid>,
     observation_count: i64,
     first_observed_at: DateTime<Utc>,
     last_observed_at: DateTime<Utc>,
     evidence: Vec<ObservedCustomerFactEvidence>,
 }
 
-/// Derive a bounded, evidence-backed customer profile from retained graph nodes.
+/// Derive a bounded, evidence-backed customer profile from retained session activity.
 ///
 /// Operations are deliberately normalized, non-sensitive graph paths. This
 /// projection never promotes a task observation into durable memory: every fact
-/// carries the journeys, node count, and recency that justify displaying it.
+/// carries the sessions, activity count, and recency that justify displaying it.
 pub(crate) fn derive_observed_customer_profile(
-    mut nodes: Vec<ObservedGraphNode>,
+    mut activities: Vec<ObservedActivity>,
 ) -> ObservedCustomerProfile {
-    nodes.sort_by(|left, right| {
+    activities.sort_by(|left, right| {
         right
             .observed_at
             .cmp(&left.observed_at)
             .then_with(|| right.session_id.cmp(&left.session_id))
             .then_with(|| right.operation.cmp(&left.operation))
     });
-    let truncated = nodes.len() > PROFILE_NODE_LIMIT;
-    nodes.truncate(PROFILE_NODE_LIMIT);
-    let mut journey_ids = BTreeSet::new();
+    let truncated = activities.len() > PROFILE_NODE_LIMIT;
+    activities.truncate(PROFILE_NODE_LIMIT);
+    let mut session_ids = BTreeSet::new();
     let mut facts = BTreeMap::<FactSeed, FactAccumulator>::new();
 
-    for node in &nodes {
-        journey_ids.insert(node.session_id);
-        let mut facts_in_node = BTreeSet::new();
-        for seed in parse_operation(&node.operation) {
-            if !facts_in_node.insert(seed.clone()) {
+    for activity in &activities {
+        session_ids.insert(activity.session_id);
+        let mut facts_in_activity = BTreeSet::new();
+        for seed in parse_operation(&activity.operation) {
+            if !facts_in_activity.insert(seed.clone()) {
                 continue;
             }
             let entry = facts
                 .entry(seed.clone())
                 .or_insert_with(|| FactAccumulator {
                     seed,
-                    journeys: BTreeSet::new(),
+                    sessions: BTreeSet::new(),
                     observation_count: 0,
-                    first_observed_at: node.observed_at,
-                    last_observed_at: node.observed_at,
+                    first_observed_at: activity.observed_at,
+                    last_observed_at: activity.observed_at,
                     evidence: Vec::new(),
                 });
-            entry.journeys.insert(node.session_id);
+            entry.sessions.insert(activity.session_id);
             entry.observation_count += 1;
-            entry.first_observed_at = entry.first_observed_at.min(node.observed_at);
-            entry.last_observed_at = entry.last_observed_at.max(node.observed_at);
+            entry.first_observed_at = entry.first_observed_at.min(activity.observed_at);
+            entry.last_observed_at = entry.last_observed_at.max(activity.observed_at);
             if entry.evidence.len() < MAX_FACT_EVIDENCE
                 && !entry
                     .evidence
                     .iter()
-                    .any(|evidence| evidence.session_id == node.session_id)
+                    .any(|evidence| evidence.session_id == activity.session_id)
             {
                 entry.evidence.push(ObservedCustomerFactEvidence {
-                    session_id: node.session_id,
-                    session_ref: node.session_ref.clone(),
-                    operation: node.operation.clone(),
-                    observed_at: node.observed_at,
+                    session_id: activity.session_id,
+                    session_ref: activity.session_ref.clone(),
+                    operation: activity.operation.clone(),
+                    observed_at: activity.observed_at,
                 });
             }
         }
@@ -108,7 +108,7 @@ pub(crate) fn derive_observed_customer_profile(
             kind: fact.seed.kind,
             strength: fact.seed.strength,
             status: fact.seed.status,
-            journey_count: count_to_i64(fact.journeys.len()),
+            session_count: count_to_i64(fact.sessions.len()),
             observation_count: fact.observation_count,
             first_observed_at: fact.first_observed_at,
             last_observed_at: fact.last_observed_at,
@@ -119,16 +119,16 @@ pub(crate) fn derive_observed_customer_profile(
         right
             .last_observed_at
             .cmp(&left.last_observed_at)
-            .then_with(|| right.journey_count.cmp(&left.journey_count))
+            .then_with(|| right.session_count.cmp(&left.session_count))
             .then_with(|| left.key.cmp(&right.key))
             .then_with(|| left.value.cmp(&right.value))
     });
 
     ObservedCustomerProfile {
-        journey_count: count_to_i64(journey_ids.len()),
-        node_count: count_to_i64(nodes.len()),
+        session_count: count_to_i64(session_ids.len()),
+        activity_count: count_to_i64(activities.len()),
         truncated,
-        last_observed_at: nodes.first().map(|node| node.observed_at),
+        last_observed_at: activities.first().map(|activity| activity.observed_at),
         facts,
     }
 }
@@ -581,8 +581,8 @@ mod tests {
 
     use super::*;
 
-    fn node(session: Uuid, operation: &str, minute: u32) -> ObservedGraphNode {
-        ObservedGraphNode {
+    fn activity(session: Uuid, operation: &str, minute: u32) -> ObservedActivity {
+        ObservedActivity {
             session_id: session,
             session_ref: format!("session-{}", &session.simple().to_string()[..8]),
             operation: operation.to_owned(),
@@ -595,21 +595,21 @@ mod tests {
         let first = Uuid::new_v4();
         let second = Uuid::new_v4();
         let profile = derive_observed_customer_profile(vec![
-            node(first, "/agent-negotiate/apartments", 0),
-            node(
+            activity(first, "/agent-negotiate/apartments", 0),
+            activity(
                 first,
                 "/agent-decide/apartments/beds-2/has-cat/budget-hard-4000/prefer-elevator",
                 1,
             ),
-            node(
+            activity(
                 second,
                 "/agent-decide/apartments/beds-2/has-cat/budget-hard-4000/area-prefer-brooklyn",
                 2,
             ),
         ]);
 
-        assert_eq!(profile.journey_count, 2);
-        assert_eq!(profile.node_count, 3);
+        assert_eq!(profile.session_count, 2);
+        assert_eq!(profile.activity_count, 3);
         let budget = profile
             .facts
             .iter()
@@ -617,7 +617,7 @@ mod tests {
             .ok_or("missing budget fact")?;
         assert_eq!(budget.value, "$4,000/month");
         assert_eq!(budget.strength.as_deref(), Some("hard"));
-        assert_eq!(budget.journey_count, 2);
+        assert_eq!(budget.session_count, 2);
         assert_eq!(budget.observation_count, 2);
         assert_eq!(budget.evidence.len(), 2);
         assert!(profile.facts.iter().any(|fact| {
@@ -632,12 +632,12 @@ mod tests {
     fn keeps_uncertainty_and_household_context_explicit() {
         let session = Uuid::new_v4();
         let profile = derive_observed_customer_profile(vec![
-            node(
+            activity(
                 session,
                 "/agent-pet-household/target-pet-both/home-2catdog/beh-motivated/food-dry-wet/goal-portion/target-100",
                 0,
             ),
-            node(
+            activity(
                 session,
                 "/agent-decide/flights/destination-tokyo/purpose-unknown/cabin-prefer-premium",
                 1,
@@ -661,11 +661,11 @@ mod tests {
     fn ignores_navigation_and_item_routes_that_do_not_encode_need_state() {
         let session = Uuid::new_v4();
         let profile = derive_observed_customer_profile(vec![
-            node(session, "/agent-negotiate/petsmart/consider-pet", 0),
-            node(session, "/agent-item/petsmart/45442", 1),
+            activity(session, "/agent-negotiate/petsmart/consider-pet", 0),
+            activity(session, "/agent-item/petsmart/45442", 1),
         ]);
 
-        assert_eq!(profile.node_count, 2);
+        assert_eq!(profile.activity_count, 2);
         assert!(profile.facts.is_empty());
     }
 
@@ -680,7 +680,7 @@ mod tests {
         );
         assert_eq!(operation.len(), 160);
 
-        let profile = derive_observed_customer_profile(vec![node(session, &operation, 0)]);
+        let profile = derive_observed_customer_profile(vec![activity(session, &operation, 0)]);
 
         assert!(
             profile

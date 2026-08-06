@@ -180,6 +180,13 @@ behavioral similarity. A request may co-supply `anonymousRef` and a verified ref
 deterministic progressive link. These fields must never be copied into capabilities, response envelopes,
 or report bodies.
 
+A product may link previously unowned session activity to a first-party browser only after its own server
+observes a human navigation through a product-generated link carrying that session reference. Report that
+event as an `http_html` interaction with `customerLinkSource: "product_link_click"`, the stable
+`anonymousRef` from the product's first-party cookie, and the original `sessionRef`. Optional
+`requestObservation` values such as IP address, user-agent, language, platform, and referrer origin are
+retained only as traits. They never identify a customer and cannot claim a session on their own.
+
 ### Completed MCP interaction contract
 
 SDKs that support customer-owned MCP integrations expose an idiomatic, framework-neutral operation for

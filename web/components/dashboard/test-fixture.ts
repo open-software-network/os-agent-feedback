@@ -352,8 +352,8 @@ export function customerDetailFixture(): CustomerDetail {
   return {
     customer,
     observedProfile: {
-      journeyCount: 2,
-      nodeCount: 7,
+      sessionCount: 2,
+      activityCount: 7,
       truncated: false,
       lastObservedAt: "2026-07-30T12:00:00Z",
       facts: [
@@ -365,7 +365,7 @@ export function customerDetailFixture(): CustomerDetail {
           kind: "constraint",
           strength: "hard",
           status: "observed",
-          journeyCount: 2,
+          sessionCount: 2,
           observationCount: 3,
           firstObservedAt: "2026-07-29T12:00:00Z",
           lastObservedAt: "2026-07-30T12:00:00Z",
@@ -386,7 +386,7 @@ export function customerDetailFixture(): CustomerDetail {
           kind: "context",
           strength: null,
           status: "observed",
-          journeyCount: 1,
+          sessionCount: 1,
           observationCount: 1,
           firstObservedAt: "2026-07-30T12:00:00Z",
           lastObservedAt: "2026-07-30T12:00:00Z",

@@ -70,7 +70,7 @@ const emptySessionConstraints: SessionConstraints = {
 };
 
 const sessionFilterLabels: Record<SessionFilter, string> = {
-  all: "All journeys",
+  all: "All sessions",
   multi: "Multi-step",
   response: "Has response",
   no_response: "No response",
@@ -309,15 +309,15 @@ export function SessionsView({
     >
       <MetricStrip
         items={[
-          { label: "Proven journeys", value: rollup.sessions.toLocaleString() },
+          { label: "Sessions", value: rollup.sessions.toLocaleString() },
           { label: "Interactions", value: rollup.interactions.toLocaleString() },
           { label: "Multi-step", value: rollup.multiStepSessions.toLocaleString() },
           { label: "Average", value: rollup.averageInteractions.toFixed(1) },
         ]}
       />
       <p className="border-b bg-muted/25 px-4 py-2 text-xs text-muted-foreground">
-        Journeys exist only when the product supplies a stable experience-graph or session
-        reference.
+        Sessions appear when the product supplies a stable session reference. Epode never groups
+        activity by timing, IP address, or user-agent.
       </p>
       <div className="flex shrink-0 flex-col gap-2 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <InputGroup className="w-full bg-background sm:w-80 sm:flex-none">
@@ -325,10 +325,10 @@ export function SessionsView({
             <IconMagnifyingGlass />
           </InputGroupAddon>
           <InputGroupInput
-            aria-label="Search journeys"
+            aria-label="Search sessions"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search journey, customer, or operation"
+            placeholder="Search session, customer, or activity"
           />
         </InputGroup>
         <div className="flex shrink-0 items-center gap-2">
@@ -381,14 +381,14 @@ export function SessionsView({
           </Button>
         </div>
       ) : null}
-      <section className="min-h-0 flex-1 overflow-auto bg-background" aria-label="Journeys">
+      <section className="min-h-0 flex-1 overflow-auto bg-background" aria-label="Sessions">
         {sessionPages.isError ? (
           <div className="p-4 text-sm text-destructive" role="alert">
-            Journeys could not be loaded. Use Refresh to try again.
+            Sessions could not be loaded. Use Refresh to try again.
           </div>
         ) : sessionPages.isPending || searchSettling ? (
           <p className="p-4 text-sm text-muted-foreground" role="status">
-            Loading journeys…
+            Loading sessions…
           </p>
         ) : sessionRows.length ? (
           <Table className="min-w-[760px] table-fixed">
@@ -415,14 +415,12 @@ export function SessionsView({
           <div className="h-full bg-canvas p-4">
             <EmptyState
               title={
-                data.listState.sessionsTotal === 0
-                  ? "No proven journeys yet"
-                  : "No matching journeys"
+                data.listState.sessionsTotal === 0 ? "No sessions yet" : "No matching sessions"
               }
               description={
                 data.listState.sessionsTotal === 0
-                  ? "Journeys appear after an agent traverses an experience graph or the product supplies a stable session reference."
-                  : "Clear the search and constraints or choose a different journey view."
+                  ? "Sessions appear after a customer agent starts a product-guided experience with a stable session reference."
+                  : "Clear the search and constraints or choose a different session view."
               }
               action={
                 data.listState.sessionsTotal === 0 ? null : (
@@ -447,7 +445,7 @@ export function SessionsView({
         <div className="flex shrink-0 items-center justify-between gap-3 border-t bg-background px-4 py-2 text-xs text-muted-foreground">
           <p aria-live="polite">
             Showing {sessionRows.length.toLocaleString()} of {rollup.sessions.toLocaleString()}{" "}
-            matching journeys. Filters cover all retained journeys.
+            matching sessions. Filters cover all retained sessions.
           </p>
           <Button
             variant="outline"
@@ -498,16 +496,16 @@ function SessionFilters({
       </PopoverTrigger>
       <PopoverContent align="end" className="w-[min(22rem,calc(100vw-2rem))]">
         <PopoverHeader>
-          <PopoverTitle>Filter proven journeys</PopoverTitle>
+          <PopoverTitle>Filter sessions</PopoverTitle>
         </PopoverHeader>
         <div className="grid gap-3">
           <fieldset className="grid gap-1.5">
-            <legend className="text-sm font-medium">Journey type</legend>
+            <legend className="text-sm font-medium">Session type</legend>
             <ToggleGroup
               orientation="vertical"
               size="sm"
               value={[draftFilter]}
-              aria-label="Journey type"
+              aria-label="Session type"
               className="w-full items-stretch gap-1"
               onValueChange={(value) => {
                 const next = value[0] as SessionFilter | undefined;
@@ -632,7 +630,7 @@ function SessionRow({
     <TableRow
       data-state={selected ? "selected" : undefined}
       aria-selected={selected}
-      aria-label={`Open journey ${session.refHint}`}
+      aria-label={`Open session ${session.refHint}`}
       tabIndex={0}
       className="cursor-pointer bg-background hover:bg-muted/40 data-[state=selected]:bg-selected data-[state=selected]:shadow-[inset_2px_0_0_var(--attention)]"
       onClick={onOpen}
@@ -695,10 +693,10 @@ function SessionInspector({
   openInteraction: (interactionId: string) => void;
 }) {
   return (
-    <DetailRail open onClose={close} label="Journey detail">
+    <DetailRail open onClose={close} label="Session detail">
       <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-4">
-        <span className="text-sm font-medium">Journey</span>
-        <Button variant="ghost" size="icon-sm" aria-label="Close journey detail" onClick={close}>
+        <span className="text-sm font-medium">Session</span>
+        <Button variant="ghost" size="icon-sm" aria-label="Close session detail" onClick={close}>
           <IconCrossSmall />
         </Button>
       </div>
@@ -707,7 +705,7 @@ function SessionInspector({
           {error ? (
             <div className="grid gap-3">
               <p className="break-all font-mono text-xs text-muted-foreground">
-                Journey {requestedId}
+                Session {requestedId}
               </p>
               <ErrorState error={error} onRetry={() => void retry()} />
             </div>
@@ -719,7 +717,7 @@ function SessionInspector({
             />
           ) : (
             <p className="text-sm text-muted-foreground" role="status">
-              Loading journey <span className="font-mono">{requestedId}</span>…
+              Loading session <span className="font-mono">{requestedId}</span>…
             </p>
           )}
         </div>
@@ -750,8 +748,7 @@ function SessionJourney({
         {detail.session.refHint}
       </h2>
       <p className="mt-2 text-xs leading-5 text-muted-foreground">
-        Grouped from the stable journey reference supplied by the product experience graph or
-        session handle.
+        Grouped from the stable session reference supplied by the product.
       </p>
 
       <dl className="mt-5 grid grid-cols-[100px_1fr] gap-x-3 gap-y-3 text-xs">
@@ -769,9 +766,9 @@ function SessionJourney({
 
       <Separator className="my-5" />
 
-      <section aria-labelledby="observed-journey-heading">
-        <h3 id="observed-journey-heading" className="text-xs font-medium">
-          Observed journey
+      <section aria-labelledby="observed-session-heading">
+        <h3 id="observed-session-heading" className="text-xs font-medium">
+          Observed activity
         </h3>
         <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
           Structured interaction metadata in chronological order.

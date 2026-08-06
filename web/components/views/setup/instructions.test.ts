@@ -13,7 +13,7 @@ describe("company-side customer enrichment setup", () => {
     expect(instructions.code).toContain("experienceTelemetryDetails");
     expect(instructions.code).toContain("/agent-negotiate");
     expect(instructions.code).toContain("/agent-decide");
-    expect(instructions.verify).toMatch(/journey session telemetry/i);
+    expect(instructions.verify).toMatch(/session telemetry/i);
   });
 
   it("offers the four implemented product surfaces", () => {
@@ -81,7 +81,7 @@ describe("company-side customer enrichment setup", () => {
   it("gives coding agents an experience-graph implementation contract", () => {
     const instructions = setupInstructions("node-experience", "experience", origin);
     const prompt = setupAgentPrompt("experience", "node-experience", instructions, origin);
-    expect(prompt).toContain("agent experience graph");
+    expect(prompt).toContain("guided agent experience");
     expect(prompt).toContain("experienceTelemetryDetails");
     expect(prompt).toContain("/agent-negotiate");
     expect(prompt).toMatch(/current-task decision input/i);

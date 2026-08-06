@@ -120,5 +120,5 @@ export function contextKeyForCategory(category: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
-  return `journey.${slug || "need"}`;
+  return `session.${slug || "need"}`;
 }

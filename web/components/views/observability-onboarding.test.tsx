@@ -109,10 +109,8 @@ describe("observability onboarding states", () => {
     );
     renderWithQuery(sessionsView(data));
 
-    expect(screen.getByText("No proven journeys yet")).toBeVisible();
-    expect(
-      screen.getByText(/experience graph or the product supplies a stable session reference/i),
-    ).toBeVisible();
+    expect(screen.getByText("No sessions yet")).toBeVisible();
+    expect(screen.getAllByText(/stable session reference/i).length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: "Clear filters" })).not.toBeInTheDocument();
   });
 
@@ -141,14 +139,14 @@ describe("observability onboarding states", () => {
     renderWithQuery(sessionsView(data));
 
     expect(screen.getByRole("row", { name: /session-42/ })).toBeVisible();
-    fireEvent.change(screen.getByLabelText("Search journeys"), {
+    fireEvent.change(screen.getByLabelText("Search sessions"), {
       target: { value: "missing" },
     });
 
     await waitFor(() =>
       expect(screen.queryByRole("row", { name: /session-42/ })).not.toBeInTheDocument(),
     );
-    expect(screen.getByText("Loading journeys…")).toBeVisible();
+    expect(screen.getByText("Loading sessions…")).toBeVisible();
   });
 
   it("keeps team rename reachable inside the Configuration layout", async () => {

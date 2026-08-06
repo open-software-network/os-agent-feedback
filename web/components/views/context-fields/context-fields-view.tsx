@@ -80,7 +80,7 @@ function parseList(value: string): string[] {
 
 function validateForm(form: FieldFormState, creating: boolean): string {
   if (creating && !/^[a-z][a-z0-9_]{0,30}\.[a-z][a-z0-9_]{0,46}$/.test(form.key.trim())) {
-    return "Field key must be a lowercase namespace.name pair such as journey.occasion.";
+    return "Field key must be a lowercase namespace.name pair such as session.occasion.";
   }
   if (creating && form.key.trim().startsWith("epode.")) {
     return "The epode.* namespace is reserved for built-in fields.";
@@ -210,7 +210,7 @@ export function QuestionsView({
       <PageHeader
         eyebrow="Configurations"
         title="Memory"
-        description="What this product remembers across journeys. The experience graph elicits needs per task; remembered questions are the conclusions you deliberately keep."
+        description="What this product remembers across sessions. Guided agent activity reveals needs per task; remembered questions are the conclusions you deliberately keep."
         actions={
           editor ? (
             <Button type="button" onClick={() => openCreate()}>
@@ -229,7 +229,7 @@ export function QuestionsView({
           const needsKey = contextKeyForCategory(category);
           openCreate({
             key: needsKey,
-            label: `${titleCase(category)} journey need`,
+            label: `${titleCase(category)} session need`,
             type: "preference",
             allowedValues: "",
             operations: `/agent-negotiate/${category}, /agent-decide/${category}`,
@@ -426,7 +426,7 @@ export function QuestionsView({
                 id="field-key"
                 value={form.key}
                 readOnly={editing !== null}
-                placeholder="journey.occasion"
+                placeholder="session.occasion"
                 onChange={(event) => setForm({ ...form, key: event.target.value })}
               />
               <p className="text-xs text-muted-foreground">
@@ -522,23 +522,23 @@ function JourneyDimensions({
   );
 
   return (
-    <Panel title="Journey dimensions">
+    <Panel title="Session dimensions">
       <p className="text-sm text-muted-foreground">
-        Needs the experience graph elicits per task, computed from recent journey telemetry. When a
-        dimension keeps deciding journeys, remember it as a question so future journeys start with
-        it already answered.
+        Needs observed per task, computed from recent session activity. When a dimension keeps
+        deciding sessions, remember it as a question so future sessions start with it already
+        answered.
       </p>
       {activity.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          No experience-graph journeys observed yet. When agents negotiate needs through your graph,
-          per-dimension activity appears here.
+          No guided sessions observed yet. When agents express and refine needs, per-dimension
+          activity appears here.
         </p>
       ) : (
         <Table>
           <TableHeader>
             <TableRow>
               <TableHead>Dimension</TableHead>
-              <TableHead>Journeys</TableHead>
+              <TableHead>Sessions</TableHead>
               <TableHead>Negotiations</TableHead>
               <TableHead>Decisions</TableHead>
               <TableHead>Decision outcomes</TableHead>

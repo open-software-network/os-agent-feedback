@@ -1186,6 +1186,8 @@ export interface components {
             /** Format: date-time */
             verifiedAt: string | null;
         };
+        /** @enum {string} */
+        CustomerLinkSource: "product_link_click";
         CustomerRequestObservation: {
             acceptLanguage: string | null;
             clientIp: string | null;
@@ -2052,6 +2054,7 @@ export interface components {
             anonymousRef?: string | null;
             classification?: string | null;
             confirmationMethod?: string | null;
+            customerLinkSource?: null | components["schemas"]["CustomerLinkSource"];
             customerRef?: string | null;
             /** Format: int64 */
             durationMs?: number | null;
@@ -2060,6 +2063,7 @@ export interface components {
             /** Format: date-time */
             occurredAt?: string | null;
             operation: string;
+            requestObservation?: null | components["schemas"]["CustomerRequestObservationInput"];
             runtimeHint?: string | null;
             runtimeHintSource?: string | null;
             /** Format: int64 */
@@ -2099,8 +2103,6 @@ export interface components {
             evidence: components["schemas"]["ObservedCustomerFactEvidence"][];
             /** Format: date-time */
             firstObservedAt: string;
-            /** Format: int64 */
-            journeyCount: number;
             key: string;
             kind: string;
             label: string;
@@ -2108,6 +2110,8 @@ export interface components {
             lastObservedAt: string;
             /** Format: int64 */
             observationCount: number;
+            /** Format: int64 */
+            sessionCount: number;
             status: string;
             strength: string | null;
             value: string;
@@ -2121,13 +2125,13 @@ export interface components {
             sessionRef: string;
         };
         ObservedCustomerProfile: {
-            facts: components["schemas"]["ObservedCustomerFact"][];
             /** Format: int64 */
-            journeyCount: number;
+            activityCount: number;
+            facts: components["schemas"]["ObservedCustomerFact"][];
             /** Format: date-time */
             lastObservedAt: string | null;
             /** Format: int64 */
-            nodeCount: number;
+            sessionCount: number;
             truncated: boolean;
         };
         /** @description Opaque JSON object whose fields depend on the MCP JSON-RPC method. */

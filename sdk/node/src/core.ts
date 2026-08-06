@@ -162,6 +162,17 @@ export interface TelemetryEvent {
   userRef?: string;
   anonymousRef?: string;
   customerRef?: string;
+  customerLinkSource?: "product_link_click";
+  requestObservation?: {
+    clientIp?: string;
+    method?: string;
+    userAgent?: string;
+    acceptLanguage?: string;
+    referrerOrigin?: string;
+    secChUa?: string;
+    secChUaPlatform?: string;
+    secChUaMobile?: string;
+  };
   classification: InteractionClassification;
   confirmationMethod?: "mcp";
   runtimeHint?: string;

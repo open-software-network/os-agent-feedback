@@ -1,8 +1,8 @@
 export const SETUP_SURFACES = {
   experience: {
-    name: "Agent experience graph",
+    name: "Guided agent experience",
     description:
-      "Serve a merchant-authored need negotiation graph and measure the agent journey as Epode sessions.",
+      "Serve a merchant-authored decision flow and measure customer-agent activity as Epode sessions.",
     stacks: ["node-experience"],
   },
   api: {
@@ -27,7 +27,7 @@ export type SetupSurface = keyof typeof SETUP_SURFACES;
 export type SetupStack = "node-experience" | "node-express" | "node-fastify" | "node-mcp";
 
 const STACK_NAMES: Record<SetupStack, string> = {
-  "node-experience": "Node · Experience graph",
+  "node-experience": "JavaScript · Guided experience",
   "node-express": "Node · Express",
   "node-fastify": "Node · Fastify",
   "node-mcp": "Node · MCP",
@@ -114,7 +114,7 @@ app.get("/agent-decide/:journeyId/:category/*tokens", (req, res) => {
   res.status(node.error ? 422 : 200).json(node);
 });`,
       verify:
-        "Open / as an agent user agent, walk one supplied negotiation edge, call /agent-decide after a decision input, and confirm Epode receives journey session telemetry.",
+        "Open / as an agent user agent, follow one supplied decision step, call /agent-decide after a decision input, and confirm Epode receives session telemetry.",
     };
   }
 
@@ -216,7 +216,7 @@ export function setupAgentPrompt(
   _origin: string,
 ): string {
   if (surface === "experience" || stack === "node-experience") {
-    return `Install Epode's agent experience graph in this repository.
+    return `Install Epode's guided agent experience in this repository.
 
 Surface: ${SETUP_SURFACES.experience.name}
 Stack: ${stackName(stack)}

@@ -696,6 +696,8 @@ pub(crate) struct InteractionTelemetryInput {
     pub account_ref: Option<String>,
     pub user_ref: Option<String>,
     pub anonymous_ref: Option<String>,
+    pub customer_link_source: Option<CustomerLinkSource>,
+    pub request_observation: Option<CustomerRequestObservationInput>,
     pub classification: Option<String>,
     pub confirmation_method: Option<String>,
     pub runtime_hint: Option<String>,
@@ -703,6 +705,12 @@ pub(crate) struct InteractionTelemetryInput {
     pub session_ref: Option<String>,
     pub session_source: Option<String>,
     pub occurred_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CustomerLinkSource {
+    ProductLinkClick,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
@@ -1225,7 +1233,7 @@ pub(crate) struct ObservedCustomerFact {
     #[schema(required = true, nullable)]
     pub strength: Option<String>,
     pub status: String,
-    pub journey_count: i64,
+    pub session_count: i64,
     pub observation_count: i64,
     pub first_observed_at: DateTime<Utc>,
     pub last_observed_at: DateTime<Utc>,
@@ -1235,8 +1243,8 @@ pub(crate) struct ObservedCustomerFact {
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ObservedCustomerProfile {
-    pub journey_count: i64,
-    pub node_count: i64,
+    pub session_count: i64,
+    pub activity_count: i64,
     pub truncated: bool,
     #[schema(required = true, nullable)]
     pub last_observed_at: Option<DateTime<Utc>>,

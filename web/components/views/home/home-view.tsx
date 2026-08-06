@@ -23,7 +23,7 @@ export function HomeView({
   setNotice: (message: string) => void;
 }) {
   const needsSetup = data.insights.opportunities === 0 && isEditor(data.currentRole);
-  const journeys = data.listState.sessionsTotal;
+  const sessions = data.listState.sessionsTotal;
   const interactions = data.insights.opportunities;
 
   useEffect(() => {
@@ -42,13 +42,13 @@ export function HomeView({
             Epode is the agent experience and analytics layer for your product.
           </h2>
           <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">
-            Serve a merchant-authored experience graph, capture current-task need state as agents
-            negotiate, personalize the product, and measure the journey from arrival to decision.
+            Guide customer agents through decisions, capture what matters in the current task,
+            personalize the product, and measure each session from arrival to decision.
           </p>
           <div className="mt-5 grid gap-3 sm:grid-cols-3">
             <div className="border bg-muted/20 p-3">
-              <p className="text-xs text-muted-foreground">Proven journeys</p>
-              <p className="mt-1 text-xl font-medium">{journeys.toLocaleString()}</p>
+              <p className="text-xs text-muted-foreground">Sessions</p>
+              <p className="mt-1 text-xl font-medium">{sessions.toLocaleString()}</p>
             </div>
             <div className="border bg-muted/20 p-3">
               <p className="text-xs text-muted-foreground">Observed interactions</p>
@@ -66,7 +66,7 @@ export function HomeView({
               <Button onClick={scrollToSetup}>Finish setup</Button>
             ) : (
               <Button onClick={() => navigateToDashboardView("sessions")}>
-                View journeys
+                View sessions
                 <IconArrowUpRight data-icon="inline-end" />
               </Button>
             )}
