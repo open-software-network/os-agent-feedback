@@ -1312,11 +1312,22 @@ export interface ExperienceTelemetry {
 const EXPERIENCE_DIMENSION_LIMIT = 24;
 const EXPERIENCE_VIOLATION_LIMIT = 40;
 const EXPERIENCE_COUNTERFACTUAL_LIMIT = 8;
+const EXPERIENCE_COUNT_LIMIT = 100_000;
+
+/** Code-point-safe truncation: a byte-index slice could split a surrogate pair. */
+function boundedText(value: string, limit: number): string {
+  return Array.from(value).slice(0, limit).join("");
+}
 
 function boundedValueText(value: unknown, limit: number): string | undefined {
   if (value === undefined || value === null) return undefined;
   const text = typeof value === "string" ? value : JSON.stringify(value);
-  return text ? text.slice(0, limit) : undefined;
+  return text ? boundedText(text, limit) : undefined;
+}
+
+function boundedCount(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) return undefined;
+  return Math.min(value, EXPERIENCE_COUNT_LIMIT);
 }
 
 /**
@@ -1332,23 +1343,23 @@ export function experienceTelemetryForNode(node: unknown): ExperienceTelemetry |
     exactMatchCount?: unknown;
     nearMissCount?: unknown;
     nearMisses?: RecordedMatch[];
-    counterfactuals?: RecordedCounterfactual[];
+    counterfactuals?: Array<RecordedCounterfactual & { deltaUsd?: number }>;
     searchAttribution?: { searchId?: unknown; resultPosition?: unknown } | null;
   };
   const experience: ExperienceTelemetry = {};
 
   if (typeof source.stage === "string" && source.stage) {
-    experience.stage = source.stage.slice(0, 40);
+    experience.stage = boundedText(source.stage, 40);
   }
 
   if (source.needState && Array.isArray(source.needState.expressedDimensions)) {
     const expressed = source.needState.expressedDimensions
       .filter((dimension) => typeof dimension === "string" && !dimension.endsWith("_unknown"))
       .slice(0, EXPERIENCE_DIMENSION_LIMIT)
-      .map((dimension) => dimension.slice(0, 80));
+      .map((dimension) => boundedText(dimension, 80));
     const unknown = Object.entries(source.needState.values ?? {})
       .filter(([, value]) => value?.known === false)
-      .map(([dimension]) => dimension.slice(0, 80))
+      .map(([dimension]) => boundedText(dimension, 80))
       .slice(0, EXPERIENCE_DIMENSION_LIMIT);
     if (expressed.length || unknown.length) {
       experience.needState = {
@@ -1362,26 +1373,28 @@ export function experienceTelemetryForNode(node: unknown): ExperienceTelemetry |
     const violations = (source.nearMisses ?? [])
       .flatMap((match) =>
         (match.violatedHardConstraints ?? []).map((violation) => ({
-          dimension: String(violation.dimension).slice(0, 80),
+          dimension: boundedText(String(violation.dimension), 80),
           requested: boundedValueText(violation.requested, 120),
           actual: boundedValueText(violation.actual, 120),
-          itemId: match.itemId ? String(match.itemId).slice(0, 120) : undefined,
+          itemId: match.itemId ? boundedText(String(match.itemId), 120) : undefined,
         })),
       )
       .slice(0, EXPERIENCE_VIOLATION_LIMIT);
     const counterfactuals = (source.counterfactuals ?? [])
       .slice(0, EXPERIENCE_COUNTERFACTUAL_LIMIT)
-      .map((counterfactual) => ({
-        change: String(counterfactual.change).slice(0, 160),
-        ...(typeof counterfactual.delta === "number" && Number.isFinite(counterfactual.delta)
-          ? { delta: counterfactual.delta }
-          : {}),
-      }));
+      .map((counterfactual) => {
+        // The domain builder emits `deltaUsd`; the token builder emits `delta`.
+        const delta = counterfactual.delta ?? counterfactual.deltaUsd;
+        return {
+          change: boundedText(String(counterfactual.change), 160),
+          ...(typeof delta === "number" && Number.isFinite(delta) ? { delta } : {}),
+        };
+      });
+    const exactMatchCount = boundedCount(source.exactMatchCount);
+    const nearMissCount = boundedCount(source.nearMissCount);
     experience.decision = {
-      ...(typeof source.exactMatchCount === "number"
-        ? { exactMatchCount: source.exactMatchCount }
-        : {}),
-      ...(typeof source.nearMissCount === "number" ? { nearMissCount: source.nearMissCount } : {}),
+      ...(exactMatchCount === undefined ? {} : { exactMatchCount }),
+      ...(nearMissCount === undefined ? {} : { nearMissCount }),
       ...(violations.length ? { violatedHardConstraints: violations } : {}),
       ...(counterfactuals.length ? { counterfactuals } : {}),
     };
@@ -1392,7 +1405,9 @@ export function experienceTelemetryForNode(node: unknown): ExperienceTelemetry |
     const position = Number(resultPosition);
     const search = {
       ...(typeof searchId === "string" && searchId ? { searchId: searchId.slice(0, 120) } : {}),
-      ...(Number.isInteger(position) && position >= 1 ? { resultPosition: position } : {}),
+      ...(Number.isInteger(position) && position >= 1 && position <= EXPERIENCE_COUNT_LIMIT
+        ? { resultPosition: position }
+        : {}),
     };
     if (Object.keys(search).length) experience.search = search;
   }

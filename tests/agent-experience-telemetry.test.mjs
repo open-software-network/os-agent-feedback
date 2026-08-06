@@ -100,16 +100,44 @@ test("experience payloads flow from graph hops to schema-valid telemetry batches
     assert.equal(detail.searchAttribution.resultPosition, 1);
 
     const productBase = detail.evaluationGraph.startUrl.replace(base, "");
-    await fetchJson(base, productBase);
+    const { body: productNode } = await fetchJson(base, productBase);
+    const considerChoice = productNode.nextQuestion?.choices?.[0];
+    assert.ok(considerChoice, "product node must offer a consider edge");
+    const { body: consideredProduct } = await fetchJson(base, considerChoice.url.replace(base, ""));
+    const valueChoice = consideredProduct.nextQuestion?.choices?.[0];
+    assert.ok(valueChoice, "considered product node must offer a value edge");
+    const { body: expressedProduct } = await fetchJson(base, valueChoice.url.replace(base, ""));
+    assert.ok(["express_more_or_evaluate", "ready_to_evaluate"].includes(expressedProduct.stage));
     const { response: fitResponse } = await fetchJson(base, `${productBase}/evaluate-fit`);
     assert.equal(fitResponse.status, 422);
 
+    const evidenceDecidePath = `${journeyPath.replace("/agent-negotiate/", "/agent-decide/")}/budget-hard-150/evidence-glare-control`;
+    const { response: evidenceResponse, body: evidenceNode } = await fetchJson(
+      base,
+      evidenceDecidePath,
+    );
+    assert.equal(evidenceResponse.status, 200);
+    assert.ok(
+      evidenceNode.nearMisses.some((match) =>
+        match.violatedHardConstraints.some(
+          (violation) => violation.dimension === "evidence:glare_control",
+        ),
+      ),
+      "decide with an evidence requirement must produce evidence-dimension violations",
+    );
+
     await waitForEvents(collector.batches, (seen) => {
-      const operations = seen.map((event) => event.operation);
       return (
-        operations.includes("/agent-decide/lamp") &&
-        operations.includes("/agent-item") &&
-        operations.includes("/agent-product/lamp/evaluate-fit")
+        seen.some((event) => event.operation === "/agent-item") &&
+        seen.some((event) => event.operation === "/agent-product/lamp/evaluate-fit") &&
+        seen.some((event) =>
+          ["express_more_or_evaluate", "ready_to_evaluate"].includes(event.experience?.stage),
+        ) &&
+        seen.some((event) =>
+          event.experience?.decision?.violatedHardConstraints?.some(
+            (violation) => violation.dimension === "evidence:glare_control",
+          ),
+        )
       );
     });
 

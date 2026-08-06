@@ -329,3 +329,22 @@ test("experience payloads ride telemetry events end to end", async () => {
   assert.equal(event.experience.decision.counterfactuals[0].delta, 58);
   assert.deepEqual(event.experience.needState.expressedDimensions, ["budget"]);
 });
+
+test("experienceTelemetryForNode maps domain deltas and clamps oversized values", async () => {
+  const { experienceTelemetryForNode } = await import("../dist/experience-graph.js");
+  const domainCounterfactual = experienceTelemetryForNode({
+    exactMatchCount: 0,
+    nearMissCount: 1,
+    counterfactuals: [
+      { change: "allow_red", effect: "Cheap Red becomes eligible", detailUrl: "x", deltaUsd: 20 },
+    ],
+  });
+  assert.equal(domainCounterfactual.decision.counterfactuals[0].delta, 20);
+
+  const clamped = experienceTelemetryForNode({
+    exactMatchCount: 2_000_000,
+    searchAttribution: { searchId: "s-1", resultPosition: 999_999 },
+  });
+  assert.equal(clamped.decision.exactMatchCount, 100_000);
+  assert.deepEqual(clamped.search, { searchId: "s-1" });
+});

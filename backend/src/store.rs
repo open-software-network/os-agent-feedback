@@ -7230,21 +7230,24 @@ async fn resolve_telemetry_customer(
     }
 }
 
-const EXPERIENCE_STAGES: [&str; 6] = [
+const EXPERIENCE_STAGES: [&str; 8] = [
     "decision_input_required",
     "express_more_or_decide",
     "ready_to_decide",
     "decision_support",
+    "express_more_or_evaluate",
+    "ready_to_evaluate",
     "item",
     "product",
 ];
 
 fn valid_experience_label(value: &str, max: usize) -> bool {
+    // `:` admits namespaced dimensions like the SDK's `evidence:glare_control`.
     !value.is_empty()
         && value.chars().count() <= max
         && value
             .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "_.-".contains(character))
+            .all(|character| character.is_ascii_alphanumeric() || "_.:-".contains(character))
 }
 
 fn valid_experience_text(value: &str, max: usize) -> bool {
@@ -18070,6 +18073,38 @@ mod product_tests {
         result
     }
 
+    #[test]
+    fn experience_validation_accepts_all_sdk_emitted_shapes() {
+        let payload = |stage: &str, dimension: &str| ExperienceTelemetryInput {
+            stage: Some(stage.into()),
+            need_state: None,
+            decision: Some(ExperienceDecisionInput {
+                exact_match_count: Some(0),
+                near_miss_count: Some(1),
+                violated_hard_constraints: Some(vec![ExperienceViolationInput {
+                    dimension: dimension.into(),
+                    requested: Some("glare_control".into()),
+                    actual: Some("[\"warm orange\"]".into()),
+                    item_id: Some("forma-one-table-lamp".into()),
+                }]),
+                counterfactuals: Some(vec![ExperienceCounterfactualInput {
+                    change: "raise_budget_from_150_to_164".into(),
+                    delta: Some(14.0),
+                    item_id: None,
+                }]),
+            }),
+            search: None,
+        };
+        // Every stage the SDK builders emit, including the product-graph
+        // evaluate stages, and the namespaced evidence dimension.
+        for stage in EXPERIENCE_STAGES {
+            validate_experience(Some(&payload(stage, "evidence:glare_control")))
+                .expect("SDK-emitted stages and namespaced dimensions must be accepted");
+        }
+        assert!(validate_experience(Some(&payload("bogus_stage", "budget"))).is_err());
+        assert!(validate_experience(Some(&payload("item", "bad dimension"))).is_err());
+    }
+
     #[tokio::test]
     #[ignore = "requires DATABASE_URL"]
     async fn experience_telemetry_powers_dashboard_insights_end_to_end() -> anyhow::Result<()> {
@@ -18144,6 +18179,12 @@ mod product_tests {
                                 dimension: "budget".into(),
                                 requested: Some("100".into()),
                                 actual: Some("250".into()),
+                                item_id: Some("luxe-chair".into()),
+                            },
+                            ExperienceViolationInput {
+                                dimension: "evidence:glare_control".into(),
+                                requested: Some("glare_control".into()),
+                                actual: Some("not_specified".into()),
                                 item_id: Some("luxe-chair".into()),
                             },
                         ]),
@@ -18321,6 +18362,15 @@ mod product_tests {
                     .violated_dimensions
                     .iter()
                     .any(|row| row.name == "budget" && row.count == 2)
+            );
+            anyhow::ensure!(
+                insights
+                    .lost_demand
+                    .violated_dimensions
+                    .iter()
+                    .any(|row| row.name == "evidence:glare_control" && row.count == 1),
+                "namespaced evidence dimensions must aggregate: {:?}",
+                insights.lost_demand.violated_dimensions
             );
             anyhow::ensure!(
                 insights

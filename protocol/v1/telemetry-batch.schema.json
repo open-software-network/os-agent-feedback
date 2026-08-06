@@ -94,6 +94,8 @@
                   "express_more_or_decide",
                   "ready_to_decide",
                   "decision_support",
+                  "express_more_or_evaluate",
+                  "ready_to_evaluate",
                   "item",
                   "product"
                 ]
