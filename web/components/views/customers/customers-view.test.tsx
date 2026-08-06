@@ -79,21 +79,53 @@ describe("CustomersView", () => {
     expect(within(profile).getByText("$4,000/month")).toBeVisible();
     expect(within(profile).getByText("Cat")).toBeVisible();
     expect(within(profile).getByText(/session-scoped evidence/i)).toBeVisible();
-    const activity = screen.getByRole("region", { name: "Recent activity" });
-    expect(within(activity).getByText("Latest activity")).toBeVisible();
-    expect(within(activity).getByText("search")).toBeVisible();
-    expect(within(activity).getByText(/deliberately remembers/i)).toBeVisible();
+    expect(within(profile).getByText("Request traits")).toBeVisible();
+    expect(within(profile).getByText("Never identity")).toBeVisible();
+    expect(within(profile).getByText("Network address")).toBeVisible();
+    expect(within(profile).getByText("Client software")).toBeVisible();
+    expect(screen.queryByRole("region", { name: "Recent activity" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Latest activity")).not.toBeInTheDocument();
+    expect(screen.queryByText(/deliberately remembers/i)).not.toBeInTheDocument();
     const sessions = screen.getByRole("region", { name: "Sessions" });
     expect(within(sessions).getByText("search")).toBeVisible();
     expect(within(sessions).getAllByText(/1 activity/).length).toBeGreaterThan(0);
-    expect(screen.getByRole("heading", { name: "How we know this customer" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "Observed traits" })).toBeVisible();
-    expect(screen.getByText("Never identity")).toBeVisible();
+    expect(
+      screen.queryByRole("heading", { name: "How we know this customer" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Observed traits" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "What we know" })).not.toBeInTheDocument();
     expect(screen.queryByText("Find the newest indexed policy")).not.toBeInTheDocument();
     expect(screen.queryByText("Context returned to product")).not.toBeInTheDocument();
     expect(screen.queryByText("Request facts")).not.toBeInTheDocument();
     expect(screen.queryByText("Permissioned memory")).not.toBeInTheDocument();
+  });
+
+  it("omits repeated domain badges when every observed fact shares one domain", async () => {
+    renderCustomers(mockCustomers(), {
+      selectedCustomerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+
+    const profile = await screen.findByRole("region", { name: "What we've observed" });
+    expect(within(profile).getByText("Budget")).toBeVisible();
+    expect(within(profile).queryByText("Apartments")).not.toBeInTheDocument();
+  });
+
+  it("keeps domain badges when observed facts span multiple domains", async () => {
+    const detail = customerDetailFixture();
+    detail.observedProfile.facts.push({
+      ...detail.observedProfile.facts[0],
+      key: "petsmart.pet",
+      domain: "petsmart",
+      label: "Pet",
+      value: "Dog",
+    });
+    renderCustomers(mockCustomers(detail), {
+      selectedCustomerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+
+    const profile = await screen.findByRole("region", { name: "What we've observed" });
+    expect(within(profile).getAllByText("Apartments").length).toBeGreaterThan(0);
+    expect(within(profile).getByText("PetSmart")).toBeVisible();
   });
 
   it("opens the exact session from the full inspector row", async () => {

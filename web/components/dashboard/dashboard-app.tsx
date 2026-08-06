@@ -300,6 +300,16 @@ export function DashboardApp() {
     setView("sessions");
   }
 
+  function openCustomer(customerId: string) {
+    setNotice(null);
+    historyMode.current = "push";
+    setSelectedReportId(null);
+    setSelectedInteractionId(null);
+    setSelectedSessionId(null);
+    setSelectedCustomerId(customerId);
+    setView("customers");
+  }
+
   function openInteraction(interactionId: string) {
     setNotice(null);
     historyMode.current = "push";
@@ -480,6 +490,7 @@ export function DashboardApp() {
             }}
             openFeedback={openFeedback}
             openInteraction={openInteraction}
+            openCustomer={openCustomer}
             refresh={refresh}
           />
         );
