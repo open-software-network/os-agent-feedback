@@ -696,6 +696,8 @@ pub(crate) struct InteractionTelemetryInput {
     pub account_ref: Option<String>,
     pub user_ref: Option<String>,
     pub anonymous_ref: Option<String>,
+    pub customer_link_source: Option<CustomerLinkSource>,
+    pub request_observation: Option<CustomerRequestObservationInput>,
     pub classification: Option<String>,
     pub confirmation_method: Option<String>,
     pub runtime_hint: Option<String>,
@@ -703,6 +705,12 @@ pub(crate) struct InteractionTelemetryInput {
     pub session_ref: Option<String>,
     pub session_source: Option<String>,
     pub occurred_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CustomerLinkSource {
+    ProductLinkClick,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
@@ -1245,6 +1253,44 @@ pub(crate) struct CustomerDetailCounts {
     pub request_observations: i64,
 }
 
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ObservedCustomerFactEvidence {
+    pub session_id: Uuid,
+    pub session_ref: String,
+    pub operation: String,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ObservedCustomerFact {
+    pub key: String,
+    pub domain: String,
+    pub label: String,
+    pub value: String,
+    pub kind: String,
+    #[schema(required = true, nullable)]
+    pub strength: Option<String>,
+    pub status: String,
+    pub session_count: i64,
+    pub observation_count: i64,
+    pub first_observed_at: DateTime<Utc>,
+    pub last_observed_at: DateTime<Utc>,
+    pub evidence: Vec<ObservedCustomerFactEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ObservedCustomerProfile {
+    pub session_count: i64,
+    pub activity_count: i64,
+    pub truncated: bool,
+    #[schema(required = true, nullable)]
+    pub last_observed_at: Option<DateTime<Utc>>,
+    pub facts: Vec<ObservedCustomerFact>,
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DashboardContextReturnedItem {
@@ -1303,6 +1349,7 @@ pub(crate) struct DashboardCustomerContextReturn {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DashboardCustomerDetail {
     pub customer: CustomerSummary,
+    pub observed_profile: ObservedCustomerProfile,
     pub identifiers: Vec<CustomerIdentifier>,
     pub request_observations: Vec<CustomerRequestObservation>,
     pub signals: Vec<CustomerSignal>,

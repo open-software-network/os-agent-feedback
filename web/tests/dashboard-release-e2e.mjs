@@ -516,6 +516,35 @@ function createFixture() {
     if (url.pathname === `/api/dashboard/customers/${ids.customerOne}`) {
       json(response, 200, {
         customer: firstCustomer,
+        observedProfile: {
+          sessionCount: 1,
+          activityCount: 4,
+          truncated: false,
+          lastObservedAt: now,
+          facts: [
+            {
+              key: "search.priority",
+              domain: "search",
+              label: "Priority",
+              value: "Freshness",
+              kind: "preference",
+              strength: "preferred",
+              status: "observed",
+              sessionCount: 1,
+              observationCount: 2,
+              firstObservedAt: now,
+              lastObservedAt: now,
+              evidence: [
+                {
+                  sessionId: ids.sessionOne,
+                  sessionRef: firstSession.refHint,
+                  operation: "/agent-decide/search/priority-freshness",
+                  observedAt: now,
+                },
+              ],
+            },
+          ],
+        },
         identifiers: [
           {
             id: "identifier-1",
@@ -525,6 +554,14 @@ function createFixture() {
             provenance: "company_assertion",
             verifiedAt: now,
           },
+          {
+            id: "identifier-2",
+            kind: "anonymous_ref",
+            displayHint: "anonymous-link-42",
+            identityLevel: "pseudonymous",
+            provenance: "first_party_anonymous",
+            verifiedAt: null,
+          },
         ],
         requestObservations: [
           {
@@ -532,7 +569,7 @@ function createFixture() {
             interactionId: firstSignal.interactionId,
             clientIp: "203.0.113.42",
             method: "GET",
-            userAgent: "Release-E2E-Browser/1.0",
+            userAgent: "claude-user/1.0",
             acceptLanguage: "en-US",
             referrerOrigin: "https://customer.example.test",
             secChUa: null,
@@ -976,8 +1013,8 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await clickText(page, "Search API");
   await textVisible(page, "Epode is the agent experience and analytics layer for your product.");
 
-  await clickText(page, "Journeys");
-  await textVisible(page, "Proven journeys");
+  await clickText(page, "Sessions");
+  await metricVisible(page, "Sessions", "2");
   await clickText(page, "session-42");
   const journeyDetail = await fixtureRequest(
     state,
@@ -994,20 +1031,27 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
     String(journeyDetail.headers.cookie).includes(TEST_COOKIE),
     "the journey detail BFF must forward the real browser session cookie",
   );
-  await textVisible(page, "Observed journey");
+  await textVisible(page, "Observed activity");
   await textVisible(page, "search");
-  await page.screenshot({ path: path.join(artifactDirectory, "05-journey.png"), fullPage: true });
-  await page.click('button[aria-label="Close journey detail"]');
+  await page.screenshot({ path: path.join(artifactDirectory, "05-session.png"), fullPage: true });
+  await page.click('button[aria-label="Close session detail"]');
 
   await clickText(page, "Customers");
   await page.waitForSelector('input[aria-label="Search customers"]', { visible: true });
   await metricVisible(page, "Customers", "1");
   await metricVisible(page, "Known", "1");
   await clickText(page, "Acme workspace");
-  await textVisible(page, "Experience graph");
-  await textVisible(page, "Latest observed node");
-  await textVisible(page, "Graph journeys");
-  await textVisible(page, "not promoted to durable memory");
+  await textVisible(page, "How we know this customer");
+  await textVisible(page, "First-party browser ID");
+  await textVisible(page, "Observed traits");
+  await textVisible(page, "Never identity");
+  await textVisible(page, "Agent network address");
+  await textVisible(page, "Recent activity");
+  await textVisible(page, "Latest activity");
+  await textVisible(page, "What we've observed");
+  await textVisible(page, "Freshness");
+  await textVisible(page, "Sessions");
+  await textVisible(page, "deliberately remembers");
   await page.screenshot({ path: path.join(artifactDirectory, "02-customers.png"), fullPage: true });
   const customerDetail = await fixtureRequest(
     state,
@@ -1025,9 +1069,9 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
     "BFF must forward the real browser session cookie to its API origin",
   );
 
-  await clickText(page, "Journeys");
-  await textVisible(page, "Proven journeys");
-  await page.screenshot({ path: path.join(artifactDirectory, "03-journeys.png"), fullPage: true });
+  await clickText(page, "Sessions");
+  await metricVisible(page, "Sessions", "2");
+  await page.screenshot({ path: path.join(artifactDirectory, "03-sessions.png"), fullPage: true });
   await clickText(page, "Filters");
   await textVisible(page, "Has response");
   await textVisible(page, "No response");
@@ -1045,9 +1089,9 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await textVisible(page, "Connect Search API");
   await textVisible(
     page,
-    "Install Epode once to serve an agent experience graph and optional permissioned context.",
+    "Install Epode once to serve a guided agent experience and optional permissioned context.",
   );
-  await textVisible(page, "Agent experience graph");
+  await textVisible(page, "Guided agent experience");
   await metricVisible(page, "Product key", "Ready");
   await metricVisible(page, "SDK connected", "Complete");
   await metricVisible(page, "Answers stored", "1");

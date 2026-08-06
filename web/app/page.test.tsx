@@ -29,7 +29,7 @@ describe("dashboard data flow", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
-    for (const view of ["Home", "Customers", "Journeys", "Configurations"]) {
+    for (const view of ["Home", "Customers", "Sessions", "Configurations"]) {
       expect(screen.getByRole("button", { name: view })).toBeVisible();
     }
     expect(fetchMock).toHaveBeenCalledWith(

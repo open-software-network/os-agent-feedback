@@ -186,6 +186,36 @@ export type CustomerContextReturn = {
   decisions: CustomerPersonalizationDecision[];
 };
 
+export type ObservedCustomerFactEvidence = {
+  sessionId: string;
+  sessionRef: string;
+  operation: string;
+  observedAt: string;
+};
+
+export type ObservedCustomerFact = {
+  key: string;
+  domain: string;
+  label: string;
+  value: string;
+  kind: "constraint" | "preference" | "intent" | "context" | "unknown" | string;
+  strength: string | null;
+  status: "observed" | "unknown" | string;
+  sessionCount: number;
+  observationCount: number;
+  firstObservedAt: string;
+  lastObservedAt: string;
+  evidence: ObservedCustomerFactEvidence[];
+};
+
+export type ObservedCustomerProfile = {
+  sessionCount: number;
+  activityCount: number;
+  truncated: boolean;
+  lastObservedAt: string | null;
+  facts: ObservedCustomerFact[];
+};
+
 export type CustomerRollup = {
   customers: number;
   verified: number;
@@ -216,6 +246,7 @@ export type CustomersPage = {
 
 export type CustomerDetail = {
   customer: CustomerSummary;
+  observedProfile: ObservedCustomerProfile;
   identifiers: CustomerIdentifier[];
   requestObservations: CustomerRequestObservation[];
   signals: CustomerSignal[];

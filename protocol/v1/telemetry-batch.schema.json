@@ -45,6 +45,33 @@
             "maxLength": 160,
             "pattern": "^[A-Za-z0-9_.:-]+$"
           },
+          "customerLinkSource": { "enum": ["product_link_click"] },
+          "requestObservation": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "clientIp": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 45,
+                "oneOf": [
+                  { "format": "ipv4" },
+                  { "format": "ipv6" }
+                ]
+              },
+              "method": { "type": "string", "pattern": "^[A-Za-z]{1,16}$" },
+              "userAgent": { "type": "string", "minLength": 1, "maxLength": 512 },
+              "acceptLanguage": { "type": "string", "minLength": 1, "maxLength": 256 },
+              "referrerOrigin": {
+                "type": "string",
+                "pattern": "^https?://[^/?#@]+$",
+                "maxLength": 300
+              },
+              "secChUa": { "type": "string", "minLength": 1, "maxLength": 512 },
+              "secChUaPlatform": { "type": "string", "minLength": 1, "maxLength": 80 },
+              "secChUaMobile": { "enum": ["?0", "?1"] }
+            }
+          },
           "classification": { "enum": ["unclassified", "confirmed"] },
           "confirmationMethod": { "enum": ["mcp"] },
           "runtimeHint": { "type": "string", "minLength": 1, "maxLength": 200 },
@@ -57,7 +84,25 @@
           },
           "sessionSource": { "enum": ["customer", "mcp", "continuation"] },
           "occurredAt": { "type": "string", "format": "date-time" }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "customerLinkSource": { "const": "product_link_click" }
+              },
+              "required": ["customerLinkSource"]
+            },
+            "then": {
+              "required": ["anonymousRef", "sessionRef"],
+              "properties": {
+                "anonymousRef": {},
+                "sessionRef": {},
+                "surface": { "const": "http_html" }
+              }
+            }
+          }
+        ]
       }
     }
   }

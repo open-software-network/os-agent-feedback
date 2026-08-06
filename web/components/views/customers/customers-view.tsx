@@ -237,7 +237,7 @@ export function CustomersView({
               <TableRow className="hover:bg-background">
                 <TableHead className="h-9 w-[42%] pl-5 text-xs">Customer</TableHead>
                 <TableHead className="h-9 w-[22%] text-xs">Identity</TableHead>
-                <TableHead className="h-9 w-[18%] text-xs">Journeys</TableHead>
+                <TableHead className="h-9 w-[18%] text-xs">Sessions</TableHead>
                 <TableHead className="h-9 w-[18%] pr-5 text-right text-xs">Updated</TableHead>
               </TableRow>
             </TableHeader>
@@ -489,8 +489,62 @@ function CustomerInspector({
   );
 }
 
-function graphNode(operation: string | null) {
-  return operation?.trim() || "No graph node observed";
+function sessionActivity(operation: string | null) {
+  return operation?.trim() || "No activity observed";
+}
+
+function identifierLabel(kind: string) {
+  if (kind === "anonymous_ref") return "First-party browser ID";
+  if (kind === "user_ref") return "Product user ID";
+  if (kind === "account_ref") return "Product account ID";
+  if (kind === "customer_ref") return "Product customer ID";
+  return titleCase(kind);
+}
+
+function observedTraits(detail: CustomerDetail) {
+  const traits = new Map<string, { label: string; value: string; observedAt: string }>();
+  for (const observation of detail.requestObservations) {
+    const isAgent = /claude|anthropic|openai|chatgpt/i.test(observation.userAgent ?? "");
+    const candidates = [
+      observation.clientIp
+        ? {
+            label: isAgent ? "Agent network address" : "Network address",
+            value: observation.clientIp,
+          }
+        : null,
+      observation.userAgent ? { label: "Client software", value: observation.userAgent } : null,
+      observation.acceptLanguage
+        ? { label: "Preferred language", value: observation.acceptLanguage }
+        : null,
+      observation.secChUaPlatform
+        ? { label: "Device platform", value: observation.secChUaPlatform.replaceAll('"', "") }
+        : null,
+      observation.referrerOrigin
+        ? { label: "Referring site", value: observation.referrerOrigin }
+        : null,
+    ];
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      const key = `${candidate.label}:${candidate.value}`;
+      if (!traits.has(key)) traits.set(key, { ...candidate, observedAt: observation.observedAt });
+    }
+  }
+  return [...traits.values()].slice(0, 12);
+}
+
+function observedFactKind(kind: string) {
+  if (kind === "context") return "Context";
+  if (kind === "intent") return "Intent";
+  if (kind === "constraint") return "Constraint";
+  if (kind === "preference") return "Preference";
+  if (kind === "unknown") return "Unknown";
+  return titleCase(kind);
+}
+
+function observedDomain(domain: string) {
+  if (domain === "saas") return "SaaS";
+  if (domain === "petsmart") return "PetSmart";
+  return titleCase(domain);
 }
 
 function CustomerDetailContent({
@@ -507,6 +561,14 @@ function CustomerDetailContent({
     0,
   );
   const latestSession = detail.sessions[0];
+  const observedProfile = detail.observedProfile ?? {
+    sessionCount: 0,
+    activityCount: 0,
+    truncated: false,
+    lastObservedAt: null,
+    facts: [],
+  };
+  const traits = observedTraits(detail);
 
   return (
     <>
@@ -519,8 +581,8 @@ function CustomerDetailContent({
       </p>
       <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
         {customer.identityLevel === "pseudonymous"
-          ? "Stable pseudonymous identity supplied by the product. Epode links graph journeys without requiring personal information."
-          : "Stable product-owned identity used to link this customer’s graph journeys."}
+          ? "Stable first-party identity supplied by the product. Epode can link sessions without requiring personal information."
+          : "Stable product-owned identity used to link this customer’s sessions."}
       </p>
       {customer.segments.length ? (
         <div className="mt-3 flex flex-wrap gap-1">
@@ -533,27 +595,172 @@ function CustomerDetailContent({
       ) : null}
 
       <Separator className="my-5" />
-      <section aria-labelledby="customer-experience-graph-heading">
+      <section aria-labelledby="customer-identity-evidence-heading">
         <div className="flex items-center justify-between gap-3">
-          <h3 id="customer-experience-graph-heading" className="text-xs font-medium">
-            Experience graph
+          <h3 id="customer-identity-evidence-heading" className="text-xs font-medium">
+            How we know this customer
           </h3>
           <span className="text-[11px] text-muted-foreground">
-            {detail.sessions.length.toLocaleString()}{" "}
-            {detail.sessions.length === 1 ? "path" : "paths"}
+            {detail.identifiers.length.toLocaleString()} stable{" "}
+            {detail.identifiers.length === 1 ? "identifier" : "identifiers"}
           </span>
         </div>
         <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-          Need state is observed in the paths the customer&apos;s agent traversed. It is scoped to
-          each journey and is not promoted to durable memory.
+          Only product-owned account, user, customer, or first-party browser IDs can link sessions
+          to this customer.
+        </p>
+        {detail.identifiers.length ? (
+          <ol className="mt-3 space-y-2">
+            {detail.identifiers.map((identifier) => (
+              <li key={identifier.id} className="border bg-muted/20 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-medium">{identifierLabel(identifier.kind)}</span>
+                  <Badge variant="outline">Stable</Badge>
+                </div>
+                <p className="mt-1 break-all font-mono text-[11px] text-muted-foreground">
+                  {identifier.displayHint}
+                </p>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="mt-2 text-sm text-muted-foreground">No stable identifier supplied yet.</p>
+        )}
+      </section>
+
+      <Separator className="my-5" />
+      <section aria-labelledby="customer-observed-traits-heading">
+        <div className="flex items-center justify-between gap-3">
+          <h3 id="customer-observed-traits-heading" className="text-xs font-medium">
+            Observed traits
+          </h3>
+          <Badge variant="secondary">Never identity</Badge>
+        </div>
+        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+          Request details witnessed during linked sessions. Network addresses and client software
+          are useful context, but Epode never uses them to decide who a customer is.
+        </p>
+        {traits.length ? (
+          <ol className="mt-3 divide-y border">
+            {traits.map((trait) => (
+              <li key={`${trait.label}:${trait.value}`} className="p-3">
+                <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                  {trait.label}
+                </p>
+                <p className="mt-1 break-words text-xs leading-5">{trait.value}</p>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  Observed {relativeDate(trait.observedAt)}
+                </p>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="mt-2 text-sm text-muted-foreground">No request traits observed yet.</p>
+        )}
+      </section>
+
+      <Separator className="my-5" />
+      <section
+        aria-labelledby="customer-observed-profile-heading"
+        aria-label="Observed customer profile"
+      >
+        <div className="flex items-center justify-between gap-3">
+          <h3 id="customer-observed-profile-heading" className="text-xs font-medium">
+            What we&apos;ve observed
+          </h3>
+          <span className="text-[11px] text-muted-foreground">
+            {observedProfile.facts.length.toLocaleString()}{" "}
+            {observedProfile.facts.length === 1 ? "fact" : "facts"}
+          </span>
+        </div>
+        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+          A live profile derived only from session activity Epode witnessed. Each value remains
+          session-scoped evidence, not a claim that it is permanently true.
+        </p>
+        {observedProfile.truncated ? (
+          <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+            Showing facts from the latest {observedProfile.activityCount.toLocaleString()} retained
+            activities.
+          </p>
+        ) : null}
+        {observedProfile.facts.length ? (
+          <ol className="mt-3 space-y-2">
+            {observedProfile.facts.map((fact) => {
+              const latestEvidence = fact.evidence[0];
+              const content = (
+                <span className="block min-w-0 text-left">
+                  <span className="flex flex-wrap items-center gap-1">
+                    <Badge variant="outline">{observedDomain(fact.domain)}</Badge>
+                    <Badge variant="secondary">{observedFactKind(fact.kind)}</Badge>
+                    {fact.strength ? (
+                      <span className="text-[10px] text-muted-foreground">
+                        {titleCase(fact.strength)}
+                      </span>
+                    ) : null}
+                  </span>
+                  <span className="mt-2 block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                    {fact.label}
+                  </span>
+                  <span className="mt-0.5 block text-sm leading-5">{fact.value}</span>
+                  <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
+                    Seen in {fact.sessionCount.toLocaleString()}{" "}
+                    {fact.sessionCount === 1 ? "session" : "sessions"}
+                    {fact.observationCount > fact.sessionCount
+                      ? ` · ${fact.observationCount.toLocaleString()} activities`
+                      : ""}
+                    {` · ${relativeDate(fact.lastObservedAt)}`}
+                  </span>
+                </span>
+              );
+              return (
+                <li key={`${fact.key}:${fact.value}:${fact.strength ?? "none"}`}>
+                  {latestEvidence ? (
+                    <Button
+                      variant="ghost"
+                      className="h-auto w-full justify-start rounded-md border bg-muted/20 p-3 font-normal whitespace-normal hover:bg-muted/40"
+                      aria-label={`Open evidence for ${fact.label}: ${fact.value}`}
+                      title={latestEvidence.operation}
+                      onClick={() => openSession(latestEvidence.sessionId)}
+                    >
+                      {content}
+                    </Button>
+                  ) : (
+                    <div className="border bg-muted/20 p-3">{content}</div>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
+        ) : (
+          <p className="mt-3 text-sm text-muted-foreground">
+            No needs, preferences, constraints, or customer context have been expressed in the
+            observed session activity yet.
+          </p>
+        )}
+      </section>
+
+      <Separator className="my-5" />
+      <section aria-labelledby="customer-recent-activity-heading">
+        <div className="flex items-center justify-between gap-3">
+          <h3 id="customer-recent-activity-heading" className="text-xs font-medium">
+            Recent activity
+          </h3>
+          <span className="text-[11px] text-muted-foreground">
+            {detail.sessions.length.toLocaleString()}{" "}
+            {detail.sessions.length === 1 ? "session" : "sessions"}
+          </span>
+        </div>
+        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+          Current needs are observed from what the customer&apos;s agent did. They stay scoped to
+          each session unless the product deliberately remembers a conclusion.
         </p>
         {latestSession ? (
           <div className="mt-3 border bg-muted/20 p-3">
             <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-              Latest observed node
+              Latest activity
             </p>
             <p className="mt-2 break-words font-mono text-xs leading-5">
-              {graphNode(latestSession.lastOperation)}
+              {sessionActivity(latestSession.lastOperation)}
             </p>
             <p className="mt-2 text-[11px] text-muted-foreground">
               {relativeDate(latestSession.lastSeenAt)} · {latestSession.refHint}
@@ -561,23 +768,23 @@ function CustomerDetailContent({
           </div>
         ) : (
           <p className="mt-2 text-sm text-muted-foreground">
-            No experience-graph path has been observed for this customer yet.
+            No session activity has been observed for this customer yet.
           </p>
         )}
       </section>
 
       <Separator className="my-5" />
-      <section aria-labelledby="customer-journeys-heading" aria-label="Graph journeys">
+      <section aria-labelledby="customer-sessions-heading" aria-label="Customer sessions">
         <div className="flex items-center justify-between gap-3">
-          <h3 id="customer-journeys-heading" className="text-xs font-medium">
-            Graph journeys
+          <h3 id="customer-sessions-heading" className="text-xs font-medium">
+            Sessions
           </h3>
           <span className="text-[11px] text-muted-foreground">
-            {interactionCount.toLocaleString()} {interactionCount === 1 ? "node" : "nodes"}
+            {interactionCount.toLocaleString()} {interactionCount === 1 ? "activity" : "activities"}
           </span>
         </div>
         <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-          Open a journey to inspect every observed node in chronological order.
+          Open a session to inspect every observed activity in chronological order.
         </p>
         {detail.sessions.length ? (
           <ol className="mt-3 divide-y">
@@ -585,7 +792,7 @@ function CustomerDetailContent({
               <li key={session.id} className="-mx-2">
                 <Button
                   variant="ghost"
-                  aria-label={`Open graph journey ${session.refHint}`}
+                  aria-label={`Open session ${session.refHint}`}
                   className="h-auto w-full justify-start rounded-md px-2 py-3 text-left font-normal whitespace-normal hover:bg-muted/40"
                   onClick={() => openSession(session.id)}
                 >
@@ -594,14 +801,15 @@ function CustomerDetailContent({
                       {session.refHint}
                     </span>
                     <span className="mt-1 block break-words font-mono text-[10px] leading-4 text-muted-foreground">
-                      {graphNode(session.firstOperation)}
+                      {sessionActivity(session.firstOperation)}
                       {session.lastOperation && session.lastOperation !== session.firstOperation
                         ? ` → ${session.lastOperation}`
                         : ""}
                     </span>
                     <span className="mt-1 block text-[11px] text-muted-foreground">
-                      {session.interactionCount} {session.interactionCount === 1 ? "node" : "nodes"}{" "}
-                      · {relativeDate(session.lastSeenAt)}
+                      {session.interactionCount}{" "}
+                      {session.interactionCount === 1 ? "activity" : "activities"} ·{" "}
+                      {relativeDate(session.lastSeenAt)}
                     </span>
                   </span>
                 </Button>
@@ -609,7 +817,7 @@ function CustomerDetailContent({
             ))}
           </ol>
         ) : (
-          <p className="mt-2 text-sm text-muted-foreground">No graph journeys yet.</p>
+          <p className="mt-2 text-sm text-muted-foreground">No sessions yet.</p>
         )}
       </section>
     </>

@@ -216,7 +216,7 @@ const result = answers.available
         ]}
       />
       <StatusMessage>
-        Install Epode once to serve an agent experience graph and optional permissioned context.
+        Install Epode once to serve a guided agent experience and optional permissioned context.
         Your customers do not need an Epode account, app, plugin, or SDK.
       </StatusMessage>
       {error ? <StatusMessage tone="error">{error}</StatusMessage> : null}
@@ -233,8 +233,8 @@ const result = answers.available
         onToggle={() => toggleSection("install")}
       >
         <p className="max-w-3xl text-sm text-muted-foreground">
-          Start with the agent experience graph for negotiation and journey telemetry, or choose an
-          enrichment surface. If Epode is unavailable, product responses stay fail-open.
+          Start with a guided agent experience and session telemetry, or choose an enrichment
+          surface. If Epode is unavailable, product responses stay fail-open.
         </p>
         <div className="flex flex-wrap gap-2">
           {(Object.keys(SETUP_SURFACES) as SetupSurface[]).map((item) => (
@@ -393,7 +393,7 @@ const result = answers.available
           {!opportunityActivated
             ? "Next: deploy the product key and call an included route or tool."
             : !contextLearned
-              ? "The company-side connection works. Next: complete one real customer-agent journey."
+              ? "The company-side connection works. Next: complete one real customer-agent session."
               : !contextRetrieved
                 ? "Answers are ready. Retrieve them from your server and personalize the experience."
                 : "Answer activation loop complete; linked Sessions still require the manual checks below."}
@@ -447,7 +447,7 @@ const result = answers.available
           <p className="text-sm text-muted-foreground">
             Routes stay in code. Derive accountRef and userRef only from authenticated requests;
             anonymousRef must be a product-owned first-party ID. Add sessionRef only when your
-            product already proves a journey belongs together.
+            product already proves a session belongs together.
           </p>
           <p className="text-sm">Verify the transport: {integration.verify}</p>
           <div className="divide-y rounded-lg border px-3">

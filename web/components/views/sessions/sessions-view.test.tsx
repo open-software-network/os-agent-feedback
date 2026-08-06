@@ -59,11 +59,11 @@ describe("SessionsView", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "session-42" })).toBeVisible();
-    const closeButton = screen.getByRole("button", { name: "Close journey detail" });
-    expect(closeButton.parentElement).toHaveTextContent("Journey");
+    const closeButton = screen.getByRole("button", { name: "Close session detail" });
+    expect(closeButton.parentElement).toHaveTextContent("Session");
     expect(closeButton.parentElement).not.toHaveTextContent(session.refHint);
     expect(screen.queryByText("Proven session")).not.toBeInTheDocument();
-    const journey = screen.getByRole("region", { name: "Observed journey" });
+    const journey = screen.getByRole("region", { name: "Observed activity" });
     expect(screen.getAllByText("Started").some((element) => element.tagName === "DT")).toBe(true);
     expect(within(journey).getByText("Session started")).toBeVisible();
     expect(within(journey).getByText("Last observed")).toBeVisible();
@@ -141,7 +141,7 @@ describe("SessionsView", () => {
       />,
     );
 
-    expect(await screen.findByRole("region", { name: "Observed journey" })).toBeVisible();
+    expect(await screen.findByRole("region", { name: "Observed activity" })).toBeVisible();
     expect(screen.queryByText("Permissioned memory")).not.toBeInTheDocument();
     expect(
       screen.queryByText("What should Tripwise prioritize for this traveler?"),
@@ -270,13 +270,13 @@ describe("SessionsView", () => {
       />,
     );
 
-    expect(screen.getByRole("textbox", { name: "Search journeys" })).toHaveValue("checkout");
+    expect(screen.getByRole("textbox", { name: "Search sessions" })).toHaveValue("checkout");
     fireEvent.click(screen.getByRole("button", { name: /^Filters/ }));
     expect(screen.getByRole("button", { name: "Multi-step" })).toHaveAttribute(
       "aria-pressed",
       "true",
     );
-    fireEvent.change(screen.getByRole("textbox", { name: "Search journeys" }), {
+    fireEvent.change(screen.getByRole("textbox", { name: "Search sessions" }), {
       target: { value: "refund" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Has response" }));
@@ -392,7 +392,7 @@ describe("SessionsView", () => {
         refresh={vi.fn().mockResolvedValue(undefined)}
       />,
     );
-    const search = screen.getByRole("textbox", { name: "Search journeys" });
+    const search = screen.getByRole("textbox", { name: "Search sessions" });
     fireEvent.change(search, { target: { value: "r" } });
     fireEvent.change(search, { target: { value: "re" } });
     fireEvent.change(search, { target: { value: "refund" } });

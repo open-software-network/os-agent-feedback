@@ -32,7 +32,7 @@ describe("CustomersView", () => {
     expect(screen.queryByLabelText("Identity filter")).not.toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "Identity" })).toBeVisible();
     expect(screen.queryByRole("columnheader", { name: "Type" })).not.toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Journeys" })).toBeVisible();
+    expect(screen.getByRole("columnheader", { name: "Sessions" })).toBeVisible();
     expect(screen.queryByRole("columnheader", { name: "Data use" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Sharing filter")).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
@@ -74,13 +74,21 @@ describe("CustomersView", () => {
     expect(screen.getAllByText("Customer · user…0042 · acct…0042").length).toBeGreaterThan(0);
     expect(screen.queryByText(/linked user|linked to account/i)).not.toBeInTheDocument();
     expect(screen.queryByText("Known customer")).not.toBeInTheDocument();
-    const graph = screen.getByRole("region", { name: "Experience graph" });
-    expect(within(graph).getByText("Latest observed node")).toBeVisible();
-    expect(within(graph).getByText("search")).toBeVisible();
-    expect(within(graph).getByText(/not promoted to durable memory/i)).toBeVisible();
-    const journeys = screen.getByRole("region", { name: "Graph journeys" });
-    expect(within(journeys).getByText("search")).toBeVisible();
-    expect(within(journeys).getAllByText(/1 node/).length).toBeGreaterThan(0);
+    const profile = screen.getByRole("region", { name: "What we've observed" });
+    expect(within(profile).getByRole("heading", { name: "What we've observed" })).toBeVisible();
+    expect(within(profile).getByText("$4,000/month")).toBeVisible();
+    expect(within(profile).getByText("Cat")).toBeVisible();
+    expect(within(profile).getByText(/session-scoped evidence/i)).toBeVisible();
+    const activity = screen.getByRole("region", { name: "Recent activity" });
+    expect(within(activity).getByText("Latest activity")).toBeVisible();
+    expect(within(activity).getByText("search")).toBeVisible();
+    expect(within(activity).getByText(/deliberately remembers/i)).toBeVisible();
+    const sessions = screen.getByRole("region", { name: "Sessions" });
+    expect(within(sessions).getByText("search")).toBeVisible();
+    expect(within(sessions).getAllByText(/1 activity/).length).toBeGreaterThan(0);
+    expect(screen.getByRole("heading", { name: "How we know this customer" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Observed traits" })).toBeVisible();
+    expect(screen.getByText("Never identity")).toBeVisible();
     expect(screen.queryByRole("heading", { name: "What we know" })).not.toBeInTheDocument();
     expect(screen.queryByText("Find the newest indexed policy")).not.toBeInTheDocument();
     expect(screen.queryByText("Context returned to product")).not.toBeInTheDocument();
@@ -96,15 +104,32 @@ describe("CustomersView", () => {
     });
 
     await screen.findByRole("heading", { name: "Acme workspace" });
-    const sessions = screen.getByRole("region", { name: "Graph journeys" });
+    const sessions = screen.getByRole("region", { name: "Sessions" });
     const sessionRow = within(sessions).getByRole("button", {
-      name: "Open graph journey session-42",
+      name: "Open session session-42",
     });
     expect(within(sessionRow).getByText("session-42")).toBeVisible();
     expect(sessionRow).toHaveClass("px-2");
     expect(sessionRow.parentElement).toHaveClass("-mx-2");
-    expect(within(sessions).queryByText("Open graph journey")).not.toBeInTheDocument();
+    expect(within(sessions).queryByText("Open session")).not.toBeInTheDocument();
     fireEvent.click(sessionRow);
+
+    expect(openSession).toHaveBeenCalledWith("55555555-5555-4555-8555-555555555555");
+  });
+
+  it("opens the exact journey that supports an observed customer fact", async () => {
+    const openSession = vi.fn();
+    renderCustomers(mockCustomers(), {
+      selectedCustomerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      openSession,
+    });
+
+    const profile = await screen.findByRole("region", { name: "What we've observed" });
+    fireEvent.click(
+      within(profile).getByRole("button", {
+        name: "Open evidence for Budget: $4,000/month",
+      }),
+    );
 
     expect(openSession).toHaveBeenCalledWith("55555555-5555-4555-8555-555555555555");
   });

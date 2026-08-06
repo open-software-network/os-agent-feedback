@@ -1186,6 +1186,8 @@ export interface components {
             /** Format: date-time */
             verifiedAt: string | null;
         };
+        /** @enum {string} */
+        CustomerLinkSource: "product_link_click";
         CustomerRequestObservation: {
             acceptLanguage: string | null;
             clientIp: string | null;
@@ -1312,6 +1314,7 @@ export interface components {
             counts: components["schemas"]["CustomerDetailCounts"];
             customer: components["schemas"]["CustomerSummary"];
             identifiers: components["schemas"]["CustomerIdentifier"][];
+            observedProfile: components["schemas"]["ObservedCustomerProfile"];
             requestObservations: components["schemas"]["CustomerRequestObservation"][];
             sessions: components["schemas"]["DashboardSessionSummary"][];
             signals: components["schemas"]["CustomerSignal"][];
@@ -2078,6 +2081,7 @@ export interface components {
             anonymousRef?: string | null;
             classification?: string | null;
             confirmationMethod?: string | null;
+            customerLinkSource?: null | components["schemas"]["CustomerLinkSource"];
             customerRef?: string | null;
             /** Format: int64 */
             durationMs?: number | null;
@@ -2086,6 +2090,7 @@ export interface components {
             /** Format: date-time */
             occurredAt?: string | null;
             operation: string;
+            requestObservation?: null | components["schemas"]["CustomerRequestObservationInput"];
             runtimeHint?: string | null;
             runtimeHintSource?: string | null;
             /** Format: int64 */
@@ -2119,6 +2124,42 @@ export interface components {
             /** Format: int64 */
             reportsMoved: number;
             targetGroupKey: string;
+        };
+        ObservedCustomerFact: {
+            domain: string;
+            evidence: components["schemas"]["ObservedCustomerFactEvidence"][];
+            /** Format: date-time */
+            firstObservedAt: string;
+            key: string;
+            kind: string;
+            label: string;
+            /** Format: date-time */
+            lastObservedAt: string;
+            /** Format: int64 */
+            observationCount: number;
+            /** Format: int64 */
+            sessionCount: number;
+            status: string;
+            strength: string | null;
+            value: string;
+        };
+        ObservedCustomerFactEvidence: {
+            /** Format: date-time */
+            observedAt: string;
+            operation: string;
+            /** Format: uuid */
+            sessionId: string;
+            sessionRef: string;
+        };
+        ObservedCustomerProfile: {
+            /** Format: int64 */
+            activityCount: number;
+            facts: components["schemas"]["ObservedCustomerFact"][];
+            /** Format: date-time */
+            lastObservedAt: string | null;
+            /** Format: int64 */
+            sessionCount: number;
+            truncated: boolean;
         };
         /** @description Opaque JSON object whose fields depend on the MCP JSON-RPC method. */
         OpaqueJsonObject: Record<string, never>;
@@ -4572,7 +4613,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Customer identity, evidence, context returned to the product, linked personalization use, sessions, and scoped consent */
+            /** @description Customer identity plus an evidence-backed profile derived from retained experience-graph journeys */
             200: {
                 headers: {
                     [name: string]: unknown;

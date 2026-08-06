@@ -248,8 +248,8 @@ describe("QuestionsView", () => {
     renderView(fetchMock);
 
     await screen.findByRole("row", { name: /journey\.occasion/ });
-    expect(screen.getByRole("heading", { name: "Journey dimensions" })).toBeVisible();
-    expect(screen.getByText(/No experience-graph journeys observed yet/)).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Session dimensions" })).toBeVisible();
+    expect(screen.getByText(/No guided sessions observed yet/)).toBeVisible();
   });
 
   it("summarizes experience-graph categories and promotes one to a remembered question", async () => {
@@ -272,8 +272,8 @@ describe("QuestionsView", () => {
 
     fireEvent.click(within(lampRow).getByRole("button", { name: "Remember as question" }));
 
-    expect(await screen.findByLabelText("Key")).toHaveValue("journey.lamp");
-    expect(screen.getByLabelText("Question topic")).toHaveValue("Lamp journey need");
+    expect(await screen.findByLabelText("Key")).toHaveValue("session.lamp");
+    expect(screen.getByLabelText("Question topic")).toHaveValue("Lamp session need");
     expect(screen.getByLabelText("Operations")).toHaveValue(
       "/agent-negotiate/lamp, /agent-decide/lamp",
     );
@@ -282,8 +282,8 @@ describe("QuestionsView", () => {
   it("marks a dimension as remembered when its question already exists", async () => {
     const remembered: ContextFieldDefinition = {
       ...occasion,
-      key: "journey.lamp",
-      label: "Lamp journey need",
+      key: "session.lamp",
+      label: "Lamp session need",
       operations: ["/agent-negotiate/lamp", "/agent-decide/lamp"],
     };
     const { fetchMock } = mockApi([remembered]);
