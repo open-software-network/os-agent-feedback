@@ -44,13 +44,15 @@ use crate::{
         EnrichmentAnswerAction, EnrichmentAnswerBodySchema, EnrichmentAnswerInput,
         EnrichmentAnswerItemsSchema, EnrichmentAnswerResponse, EnrichmentCatalogEntry,
         EnrichmentConsentAction, EnrichmentConsentBodySchema, EnrichmentConsentDecisionInput,
-        EnrichmentConsentDecisionResponse, EnrichmentFieldDefinitionInput,
-        EnrichmentFieldDefinitionResponse, EnrichmentFieldListResponse, EnrichmentRequestInput,
-        EnrichmentRequestResponse, FeedbackFindingInput, FeedbackInteractionItem,
-        FeedbackInteractionsPage, FeedbackListInteractionsInput, FeedbackListReportsInput,
-        FeedbackOperationSummary, FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse,
-        FeedbackSummary, FeedbackSurfaceSummary, FeedbackWindow, GithubIssueLink, InsightCount,
-        Insights, InteractionTelemetryInput, MergeReportGroupsResponse, PersonalizationDecision,
+        EnrichmentConsentDecisionResponse, EnrichmentConstraintCatalog, EnrichmentConstraintField,
+        EnrichmentConstraintRetention, EnrichmentFieldDefinitionInput,
+        EnrichmentFieldDefinitionResponse, EnrichmentFieldListResponse,
+        EnrichmentRequestConstraints, EnrichmentRequestInput, EnrichmentRequestResponse,
+        FeedbackFindingInput, FeedbackInteractionItem, FeedbackInteractionsPage,
+        FeedbackListInteractionsInput, FeedbackListReportsInput, FeedbackOperationSummary,
+        FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse, FeedbackSummary,
+        FeedbackSurfaceSummary, FeedbackWindow, GithubIssueLink, InsightCount, Insights,
+        InteractionTelemetryInput, MergeReportGroupsResponse, PersonalizationDecision,
         PersonalizationDecisionInput, PersonalizationDecisionResponse, PersonalizationOutcome,
         PersonalizationOutcomeInput, PersonalizationOutcomeResponse, PolicyInput, Product,
         ProductActivationMilestones, ProductAuth, ProductEnvironment, ProductFeedbackReport,
@@ -9253,6 +9255,11 @@ struct EnrichmentRequestRow {
     surface: String,
     purpose: String,
     remember: bool,
+    handler_owner: String,
+    catalog_hash: Vec<u8>,
+    remember_allowed: bool,
+    remembered_max_days: i32,
+    unremembered_expires_at: DateTime<Utc>,
     consent_subject: String,
     expected_consent_revision: i64,
     identity_level: String,
@@ -9263,6 +9270,37 @@ struct EnrichmentRequestRow {
     expires_at: DateTime<Utc>,
     created_at: DateTime<Utc>,
 }
+
+async fn enrichment_contract_columns_available(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<bool, ApiError> {
+    Ok(sqlx::query_scalar(
+        r"SELECT COUNT(*) = 5 FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'enrichment_requests'
+            AND column_name IN ('handler_owner', 'catalog_hash', 'remember_allowed',
+              'remembered_max_days', 'unremembered_expires_at')",
+    )
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
+const ENRICHMENT_REQUEST_COLUMNS: &str = r"id, workspace_id, product_id, environment_id,
+ interaction_id, customer_id, surface, purpose, remember,
+ COALESCE(handler_owner, CASE WHEN surface = 'mcp' THEN 'company_mcp' ELSE 'same_origin_best_effort' END) AS handler_owner,
+ COALESCE(catalog_hash, decode(repeat('00', 32), 'hex')) AS catalog_hash,
+ COALESCE(remember_allowed, remember) AS remember_allowed,
+ COALESCE(remembered_max_days, (SELECT retention_days FROM product_environments WHERE id = enrichment_requests.environment_id)) AS remembered_max_days,
+ COALESCE(unremembered_expires_at, expires_at) AS unremembered_expires_at,
+ consent_subject, expected_consent_revision, identity_level, state, question, request_hash,
+ capability_nonce_hash, expires_at, created_at";
+
+const LEGACY_ENRICHMENT_REQUEST_COLUMNS: &str = r"id, workspace_id, product_id, environment_id,
+ interaction_id, customer_id, surface, purpose, remember,
+ CASE WHEN surface = 'mcp' THEN 'company_mcp' ELSE 'same_origin_best_effort' END AS handler_owner,
+ decode(repeat('00', 32), 'hex') AS catalog_hash, remember AS remember_allowed,
+ (SELECT retention_days FROM product_environments WHERE id = enrichment_requests.environment_id) AS remembered_max_days,
+ expires_at AS unremembered_expires_at, consent_subject, expected_consent_revision, identity_level,
+ state, question, request_hash, capability_nonce_hash, expires_at, created_at";
 
 #[derive(Debug, sqlx::FromRow)]
 struct ExistingEnrichmentInteractionRow {
@@ -9641,6 +9679,7 @@ fn enrichment_answer_action(
     public_base_url: &str,
     token: &str,
     catalog: Option<&RequestFieldCatalog>,
+    _handler_owner: &str,
 ) -> EnrichmentAnswerAction {
     let (catalog_version, entries, signal_types) = catalog.map_or_else(
         || {
@@ -9742,13 +9781,48 @@ fn enrichment_response(
         purpose: request.purpose.clone(),
         surface: request.surface.clone(),
         identity_level: request.identity_level.clone(),
+        constraints: EnrichmentRequestConstraints {
+            handler_owner: request.handler_owner.clone(),
+            purpose: request.purpose.clone(),
+            catalog: EnrichmentConstraintCatalog {
+                version: catalog.map_or_else(|| "v1".to_owned(), |value| value.version.clone()),
+                hash: request
+                    .catalog_hash
+                    .iter()
+                    .fold(String::new(), |mut hash, byte| {
+                        use std::fmt::Write as _;
+                        let _ = write!(hash, "{byte:02x}");
+                        hash
+                    }),
+            },
+            allowed_fields: catalog.map_or_else(Vec::new, |value| {
+                value
+                    .fields
+                    .iter()
+                    .map(|field| EnrichmentConstraintField {
+                        key: field.key.clone(),
+                        signal_type: field.signal_type.clone(),
+                        question_type: field.question_type.clone(),
+                        allowed_values: field.allowed_values.clone(),
+                    })
+                    .collect()
+            }),
+            retention: EnrichmentConstraintRetention {
+                remember_allowed: request.remember_allowed,
+                remember_selected: request.remember,
+                remembered_max_days: request.remembered_max_days,
+                unremembered_expires_at: request.unremembered_expires_at,
+            },
+        },
         stage_instruction: enrichment_stage_instruction(request),
         question: consent_required.then(|| request.question.clone()),
         answer_instruction: answer_ready
             .then(|| answer_instruction("this company", &request.purpose, request.remember)),
         expires_at: request.expires_at,
         consent: Some(enrichment_consent_action(public_base_url, token)),
-        submit: answer_ready.then(|| enrichment_answer_action(public_base_url, token, catalog)),
+        submit: answer_ready.then(|| {
+            enrichment_answer_action(public_base_url, token, catalog, &request.handler_owner)
+        }),
     }
 }
 
@@ -9836,6 +9910,24 @@ pub(crate) async fn create_enrichment_request(
     input: EnrichmentRequestInput,
 ) -> Result<EnrichmentRequestResponse, ApiError> {
     validate_enrichment_purpose(&input.purpose)?;
+    let handler_owner = input
+        .handler_owner
+        .as_deref()
+        .unwrap_or(if input.surface == "mcp" {
+            "company_mcp"
+        } else {
+            "same_origin_best_effort"
+        });
+    let owner_valid = match handler_owner {
+        "company_mcp" => input.surface == "mcp",
+        "same_origin_best_effort" => input.surface != "mcp",
+        _ => false,
+    };
+    if !owner_valid {
+        return Err(ApiError::bad_request(
+            "handlerOwner is not allowed for this surface and purpose",
+        ));
+    }
     let (interaction_surface, classification, confirmation_method) =
         validate_enrichment_surface(&input.surface)?;
     if input
@@ -9889,6 +9981,7 @@ pub(crate) async fn create_enrichment_request(
     let now = Utc::now();
     let expires_at = now + Duration::hours(2);
     let mut tx = pool.begin().await?;
+    let contract_columns_available = enrichment_contract_columns_available(&mut tx).await?;
     let key_hash = product_key_hash(&mut tx, auth).await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!(
@@ -9897,24 +9990,30 @@ pub(crate) async fn create_enrichment_request(
         ))
         .execute(&mut *tx)
         .await?;
-    let existing_request = sqlx::query_as::<_, EnrichmentRequestRow>(
-        r"SELECT id, workspace_id, product_id, environment_id, interaction_id,
-          customer_id, surface, purpose, remember, consent_subject, expected_consent_revision,
-          identity_level, state, question, request_hash, capability_nonce_hash,
-          expires_at, created_at
-        FROM enrichment_requests
-        WHERE environment_id = $1 AND interaction_id = $2 FOR UPDATE",
-    )
-    .bind(auth.environment.id)
-    .bind(input.interaction_id)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let existing_sql = format!(
+        "SELECT {} FROM enrichment_requests WHERE environment_id = $1 AND interaction_id = $2 FOR UPDATE",
+        if contract_columns_available {
+            ENRICHMENT_REQUEST_COLUMNS
+        } else {
+            LEGACY_ENRICHMENT_REQUEST_COLUMNS
+        }
+    );
+    let existing_request = sqlx::query_as::<_, EnrichmentRequestRow>(&existing_sql)
+        .bind(auth.environment.id)
+        .bind(input.interaction_id)
+        .fetch_optional(&mut *tx)
+        .await?;
     if let Some(request) = existing_request {
         if request.request_hash != request_hash || request.expires_at <= now {
             return Err(ApiError::conflict(
                 "interactionId was already used with a different or expired enrichment request",
             ));
         }
+        let catalog = load_verified_request_field_catalog(&mut tx, &request).await?;
+        let legacy = request.catalog_hash == vec![0_u8; 32];
+        let digest = (!legacy)
+            .then(|| enrichment_contract_digest(&request, &catalog))
+            .transpose()?;
         let (token, expected_nonce_hash) = sign_deterministic_enrichment_capability(
             auth.api_key_id,
             &key_hash,
@@ -9922,19 +10021,19 @@ pub(crate) async fn create_enrichment_request(
             request.interaction_id,
             request.created_at,
             request.expires_at,
+            digest.as_deref(),
         )?;
         if request.capability_nonce_hash != expected_nonce_hash {
             return Err(ApiError::conflict(
                 "This enrichment request cannot be retried with the current product key",
             ));
         }
-        let catalog = load_request_field_catalog(&mut tx, request.id, request.workspace_id).await?;
         tx.commit().await?;
         return Ok(enrichment_response(
             public_base_url,
             &request,
             &token,
-            catalog.as_ref(),
+            Some(&catalog),
         ));
     }
     let customer_id =
@@ -10177,14 +10276,6 @@ pub(crate) async fn create_enrichment_request(
     .fetch_one(&mut *tx)
     .await?;
     let proposed_request_id = Uuid::new_v4();
-    let (_, proposed_nonce_hash) = sign_deterministic_enrichment_capability(
-        auth.api_key_id,
-        &key_hash,
-        proposed_request_id,
-        input.interaction_id,
-        now,
-        expires_at,
-    )?;
     let field_catalog = resolve_enrichment_request_fields(
         &mut tx,
         auth,
@@ -10193,6 +10284,51 @@ pub(crate) async fn create_enrichment_request(
         input.field_keys.as_deref(),
     )
     .await?;
+    let catalog = field_catalog
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("missing request catalog"))?;
+    let catalog_hash = request_catalog_hash(catalog)?;
+    let remembered_max_days = sqlx::query_scalar::<_, i32>(
+        "SELECT retention_days FROM product_environments WHERE id = $1",
+    )
+    .bind(auth.environment.id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let proposed_contract = EnrichmentRequestRow {
+        id: proposed_request_id,
+        workspace_id: auth.workspace.id,
+        product_id: auth.environment.product_id,
+        environment_id: auth.environment.id,
+        interaction_id: input.interaction_id,
+        customer_id,
+        surface: input.surface.clone(),
+        purpose: input.purpose.clone(),
+        remember,
+        handler_owner: handler_owner.to_owned(),
+        catalog_hash: catalog_hash.clone(),
+        remember_allowed: remember,
+        remembered_max_days,
+        unremembered_expires_at: expires_at,
+        consent_subject: String::new(),
+        expected_consent_revision: 0,
+        identity_level: String::new(),
+        state: String::new(),
+        question: String::new(),
+        request_hash: Vec::new(),
+        capability_nonce_hash: Vec::new(),
+        expires_at,
+        created_at: now,
+    };
+    let contract_digest = enrichment_contract_digest(&proposed_contract, catalog)?;
+    let (_, proposed_nonce_hash) = sign_deterministic_enrichment_capability(
+        auth.api_key_id,
+        &key_hash,
+        proposed_request_id,
+        input.interaction_id,
+        now,
+        expires_at,
+        contract_columns_available.then_some(contract_digest.as_slice()),
+    )?;
     let field_labels = field_catalog.as_ref().map(|catalog| {
         catalog
             .fields
@@ -10217,9 +10353,12 @@ pub(crate) async fn create_enrichment_request(
         ON CONFLICT (environment_id, interaction_id) DO UPDATE SET
           id = enrichment_requests.id
         RETURNING id, workspace_id, product_id, environment_id, interaction_id,
-          customer_id, surface, purpose, remember, consent_subject, expected_consent_revision,
-          identity_level, state, question, request_hash, capability_nonce_hash,
-          expires_at, created_at",
+          customer_id, surface, purpose, remember,
+          CASE WHEN surface = 'mcp' THEN 'company_mcp' ELSE 'same_origin_best_effort' END AS handler_owner,
+          decode(repeat('00', 32), 'hex') AS catalog_hash, remember AS remember_allowed,
+          (SELECT retention_days FROM product_environments WHERE id = enrichment_requests.environment_id) AS remembered_max_days,
+          expires_at AS unremembered_expires_at, consent_subject, expected_consent_revision,
+          identity_level, state, question, request_hash, capability_nonce_hash, expires_at, created_at",
     )
     .bind(proposed_request_id)
     .bind(auth.workspace.id)
@@ -10243,6 +10382,29 @@ pub(crate) async fn create_enrichment_request(
     .bind(now)
     .fetch_one(&mut *tx)
     .await?;
+    let mut request = request;
+    if contract_columns_available {
+        sqlx::query(
+            r"UPDATE enrichment_requests SET handler_owner = $2, catalog_hash = $3,
+            remember_allowed = $4, remembered_max_days = $5, unremembered_expires_at = $6
+            WHERE id = $1",
+        )
+        .bind(request.id)
+        .bind(handler_owner)
+        .bind(&catalog_hash)
+        .bind(remember)
+        .bind(remembered_max_days)
+        // Keep the deadline at the microsecond precision round-tripped by
+        // Postgres rather than restoring the pre-insert nanoseconds.
+        .bind(request.expires_at)
+        .execute(&mut *tx)
+        .await?;
+        request.handler_owner = handler_owner.to_owned();
+        request.catalog_hash = catalog_hash;
+        request.remember_allowed = remember;
+        request.remembered_max_days = remembered_max_days;
+        request.unremembered_expires_at = request.expires_at;
+    }
     if request.request_hash != request_hash {
         return Err(ApiError::conflict(
             "interactionId was already used with a different enrichment request",
@@ -10258,6 +10420,12 @@ pub(crate) async fn create_enrichment_request(
         request.interaction_id,
         request.created_at,
         request.expires_at,
+        if contract_columns_available {
+            Some(enrichment_contract_digest(&request, catalog)?)
+        } else {
+            None
+        }
+        .as_deref(),
     )?;
     if request.capability_nonce_hash != expected_nonce_hash {
         return Err(ApiError::conflict(
@@ -10278,6 +10446,7 @@ async fn verified_enrichment_request(
     capability: &str,
 ) -> Result<(EnrichmentRequestRow, Vec<u8>), ApiError> {
     let parsed = parse_enrichment_capability(capability)?;
+    let key_id = parsed.key_id;
     let key_hash = sqlx::query_scalar::<_, Vec<u8>>(
         r"SELECT key_hash FROM api_keys WHERE id = $1 AND kind = 'write'
           AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())",
@@ -10287,21 +10456,39 @@ async fn verified_enrichment_request(
     .await?
     .ok_or_else(ApiError::unauthorized)?;
     let claims = verify_enrichment_capability(parsed, &key_hash, Utc::now())?;
-    let request = sqlx::query_as::<_, EnrichmentRequestRow>(
-        r"SELECT id, workspace_id, product_id, environment_id, interaction_id,
-          customer_id, surface, purpose, remember, consent_subject, expected_consent_revision,
-          identity_level, state, question, request_hash, capability_nonce_hash,
-          expires_at, created_at
-        FROM enrichment_requests WHERE id = $1 AND interaction_id = $2
-          AND api_key_id = $3 FOR UPDATE",
-    )
-    .bind(claims.q)
-    .bind(claims.i)
-    .bind(parsed_enrichment_key_id(capability)?)
-    .fetch_optional(&mut **tx)
-    .await?
-    .ok_or_else(ApiError::unauthorized)?;
+    let columns = if enrichment_contract_columns_available(tx).await? {
+        ENRICHMENT_REQUEST_COLUMNS
+    } else {
+        LEGACY_ENRICHMENT_REQUEST_COLUMNS
+    };
+    let request_sql = format!(
+        "SELECT {columns} FROM enrichment_requests WHERE id = $1 AND interaction_id = $2 AND api_key_id = $3 FOR UPDATE"
+    );
+    let request = sqlx::query_as::<_, EnrichmentRequestRow>(&request_sql)
+        .bind(claims.q)
+        .bind(claims.i)
+        .bind(parsed_enrichment_key_id(capability)?)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(ApiError::unauthorized)?;
     if request.expires_at <= Utc::now() || request.capability_nonce_hash != sha256(&claims.n) {
+        return Err(ApiError::unauthorized());
+    }
+    let catalog = load_verified_request_field_catalog(tx, &request).await?;
+    let legacy = request.catalog_hash == vec![0_u8; 32];
+    let digest = (!legacy)
+        .then(|| enrichment_contract_digest(&request, &catalog))
+        .transpose()?;
+    let (_, expected_nonce_hash) = sign_deterministic_enrichment_capability(
+        key_id,
+        &key_hash,
+        request.id,
+        request.interaction_id,
+        request.created_at,
+        request.expires_at,
+        digest.as_deref(),
+    )?;
+    if request.capability_nonce_hash != expected_nonce_hash {
         return Err(ApiError::unauthorized());
     }
     Ok((request, key_hash))
@@ -10314,13 +10501,13 @@ pub(crate) async fn inspect_enrichment_request(
 ) -> Result<EnrichmentRequestResponse, ApiError> {
     let mut tx = pool.begin().await?;
     let (request, _) = verified_enrichment_request(&mut tx, capability).await?;
-    let catalog = load_request_field_catalog(&mut tx, request.id, request.workspace_id).await?;
+    let catalog = load_verified_request_field_catalog(&mut tx, &request).await?;
     tx.commit().await?;
     Ok(enrichment_response(
         public_base_url,
         &request,
         capability,
-        catalog.as_ref(),
+        Some(&catalog),
     ))
 }
 
@@ -10434,8 +10621,7 @@ pub(crate) async fn decide_enrichment_consent(
     }
     let mut tx = pool.begin().await?;
     let (mut request, _) = verified_enrichment_request(&mut tx, capability).await?;
-    let field_catalog =
-        load_request_field_catalog(&mut tx, request.id, request.workspace_id).await?;
+    let field_catalog = load_verified_request_field_catalog(&mut tx, &request).await?;
     let auth = ProductAuth {
         workspace: sqlx::query_as("SELECT * FROM workspaces WHERE id = $1")
             .bind(request.workspace_id)
@@ -10453,6 +10639,11 @@ pub(crate) async fn decide_enrichment_consent(
     if let Some(remember) = input.remember
         && remember != request.remember
     {
+        if remember && !request.remember_allowed {
+            return Err(ApiError::bad_request(
+                "Consent cannot widen the request retention contract",
+            ));
+        }
         if request.state != "consent_required" {
             return Err(ApiError::conflict(
                 "Retention cannot change after customer context is approved",
@@ -10486,18 +10677,16 @@ pub(crate) async fn decide_enrichment_consent(
         request.consent_subject = subject;
         request.expected_consent_revision = revision;
         request.state = state;
-        let field_labels = field_catalog.as_ref().map(|catalog| {
-            catalog
-                .fields
-                .iter()
-                .map(|field| field.label.clone())
-                .collect::<Vec<_>>()
-        });
+        let field_labels = field_catalog
+            .fields
+            .iter()
+            .map(|field| field.label.clone())
+            .collect::<Vec<_>>();
         request.question = enrichment_question(
             &product_name,
             &request.purpose,
             remember,
-            field_labels.as_deref(),
+            Some(&field_labels),
         );
         sqlx::query(
             r"UPDATE enrichment_requests
@@ -10542,8 +10731,14 @@ pub(crate) async fn decide_enrichment_consent(
         stage_instruction: enrichment_stage_instruction(&request),
         answer_instruction: (request.state == "answer_ready")
             .then(|| answer_instruction("this company", &request.purpose, request.remember)),
-        submit: (request.state == "answer_ready")
-            .then(|| enrichment_answer_action(public_base_url, capability, field_catalog.as_ref())),
+        submit: (request.state == "answer_ready").then(|| {
+            enrichment_answer_action(
+                public_base_url,
+                capability,
+                Some(&field_catalog),
+                &request.handler_owner,
+            )
+        }),
     })
 }
 
@@ -10595,6 +10790,52 @@ impl From<&'static EnrichmentCatalogDefinition> for EnrichmentFieldSnapshot {
 struct RequestFieldCatalog {
     version: String,
     fields: Vec<EnrichmentFieldSnapshot>,
+}
+
+fn request_catalog_hash(catalog: &RequestFieldCatalog) -> Result<Vec<u8>, ApiError> {
+    let snapshot = serde_json::to_value(&catalog.fields).map_err(ApiError::internal)?;
+    Ok(sha256_bytes(
+        &serde_json::to_vec(&serde_json::json!({
+            "version": catalog.version,
+            "fields": snapshot,
+        }))
+        .map_err(ApiError::internal)?,
+    ))
+}
+
+fn enrichment_contract_digest(
+    request: &EnrichmentRequestRow,
+    catalog: &RequestFieldCatalog,
+) -> Result<Vec<u8>, ApiError> {
+    let expected_owner = if request.surface == "mcp" {
+        "company_mcp"
+    } else {
+        "same_origin_best_effort"
+    };
+    if request.handler_owner != expected_owner
+        || (request.remember && !request.remember_allowed)
+        || request.remembered_max_days < 0
+        || request.unremembered_expires_at > request.expires_at
+        || request.catalog_hash.len() != 32
+        || request.catalog_hash != request_catalog_hash(catalog)?
+    {
+        return Err(ApiError::conflict(
+            "Stored customer context contract is invalid",
+        ));
+    }
+    let canonical = serde_json::json!({
+        "owner": request.handler_owner,
+        "surface": request.surface,
+        "purpose": request.purpose,
+        "catalogVersion": catalog.version,
+        "catalogHash": URL_SAFE_NO_PAD.encode(&request.catalog_hash),
+        "rememberAllowed": request.remember_allowed,
+        "rememberedMaxDays": request.remembered_max_days,
+        "unrememberedExpiresAt": request.unremembered_expires_at.timestamp_micros(),
+    });
+    Ok(sha256_bytes(
+        &serde_json::to_vec(&canonical).map_err(ApiError::internal)?,
+    ))
 }
 
 fn legacy_field_catalog() -> Vec<EnrichmentFieldSnapshot> {
@@ -10750,7 +10991,10 @@ async fn resolve_enrichment_request_fields(
                 "Customer context field selection is unavailable until the latest migration is applied",
             ))
         } else {
-            Ok(None)
+            Ok(Some(RequestFieldCatalog {
+                version: "v1".to_owned(),
+                fields: legacy_field_catalog(),
+            }))
         };
     }
     let definitions =
@@ -10758,7 +11002,10 @@ async fn resolve_enrichment_request_fields(
             .await?;
     let custom_catalog = !definitions.is_empty();
     if !custom_catalog && field_keys.is_none() {
-        return Ok(None);
+        return Ok(Some(RequestFieldCatalog {
+            version: "v1".to_owned(),
+            fields: legacy_field_catalog(),
+        }));
     }
     let version = if custom_catalog { "product:v1" } else { "v1" };
     let mut selected = Vec::new();
@@ -10878,6 +11125,39 @@ async fn load_request_field_catalog(
             .map_err(ApiError::internal)
     })
     .transpose()
+}
+
+async fn load_verified_request_field_catalog(
+    tx: &mut Transaction<'_, Postgres>,
+    request: &EnrichmentRequestRow,
+) -> Result<RequestFieldCatalog, ApiError> {
+    let catalog = load_request_field_catalog(tx, request.id, request.workspace_id).await?;
+    if let Some(catalog) = catalog {
+        // Requests predating migration 0043 can have a migration-0040 snapshot,
+        // but no historical request-bound hash. Preserve that immutable snapshot
+        // under the explicit legacy sentinel; every new request must verify.
+        if request.catalog_hash == vec![0_u8; 32] {
+            return Ok(catalog);
+        }
+        let actual = request_catalog_hash(&catalog)?;
+        if actual.as_slice() != request.catalog_hash.as_slice() {
+            return Err(ApiError::conflict(
+                "Stored customer context catalog is invalid",
+            ));
+        }
+        return Ok(catalog);
+    }
+    // Pre-contract requests without a migration-0040 snapshot use the built-in
+    // legacy catalog for compatibility.
+    if request.catalog_hash == vec![0_u8; 32] {
+        return Ok(RequestFieldCatalog {
+            version: "legacy:v1".to_owned(),
+            fields: legacy_field_catalog(),
+        });
+    }
+    Err(ApiError::conflict(
+        "Stored customer context catalog is missing",
+    ))
 }
 
 fn validate_field_definition_input(
@@ -11365,15 +11645,8 @@ pub(crate) async fn submit_enrichment_answer(
     }
     let mut tx = pool.begin().await?;
     let (request, _) = verified_enrichment_request(&mut tx, capability).await?;
-    let field_catalog =
-        load_request_field_catalog(&mut tx, request.id, request.workspace_id).await?;
-    let legacy_catalog;
-    let catalog_fields: &[EnrichmentFieldSnapshot] = if let Some(catalog) = &field_catalog {
-        &catalog.fields
-    } else {
-        legacy_catalog = legacy_field_catalog();
-        &legacy_catalog
-    };
+    let field_catalog = load_verified_request_field_catalog(&mut tx, &request).await?;
+    let catalog_fields = field_catalog.fields.as_slice();
     for item in &input.items {
         validate_enrichment_item(item, &request.purpose, catalog_fields)?;
     }
@@ -11437,7 +11710,7 @@ pub(crate) async fn submit_enrichment_answer(
     .bind(&payload_hash)
     .execute(&mut *tx)
     .await?;
-    let retained_until = Utc::now()
+    let current_retained_until = Utc::now()
         + Duration::days(i64::from(
             sqlx::query_scalar::<_, i32>(
                 "SELECT retention_days FROM product_environments WHERE id = $1",
@@ -11446,18 +11719,21 @@ pub(crate) async fn submit_enrichment_answer(
             .fetch_one(&mut *tx)
             .await?,
         ));
+    let snapshotted_retained_until =
+        request.created_at + Duration::days(i64::from(request.remembered_max_days));
+    let retained_until = current_retained_until.min(snapshotted_retained_until);
     for (index, item) in input.items.iter().enumerate() {
         let definition = validate_enrichment_item(item, &request.purpose, catalog_fields)?;
         let default_expiry = if item.remember {
             retained_until
         } else {
-            request.expires_at
+            request.unremembered_expires_at
         };
         let expires_at = item.expires_at.unwrap_or(default_expiry);
         let maximum_expiry = if item.remember {
             retained_until
         } else {
-            request.expires_at.min(retained_until)
+            request.unremembered_expires_at.min(retained_until)
         };
         if expires_at <= Utc::now() || expires_at > maximum_expiry {
             return Err(ApiError::bad_request(
@@ -11487,9 +11763,7 @@ pub(crate) async fn submit_enrichment_answer(
             "remembered": item.remember,
             "purpose": request.purpose,
             "enrichmentType": definition.effective_type(),
-            "catalogVersion": field_catalog
-                .as_ref()
-                .map_or("v1", |catalog| catalog.version.as_str()),
+            "catalogVersion": field_catalog.version,
         }))
         .bind(&item.provenance)
         .bind(item.confidence)
@@ -16672,26 +16946,46 @@ mod product_tests {
                 .execute(&pool)
                 .await?;
             }
+            let enrichment_request_id = Uuid::new_v4();
+            let enrichment_catalog = RequestFieldCatalog {
+                version: "v1".to_owned(),
+                fields: legacy_field_catalog(),
+            };
+            let enrichment_catalog_hash =
+                request_catalog_hash(&enrichment_catalog).map_err(test_error)?;
             sqlx::query(
                 r"INSERT INTO enrichment_requests
                 (id, workspace_id, product_id, environment_id, interaction_id,
                  surface, purpose, remember, consent_subject, identity_level, state,
                  operation, question_key, question, request_hash, capability_nonce_hash,
-                 expires_at, created_at, updated_at)
+                 expires_at, created_at, updated_at, handler_owner, catalog_hash,
+                 remember_allowed, remembered_max_days, unremembered_expires_at)
                 VALUES ($1, $2, $3, $4, $5, 'mcp', 'product_personalization', FALSE,
                   'afint1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'ephemeral',
                   'consent_required', 'checkout', 'customer_context.v1',
                   'What should the product prioritize for this customer?',
                   decode(repeat('ab', 32), 'hex'), decode(repeat('cd', 32), 'hex'),
-                  $6, $7, $7)",
+                  $6, $7, $7, 'same_origin_best_effort', $8, FALSE, 30, $6)",
             )
-            .bind(Uuid::new_v4())
+            .bind(enrichment_request_id)
             .bind(workspace.id)
             .bind(product.id)
             .bind(environment.id)
             .bind(checkout)
             .bind(now + Duration::hours(1))
             .bind(now - Duration::minutes(4))
+            .bind(enrichment_catalog_hash)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                r"INSERT INTO enrichment_request_fields
+                (request_id, workspace_id, catalog_version, snapshot)
+                VALUES ($1, $2, $3, $4)",
+            )
+            .bind(enrichment_request_id)
+            .bind(workspace.id)
+            .bind(&enrichment_catalog.version)
+            .bind(serde_json::to_value(&enrichment_catalog.fields)?)
             .execute(&pool)
             .await?;
 
@@ -20069,6 +20363,11 @@ mod product_tests {
             surface: "http_json".into(),
             purpose: "targeted_advertising".into(),
             remember: false,
+            handler_owner: "same_origin_best_effort".into(),
+            catalog_hash: vec![0; 32],
+            remember_allowed: false,
+            remembered_max_days: 0,
+            unremembered_expires_at: Utc::now() + Duration::hours(2),
             consent_subject: transient,
             expected_consent_revision: 0,
             identity_level: "verified".into(),
@@ -20143,7 +20442,9 @@ mod product_tests {
         let result = Box::pin(async {
             let interaction_id = Uuid::new_v4();
             let request_input = EnrichmentRequestInput {
-                interaction_id,                field_keys: None,
+                interaction_id,
+                handler_owner: None,
+                field_keys: None,
                 operation: "/search".into(),
                 surface: "html".into(),
                 status_code: Some(200),
@@ -20171,7 +20472,7 @@ mod product_tests {
                     &auth_a,
                     TEST_IDENTITY_HMAC_SECRET,
                     "https://app.epode.ai",
-                    request_input,
+                    request_input.clone(),
                 )
             );
             let request = first_request.map_err(test_error)?;
@@ -20188,6 +20489,54 @@ mod product_tests {
             anyhow::ensure!(request.identity_level == "pseudonymous");
             anyhow::ensure!(request.surface == "html");
             anyhow::ensure!(request.submit.is_none() && request.consent.is_some());
+
+            // Simulate a row created before the immutable contract columns were
+            // available. Its request hash uses the original v1 material, and
+            // its capability nonce is not bound to a contract digest.
+            let (created_at, expires_at) = sqlx::query_as::<
+                _,
+                (DateTime<Utc>, DateTime<Utc>),
+            >("SELECT created_at, expires_at FROM enrichment_requests WHERE id = $1")
+            .bind(request.request_id)
+            .fetch_one(&pool)
+            .await?;
+            let key_hash = sqlx::query_scalar::<_, Vec<u8>>(
+                "SELECT key_hash FROM api_keys WHERE id = $1",
+            )
+            .bind(auth_a.api_key_id)
+            .fetch_one(&pool)
+            .await?;
+            let (_, legacy_nonce_hash) = sign_deterministic_enrichment_capability(
+                auth_a.api_key_id,
+                &key_hash,
+                request.request_id,
+                interaction_id,
+                created_at,
+                expires_at,
+                None,
+            )
+            .map_err(test_error)?;
+            sqlx::query(
+                r"UPDATE enrichment_requests SET handler_owner = NULL, catalog_hash = NULL,
+                  remember_allowed = NULL, remembered_max_days = NULL,
+                  unremembered_expires_at = NULL, capability_nonce_hash = $2
+                WHERE id = $1",
+            )
+            .bind(request.request_id)
+            .bind(legacy_nonce_hash)
+            .execute(&pool)
+            .await?;
+            let bridge_retry = create_enrichment_request(
+                &pool,
+                &auth_a,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.epode.ai",
+                request_input.clone(),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(bridge_retry.request_id == request.request_id);
+
             let first_interaction = sqlx::query_as::<
                 _,
                 (String, String, Option<String>, Option<i32>, Option<i64>, Option<String>, Option<Uuid>),
@@ -20206,7 +20555,7 @@ mod product_tests {
             anyhow::ensure!(first_interaction.4 == Some(24));
             anyhow::ensure!(first_interaction.5.as_deref() == Some("codex/1"));
             anyhow::ensure!(first_interaction.6.is_some());
-            let capability = request
+            let capability = bridge_retry
                 .consent
                 .as_ref()
                 .and_then(|action| action.authorization.strip_prefix("Bearer "))
@@ -20393,6 +20742,7 @@ mod product_tests {
                 "https://app.epode.ai",
                 EnrichmentRequestInput {
                     interaction_id: mcp_interaction_id,
+                    handler_owner: None,
                     field_keys: None,
                     operation: "catalog_search".into(),
                     surface: "mcp".into(),
@@ -20507,6 +20857,7 @@ mod product_tests {
                 "https://app.epode.ai",
                 EnrichmentRequestInput {
                     interaction_id: resolved_interaction_id,
+                    handler_owner: None,
                     field_keys: None,
                     operation: "/search".into(),
                     surface: "http_json".into(),
@@ -20699,6 +21050,7 @@ mod product_tests {
                 "https://app.epode.ai",
                 EnrichmentRequestInput {
                     interaction_id: Uuid::new_v4(),
+                    handler_owner: None,
                     field_keys: None,
                     operation: "/recommend".into(),
                     surface: "mcp".into(),
@@ -20769,6 +21121,7 @@ mod product_tests {
                 "https://app.epode.ai",
                 EnrichmentRequestInput {
                     interaction_id: transient_known_interaction,
+                    handler_owner: None,
                     field_keys: None,
                     operation: "/recommend".into(),
                     surface: "http_json".into(),
@@ -20829,6 +21182,7 @@ mod product_tests {
                 "https://app.epode.ai",
                 EnrichmentRequestInput {
                     interaction_id: Uuid::new_v4(),
+                    handler_owner: None,
                     field_keys: None,
                     operation: "/recommend".into(),
                     surface: "http_json".into(),
@@ -20887,6 +21241,7 @@ mod product_tests {
                 "https://app.epode.ai",
                 EnrichmentRequestInput {
                     interaction_id: transient_anonymous_interaction,
+                    handler_owner: None,
                     field_keys: None,
                     operation: "/recommend".into(),
                     surface: "http_json".into(),
@@ -20956,6 +21311,7 @@ mod product_tests {
             preexisting_tx.commit().await?;
             let preexisting_input = EnrichmentRequestInput {
                 interaction_id: preexisting_interaction_id,
+                handler_owner: None,
                 field_keys: None,
                 operation: "/preexisting".into(),
                 surface: "http_json".into(),
@@ -21016,6 +21372,7 @@ mod product_tests {
                 "https://app.epode.ai",
                 EnrichmentRequestInput {
                     interaction_id: Uuid::new_v4(),
+                    handler_owner: None,
                     field_keys: None,
                     operation: "/consent-merge".into(),
                     surface: "http_json".into(),
@@ -21102,6 +21459,7 @@ mod product_tests {
                 "https://app.epode.ai",
                 EnrichmentRequestInput {
                     interaction_id: Uuid::new_v4(),
+                    handler_owner: None,
                     field_keys: None,
                     operation: "/consent-merge".into(),
                     surface: "http_json".into(),
@@ -21144,6 +21502,7 @@ mod product_tests {
                 "https://app.epode.ai",
                 EnrichmentRequestInput {
                     interaction_id: Uuid::new_v4(),
+                    handler_owner: None,
                     field_keys: None,
                     operation: "/consent-merge".into(),
                     surface: "http_json".into(),
@@ -21241,6 +21600,7 @@ mod product_tests {
             let conflicting_request_interaction = Uuid::new_v4();
             let conflicting_request = EnrichmentRequestInput {
                 interaction_id: conflicting_request_interaction,
+                handler_owner: None,
                 field_keys: None,
                 operation: "/recommend".into(),
                 surface: "http_json".into(),
@@ -21370,6 +21730,7 @@ mod product_tests {
                 "https://app.epode.ai",
                 EnrichmentRequestInput {
                     interaction_id: ephemeral_interaction_id,
+                    handler_owner: None,
                     field_keys: None,
                     operation: "/recommend".into(),
                     surface: "http_json".into(),
@@ -21572,6 +21933,7 @@ mod product_tests {
         let request_input =
             |operation: &str, field_keys: Option<Vec<String>>| EnrichmentRequestInput {
                 interaction_id: Uuid::new_v4(),
+                handler_owner: None,
                 operation: operation.into(),
                 field_keys,
                 surface: "mcp".into(),
@@ -21944,14 +22306,29 @@ mod product_tests {
                     question.contains("relevant, non-sensitive preferences")
                 })
             );
-            anyhow::ensure!(
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*) FROM enrichment_request_fields WHERE request_id = $1",
+            let (legacy_version, legacy_snapshot, legacy_hash) =
+                sqlx::query_as::<_, (String, serde_json::Value, Vec<u8>)>(
+                    r"SELECT fields.catalog_version, fields.snapshot, requests.catalog_hash
+                    FROM enrichment_request_fields fields
+                    JOIN enrichment_requests requests
+                      ON requests.id = fields.request_id
+                     AND requests.workspace_id = fields.workspace_id
+                    WHERE fields.request_id = $1",
                 )
                 .bind(legacy_request.request_id)
                 .fetch_one(&pool)
-                .await?
-                    == 0
+                .await?;
+            let expected_legacy_catalog = RequestFieldCatalog {
+                version: "v1".to_owned(),
+                fields: legacy_field_catalog(),
+            };
+            anyhow::ensure!(legacy_version == expected_legacy_catalog.version);
+            anyhow::ensure!(
+                legacy_snapshot == serde_json::to_value(&expected_legacy_catalog.fields)?
+            );
+            anyhow::ensure!(
+                legacy_hash
+                    == request_catalog_hash(&expected_legacy_catalog).map_err(test_error)?
             );
             let (legacy_consent, _) = enrichment_test_approve_and_answer(
                 &pool,
