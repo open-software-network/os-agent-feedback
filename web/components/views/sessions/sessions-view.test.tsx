@@ -53,6 +53,7 @@ describe("SessionsView", () => {
         selectSession={selectSession}
         openFeedback={openFeedback}
         openInteraction={openInteraction}
+        openCustomer={vi.fn()}
         loadMore={vi.fn()}
         refresh={vi.fn().mockResolvedValue(undefined)}
       />,
@@ -136,6 +137,7 @@ describe("SessionsView", () => {
         selectSession={vi.fn()}
         openFeedback={vi.fn()}
         openInteraction={vi.fn()}
+        openCustomer={vi.fn()}
         loadMore={vi.fn()}
         refresh={vi.fn().mockResolvedValue(undefined)}
       />,
@@ -160,6 +162,7 @@ describe("SessionsView", () => {
         selectSession={selectSession}
         openFeedback={vi.fn()}
         openInteraction={vi.fn()}
+        openCustomer={vi.fn()}
         loadMore={vi.fn()}
         refresh={vi.fn().mockResolvedValue(undefined)}
       />,
@@ -196,15 +199,105 @@ describe("SessionsView", () => {
         selectSession={vi.fn()}
         openFeedback={vi.fn()}
         openInteraction={vi.fn()}
+        openCustomer={vi.fn()}
         refresh={vi.fn().mockResolvedValue(undefined)}
       />,
     );
 
     const row = screen.getByRole("row", { name: new RegExp(base.sessions[0].refHint) });
     expect(within(row).getByText("user-checkout")).toBeVisible();
-    expect(within(row).getByText("Verified")).toBeVisible();
+    expect(within(row).getByText("Known")).toBeVisible();
+    expect(within(row).queryByText("Verified")).not.toBeInTheDocument();
     expect(within(row).queryByText("Unresolved actor")).not.toBeInTheDocument();
     expect(within(row).queryByText("Identity not resolved")).not.toBeInTheDocument();
+  });
+
+  it("uses the shared anonymous label for pseudonymous customers", () => {
+    const base = dashboardFixture();
+    const data = dashboardFixture({
+      sessions: [
+        {
+          ...base.sessions[0],
+          customerRef: null,
+          customerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          customerDisplayName: "anonymous--d8MjbUf",
+          identityLevel: "pseudonymous",
+        },
+      ],
+    });
+
+    renderWithQuery(
+      <SessionsView
+        data={data}
+        selectedSessionId={null}
+        selectSession={vi.fn()}
+        openFeedback={vi.fn()}
+        openInteraction={vi.fn()}
+        openCustomer={vi.fn()}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    const row = screen.getByRole("row", { name: new RegExp(base.sessions[0].refHint) });
+    expect(within(row).getByText("Anonymous")).toBeVisible();
+    expect(within(row).queryByText("Pseudonymous")).not.toBeInTheDocument();
+  });
+
+  it("opens the linked customer from the row and the session inspector", async () => {
+    const base = dashboardFixture();
+    const session = base.sessions[0];
+    vi.stubGlobal(
+      "fetch",
+      sessionFetch(base, { session, interactions: [base.interactions[0]], reports: [] }),
+    );
+    const openCustomer = vi.fn();
+    const selectSession = vi.fn();
+
+    renderWithQuery(
+      <SessionsView
+        data={base}
+        selectedSessionId={null}
+        selectSession={selectSession}
+        openFeedback={vi.fn()}
+        openInteraction={vi.fn()}
+        openCustomer={openCustomer}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: `Open customer ${session.customerDisplayName}` }),
+    );
+    expect(openCustomer).toHaveBeenCalledWith(session.customerId);
+    expect(selectSession).not.toHaveBeenCalled();
+  });
+
+  it("links the session inspector to the observed customer", async () => {
+    const base = dashboardFixture();
+    const session = base.sessions[0];
+    vi.stubGlobal(
+      "fetch",
+      sessionFetch(base, { session, interactions: [base.interactions[0]], reports: [] }),
+    );
+    const openCustomer = vi.fn();
+
+    renderWithQuery(
+      <SessionsView
+        data={base}
+        selectedSessionId={session.id}
+        selectSession={vi.fn()}
+        openFeedback={vi.fn()}
+        openInteraction={vi.fn()}
+        openCustomer={openCustomer}
+        refresh={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(await screen.findByRole("region", { name: "Observed activity" })).toBeVisible();
+    expect(screen.getAllByText("Customer").some((element) => element.tagName === "DT")).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: session.customerDisplayName as string }));
+
+    expect(openCustomer).toHaveBeenCalledWith(session.customerId);
   });
 
   it("uses complete server rollups when interaction and report windows do not overlap", async () => {
@@ -235,6 +328,7 @@ describe("SessionsView", () => {
         selectSession={vi.fn()}
         openFeedback={vi.fn()}
         openInteraction={vi.fn()}
+        openCustomer={vi.fn()}
         loadMore={vi.fn()}
         refresh={vi.fn().mockResolvedValue(undefined)}
       />,
@@ -266,6 +360,7 @@ describe("SessionsView", () => {
         selectSession={vi.fn()}
         openFeedback={vi.fn()}
         openInteraction={vi.fn()}
+        openCustomer={vi.fn()}
         refresh={vi.fn().mockResolvedValue(undefined)}
       />,
     );
@@ -300,6 +395,7 @@ describe("SessionsView", () => {
         selectSession={vi.fn()}
         openFeedback={vi.fn()}
         openInteraction={vi.fn()}
+        openCustomer={vi.fn()}
         refresh={vi.fn().mockResolvedValue(undefined)}
       />,
     );
@@ -329,6 +425,7 @@ describe("SessionsView", () => {
         selectSession={vi.fn()}
         openFeedback={vi.fn()}
         openInteraction={vi.fn()}
+        openCustomer={vi.fn()}
         refresh={vi.fn().mockResolvedValue(undefined)}
       />,
     );
@@ -389,6 +486,7 @@ describe("SessionsView", () => {
         selectSession={vi.fn()}
         openFeedback={vi.fn()}
         openInteraction={vi.fn()}
+        openCustomer={vi.fn()}
         refresh={vi.fn().mockResolvedValue(undefined)}
       />,
     );

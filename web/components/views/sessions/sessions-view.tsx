@@ -7,6 +7,7 @@ import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { useEffect, useMemo, useState } from "react";
 
 import { DetailRail, DetailWorkspace } from "@/components/dashboard/detail-rail";
+import { identityLabel } from "@/components/dashboard/intelligence-badges";
 import { MetricStrip } from "@/components/dashboard/metric-strip";
 import { EmptyState, ErrorState, NativeSelect } from "@/components/dashboard/view-primitives";
 import { Badge } from "@/components/ui/badge";
@@ -188,6 +189,7 @@ export function SessionsView({
   selectSession,
   openFeedback,
   openInteraction,
+  openCustomer,
   refresh,
 }: {
   data: DashboardData;
@@ -195,6 +197,7 @@ export function SessionsView({
   selectSession: (sessionId: string | null) => void;
   openFeedback: (reportId: string) => void;
   openInteraction: (interactionId: string) => void;
+  openCustomer: (customerId: string) => void;
   /** @deprecated Pagination is now owned by the server-backed list query. */
   loadMore?: () => void;
   refresh: () => Promise<unknown>;
@@ -298,11 +301,13 @@ export function SessionsView({
           <SessionInspector
             requestedId={selectedSessionId}
             detail={detail.data}
+            summary={sessionRows.find((entry) => entry.id === selectedSessionId)}
             error={detail.isError ? detail.error : null}
             close={() => selectSession(null)}
             retry={() => detail.refetch()}
             openFeedback={openFeedback}
             openInteraction={openInteraction}
+            openCustomer={openCustomer}
           />
         ) : null
       }
@@ -407,6 +412,7 @@ export function SessionsView({
                   session={session}
                   selected={selectedSessionId === session.id}
                   onOpen={() => selectSession(session.id)}
+                  openCustomer={openCustomer}
                 />
               ))}
             </TableBody>
@@ -621,11 +627,15 @@ function SessionRow({
   session,
   selected,
   onOpen,
+  openCustomer,
 }: {
   session: EnrichedSessionSummary;
   selected: boolean;
   onOpen: () => void;
+  openCustomer: (customerId: string) => void;
 }) {
+  const customerName = session.customerDisplayName ?? session.customerRef ?? "Unresolved actor";
+
   return (
     <TableRow
       data-state={selected ? "selected" : undefined}
@@ -657,11 +667,23 @@ function SessionRow({
         </p>
       </TableCell>
       <TableCell className="overflow-hidden">
-        <p className="truncate text-xs font-medium">
-          {session.customerDisplayName ?? session.customerRef ?? "Unresolved actor"}
-        </p>
+        {session.customerId ? (
+          <Button
+            variant="link"
+            className="h-auto max-w-full justify-start truncate p-0 text-xs font-medium"
+            aria-label={`Open customer ${customerName}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              openCustomer(session.customerId as string);
+            }}
+          >
+            {customerName}
+          </Button>
+        ) : (
+          <p className="truncate text-xs font-medium">{customerName}</p>
+        )}
         <p className="mt-1 truncate text-xs text-muted-foreground">
-          {session.identityLevel ? titleCase(session.identityLevel) : "Identity not resolved"}
+          {session.identityLevel ? identityLabel(session.identityLevel) : "Identity not resolved"}
         </p>
       </TableCell>
       <TableCell className="text-xs">{session.interactionCount}</TableCell>
@@ -678,19 +700,23 @@ function SessionRow({
 function SessionInspector({
   requestedId,
   detail,
+  summary,
   error,
   close,
   retry,
   openFeedback,
   openInteraction,
+  openCustomer,
 }: {
   requestedId: string;
   detail?: DashboardSessionDetail;
+  summary?: EnrichedSessionSummary;
   error: Error | null;
   close: () => void;
   retry: () => Promise<unknown>;
   openFeedback: (reportId: string) => void;
   openInteraction: (interactionId: string) => void;
+  openCustomer: (customerId: string) => void;
 }) {
   return (
     <DetailRail open onClose={close} label="Session detail">
@@ -712,8 +738,10 @@ function SessionInspector({
           ) : detail?.session ? (
             <SessionJourney
               detail={detail}
+              summary={summary}
               openFeedback={openFeedback}
               openInteraction={openInteraction}
+              openCustomer={openCustomer}
             />
           ) : (
             <p className="text-sm text-muted-foreground" role="status">
@@ -728,12 +756,16 @@ function SessionInspector({
 
 function SessionJourney({
   detail,
+  summary,
   openFeedback,
   openInteraction,
+  openCustomer,
 }: {
   detail: DashboardSessionDetail;
+  summary?: EnrichedSessionSummary;
   openFeedback: (reportId: string) => void;
   openInteraction: (interactionId: string) => void;
+  openCustomer: (customerId: string) => void;
 }) {
   const reportsByInteraction = new Map(
     detail.reports.map((report) => [report.interactionId, report]),
@@ -741,6 +773,9 @@ function SessionJourney({
   const interactions = [...detail.interactions].sort((left, right) =>
     left.occurredAt.localeCompare(right.occurredAt),
   );
+  const customerName = summary
+    ? (summary.customerDisplayName ?? summary.customerRef ?? null)
+    : null;
 
   return (
     <>
@@ -756,6 +791,22 @@ function SessionJourney({
         <dd>{formatDate(detail.session.startedAt)}</dd>
         <dt className="text-muted-foreground">Source</dt>
         <dd>{interfaceLabel(detail.session.source)}</dd>
+        <dt className="text-muted-foreground">Customer</dt>
+        <dd>
+          {summary?.customerId && customerName ? (
+            <Button
+              variant="link"
+              className="h-auto justify-start p-0 text-xs font-medium"
+              onClick={() => openCustomer(summary.customerId as string)}
+            >
+              {customerName}
+            </Button>
+          ) : summary ? (
+            (customerName ?? "Unresolved actor")
+          ) : (
+            "—"
+          )}
+        </dd>
         <dt className="text-muted-foreground">Observed for</dt>
         <dd>{sessionDuration(detail.session.startedAt, detail.session.lastSeenAt)}</dd>
         <dt className="text-muted-foreground">Interactions</dt>

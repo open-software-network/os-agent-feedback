@@ -228,6 +228,7 @@ function sessionsView(data: DashboardData) {
       selectSession={vi.fn()}
       openFeedback={vi.fn()}
       openInteraction={vi.fn()}
+      openCustomer={vi.fn()}
       refresh={vi.fn().mockResolvedValue(undefined)}
     />
   );

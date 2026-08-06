@@ -1036,22 +1036,26 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await page.screenshot({ path: path.join(artifactDirectory, "05-session.png"), fullPage: true });
   await page.click('button[aria-label="Close session detail"]');
 
+  await page.click('button[aria-label="Open customer Acme workspace"]');
+  await textVisible(page, "What we've observed");
+  assert.equal(
+    new URL(page.url()).searchParams.get("view"),
+    "customers",
+    "the sessions table customer link must open the customers view",
+  );
+  await page.click('button[aria-label="Close customer detail"]');
+
   await clickText(page, "Customers");
   await page.waitForSelector('input[aria-label="Search customers"]', { visible: true });
   await metricVisible(page, "Customers", "1");
   await metricVisible(page, "Known", "1");
   await clickText(page, "Acme workspace");
-  await textVisible(page, "How we know this customer");
-  await textVisible(page, "First-party browser ID");
-  await textVisible(page, "Observed traits");
-  await textVisible(page, "Never identity");
-  await textVisible(page, "Agent network address");
-  await textVisible(page, "Recent activity");
-  await textVisible(page, "Latest activity");
   await textVisible(page, "What we've observed");
   await textVisible(page, "Freshness");
+  await textVisible(page, "Request traits");
+  await textVisible(page, "Never identity");
+  await textVisible(page, "Agent network address");
   await textVisible(page, "Sessions");
-  await textVisible(page, "deliberately remembers");
   await page.screenshot({ path: path.join(artifactDirectory, "02-customers.png"), fullPage: true });
   const customerDetail = await fixtureRequest(
     state,

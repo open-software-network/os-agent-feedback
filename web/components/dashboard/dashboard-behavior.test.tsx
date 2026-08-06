@@ -770,6 +770,7 @@ describe("dashboard view behavior", () => {
         selectSession={vi.fn()}
         openFeedback={vi.fn()}
         openInteraction={vi.fn()}
+        openCustomer={vi.fn()}
         loadMore={vi.fn()}
         refresh={vi.fn().mockResolvedValue(undefined)}
       />,
@@ -785,6 +786,7 @@ describe("dashboard view behavior", () => {
         selectSession={selectSession}
         openFeedback={vi.fn()}
         openInteraction={vi.fn()}
+        openCustomer={vi.fn()}
         loadMore={vi.fn()}
         refresh={vi.fn().mockResolvedValue(undefined)}
       />,
