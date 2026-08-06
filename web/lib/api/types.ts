@@ -7115,7 +7115,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Question and permission action selected for the interaction */
+            /** @description Submit-ready customer context contract for the interaction */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -7171,7 +7171,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Current enrichment request stage and safe user-facing question */
+            /** @description Current enrichment request stage and submission contract */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -7213,7 +7213,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Enrichment permission decision recorded idempotently */
+            /** @description Explicit enrichment opt-out or compatibility approval recorded idempotently */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -7291,7 +7291,7 @@ export interface operations {
                     "application/json": components["schemas"]["ApiErrorEnvelope"];
                 };
             };
-            /** @description Customer context sharing is not approved */
+            /** @description Customer context sharing was declined or is inactive */
             403: {
                 headers: {
                     [name: string]: unknown;
