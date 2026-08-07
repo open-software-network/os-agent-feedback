@@ -18,4 +18,4 @@ if ! pg_isready -d "$DATABASE_URL" >/dev/null 2>&1; then
 fi
 (cd backend && cargo test --locked -- --ignored --test-threads=1)
 
-gh signoff backend
+signoff_post backend

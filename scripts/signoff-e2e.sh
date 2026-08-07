@@ -20,4 +20,4 @@ fi
 pnpm test:customer-enrichment-e2e
 pnpm test:customer-context-mcp-e2e
 
-gh signoff e2e
+signoff_post e2e

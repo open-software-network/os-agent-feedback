@@ -2,9 +2,20 @@
 # Shared preflight for the local signoff scripts. Sourced, not executed.
 #
 # A signoff status is tied to a specific pushed commit, so every script refuses
-# to run unless the worktree is clean and the pushed branch tip matches HEAD.
-# That guarantee is what lets the repository ruleset treat signoff/* statuses
-# as merge gates.
+# to run unless the worktree is clean and the remote branch tip matches HEAD.
+# It verifies that invariant again after the checks, closing the gap where a
+# concurrent commit could otherwise receive a status for tests run on an older
+# tree.
+
+signoff_require_command() {
+  local command_name="$1"
+  local install_hint="$2"
+
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "${command_name} is required. ${install_hint}" >&2
+    exit 1
+  fi
+}
 
 signoff_require_gh() {
   if ! command -v gh >/dev/null 2>&1; then
@@ -24,6 +35,11 @@ signoff_require_gh() {
 }
 
 signoff_require_pushed_head() {
+  local push_ref
+  local push_remote
+  local push_branch
+  local remote_sha
+
   if ! git rev-parse --abbrev-ref '@{push}' >/dev/null 2>&1; then
     echo "The current branch is not tracking a remote branch. Push it first:" >&2
     echo "  git push -u origin HEAD" >&2
@@ -35,8 +51,13 @@ signoff_require_pushed_head() {
     exit 1
   fi
 
-  if [[ -n "$(git log '@{push}'..)" ]]; then
-    echo "Push the current HEAD before signing off. The signoff status is posted to the pushed commit." >&2
+  push_ref="$(git rev-parse --abbrev-ref '@{push}')"
+  push_remote="${push_ref%%/*}"
+  push_branch="${push_ref#*/}"
+  remote_sha="$(git ls-remote --exit-code "$push_remote" "refs/heads/$push_branch" | awk 'NR == 1 { print $1 }')"
+
+  if [[ -z "$remote_sha" || "$remote_sha" != "$(git rev-parse HEAD)" ]]; then
+    echo "Push the current HEAD before signing off. The remote branch tip must exactly match HEAD." >&2
     echo "  git push" >&2
     exit 1
   fi
@@ -46,6 +67,41 @@ signoff_preflight() {
   cd "$(git rev-parse --show-toplevel)" || exit 1
   signoff_require_gh
   signoff_require_pushed_head
+  SIGNOFF_COMMIT_SHA="$(git rev-parse HEAD)"
+  export SIGNOFF_COMMIT_SHA
+}
+
+signoff_post() {
+  local context="$1"
+
+  if [[ "$(git rev-parse HEAD)" != "${SIGNOFF_COMMIT_SHA:-}" ]]; then
+    echo "HEAD changed while signoff/${context} was running; refusing to sign the untested commit." >&2
+    exit 1
+  fi
+
+  if [[ -n "$(git status --porcelain)" ]]; then
+    echo "The worktree changed while signoff/${context} was running; refusing to sign off." >&2
+    exit 1
+  fi
+
+  signoff_require_pushed_head
+  gh signoff "$context"
+}
+
+# Root Node tests import the two agent-experience reference products, which are
+# intentionally outside the pnpm workspace and keep their own lockfiles.
+signoff_install_experience_examples() {
+  pnpm --dir sdk/node build
+  npm ci \
+    --prefix examples/agent-experience-commerce \
+    --ignore-scripts \
+    --no-audit \
+    --no-fund
+  pnpm \
+    --dir examples/petsmart-demo \
+    install \
+    --frozen-lockfile \
+    --ignore-workspace
 }
 
 # Local PostgreSQL for the backend isolation tests and the disposable customer

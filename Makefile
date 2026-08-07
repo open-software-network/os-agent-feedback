@@ -1,4 +1,4 @@
-.PHONY: help install node-install backend-install node-version-check dev-env dev-setup dev-bootstrap dev-compose-check dev-db dev-db-stop dev-observability dev-observability-stop dev-backend dev-web tunnel-setup tunnel-run tunnel-route tunnel-routes tunnel-status backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test sdk-node-test sdk-rust-test linked-journey-conformance web-install web-types-check web-check web-typecheck web-test web-release-e2e web-build docs-validate docs-a11y types check local-ci signoff-pr signoff-backend signoff-e2e signoff-node signoff-sdk signoff-examples signoff-web signoff-docs
+.PHONY: help install node-install backend-install node-version-check dev-env dev-setup dev-bootstrap dev-compose-check dev-db dev-db-stop dev-observability dev-observability-stop dev-backend dev-web tunnel-setup tunnel-run tunnel-route tunnel-routes tunnel-status backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test sdk-node-test sdk-rust-test linked-journey-conformance web-install web-types-check web-check web-typecheck web-test web-release-e2e web-build docs-validate docs-a11y types check local-ci signoff-pr signoff-backend signoff-e2e signoff-node signoff-sdk signoff-examples signoff-web signoff-docs signoff-workflows
 
 .DEFAULT_GOAL := help
 
@@ -206,6 +206,9 @@ signoff-web:  ## Run local web checks, build, and release e2e, post signoff/web
 
 signoff-docs:  ## Run local docs validation and post signoff/docs
 	./scripts/signoff-docs.sh
+
+signoff-workflows:  ## Lint workflows and shell scripts locally, post signoff/workflows
+	./scripts/signoff-workflows.sh
 
 # --- Generated API types ---
 types: node-version-check backend-openapi  ## Regenerate OpenAPI TypeScript types for the phase 2 web app

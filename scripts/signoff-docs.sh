@@ -10,4 +10,4 @@ make node-install
 make docs-validate
 make docs-a11y
 
-gh signoff docs
+signoff_post docs

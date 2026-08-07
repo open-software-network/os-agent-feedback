@@ -7,7 +7,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/signoff-common.sh"
 signoff_preflight
 
 make node-install
+signoff_install_experience_examples
 make biome-check
 make node-test
 
-gh signoff node
+signoff_post node

@@ -78,11 +78,11 @@ test("production promotion verifies the active canary pair and can compensate ei
   );
   assert.match(resolve, /api_resolved_revision" != "\$web_resolved_revision/);
   assert.match(resolve, /git merge-base --is-ancestor/);
-  assert.match(resolve, /actions\/workflows\/ci\.yml\/runs\?head_sha=\$\{revision\}/);
+  assert.match(resolve, /scripts\/verify-ci-signoffs\.sh "\$revision"/);
   assert.doesNotMatch(
     resolve,
     /if \[\[ "\$OPERATION" == "promote" \]\]; then[\s\S]*git merge-base --is-ancestor/,
-    "rollback candidates must pass the same ancestry and exact-CI gates as promotions",
+    "rollback candidates must pass the same ancestry and local-signoff gates as promotions",
   );
   const canaryVerification = source.slice(
     source.indexOf("Verify the exact promotion pair passed canary"),
@@ -143,7 +143,7 @@ test("additive database expansion is derived, retry-safe, attested, and fail-clo
   );
   assert.match(source, /target_sha must be the exact checked-out 40-character commit/);
   assert.match(source, /git merge-base --is-ancestor/);
-  assert.match(source, /actions\/workflows\/ci\.yml\/runs\?head_sha=\$\{TARGET_SHA\}/);
+  assert.match(source, /scripts\/verify-ci-signoffs\.sh "\$TARGET_SHA"/);
   assert.match(source, /Derive the single added migration/);
   assert.match(
     source,
@@ -205,8 +205,31 @@ test("additive database expansion is derived, retry-safe, attested, and fail-clo
   const promotion = await readFile(repoFile(".github/workflows/promote.yml"), "utf8");
   assert.match(promotion, /A release may cross one additive migration boundary/);
   assert.match(promotion, /EPODE_PRODUCTION_MIGRATION_STATUS == "verified"/);
-  const ci = await readFile(repoFile(".github/workflows/ci.yml"), "utf8");
-  assert.match(ci, /scripts\/verify-migration-ledger\.sh/);
+  const localCi = await readFile(repoFile("scripts/local-ci.sh"), "utf8");
+  assert.match(localCi, /scripts\/verify-migration-ledger\\\.sh/);
+});
+
+test("delivery workflows consume local CI signoff attestations", async () => {
+  const verifier = await readFile(repoFile("scripts/verify-ci-signoffs.sh"), "utf8");
+  for (const context of ["workflows", "backend", "e2e", "node", "sdk", "examples", "web", "docs"]) {
+    assert.match(verifier, new RegExp(`signoff/${context}`));
+  }
+  assert.match(verifier, /commits\/\$\{target_sha\}\/pulls/);
+  assert.match(verifier, /\.merge_commit_sha ==/);
+  assert.match(verifier, /verify_commit_statuses "\$pull_head_sha"/);
+
+  for (const workflow of [
+    "promote.yml",
+    "sdk-release.yml",
+    "catchup-code-intel-production.yml",
+    "migrate-production.yml",
+  ]) {
+    const source = await readFile(repoFile(`.github/workflows/${workflow}`), "utf8");
+    assert.match(source, /scripts\/verify-ci-signoffs\.sh/);
+    assert.doesNotMatch(source, /actions\/workflows\/ci\.yml\/runs/);
+    assert.match(source, /pull-requests: read/);
+    assert.match(source, /statuses: read/);
+  }
 });
 
 test("migration ledger helper permits only exact one-step additive DDL", async () => {

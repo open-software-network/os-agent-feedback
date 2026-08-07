@@ -46,6 +46,8 @@ on:
 permissions:
   actions: read
   contents: read
+  pull-requests: read
+  statuses: read
 
 concurrency:
   group: epode-release-mutation
@@ -80,7 +82,7 @@ jobs:
           ref: ${{ inputs.target_sha }}
           fetch-depth: 0
 
-      - name: Require protected main and exact successful CI
+      - name: Require protected main and local CI signoff
         run: |
           set -euo pipefail
           if [[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ || "$(git rev-parse HEAD)" != "$TARGET_SHA" ]]; then
@@ -92,16 +94,7 @@ jobs:
             echo "::error::The migration commit is not on protected $DEFAULT_BRANCH."
             exit 1
           fi
-          ci_conclusion="$(
-            gh api \
-              -H 'Accept: application/vnd.github+json' \
-              "/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${TARGET_SHA}&status=completed&per_page=20" \
-              --jq '.workflow_runs | map(select(.head_branch == env.DEFAULT_BRANCH and .event == "push")) | max_by(.run_number, .run_attempt) | .conclusion // empty'
-          )"
-          if [[ "$ci_conclusion" != "success" ]]; then
-            echo "::error::The exact migration commit has no successful protected-main CI run."
-            exit 1
-          fi
+          scripts/verify-ci-signoffs.sh "$TARGET_SHA"
 
       - name: Derive the single added migration
         id: review

@@ -14,4 +14,4 @@ make web-test
 make web-build
 make web-release-e2e
 
-gh signoff web
+signoff_post web

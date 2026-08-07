@@ -21,6 +21,8 @@ permissions:
   actions: read
   contents: read
   packages: read
+  pull-requests: read
+  statuses: read
 
 concurrency:
   group: epode-release-mutation
@@ -45,7 +47,7 @@ jobs:
           ref: ${{ inputs.target_sha }}
           fetch-depth: 0
 
-      - name: Require protected main, exact CI, and explicit confirmation
+      - name: Require protected main, local CI signoff, and explicit confirmation
         env:
           TARGET_SHA: ${{ inputs.target_sha }}
           CONFIRM_PRODUCTION: ${{ inputs.confirm_production }}
@@ -63,11 +65,7 @@ jobs:
             echo "::error::The catch-up revision is not on protected $DEFAULT_BRANCH."
             exit 1
           fi
-          ci_conclusion="$(gh api \
-            -H 'Accept: application/vnd.github+json' \
-            "/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${TARGET_SHA}&status=completed&per_page=20" \
-            --jq '.workflow_runs | map(select(.head_branch == env.DEFAULT_BRANCH and .event == "push")) | max_by(.run_number, .run_attempt) | .conclusion // empty')"
-          [[ "$ci_conclusion" == "success" ]] || { echo "::error::The exact revision has no successful protected-main CI run."; exit 1; }
+          scripts/verify-ci-signoffs.sh "$TARGET_SHA"
           [[ "$CONFIRM_PRODUCTION" == "true" ]] || { echo "::error::confirm_production must be true."; exit 1; }
           [[ "$BACKUP_REFERENCE" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || {
             echo "::error::backup_reference must be an exact Railway backup UUID."

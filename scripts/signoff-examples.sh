@@ -6,6 +6,9 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/signoff-common.sh"
 signoff_preflight
 
+make node-install
+signoff_install_experience_examples
+
 npm ci --prefix examples/customer-context-scenarios --omit=dev --ignore-scripts
 npm ci --prefix examples/node-express --omit=dev --ignore-scripts
 npm ci --prefix examples/node-mcp --omit=dev --ignore-scripts
@@ -23,6 +26,8 @@ node --check examples/node-mcp/src/index.js
 
 npm test --prefix examples/customer-context-scenarios
 npm run --prefix examples/static-docs-edge check
+npm test --prefix examples/agent-experience-commerce
+pnpm --dir examples/petsmart-demo test
 
 export AGENT_FEEDBACK_KEY="af_live_11111111111111111111111111111111_22222222222222222222222222222222_abcdefghijklmnopqrstuvwxyz"
 export AGENT_FEEDBACK_URL="http://127.0.0.1:9"
@@ -49,4 +54,4 @@ for port in 3100 3102; do
   fi
 done
 
-gh signoff examples
+signoff_post examples

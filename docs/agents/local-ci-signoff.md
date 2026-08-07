@@ -1,59 +1,76 @@
 # Local CI signoff
 
-Epode uses local signoff for PR checks. Hosted GitHub Actions minutes are
-slow and rented; developer laptops are fast and already paid for. On pull
-requests, every test and build job is replaced by a local run that posts a
-green `signoff/*` commit status when it passes. Push to `main` still runs the
-full hosted suite, so merged code is always verified in the cloud.
+Epode runs pull-request CI on the developer or agent machine that owns the
+change. GitHub does not rerun test or build CI. Instead, the local command
+posts `signoff/*` commit statuses, and the repository ruleset blocks merge
+until every required status exists on the current PR head.
 
-One hosted job stays on PRs: **Workflow lint** (actionlint + shellcheck). It
-is cheap and guards the workflow files and the signoff scripts themselves.
+Deployment, migration, promotion, and release workflows remain hosted. They
+are delivery automation rather than PR CI and need GitHub environments and
+repository secrets. Before acting on a protected-main revision, they verify
+the local signoffs from the PR that produced it; they do not rerun CI.
 
-Each hosted PR job maps to a required commit status:
+The required local statuses are:
 
-- `Backend` → `signoff/backend` (rustfmt, Clippy, unit tests, OpenAPI drift,
-  and the live PostgreSQL isolation and migration tests)
-- `Customer enrichment journey` → `signoff/e2e` (the disposable customer
-  personalization, advertising, and MCP journeys)
-- `Node and Biome` → `signoff/node`
-- `Node SDK` + `SDK package artifacts` → `signoff/sdk`
-- `Product examples` → `signoff/examples`
-- `Web` → `signoff/web` (types drift, lint, typecheck, unit tests, production
-  build, and the dashboard release browser check)
-- `Documentation` → `signoff/docs`
+- `signoff/workflows` — actionlint plus shellcheck for deployment and signoff
+  scripts
+- `signoff/backend` — rustfmt, Clippy, unit tests, OpenAPI drift, and live
+  PostgreSQL isolation and migration tests
+- `signoff/e2e` — disposable customer-personalization, advertising, and MCP
+  journeys
+- `signoff/node` — Biome and the root Node test suite
+- `signoff/sdk` — Node, Python, Go, and Rust SDK checks, linked-journey
+  conformance, Python's MCP lower bound, and release artifact readiness
+- `signoff/examples` — example installs, syntax checks, tests, bundle
+  validation, reference-product journeys, and health smoke tests
+- `signoff/web` — generated types, lint, typecheck, unit tests, production
+  build, and the signed-in browser release check
+- `signoff/docs` — Mintlify validation and accessibility checks
 
 ## One-time setup
 
-Install GitHub CLI and the Basecamp signoff extension:
+Install and authenticate the GitHub CLI, then install Basecamp's signoff
+extension:
 
 ```sh
 gh auth login
 gh extension install basecamp/gh-signoff
 ```
 
-The backend and e2e suites also need the local PostgreSQL container; the
-signoff scripts start it with `make dev-db` when they run. The SDK suite needs
-node, pnpm, npm, python, go, and cargo on `PATH`.
+Local CI also expects the repository's supported Node and Rust toolchains,
+pnpm, npm, Python, uv, Go, Docker Compose, PostgreSQL client tools,
+`actionlint`, and `shellcheck`. On macOS, the last two are available with:
+
+```sh
+brew install actionlint shellcheck
+```
+
+The backend and e2e suites start the repository's local PostgreSQL service
+when needed. Existing local environment files are preserved.
 
 ## Sign off on a PR commit
 
-From a clean pushed branch:
+From a clean, pushed branch:
 
 ```sh
 git push -u origin HEAD
 make local-ci
 ```
 
-`make local-ci` compares the branch with the PR base, runs the suites needed
-for the changed paths, and posts every required status. If a suite is not
-relevant to the changed paths, the command posts its status as not applicable
-without running it, so docs-only PRs stay mergeable when the repository
-ruleset requires every signoff context.
+`make local-ci` compares the branch with the PR base and runs the suites
+needed for the changed paths. It posts every required context. Irrelevant
+suites receive a successful not-applicable signoff so a docs-only change does
+not have to build the backend.
 
-The lower-level commands are available when you want to run one status
-explicitly:
+The command refuses to begin unless the worktree is clean and the remote
+branch tip exactly matches local `HEAD`. Before posting each status it checks
+those invariants again. A new commit therefore makes the existing statuses
+stale automatically and requires a new local run.
+
+Individual suites can be run with:
 
 ```sh
+make signoff-workflows
 make signoff-backend
 make signoff-e2e
 make signoff-node
@@ -63,43 +80,16 @@ make signoff-web
 make signoff-docs
 ```
 
-Each runs the same steps the hosted job used to run. The backend and e2e
-scripts export `DATABASE_URL` pointing at the local compose PostgreSQL
-(`localhost:54329`); set `DATABASE_URL` yourself to target something else.
+The backend and e2e scripts default to the Compose PostgreSQL database at
+`localhost:54329`. Set `DATABASE_URL` to use a different local database.
 
-If checks pass, the command posts the matching `signoff/*` status to the
-current pushed commit. If the branch changes later, run `make local-ci` again
-for the new HEAD.
+## Enforcement
 
-## Force hosted CI on a PR
+The `main-protection` repository ruleset must require the eight `signoff/*`
+contexts above and must not require the removed hosted `CI` check. Required
+statuses are attached to a commit SHA, so any push blocks the PR again until
+local CI signs the new head.
 
-Add labels to a PR when a cloud-hosted verification run is useful:
-
-- `run-backend-ci`
-- `run-e2e-ci`
-- `run-node-ci`
-- `run-sdk-ci` (enables both SDK jobs)
-- `run-examples-ci`
-- `run-web-ci`
-- `run-docs-ci`
-
-You can also run the workflow manually from the Actions tab, and every job
-runs on push to `main` regardless of labels.
-
-## Enforce the signoff
-
-To require local signoff before merge, add these required status checks to
-the existing `main-protection` repository ruleset, alongside the existing
-`CI` check:
-
-- `signoff/backend`
-- `signoff/e2e`
-- `signoff/node`
-- `signoff/sdk`
-- `signoff/examples`
-- `signoff/web`
-- `signoff/docs`
-
-Do not run `gh signoff install` in this repository. That command writes
-classic branch protection and can bypass the repo's existing ruleset-based
-protection.
+Do not run `gh signoff install` in this repository. It writes classic branch
+protection and can bypass the existing ruleset-based protection. Maintain the
+contexts on `main-protection` instead.
