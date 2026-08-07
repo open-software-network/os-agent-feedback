@@ -14,7 +14,7 @@ make sdk-node-test
 make linked-journey-conformance
 make sdk-rust-test
 
-artifact_dir="$(mktemp -d "${TMPDIR:-/tmp}/epode-sdk-signoff.XXXXXX")"
+artifact_dir="$(pwd)/.artifacts/local-ci-sdk"
 trap 'rm -rf "$artifact_dir"' EXIT
 SDK_ARTIFACT_DIR="$artifact_dir" bash scripts/sdk-release-readiness.sh
 
