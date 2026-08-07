@@ -1,4 +1,4 @@
-.PHONY: help install node-install backend-install node-version-check dev-env dev-setup dev-bootstrap dev-compose-check dev-db dev-db-stop dev-observability dev-observability-stop dev-backend dev-web tunnel-setup tunnel-run tunnel-route tunnel-routes tunnel-status backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test sdk-node-test sdk-rust-test linked-journey-conformance web-install web-types-check web-check web-typecheck web-test web-release-e2e web-build docs-validate docs-a11y types check
+.PHONY: help install node-install backend-install node-version-check dev-env dev-setup dev-bootstrap dev-compose-check dev-db dev-db-stop dev-observability dev-observability-stop dev-backend dev-web tunnel-setup tunnel-run tunnel-route tunnel-routes tunnel-status backend-fmt-check backend-clippy backend-test backend-openapi backend-openapi-check biome-check biome-fix node-test sdk-node-test sdk-rust-test linked-journey-conformance web-install web-types-check web-check web-typecheck web-test web-release-e2e web-build docs-validate docs-a11y types check local-ci signoff-pr signoff-backend signoff-e2e signoff-node signoff-sdk signoff-examples signoff-web signoff-docs signoff-workflows
 
 .DEFAULT_GOAL := help
 
@@ -178,6 +178,37 @@ docs-validate: node-version-check  ## Validate the Mintlify documentation
 
 docs-a11y: node-version-check  ## Run Mintlify accessibility checks
 	pnpm run docs:a11y
+
+# --- Local CI signoff ---
+# Local replacement for the hosted PR jobs; see docs/agents/local-ci-signoff.md.
+local-ci:  ## Run path-aware local PR checks and post required signoff/* statuses
+	./scripts/local-ci.sh
+
+signoff-pr: local-ci
+
+signoff-backend:  ## Run local backend checks (incl. PostgreSQL tests) and post signoff/backend
+	./scripts/signoff-backend.sh
+
+signoff-e2e:  ## Run local customer enrichment journeys and post signoff/e2e
+	./scripts/signoff-e2e.sh
+
+signoff-node:  ## Run local Biome and Node checks and post signoff/node
+	./scripts/signoff-node.sh
+
+signoff-sdk:  ## Run local SDK build/test and release readiness, post signoff/sdk
+	./scripts/signoff-sdk.sh
+
+signoff-examples:  ## Run local example app checks and post signoff/examples
+	./scripts/signoff-examples.sh
+
+signoff-web:  ## Run local web checks, build, and release e2e, post signoff/web
+	./scripts/signoff-web.sh
+
+signoff-docs:  ## Run local docs validation and post signoff/docs
+	./scripts/signoff-docs.sh
+
+signoff-workflows:  ## Lint workflows and shell scripts locally, post signoff/workflows
+	./scripts/signoff-workflows.sh
 
 # --- Generated API types ---
 types: node-version-check backend-openapi  ## Regenerate OpenAPI TypeScript types for the phase 2 web app

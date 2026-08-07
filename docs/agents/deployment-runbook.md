@@ -30,10 +30,12 @@ database recovery:
   `sdk-release`. Require production and SDK-release reviewers. Restrict who
   can approve and deploy, and protect `sdk/*/v*` tags.
 - Protect `main` with a repository or organization ruleset that requires the
-  aggregate `CI` status check, blocks force pushes and deletion, and requires
-  changes to arrive through a pull request. The release workflows independently
-  verify exact-commit CI, but branch rules prevent an unreviewed main commit
-  from becoming a release candidate in the first place.
+  eight local `signoff/*` statuses documented in
+  [`local-ci-signoff.md`](./local-ci-signoff.md), blocks force pushes and
+  deletion, and requires changes to arrive through a pull request. The release
+  workflows independently verify the same exact-commit attestations, while
+  branch rules prevent an unsigned main commit from becoming a release
+  candidate in the first place.
 - Add an environment-scoped `RAILWAY_TOKEN` secret and `RAILWAY_PROJECT_ID`
   variable to `v2-canary` and `production`. The Railway token must be limited
   to the Epode project.

@@ -49,6 +49,8 @@ jobs:
       actions: read
       contents: read
       packages: read
+      pull-requests: read
+      statuses: read
     outputs:
       api_ref: ${{ steps.resolve.outputs.api_ref }}
       api_digest: ${{ steps.resolve.outputs.api_digest }}
@@ -165,16 +167,7 @@ jobs:
             echo "::error::Production revision $revision is not an ancestor of protected $DEFAULT_BRANCH."
             exit 1
           fi
-          ci_conclusion="$(
-            gh api \
-              -H 'Accept: application/vnd.github+json' \
-              "/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${revision}&status=completed&per_page=20" \
-              --jq '.workflow_runs | map(select(.head_branch == env.DEFAULT_BRANCH and .event == "push")) | max_by(.run_number, .run_attempt) | .conclusion // empty'
-          )"
-          if [[ "$ci_conclusion" != "success" ]]; then
-            echo "::error::The exact production revision $revision has no successful completed CI workflow."
-            exit 1
-          fi
+          scripts/verify-ci-signoffs.sh "$revision"
 
       - name: Preserve every previously published hosted artifact
         env:
