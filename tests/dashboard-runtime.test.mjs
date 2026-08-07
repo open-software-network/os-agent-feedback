@@ -213,7 +213,10 @@ const dashboard = {
         { name: "budget", count: 3 },
         { name: "color", count: 2 },
       ],
-      violatedDimensions: [{ name: "budget", count: 2 }],
+      violatedDimensions: [
+        { name: "budget", count: 2 },
+        { name: "evidence:glare_control", count: 1 },
+      ],
       counterfactualChanges: [{ name: "raise_budget_from_150_to_164", count: 1 }],
       medianCounterfactualDelta: 14,
     },
@@ -273,7 +276,15 @@ async function loadDashboard({
     },
   };
   const elements = new Map([
-    ["#page", { innerHTML: "", setAttribute() {}, querySelector: () => heading }],
+    [
+      "#page",
+      {
+        innerHTML: "",
+        setAttribute() {},
+        querySelector: () => heading,
+        querySelectorAll: () => [],
+      },
+    ],
     [
       "#notice",
       {
@@ -821,25 +832,45 @@ test("the product root opens a Home overview with recent feedback and usage", as
 
 test("the Home overview surfaces lost demand, journey flow, handoff, context ROI, agent mix, rank, and unknowns", async () => {
   const { page } = await loadDashboard({ href: "https://app.epode.ai/" });
+  assert.doesNotMatch(page.innerHTML, /style="width/);
+  assert.match(page.innerHTML, /data-bar-width="\d+"/);
   assert.match(page.innerHTML, /LOST DEMAND/);
   assert.match(page.innerHTML, /What agents asked for and could not get/);
   assert.match(page.innerHTML, /Zero exact matches \(25%\)/);
   assert.match(page.innerHTML, /Dealbreaker dimensions/);
+  assert.match(page.innerHTML, /evidence:glare_control/);
   assert.match(page.innerHTML, /Cheapest fixes/);
+  assert.match(page.innerHTML, /raise_budget_from_150_to_164/);
   assert.match(page.innerHTML, /JOURNEY FLOW/);
-  assert.match(page.innerHTML, /\/agent-negotiate\/lamp → \/agent-decide\/lamp/i);
+  assert.match(page.innerHTML, /\/agent-negotiate\/lamp → \/agent-decide\/lamp/);
   assert.match(page.innerHTML, /Where journeys end/);
   assert.match(page.innerHTML, /HANDOFF/);
   assert.match(page.innerHTML, /Sessions with a handoff \(33%\)/);
   assert.match(page.innerHTML, /Handoff landing pages/);
+  assert.match(page.innerHTML, /\/product\/feeder/);
+  const handoffFunnel =
+    page.innerHTML.match(
+      /<section class="funnel"><div><p class="eyebrow">HANDOFF<\/p>[\s\S]*?<\/section>/,
+    )?.[0] ?? "";
+  assert.match(handoffFunnel, /Product link clicks/);
+  assert.doesNotMatch(handoffFunnel, /Handoff landing pages/);
   assert.match(page.innerHTML, /CONTEXT ROI/);
-  assert.match(page.innerHTML, /3 decisions · 2 outcomes · 1 conversions/);
+  assert.match(page.innerHTML, /constraint\/budget/);
+  assert.match(page.innerHTML, /3 decisions · 2 outcomes · 1 conversion</);
   assert.match(page.innerHTML, /AGENT MIX/);
   assert.match(page.innerHTML, /Claude/);
+  assert.match(page.innerHTML, /OpenAI/);
   assert.match(page.innerHTML, /Result position views/);
   assert.match(page.innerHTML, /Position 1/);
   assert.match(page.innerHTML, /Unknown dimensions/);
   assert.match(page.innerHTML, /Unanswered questions/);
+  assert.match(page.innerHTML, /budget · declined/);
+});
+
+test("proportion bars use CSP-safe data attributes instead of inline width styles", () => {
+  assert.doesNotMatch(source, /style="width/);
+  assert.match(source, /data-bar-width/);
+  assert.match(source, /page\.querySelectorAll\?\.\("\[data-bar-width\]"\)/);
 });
 
 test("the Home overview renders safe empty states when new insight groups are absent", async () => {
