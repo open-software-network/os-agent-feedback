@@ -18,13 +18,16 @@ increased-AI-traffic terms:
    stock and exact fit evidence appear only on those pages — the value
    asymmetry that earns a need-carrying second fetch.
    When none of the named situations is exact, the storefront publishes a
-   composable `/feeders?...` template. Its results use durable `/c/<signed
-   need>/product/<id>` links: the signature covers only bounded catalog
-   facets, carries no identity, and does not expire.
-   ChatGPT and Claude also receive the full catalog at the root; Gemini's
-   observed `Google` fetcher receives a link-first root because it otherwise
-   stops after one page. API-capable agents can still walk the structured JSON
-   graph at `/agent-negotiate/…`.
+   normal filter form backed by the composable `/feeders?...` route. Its
+   results use durable `/c/<signed need>/product/<id>` links: the signature
+   covers only bounded catalog facets, carries no identity, and does not
+   expire.
+   ChatGPT receives the situation links before the full fallback catalog.
+   Claude receives the same catalog facts without generic root PDP anchors, so
+   its only product handoff comes from a ranked situation. Gemini's observed
+   `Google` fetcher receives a link-first root because it otherwise stops after
+   one page. The JSON graph is exposed through ordinary alternate links rather
+   than visible instructions aimed at agents.
 2. **Trait capture** — the agent expresses the household's needs through
    merchant-supplied edges: *two cats and a dog, one strongly food-motivated,
    $200 target budget*.
@@ -67,13 +70,31 @@ The selected delivery policy is platform-specific:
 
 | Platform | Selected approach | What it optimizes |
 | --- | --- | --- |
-| ChatGPT | Full catalog root + PR #119 faceted-query anchors | Need-state fetch and same-URL human handoff |
+| ChatGPT | Facets-first root + full catalog fallback + PR #119 query anchors | Need-state fetch without losing the safe one-page answer |
 | Gemini | Link-first root + signed situation paths | Forces live price/stock verification and yields a permanent `/s/` PDP |
 | Grok | `/agent-experience.json` JSON graph, linked from the human storefront | Exact multi-step evaluation and a permanent signed-need `/c/` PDP |
-| Claude | Full HTML root + signed situation paths; JSON remains optional | Reliable price/stock traversal with a clean direct product handoff |
+| Claude | Full catalog facts without generic root PDP links + signed situation paths | Prevents Claude from stripping the need-bearing handoff as “tracking” |
 | Meta AI | Indexable one-page catalog + public custom `/feeders?...` URL | Accurate one-fetch recommendation and a useful first-party landing despite blocked second hops |
 | Perplexity | Stable indexed hostname and product/index feeds | Its Search surface does not fetch pasted quick-tunnel pages; no response shape won |
 | Copilot | Microsoft Merchant Center/Bing catalog distribution | Shopping does not fetch the supplied storefront; no response shape won |
+
+The final adversarial loop materially changed that matrix. A strict `$90`
+no-match case let ChatGPT answer from the fallback catalog and skip stock.
+Link-first + signed paths still failed; link-first + raw query anchors worked;
+and the decisive hybrid was query facets **before** the full fallback catalog.
+That hybrid fetched the exact situation, reported zero matches and live stock,
+and returned the measured URL without reintroducing the competitor fallback
+risk. ChatGPT keeps ordinary root product anchors because removing them
+regressed its browsing layer; Claude gets the inverse policy because it
+otherwise prefers an unfiltered PDP and discards the selected needs.
+
+Hard and target budgets are no longer rounded to the published navigation
+ladder. The graph accepts bounded exact-dollar tokens (for example
+`budget-hard-175` and `budget-target-175`), signs them into durable `/c/`
+handoffs, and exposes a normal storefront filter form. High-intent composite
+links cover the live failures found in testing: multi-cat theft at hard `$90`,
+mixed cats-and-dog at hard `$175`, scheduled one-cat meals at hard `$90`, and
+multi-cat theft at a `$150` target.
 
 The platform behavior differs:
 
@@ -88,18 +109,28 @@ The platform behavior differs:
   reported live stock, and handed its need-bearing URL to the user. Restoring
   that source shape with a compact signed capability restored the same
   traversal. The clicked situation URL joins the user to the agent journey;
-  its product links are permanent signed-need `/c/` URLs.
+  its product links are permanent signed-need `/c/` URLs. A second A/B showed
+  that order matters too: facets-first won the hard-budget no-match case while
+  the same catalog-first data stopped at the root.
 - **Claude** — regular claude.ai reliably followed the signed HTML edges and
-  produced accurate price, stock, constraint, and counterfactual reasoning.
-  The implementation also exposes permanent public or signed-need handoffs in
-  both HTML and JSON; Grok live-confirmed the complete JSON path, while Claude's
-  latest JSON retry was less reliable than its HTML runs.
+  produced accurate price, stock, constraint, and counterfactual reasoning. An
+  incognito run caught a real catalog error (a grazing hopper was incorrectly
+  “exact” for scheduled meals) and revealed that Claude deliberately strips a
+  long journey URL as tracking. Making generic product names non-clickable on
+  Claude's agent root fixed both outcomes: Claude returned the permanent
+  `/s/one-cat-scheduled-portions-under-90/product/...` link and correctly
+  reported one exact match.
 - **Cloud browser** — Grok used ordinary Safari/Chrome user agents, traversed
   the human root, the production `/agent-experience.json` graph, public
   situations, and a custom `$150` hard budget URL. It returned exact catalog
   facts. A real answer click carried
   browser activation but stripped the Grok referrer, so it is deliberately
   recorded as first-party custom-need intent rather than falsely attributed.
+  The hard-`$175` retest found the correct zero-match counterfactual and exact
+  situation, but Grok still preferred the shorter generic PDP in its final
+  prose. Because Grok is indistinguishable from an ordinary human browser, the
+  implementation does not remove normal catalog links for all shoppers; this
+  remains a measured handoff limitation rather than a falsely claimed win.
 - **Meta AI** — `meta-webindexer/1.1` supports an accurate one-fetch answer.
   Both ordinary and Discover Products modes constructed the exact custom URL,
   but second hops returned `LIVE_CRAWL_POLICY_BLOCKED`; Meta rendered the URL

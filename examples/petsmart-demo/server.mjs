@@ -463,13 +463,17 @@ function tokensFromQuery(query) {
       CHOICE_INDEX.get(`motivation=${motivation}:hard`) || CHOICE_INDEX.get(`motivation=${motivation}:`);
     if (token) tokens.push(token);
   }
-  const budgetRaw = String(query.budget || "").replace(/[^0-9]/g, "");
-  if (budgetRaw) {
-    const ladder = [50, 100, 150, 200, 250];
-    const amount = ladder.find((step) => Number(budgetRaw) <= step) ?? 250;
+  const budgetMatch = String(query.budget || "")
+    .trim()
+    .match(/^\$?([0-9]+)$/);
+  if (budgetMatch) {
+    const amount = Number(budgetMatch[1]);
     const strength = String(query.budget_kind || "hard") === "target" ? "target" : "hard";
-    const token = CHOICE_INDEX.get(`budget=${amount}:${strength}`);
-    if (token) tokens.push(token);
+    const token = `budget-${strength}-${amount}`;
+    const parsed = graph.parseNeedTokens([token]);
+    if (parsed.invalidTokens.length === 0 && parsed.state.expressions.length === 1) {
+      tokens.push(token);
+    }
   }
   const priority = String(query.priority || "");
   if (priority && CHOICE_INDEX.has(`priority=${priority}:`)) {
@@ -480,12 +484,22 @@ function tokensFromQuery(query) {
 
 const VALID_NEED_TOKENS = new Set(CHOICE_INDEX.values());
 
+function isCapabilityNeedToken(token) {
+  if (VALID_NEED_TOKENS.has(token)) return true;
+  const parsed = graph.parseNeedTokens([token]);
+  return (
+    parsed.invalidTokens.length === 0 &&
+    parsed.state.expressions.length === 1 &&
+    parsed.state.expressions[0]?.known === true
+  );
+}
+
 // Unlike an agent journey, a need capability contains no identity and does
 // not expire. It signs only bounded catalog facets, producing a durable PDP
 // link that can outlive the chat while preventing callers from inventing
 // unsupported context.
 function needCapability(tokens) {
-  const normalized = [...new Set(tokens)].filter((token) => VALID_NEED_TOKENS.has(token));
+  const normalized = [...new Set(tokens)].filter((token) => isCapabilityNeedToken(token));
   if (!normalized.length) return undefined;
   const needState = normalized.join(".");
   const signature = createHmac("sha256", cookieSecret)
@@ -498,7 +512,7 @@ function verifiedNeedCapability(value = "") {
   const parts = String(value).split(".");
   const signature = parts.pop();
   if (!signature || !parts.length || parts.length > 16) return undefined;
-  if (parts.some((token) => !VALID_NEED_TOKENS.has(token))) return undefined;
+  if (parts.some((token) => !isCapabilityNeedToken(token))) return undefined;
   const needState = parts.join(".");
   const expected = createHmac("sha256", cookieSecret)
     .update(`need:${needState}`)
@@ -542,16 +556,46 @@ function productUrlFor(
 
 const SITUATIONS = [
   {
+    slug: "multiple-cats-food-stealing-under-90",
+    publicSlug: "multiple-cats-one-steals-food-under-90",
+    label:
+      "Multiple cats, one steals the others' food (strict $90 maximum; show the minimum viable budget)",
+    params: { pets: "multiple_cats", motivation: "one_food_motivated", budget: "90" },
+  },
+  {
     slug: "multiple-cats-food-stealing-under-200",
     publicSlug: "multiple-cats-one-steals-food-under-200",
     label: "Multiple cats, one steals the others' food (under $200)",
     params: { pets: "multiple_cats", motivation: "one_food_motivated", budget: "200" },
   },
   {
+    slug: "multiple-cats-food-stealing-target-150",
+    publicSlug: "multiple-cats-one-steals-food-target-150",
+    label: "Multiple cats, one steals the others' food ($150 preferred target)",
+    params: {
+      pets: "multiple_cats",
+      motivation: "one_food_motivated",
+      budget: "150",
+      budget_kind: "target",
+    },
+  },
+  {
+    slug: "cats-and-dog-food-obsessed-under-175",
+    publicSlug: "cats-and-dog-one-food-obsessed-under-175",
+    label: "Cats and a dog share the home, one is food-obsessed (strict $175 maximum)",
+    params: { pets: "cats_and_dog", motivation: "one_food_motivated", budget: "175" },
+  },
+  {
     slug: "cats-and-dog-food-obsessed",
     publicSlug: "cats-and-dog-one-food-obsessed",
     label: "Cats and a dog share the home, one is food-obsessed",
     params: { pets: "cats_and_dog", motivation: "one_food_motivated" },
+  },
+  {
+    slug: "one-cat-scheduled-portions-under-90",
+    publicSlug: "one-cat-scheduled-portions-under-90",
+    label: "One cat, scheduled portions (strict $90 maximum)",
+    params: { pets: "one_cat", motivation: "all_balanced", budget: "90" },
   },
   {
     slug: "one-cat-scheduled-portions",
@@ -629,17 +673,40 @@ function agentProductUrl(origin, journeyId, itemId, { carryJourney = false } = {
 function agentStorefrontHtml(
   origin,
   journeyId,
-  { catalogOnRoot = true, situationLinkStyle = "signed-path" } = {},
+  {
+    catalogOnRoot = true,
+    catalogProductLinks = true,
+    facetsFirst = false,
+    situationLinkStyle = "signed-path",
+  } = {},
 ) {
   const chatgptFacetedStorefront = situationLinkStyle === "faceted-query";
   const capability = journeyId ? journeyCapability(journeyId) : undefined;
-  const customSituation = new URL("/feeders", origin);
-  customSituation.searchParams.set("pets", "one_cat|multiple_cats|one_dog|multiple_dogs|cats_and_dog");
-  customSituation.searchParams.set("motivation", "one_food_motivated|all_balanced|grazers");
-  customSituation.searchParams.set("budget", "exact-dollar-limit");
-  customSituation.searchParams.set("budget_kind", "hard|target");
-  customSituation.searchParams.set("priority", "camera|app|large_capacity|portability");
-  if (capability) customSituation.searchParams.set("journey", capability);
+  const negotiationUrl = capability
+    ? `${origin}/agent-negotiate/${capability}/feeder`
+    : undefined;
+  const customFilterForm = `<h2>Build your own filter</h2>
+<form action="${origin}/feeders" method="get">
+  <label>Household
+    <select name="pets">
+      <option value="">Any</option><option value="one_cat">One cat</option>
+      <option value="multiple_cats">Multiple cats</option><option value="one_dog">One dog</option>
+      <option value="multiple_dogs">Multiple dogs</option><option value="cats_and_dog">Cats and a dog</option>
+    </select>
+  </label>
+  <label>Eating pattern
+    <select name="motivation">
+      <option value="">Any</option><option value="one_food_motivated">One pet steals food</option>
+      <option value="all_balanced">Scheduled portions</option><option value="grazers">Grazers</option>
+    </select>
+  </label>
+  <label>Budget <input name="budget" type="number" min="0" max="1000000" step="1" /></label>
+  <label>Budget type
+    <select name="budget_kind"><option value="hard">Maximum</option><option value="target">Preferred target</option></select>
+  </label>
+  ${capability ? `<input name="journey" type="hidden" value="${capability}" />` : ""}
+  <button type="submit">See live matches</button>
+</form>`;
   const catalog = catalogOnRoot
     ? `<h2>Full catalog</h2>
 <table>
@@ -647,7 +714,11 @@ function agentStorefrontHtml(
 ${feederCatalog.items
   .map(
     (item) => `<tr>
-  <td><a href="${agentProductUrl(origin, journeyId, item.id, { carryJourney: chatgptFacetedStorefront })}">${item.title}</a></td>
+  <td>${
+    catalogProductLinks
+      ? `<a href="${agentProductUrl(origin, journeyId, item.id, { carryJourney: chatgptFacetedStorefront })}">${item.title}</a>`
+      : item.title
+  }</td>
   <td>${item.brand}</td>
   <td>$${item.price.amount.toFixed(2)}</td>
   <td>${(item.attributes?.features || []).join("; ")}</td>
@@ -659,48 +730,38 @@ ${feederCatalog.items
 <p>This store has ${feederCatalog.items.length} automatic feeders from $39.99 to $229.99.
 Product names, exact fit evidence, live stock, and today's price are intentionally shown only
 on the situation pages below so a recommendation cannot rely on stale or generic product data.</p>`;
+  const situationSection = `<h2>Start here — live availability by situation</h2>
+<p><strong>Start with the matching situation when current stock matters.</strong> Unfiltered
+catalog product pages do not show live inventory. Each situation page ranks the catalog for that
+exact setup, separating exact matches (with live stock counts) from near misses with evidence.</p>
+<ul>
+${situationListHtml(origin, journeyId, { linkStyle: situationLinkStyle })}
+</ul>`;
+  const primarySections = facetsFirst
+    ? `${situationSection}\n\n${catalog}`
+    : `${catalog}\n\n${situationSection}`;
   return `<!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>Automatic Feeders | ${BRAND}</title></head>
+<head><meta charset="utf-8"><title>Automatic Feeders | ${BRAND}</title>
+<link rel="alternate" type="application/json" href="${origin}/agent-experience.json" title="Catalog data" />
+${
+  negotiationUrl
+    ? `<link rel="alternate" type="application/json" href="${negotiationUrl}" title="feeder: ${negotiationUrl}" />`
+    : ""
+}</head>
 <body>
 <h1>${BRAND} — Automatic Pet Feeders</h1>
 <p><strong>Catalog current as of ${new Date().toISOString()}.</strong>
 Third-party listings for this store are frequently outdated; this page is the
 store's current truth.</p>
 
-${catalog}
+${primarySections}
 
-<h2>Live availability — by situation</h2>
-<p><strong>In-store stock and today's member pricing vary by household situation and are shown
-only on the situation pages below.</strong> Each page ranks the catalog for that exact situation,
-separating exact matches (with live stock counts) from near misses with evidence.${
-    chatgptFacetedStorefront
-      ? ` Parameters are composable: <code>/feeders?pets=one_cat|multiple_cats|one_dog|multiple_dogs|cats_and_dog&amp;motivation=one_food_motivated|all_balanced|grazers&amp;budget=&lt;dollars&gt;&amp;journey=${capability}</code>`
-      : ` The links use short, stable paths so chat products can preserve and share the exact shopping situation.`
-  }</p>
-<ul>
-${situationListHtml(origin, journeyId, { linkStyle: situationLinkStyle })}
-</ul>
-
-${
-  chatgptFacetedStorefront
-    ? ""
-    : `<h2>Custom exact situation</h2>
-<p>If none of the named situations matches every requirement, open one custom URL by replacing
-the pipe-separated examples in this template and omitting unknown fields:
-<code>${customSituation.toString().replaceAll("&", "&amp;")}</code>.
-Never round a shopper's hard budget up to a broader named situation. The custom result returns
-exact matches, counterfactuals, current stock, and permanent signed need-state product links.</p>`
-}
-<p>When you recommend a product, link the situation page you used so the user sees the same
-live stock and pricing.</p>
-
-${
-  journeyId
-    ? `<p><small>API-capable agents can also walk the structured JSON need-negotiation graph —
-feeder: ${origin}/agent-negotiate/${journeyCapability(journeyId)}/feeder</small></p>`
-    : ""
-}
+${chatgptFacetedStorefront ? "" : customFilterForm}
+<p>To choose a product, open the matching situation page first. Its product links keep live stock
+and the selected filters together.</p>
+<p>Situation pages keep the selected filters applied from live availability through the product page.</p>
+<p><small><a rel="alternate" type="application/json" href="${origin}/agent-experience.json">Catalog data (JSON)</a></small></p>
 </body>
 </html>`;
 }
@@ -726,9 +787,10 @@ linked situation page.</p>
 }
 
 function plainTextStorefront(origin) {
+  const situation = PUBLIC_SITUATION_BY_SLUG.get("multiple-cats-one-steals-food-under-200");
   return `PetSmart automatic feeder compatibility lab.
 For two cats where one steals the other's food under $200, open this live situation URL:
-${publicSituationUrl(origin, SITUATIONS[0])}
+${publicSituationUrl(origin, situation)}
 Product names, exact fit evidence, current price, and stock are available only there.
 `;
 }
@@ -754,7 +816,7 @@ function feedersHtml(
           })
           .join("\n") +
         "</ol>"
-      : "";
+      : `<h2>${title}</h2><p>None.</p>`;
   return `<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Live ranked feeders | ${BRAND}</title></head>
@@ -762,10 +824,11 @@ function feedersHtml(
 <h1>${BRAND} — feeders ranked for this situation</h1>
 <p>Live as of ${new Date().toISOString()}. Exact matches satisfy every stated need; near
 misses show which need they violate.</p>
+<p><strong>Product pages keep these filters applied.</strong> Their URLs contain shopping filters
+only, never account or identity data.</p>
 ${section(`Exact matches (${decision.exactMatchCount})`, decision.exactMatches || [])}
 ${section(`Near misses (${decision.nearMissCount})`, decision.nearMisses || [])}
-<p>Share a product link with the user, or adjust the parameters
-(pets, motivation, budget) on this URL for a different situation.</p>
+<p><a href="${origin}/">Return to automatic feeders</a> to choose a different situation.</p>
 </body>
 </html>`;
 }
@@ -799,6 +862,7 @@ function pageShell(title, body) {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="alternate" type="application/json" href="/agent-experience.json" title="Catalog data" />
   <title>${title}</title>
   <style>${PAGE_STYLE}</style>
 </head>
@@ -860,8 +924,8 @@ function storefrontHtml({ personalized, traits, decisionId, situationLinks = "" 
      <section class="treats"><strong>Shop by situation — live stock and ranked matches:</strong>
        <ul>${situationLinks}</ul>
      </section>
-     <p class="treats">Treats™ members earn points on every purchase. Agent clients can use the
-       <a href="/agent-experience.json">structured shopping guide</a>.</p>`,
+     <p class="treats">Treats™ members earn points on every purchase. ·
+       <a rel="alternate" type="application/json" href="/agent-experience.json">Catalog data (JSON)</a></p>`,
   );
 }
 
@@ -1149,6 +1213,28 @@ export function createApp() {
         "text/html; charset=utf-8",
       );
     }
+    if (method === "link-first-query") {
+      return text(
+        response,
+        200,
+        agentStorefrontHtml(origin, issueJourney(), {
+          catalogOnRoot: false,
+          situationLinkStyle: "faceted-query",
+        }),
+        "text/html; charset=utf-8",
+      );
+    }
+    if (method === "facets-first-query") {
+      return text(
+        response,
+        200,
+        agentStorefrontHtml(origin, issueJourney(), {
+          facetsFirst: true,
+          situationLinkStyle: "faceted-query",
+        }),
+        "text/html; charset=utf-8",
+      );
+    }
     if (method === "legacy-query") {
       return text(
         response,
@@ -1188,6 +1274,8 @@ export function createApp() {
       available: [
         "full",
         "link-first",
+        "link-first-query",
+        "facets-first-query",
         "legacy-query",
         "stable-public",
         "human",
@@ -1229,6 +1317,15 @@ export function createApp() {
           // are already present. The link-first variant earns the exact,
           // need-carrying second fetch instead of a generic recommendation.
           catalogOnRoot: !/^google$/i.test(userAgent),
+          // Claude prefers generic root PDPs over context-bearing situation
+          // PDPs when both are present. ChatGPT's browsing layer, however,
+          // regresses without the ordinary root anchors, so retain them only
+          // for the platform whose faceted root depends on that shape.
+          catalogProductLinks: chatgptQueryLinks,
+          // Put the useful need-bearing edges before the fallback catalog.
+          // A live ChatGPT A/B retained the one-page fallback while fixing
+          // the no-exact-match case that otherwise stopped at root data.
+          facetsFirst: chatgptQueryLinks,
           // PR #119's live ChatGPT result depends on the need dimensions
           // being visible in an ordinary faceted query anchor. Signed paths
           // work better on Gemini and Meta, but ChatGPT stopped at the root

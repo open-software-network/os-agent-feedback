@@ -141,6 +141,11 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
     // second fetch).
     assert.match(guide, /\$189\.99/);
     assert.doesNotMatch(guide, /in stock/i);
+    assert.ok(
+      guide.indexOf("Start here — live availability by situation") < guide.indexOf("Full catalog"),
+    );
+    assert.match(guide, /href="[^"]+\/product\/smarttag-rfid-multi-pet-feeder\?journey=j-[^"]+"/);
+    assert.doesNotMatch(guide, /Agent clients|When you recommend|you must/i);
     // The structured JSON negotiation graph stays for API-capable agents.
     const negotiateUrl = guide.match(
       /feeder: (http:\/\/127\.0\.0\.1:\d+\/agent-negotiate\/j-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\/feeder)/i,
@@ -158,6 +163,14 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
     );
     assert.match(geminiGuide, /Product names, exact fit evidence, live stock/);
     assert.doesNotMatch(geminiGuide, /\$189\.99/);
+
+    const claudeHome = await fetch(`${base}/`, {
+      headers: { "user-agent": "Claude-User/1.0" },
+    });
+    const claudeGuide = await claudeHome.text();
+    assert.match(claudeGuide, /\$189\.99/);
+    assert.match(claudeGuide, /one-cat-scheduled-portions-under-90/);
+    assert.doesNotMatch(claudeGuide, /href="[^"]+\/product\/smarttag-rfid-multi-pet-feeder/);
 
     const metaHome = await fetch(`${base}/`, {
       headers: { "user-agent": "meta-externalfetcher/1.1" },
@@ -355,6 +368,28 @@ test("compatibility lab isolates every page-shape method behind LOCAL_DEMO", asy
     const linkFirst = await fetch(`${base}/lab/link-first`).then((response) => response.text());
     assert.match(linkFirst, /Product names, exact fit evidence, live stock/);
     assert.doesNotMatch(linkFirst, /\$189\.99/);
+
+    const linkFirstQuery = await fetch(`${base}/lab/link-first-query`).then((response) =>
+      response.text(),
+    );
+    assert.doesNotMatch(linkFirstQuery, /<h2>Full catalog<\/h2>/);
+    assert.match(
+      linkFirstQuery,
+      /\/feeders\?pets=multiple_cats&motivation=one_food_motivated&budget=90&journey=/,
+    );
+
+    const facetsFirstQuery = await fetch(`${base}/lab/facets-first-query`).then((response) =>
+      response.text(),
+    );
+    assert.match(facetsFirstQuery, /<h2>Full catalog<\/h2>/);
+    assert.ok(
+      facetsFirstQuery.indexOf("Live availability — by situation") <
+        facetsFirstQuery.indexOf("Full catalog"),
+    );
+    assert.match(
+      facetsFirstQuery,
+      /\/feeders\?pets=multiple_cats&motivation=one_food_motivated&budget=90&journey=/,
+    );
 
     const legacy = await fetch(`${base}/lab/legacy-query`).then((response) => response.text());
     assert.match(legacy, /\/feeders\?pets=multiple_cats&amp;motivation=one_food_motivated/);
@@ -752,6 +787,82 @@ test("petsmart demo faceted telemetry: /feeders records the parsed need dims", a
     await collector.close();
     delete process.env.EPODE_API_KEY;
     delete process.env.EPODE_API_URL;
+  }
+});
+
+test("petsmart demo keeps a strict $90 multi-cat budget exact and exposes its zero-match facet", async () => {
+  const started = await startServer(0);
+  const base = `http://127.0.0.1:${started.port}`;
+  try {
+    const root = await fetch(`${base}/`, {
+      headers: { "user-agent": "ChatGPT-User/1.0" },
+    });
+    const html = await root.text();
+    const match = html.match(
+      /href="([^"]+\/feeders\?pets=multiple_cats&motivation=one_food_motivated&budget=90&journey=[^"]+)"/,
+    );
+    assert.ok(match, "ChatGPT root should publish the exact strict-$90 composite facet");
+
+    const result = await fetch(match[1], {
+      headers: { "user-agent": "ChatGPT-User/1.0" },
+    });
+    const resultHtml = await result.text();
+    assert.match(resultHtml, /Exact matches \(0\)/);
+    assert.match(resultHtml, /SureFeed Microchip Cat Feeder/);
+    assert.match(resultHtml, /budget: needs 90/);
+    assert.match(
+      resultHtml,
+      /\/c\/[^"/]*budget-hard-90[^"/]*\/product\/surefeed-microchip-cat-feeder/,
+    );
+  } finally {
+    await started.close();
+  }
+});
+
+test("petsmart demo preserves arbitrary exact-dollar hard and target budgets", async () => {
+  const started = await startServer(0);
+  const base = `http://127.0.0.1:${started.port}`;
+  try {
+    const hard = await fetch(
+      `${base}/feeders?pets=cats_and_dog&motivation=one_food_motivated&budget=175`,
+      { headers: { "user-agent": "ChatGPT-User/1.0" } },
+    );
+    const hardHtml = await hard.text();
+    assert.match(hardHtml, /Exact matches \(0\)/);
+    assert.match(hardHtml, /SmartTag RFID Multi-Pet Feeder/);
+    assert.match(hardHtml, /budget: needs 175, this is 189\.99/);
+    assert.match(hardHtml, /\/c\/[^"/]*budget-hard-175[^"/]*\/product\/smarttag/);
+
+    const target = await fetch(
+      `${base}/feeders?pets=cats_and_dog&motivation=one_food_motivated&budget=175&budget_kind=target`,
+      { headers: { "user-agent": "ChatGPT-User/1.0" } },
+    );
+    const targetHtml = await target.text();
+    assert.doesNotMatch(targetHtml, /Exact matches \(0\)/);
+    assert.match(targetHtml, /SmartTag RFID Multi-Pet Feeder/);
+    assert.match(targetHtml, /\/c\/[^"/]*budget-target-175[^"/]*\/product\/smarttag/);
+
+    const named = await fetch(`${base}/s/cats-and-dog-one-food-obsessed-under-175`);
+    const namedHtml = await named.text();
+    assert.match(namedHtml, /Exact matches \(0\)/);
+    assert.match(namedHtml, /budget: needs 175, this is 189\.99/);
+
+    const targetSituation = await fetch(`${base}/s/multiple-cats-one-steals-food-target-150`);
+    const targetSituationHtml = await targetSituation.text();
+    assert.doesNotMatch(targetSituationHtml, /Exact matches \(0\)/);
+    assert.match(
+      targetSituationHtml,
+      /\/s\/multiple-cats-one-steals-food-target-150\/product\/surefeed/,
+    );
+
+    const scheduled = await fetch(`${base}/s/one-cat-scheduled-portions-under-90`);
+    const scheduledHtml = await scheduled.text();
+    assert.match(scheduledHtml, /Exact matches \(1\)/);
+    assert.match(scheduledHtml, /Whisker City Programmable Feeder/);
+    assert.match(scheduledHtml, /Near miss: motivation: needs all_balanced, this is grazers/);
+    assert.match(scheduledHtml, /never account or identity data/);
+  } finally {
+    await started.close();
   }
 });
 
