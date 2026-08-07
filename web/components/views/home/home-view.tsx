@@ -5,6 +5,7 @@ import Image from "next/image";
 import { useEffect } from "react";
 import type { ShownSecrets } from "@/components/dashboard/types";
 import { Button } from "@/components/ui/button";
+import { ExperienceInsights } from "@/components/views/home/experience-insights";
 import { SetupView } from "@/components/views/setup/setup-view";
 import type { DashboardData } from "@/lib/api/dashboard";
 import { isEditor } from "@/lib/dashboard/format";
@@ -76,6 +77,7 @@ export function HomeView({
           </div>
         </div>
       </section>
+      <ExperienceInsights insights={data.insights} />
       {isEditor(data.currentRole) ? (
         <section id="setup" aria-label="Setup" className="scroll-mt-4">
           <SetupView

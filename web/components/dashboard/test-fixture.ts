@@ -219,26 +219,44 @@ export function dashboardFixture(overrides: Partial<DashboardData> = {}): Dashbo
       surfaces: [{ name: "http", count: 1 }],
       topOperations: [{ name: "search", count: 1 }],
       lostDemand: {
-        decisionInteractions: 0,
-        zeroMatchDecisions: 0,
-        expressedDimensions: [],
-        violatedDimensions: [],
-        counterfactualChanges: [],
-        medianCounterfactualDelta: null,
+        decisionInteractions: 4,
+        zeroMatchDecisions: 1,
+        expressedDimensions: [
+          { name: "evidence:glare_control", count: 3 },
+          { name: "constraint:budget", count: 2 },
+        ],
+        violatedDimensions: [{ name: "constraint:budget", count: 2 }],
+        counterfactualChanges: [{ name: "raise_budget_from_150_to_164", count: 1 }],
+        medianCounterfactualDelta: 14,
       },
-      journeyFlow: { edges: [], exitOperations: [] },
+      journeyFlow: {
+        edges: [
+          {
+            fromOperation: "/agent-negotiate/lamp",
+            toOperation: "/agent-decide/lamp",
+            traversals: 3,
+          },
+        ],
+        exitOperations: [{ name: "/agent-decide/lamp", count: 2 }],
+      },
       handoff: {
-        handoffClicks: 0,
-        sessionsWithHandoff: 0,
-        sessions: 1,
-        handoffRate: 0,
-        landingOperations: [],
+        handoffClicks: 2,
+        sessionsWithHandoff: 1,
+        sessions: 3,
+        handoffRate: 33,
+        landingOperations: [{ name: "/product/feeder", count: 2 }],
       },
-      signalOutcomes: [],
-      agentVendors: [],
-      rankPositions: [],
-      unknownDimensions: [],
-      unansweredQuestions: [],
+      signalOutcomes: [{ signal: "constraint/budget", decisions: 3, outcomes: 2, conversions: 1 }],
+      agentVendors: [
+        { vendor: "claude", interactions: 5, sessions: 2 },
+        { vendor: "openai", interactions: 2, sessions: 1 },
+      ],
+      rankPositions: [
+        { name: "1", count: 4 },
+        { name: "2", count: 1 },
+      ],
+      unknownDimensions: [{ name: "commute", count: 2 }],
+      unansweredQuestions: [{ name: "budget · declined", count: 1 }],
     } as DashboardData["insights"] & {
       customerContextItems: number;
       customersWithContext: number;

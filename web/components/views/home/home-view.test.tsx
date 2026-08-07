@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { dashboardFixture } from "@/components/dashboard/test-fixture";
@@ -27,11 +27,107 @@ describe("HomeView", () => {
     expect(screen.queryByRole("region", { name: "At a glance" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Recent responses" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Recent customers" })).not.toBeInTheDocument();
-    expect(screen.queryByText(/signals|contexts|evidences/i)).not.toBeInTheDocument();
+    const overview = screen.getByRole("region", {
+      name: "Epode is the agent experience and analytics layer for your product.",
+    });
+    expect(within(overview).queryByText(/signals|contexts|evidences/i)).not.toBeInTheDocument();
     expect(screen.getByText("Observed interactions")).toBeVisible();
     expect(screen.getByText("Sessions")).toBeVisible();
     expect(screen.getByRole("region", { name: "Setup" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "Connect Search API" })).toBeVisible();
+  });
+
+  it("renders the seven experience insight groups from the dashboard payload", () => {
+    renderHome(dashboardFixture());
+
+    for (const heading of [
+      "What agents asked for and could not get",
+      "Where agents go next",
+      "Where journeys end",
+      "From agent journey to human click",
+      "Signals that drive outcomes",
+      "Traffic by assistant runtime",
+      "Result position views",
+      "What agents could not learn",
+    ]) {
+      expect(screen.getByRole("heading", { name: heading })).toBeVisible();
+    }
+
+    expect(screen.getByText("Zero exact matches (25%)")).toBeVisible();
+    expect(screen.getByText("Median gap to a match")).toBeVisible();
+    expect(screen.getByText("Sessions with a handoff (33%)")).toBeVisible();
+    expect(screen.getByText("Handoff landing pages")).toBeVisible();
+
+    // Machine-readable values render verbatim, never title-cased.
+    expect(screen.getByText("evidence:glare_control")).toBeVisible();
+    expect(screen.getByText("/agent-negotiate/lamp → /agent-decide/lamp")).toBeVisible();
+    expect(screen.getByText("raise_budget_from_150_to_164")).toBeVisible();
+    expect(screen.getByText("constraint/budget")).toBeVisible();
+    expect(screen.getByText("/product/feeder")).toBeVisible();
+    expect(screen.getByText("budget · declined")).toBeVisible();
+    expect(screen.queryByText("Evidence:glare_control")).not.toBeInTheDocument();
+
+    // Signal outcomes pluralize correctly, including the singular conversion.
+    expect(screen.getByText("3 decisions · 2 outcomes · 1 conversion")).toBeVisible();
+
+    // Vendors get human labels and paired counts, plus the privacy note.
+    expect(screen.getByText("Claude")).toBeVisible();
+    expect(screen.getByText("OpenAI")).toBeVisible();
+    expect(screen.getByText("5 interactions · 2 sessions")).toBeVisible();
+    expect(
+      screen.getByText(
+        /Runtime hints and user-agent values are unverified observations, never identity\./,
+      ),
+    ).toBeVisible();
+
+    expect(screen.getByText("Position 1")).toBeVisible();
+    expect(screen.getByText("commute")).toBeVisible();
+  });
+
+  it("explains when data will appear for each absent insight group", () => {
+    const data = dashboardFixture();
+    const {
+      lostDemand: _lostDemand,
+      journeyFlow: _journeyFlow,
+      handoff: _handoff,
+      signalOutcomes: _signalOutcomes,
+      agentVendors: _agentVendors,
+      rankPositions: _rankPositions,
+      unknownDimensions: _unknownDimensions,
+      unansweredQuestions: _unansweredQuestions,
+      ...insights
+    } = data.insights;
+
+    renderHome({ ...data, insights: insights as DashboardData["insights"] });
+
+    for (const heading of [
+      "What agents asked for and could not get",
+      "Where agents go next",
+      "Where journeys end",
+      "From agent journey to human click",
+      "Signals that drive outcomes",
+      "Traffic by assistant runtime",
+      "Result position views",
+      "What agents could not learn",
+    ]) {
+      expect(screen.getByRole("heading", { name: heading })).toBeVisible();
+    }
+
+    for (const message of [
+      "No expressed dimensions yet.",
+      "No hard-constraint violations yet.",
+      "No counterfactuals yet. They appear when a search ends with zero exact matches.",
+      "Transitions appear when journeys carry a session reference.",
+      "No journey exits in the last 30 days.",
+      "Landing pages appear when a proven session records a product link click.",
+      "No personalization decisions cited customer signals yet.",
+      "Runtime evidence has not named an assistant yet.",
+      "No search-attributed item views yet.",
+      "Agents answered every dimension they were asked.",
+      "No declined or unanswerable context questions.",
+    ]) {
+      expect(screen.getByText(message)).toBeVisible();
+    }
   });
 
   it("routes to the core object screens", () => {
