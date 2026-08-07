@@ -4,6 +4,11 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   output: "standalone",
   outputFileTracingRoot: path.join(import.meta.dirname, ".."),
+  // ACO report assets are read from disk at request time; the standalone
+  // output only ships traced files, so include the report tree explicitly.
+  outputFileTracingIncludes: {
+    "/aco-report/[slug]/assets/[asset]": ["./aco-reports/**"],
+  },
   turbopack: {
     root: path.join(import.meta.dirname, ".."),
   },

@@ -18,7 +18,10 @@ function isPublicRoute(pathname: string): boolean {
     AUTH_ROUTE_ALLOWLIST.has(pathname) ||
     pathname === "/.well-known/agent-feedback-v1.json" ||
     pathname.startsWith("/join/") ||
-    pathname.startsWith("/static/")
+    pathname.startsWith("/static/") ||
+    // ACO reports carry their own per-report password gate.
+    pathname === "/aco-report" ||
+    pathname.startsWith("/aco-report/")
   );
 }
 
