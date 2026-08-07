@@ -12816,6 +12816,8 @@
           "kind",
           "strength",
           "status",
+          "scope",
+          "scopeRef",
           "sessionCount",
           "observationCount",
           "firstObservedAt",
@@ -12852,6 +12854,15 @@
           "observationCount": {
             "type": "integer",
             "format": "int64"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ObservedCustomerFactScope"
+          },
+          "scopeRef": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "sessionCount": {
             "type": "integer",
@@ -12895,6 +12906,15 @@
             "type": "string"
           }
         }
+      },
+      "ObservedCustomerFactScope": {
+        "type": "string",
+        "enum": [
+          "customer",
+          "journey",
+          "item",
+          "session"
+        ]
       },
       "ObservedCustomerProfile": {
         "type": "object",

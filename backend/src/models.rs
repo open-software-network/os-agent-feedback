@@ -1334,6 +1334,15 @@ pub(crate) struct ObservedCustomerFactEvidence {
     pub observed_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ObservedCustomerFactScope {
+    Customer,
+    Journey,
+    Item,
+    Session,
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ObservedCustomerFact {
@@ -1345,6 +1354,9 @@ pub(crate) struct ObservedCustomerFact {
     #[schema(required = true, nullable)]
     pub strength: Option<String>,
     pub status: String,
+    pub scope: ObservedCustomerFactScope,
+    #[schema(required = true, nullable)]
+    pub scope_ref: Option<String>,
     pub session_count: i64,
     pub observation_count: i64,
     pub first_observed_at: DateTime<Utc>,

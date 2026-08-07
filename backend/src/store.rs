@@ -4830,6 +4830,7 @@ pub(crate) async fn dashboard_customer_by_id(
     let observed_profile = derive_observed_customer_profile(
         sqlx::query_as::<_, ObservedActivity>(
             r"SELECT interaction.session_id, session.ref_hint AS session_ref,
+              session.source AS session_source,
               interaction.operation, interaction.occurred_at AS observed_at
             FROM interactions_v2 interaction
             JOIN sessions_v2 session ON session.id = interaction.session_id

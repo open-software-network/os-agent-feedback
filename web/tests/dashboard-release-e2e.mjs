@@ -531,6 +531,8 @@ function createFixture() {
               kind: "preference",
               strength: "preferred",
               status: "observed",
+              scope: "journey",
+              scopeRef: firstSession.refHint,
               sessionCount: 1,
               observationCount: 2,
               firstObservedAt: now,
@@ -540,6 +542,29 @@ function createFixture() {
                   sessionId: ids.sessionOne,
                   sessionRef: firstSession.refHint,
                   operation: "/agent-decide/search/priority-freshness",
+                  observedAt: now,
+                },
+              ],
+            },
+            {
+              key: "search.household",
+              domain: "search",
+              label: "Household",
+              value: "Two pets",
+              kind: "context",
+              strength: null,
+              status: "observed",
+              scope: "customer",
+              scopeRef: null,
+              sessionCount: 1,
+              observationCount: 1,
+              firstObservedAt: now,
+              lastObservedAt: now,
+              evidence: [
+                {
+                  sessionId: ids.sessionOne,
+                  sessionRef: firstSession.refHint,
+                  operation: "/agent-pet-household/home-multi",
                   observedAt: now,
                 },
               ],
@@ -1068,8 +1093,13 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await metricVisible(page, "Known", "1");
   await clickText(page, "Acme workspace");
   await textVisible(page, "What we've observed");
+  await textVisible(page, "Customer traits");
+  await textVisible(page, "Customer-wide");
+  await textVisible(page, "Two pets");
   await textVisible(page, "Freshness");
-  await textVisible(page, "Visitor traits");
+  await textVisible(page, "Scoped context");
+  await textVisible(page, "Journey · session-42");
+  await textVisible(page, "Request metadata");
   await textVisible(page, "Last seen");
   await textVisible(page, "Agent network address");
   await textVisible(page, "Sessions");

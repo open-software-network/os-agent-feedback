@@ -8,7 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use crate::models::{ObservedCustomerFact, ObservedCustomerFactEvidence, ObservedCustomerProfile};
+use crate::models::{
+    ObservedCustomerFact, ObservedCustomerFactEvidence, ObservedCustomerFactScope,
+    ObservedCustomerProfile,
+};
 
 const MAX_FACT_EVIDENCE: usize = 3;
 pub(crate) const PROFILE_NODE_LIMIT: usize = 5_000;
@@ -17,6 +20,7 @@ pub(crate) const PROFILE_NODE_LIMIT: usize = 5_000;
 pub(crate) struct ObservedActivity {
     pub session_id: Uuid,
     pub session_ref: String,
+    pub session_source: String,
     pub operation: String,
     pub observed_at: DateTime<Utc>,
 }
@@ -32,8 +36,15 @@ struct FactSeed {
     status: String,
 }
 
+#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct ScopedFactSeed {
+    fact: FactSeed,
+    scope: ObservedCustomerFactScope,
+    scope_ref: Option<String>,
+}
+
 struct FactAccumulator {
-    seed: FactSeed,
+    seed: ScopedFactSeed,
     sessions: BTreeSet<Uuid>,
     observation_count: i64,
     first_observed_at: DateTime<Utc>,
@@ -44,8 +55,9 @@ struct FactAccumulator {
 /// Derive a bounded, evidence-backed customer profile from retained session activity.
 ///
 /// Operations are deliberately normalized, non-sensitive graph paths. This
-/// projection never promotes a task observation into durable memory: every fact
-/// carries the sessions, activity count, and recency that justify displaying it.
+/// projection distinguishes customer-wide traits from journey, item, and
+/// session context. Every fact also carries the evidence that justifies
+/// displaying it.
 pub(crate) fn derive_observed_customer_profile(
     mut activities: Vec<ObservedActivity>,
 ) -> ObservedCustomerProfile {
@@ -59,12 +71,18 @@ pub(crate) fn derive_observed_customer_profile(
     let truncated = activities.len() > PROFILE_NODE_LIMIT;
     activities.truncate(PROFILE_NODE_LIMIT);
     let mut session_ids = BTreeSet::new();
-    let mut facts = BTreeMap::<FactSeed, FactAccumulator>::new();
+    let mut facts = BTreeMap::<ScopedFactSeed, FactAccumulator>::new();
 
     for activity in &activities {
         session_ids.insert(activity.session_id);
         let mut facts_in_activity = BTreeSet::new();
-        for seed in parse_operation(&activity.operation) {
+        for parsed in parse_operation(&activity.operation) {
+            let (scope, scope_ref) = fact_scope(activity, &parsed);
+            let seed = ScopedFactSeed {
+                fact: parsed.fact,
+                scope,
+                scope_ref,
+            };
             if !facts_in_activity.insert(seed.clone()) {
                 continue;
             }
@@ -101,13 +119,15 @@ pub(crate) fn derive_observed_customer_profile(
     let mut facts = facts
         .into_values()
         .map(|fact| ObservedCustomerFact {
-            key: fact.seed.key,
-            domain: fact.seed.domain,
-            label: fact.seed.label,
-            value: fact.seed.value,
-            kind: fact.seed.kind,
-            strength: fact.seed.strength,
-            status: fact.seed.status,
+            key: fact.seed.fact.key,
+            domain: fact.seed.fact.domain,
+            label: fact.seed.fact.label,
+            value: fact.seed.fact.value,
+            kind: fact.seed.fact.kind,
+            strength: fact.seed.fact.strength,
+            status: fact.seed.fact.status,
+            scope: fact.seed.scope,
+            scope_ref: fact.seed.scope_ref,
             session_count: count_to_i64(fact.sessions.len()),
             observation_count: fact.observation_count,
             first_observed_at: fact.first_observed_at,
@@ -137,27 +157,84 @@ fn count_to_i64(count: usize) -> i64 {
     i64::try_from(count).unwrap_or(i64::MAX)
 }
 
-fn parse_operation(operation: &str) -> Vec<FactSeed> {
+#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct ParsedFact {
+    fact: FactSeed,
+    item_ref: Option<String>,
+}
+
+fn parse_operation(operation: &str) -> Vec<ParsedFact> {
     let segments = operation
         .trim_matches('/')
         .split('/')
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
-    let Some((domain, tokens)) = operation_state_tokens(&segments) else {
+    let Some((domain, tokens, item_ref)) = operation_state_tokens(&segments) else {
         return Vec::new();
     };
     tokens
         .iter()
-        .filter_map(|token| parse_token(domain, token))
+        .filter_map(|token| {
+            parse_token(domain, token).map(|fact| ParsedFact {
+                fact,
+                item_ref: item_ref.map(str::to_owned),
+            })
+        })
         .collect()
 }
 
-fn operation_state_tokens<'a>(segments: &'a [&'a str]) -> Option<(&'a str, &'a [&'a str])> {
+fn operation_state_tokens<'a>(
+    segments: &'a [&'a str],
+) -> Option<(&'a str, &'a [&'a str], Option<&'a str>)> {
     match segments {
-        ["agent-negotiate" | "agent-decide", domain, tokens @ ..] => Some((domain, tokens)),
-        ["agent-pet-household", tokens @ ..] => Some(("petsmart", tokens)),
+        ["agent-negotiate" | "agent-decide", domain, tokens @ ..] => Some((domain, tokens, None)),
+        ["agent-pet-household", tokens @ ..] => Some(("petsmart", tokens, None)),
+        [
+            "agent-product" | "agent-item",
+            domain,
+            item_ref,
+            tokens @ ..,
+        ] if !matches!(*item_ref, "evaluate-fit" | "alternatives") => {
+            let tokens = if tokens
+                .last()
+                .is_some_and(|token| matches!(*token, "evaluate-fit" | "alternatives"))
+            {
+                &tokens[..tokens.len() - 1]
+            } else {
+                tokens
+            };
+            Some((domain, tokens, Some(item_ref)))
+        }
         _ => None,
     }
+}
+
+fn fact_scope(
+    activity: &ObservedActivity,
+    parsed: &ParsedFact,
+) -> (ObservedCustomerFactScope, Option<String>) {
+    if is_customer_wide(&parsed.fact) {
+        return (ObservedCustomerFactScope::Customer, None);
+    }
+    if let Some(item_ref) = parsed.item_ref.as_ref() {
+        return (ObservedCustomerFactScope::Item, Some(item_ref.clone()));
+    }
+    if activity.session_source == "customer" {
+        return (
+            ObservedCustomerFactScope::Journey,
+            Some(activity.session_ref.clone()),
+        );
+    }
+    (
+        ObservedCustomerFactScope::Session,
+        Some(activity.session_ref.clone()),
+    )
+}
+
+fn is_customer_wide(fact: &FactSeed) -> bool {
+    // Only semantics that explicitly describe the household cross the
+    // customer-wide boundary. Everything ambiguous stays scoped.
+    matches!(fact.key.rsplit('.').next(), Some("household" | "pets"))
 }
 
 fn parse_token(domain: &str, token: &str) -> Option<FactSeed> {
@@ -582,9 +659,19 @@ mod tests {
     use super::*;
 
     fn activity(session: Uuid, operation: &str, minute: u32) -> ObservedActivity {
+        activity_from("customer", session, operation, minute)
+    }
+
+    fn activity_from(
+        source: &str,
+        session: Uuid,
+        operation: &str,
+        minute: u32,
+    ) -> ObservedActivity {
         ObservedActivity {
             session_id: session,
             session_ref: format!("session-{}", &session.simple().to_string()[..8]),
+            session_source: source.to_owned(),
             operation: operation.to_owned(),
             observed_at: Utc.with_ymd_and_hms(2026, 8, 5, 12, minute, 0).unwrap(),
         }
@@ -610,20 +697,34 @@ mod tests {
 
         assert_eq!(profile.session_count, 2);
         assert_eq!(profile.activity_count, 3);
-        let budget = profile
+        let budgets = profile
             .facts
             .iter()
-            .find(|fact| fact.key == "apartments.budget")
-            .ok_or("missing budget fact")?;
-        assert_eq!(budget.value, "$4,000/month");
-        assert_eq!(budget.strength.as_deref(), Some("hard"));
-        assert_eq!(budget.session_count, 2);
-        assert_eq!(budget.observation_count, 2);
-        assert_eq!(budget.evidence.len(), 2);
+            .filter(|fact| fact.key == "apartments.budget")
+            .collect::<Vec<_>>();
+        assert_eq!(budgets.len(), 2);
+        assert!(budgets.iter().all(|budget| {
+            budget.value == "$4,000/month"
+                && budget.strength.as_deref() == Some("hard")
+                && budget.scope == ObservedCustomerFactScope::Journey
+                && budget.scope_ref.is_some()
+                && budget.session_count == 1
+                && budget.observation_count == 1
+                && budget.evidence.len() == 1
+        }));
+        let pets = profile
+            .facts
+            .iter()
+            .find(|fact| fact.key == "apartments.pets")
+            .ok_or("missing customer-wide pet fact")?;
+        assert_eq!(pets.scope, ObservedCustomerFactScope::Customer);
+        assert_eq!(pets.scope_ref, None);
+        assert_eq!(pets.session_count, 2);
         assert!(profile.facts.iter().any(|fact| {
             fact.key == "apartments.amenity"
                 && fact.value == "Elevator"
                 && fact.kind == "preference"
+                && fact.scope == ObservedCustomerFactScope::Journey
         }));
         Ok(())
     }
@@ -645,7 +746,9 @@ mod tests {
         ]);
 
         assert!(profile.facts.iter().any(|fact| {
-            fact.key == "petsmart.household" && fact.value == "Two cats and a dog"
+            fact.key == "petsmart.household"
+                && fact.value == "Two cats and a dog"
+                && fact.scope == ObservedCustomerFactScope::Customer
         }));
         assert!(profile.facts.iter().any(|fact| {
             fact.key == "petsmart.food_format" && fact.value == "Dry kibble and wet pâté"
@@ -654,6 +757,35 @@ mod tests {
             fact.key == "flights.purpose"
                 && fact.status == "unknown"
                 && fact.value == "Not expressed"
+                && fact.scope == ObservedCustomerFactScope::Journey
+        }));
+    }
+
+    #[test]
+    fn scopes_non_customer_context_to_items_or_sessions_when_available() {
+        let item_session = Uuid::new_v4();
+        let mcp_session = Uuid::new_v4();
+        let mcp_session_ref = format!("session-{}", &mcp_session.simple().to_string()[..8]);
+        let profile = derive_observed_customer_profile(vec![
+            activity(
+                item_session,
+                "/agent-product/lamps/task-lamp/budget-hard-150/purpose-coding/evaluate-fit",
+                0,
+            ),
+            activity_from("mcp", mcp_session, "/agent-decide/lamps/budget-hard-200", 1),
+        ]);
+
+        assert!(profile.facts.iter().any(|fact| {
+            fact.key == "lamps.budget"
+                && fact.value == "$150"
+                && fact.scope == ObservedCustomerFactScope::Item
+                && fact.scope_ref.as_deref() == Some("task-lamp")
+        }));
+        assert!(profile.facts.iter().any(|fact| {
+            fact.key == "lamps.budget"
+                && fact.value == "$200"
+                && fact.scope == ObservedCustomerFactScope::Session
+                && fact.scope_ref.as_deref() == Some(mcp_session_ref.as_str())
         }));
     }
 
