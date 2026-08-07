@@ -165,9 +165,9 @@ test("additive database expansion is derived, retry-safe, attested, and fail-clo
   assert.match(source, /Derive the single added migration/);
   assert.match(
     source,
-    /git diff --name-status "\$\{TARGET_SHA\}\^1" "\$TARGET_SHA" -- backend\/migrations/,
+    /git diff --name-status "\$\{migration_sha\}\^1" "\$migration_sha" -- backend\/migrations/,
   );
-  assert.match(source, /target_sha must add exactly one migration/);
+  assert.match(source, /migration_sha must add exactly one migration/);
   assert.match(source, /migration_sha256="\$\(sha256sum "\$migration_path"/);
   assert.match(source, /expected_previous_version="\$\(\(migration_version - 1\)\)"/);
   assert.doesNotMatch(
@@ -219,6 +219,10 @@ test("additive database expansion is derived, retry-safe, attested, and fail-clo
   assert.match(source, /EPODE_PRODUCTION_MIGRATION_API_REF/);
   assert.match(source, /EPODE_PRODUCTION_MIGRATION_API_DEPLOYMENT_ID == \$deployment_id/);
   assert.doesNotMatch(source, /EPODE_PRODUCTION_MIGRATION_WEB_REF|migration-marker pair/);
+  assert.match(source, /MIGRATION_SHA: \$\{\{ inputs\.migration_sha \}\}/);
+  assert.match(source, /migration_sha="\$\{MIGRATION_SHA:-\$TARGET_SHA\}"/);
+  assert.match(source, /git merge-base --is-ancestor "\$migration_sha" "\$TARGET_SHA"/);
+  assert.match(source, /git diff --name-status "\$\{migration_sha\}\^1" "\$migration_sha"/);
 
   const promotion = await readFile(repoFile(".github/workflows/promote.yml"), "utf8");
   assert.match(promotion, /A release may cross one additive migration boundary/);

@@ -177,6 +177,14 @@ boundary or any edit to an existing migration fails before production changes.
 Schema expansion uses the manually dispatched `Verify or apply additive
 database expansion` workflow. It has four operations:
 
+The required `target_sha` is the current protected-main revision carrying the
+migration and local CI signoffs. Normally it is also the commit that added the
+migration. When rolling out an older pending migration after a CI transition,
+set optional `migration_sha` to the exact protected-main ancestor that
+originally added the SQL file. The workflow still verifies signoffs on
+`target_sha`, derives the immutable migration from `migration_sha`, and rejects
+an origin that is not its ancestor.
+
 - `verify-canary` and `verify-production` read the SQLx ledger, verify every
   known SQLx SHA-384 checksum, and compute a canonical public-schema
   fingerprint. They do not set Railway variables, redeploy a service, or alter
