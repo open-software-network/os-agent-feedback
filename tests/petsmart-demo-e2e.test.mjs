@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import test from "node:test";
@@ -58,18 +59,40 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
       assert.match(html, /PetSmart|Pet<span/);
       assert.match(html, /Anything for Pets/);
       assert.match(html, /data-personalized="false"/);
+      // Work-mode cloud browsers browse the human storefront with a real
+      // Chrome UA, so the human page carries the same situation links —
+      // without a journey: a per-render minted id would fabricate agent
+      // handoff evidence the moment anyone clicked it.
+      assert.match(html, /Shop by situation/);
+      assert.match(html, /\/feeders\?pets=multiple_cats&motivation=one_food_motivated&budget=200/);
+      assert.doesNotMatch(html, /\/feeders\?[^"]*journey=/);
       assert.equal(setCookies(home).length, 0, "the homepage must not drop cookies");
     }
 
-    // The shopping agent receives the experience graph at the same URL.
+    // The shopping agent receives the faceted storefront at the same URL:
+    // plain HTML whose anchors ARE the experience graph.
     const agentHome = await fetch(`${base}/`, { headers: { "user-agent": AGENT_UA } });
     assert.equal(agentHome.status, 200);
+    assert.match(agentHome.headers.get("content-type") ?? "", /text\/html/);
     const guide = await agentHome.text();
-    assert.match(guide, /Agent experience guide/);
+    // Situation anchors carry the need dims as ordinary query params plus the
+    // journey id for session stitching.
+    assert.match(
+      guide,
+      /href="http:\/\/127\.0\.0\.1:\d+\/feeders\?pets=multiple_cats&motivation=one_food_motivated&budget=200&journey=j-[a-f0-9-]+"/,
+    );
+    // The composable URL template is documented on-page.
+    assert.match(guide, /\/feeders\?pets=one_cat\|multiple_cats/);
+    // Prices at root guarantee a correct one-fetch answer; stock lives only
+    // behind the situation pages (the value asymmetry that earns the tokened
+    // second fetch).
+    assert.match(guide, /\$189\.99/);
+    assert.doesNotMatch(guide, /in stock/i);
+    // The structured JSON negotiation graph stays for API-capable agents.
     const negotiateUrl = guide.match(
       /feeder: (http:\/\/127\.0\.0\.1:\d+\/agent-negotiate\/j-[a-f0-9-]+\/feeder)/i,
     )?.[1];
-    assert.ok(negotiateUrl, "guide must include a concrete feeder negotiation URL");
+    assert.ok(negotiateUrl, "the agent storefront must keep the JSON negotiation entry URL");
 
     // Negotiate: two cats + a dog, one food-motivated, $200 target.
     let { response, body: node } = await fetchJson(base, negotiateUrl.replace(base, ""));
@@ -175,6 +198,24 @@ test("petsmart demo e2e: gating and counterfactuals stay honest", async () => {
     const missing = await fetchJson(base, "/agent-item/j-missing?item_id=unknown-item");
     assert.equal(missing.response.status, 404);
     assert.equal(missing.body.error, "item_not_found");
+  } finally {
+    await started.close();
+  }
+});
+
+test("petsmart demo: robots.txt stays permissive for assistant preflight checks", async () => {
+  const started = await startServer(0);
+  const base = `http://127.0.0.1:${started.port}`;
+
+  try {
+    // Chat-mode assistants check robots.txt before opening any link, and
+    // work-mode cloud browsers respect a disallow outright.
+    const robots = await fetch(`${base}/robots.txt`);
+    assert.equal(robots.status, 200);
+    const body = await robots.text();
+    assert.match(body, /User-agent: \*/);
+    assert.match(body, /Allow: \//);
+    assert.doesNotMatch(body, /Disallow/);
   } finally {
     await started.close();
   }
@@ -330,6 +371,161 @@ test("petsmart demo telemetry: hops carry experience payloads, vendor hints, and
     assert.equal(handoff.sessionRef, journeyId);
     assert.match(handoff.anonymousRef, /^psv_/);
     assert.equal(handoff.runtimeHint, "petsmart-demo/1.0");
+  } finally {
+    await started.close();
+    await collector.close();
+    delete process.env.EPODE_API_KEY;
+    delete process.env.EPODE_API_URL;
+  }
+});
+
+test("petsmart demo faceted telemetry: /feeders records the parsed need dims", async () => {
+  const collector = await startCollector();
+  process.env.EPODE_API_KEY =
+    "af_live_0123456789abcdef0123456789abcdef_secretsecretsecretsecretsecretse";
+  process.env.EPODE_API_URL = `http://127.0.0.1:${collector.port}`;
+  const facetedServer = await import("../examples/petsmart-demo/server.mjs?faceted-telemetry");
+  const started = await facetedServer.startServer(0);
+  const base = `http://127.0.0.1:${started.port}`;
+
+  try {
+    // The agent-UA root is the faceted storefront; take a situation anchor
+    // exactly as an assistant would.
+    const root = await fetch(`${base}/`, { headers: { "user-agent": AGENT_UA } });
+    assert.match(root.headers.get("content-type") ?? "", /text\/html/);
+    const storefront = await root.text();
+    const situationUrl = storefront.match(
+      /href="(http:\/\/127\.0\.0\.1:\d+\/feeders\?pets=multiple_cats&motivation=one_food_motivated&budget=200&journey=j-[a-f0-9-]+)"/,
+    )?.[1];
+    assert.ok(situationUrl, "the storefront must anchor a tokened situation URL");
+    const journeyId = new URL(situationUrl).searchParams.get("journey");
+
+    const plain = await fetch(situationUrl, { headers: { "user-agent": AGENT_UA } });
+    assert.equal(plain.status, 200);
+    const plainHtml = await plain.text();
+    // Value asymmetry: live stock appears only on the situation page.
+    assert.match(plainHtml, /in stock nearby/);
+    assert.doesNotMatch(storefront, /in stock/i);
+    assert.match(plainHtml, /Exact matches \(2\)/);
+    // Product anchors carry the ranked-against context for the handoff click.
+    assert.match(plainHtml, new RegExp(`/product/[a-z0-9-]+\\?journey=${journeyId}&ctx=`));
+
+    // ChatGPT's link sanitizer percent-encodes nested query separators; the
+    // server must recover the same dims or the journey and tokens silently
+    // vanish.
+    const encodedJourney = `j-${randomUUID()}`;
+    const encoded = await fetch(
+      `${base}/feeders?pets=multiple_cats%26motivation%3Done_food_motivated%26budget%3D200%26journey%3D${encodedJourney}`,
+      { headers: { "user-agent": AGENT_UA } },
+    );
+    assert.equal(encoded.status, 200);
+    assert.match(await encoded.text(), /Exact matches \(2\)/);
+
+    await waitForEvents(collector.batches, (seen) =>
+      [journeyId, encodedJourney].every((sessionRef) =>
+        seen.some(
+          (event) =>
+            event.sessionRef === sessionRef &&
+            event.operation === "/agent-decide/feeder" &&
+            event.experience?.needState?.expressedDimensions?.length === 3,
+        ),
+      ),
+    );
+
+    for (const batch of collector.batches) {
+      assert.ok(
+        validateBatch(batch),
+        `batch must satisfy the telemetry schema: ${JSON.stringify(validateBatch.errors)}`,
+      );
+    }
+
+    const seen = collectedEvents(collector.batches);
+    for (const sessionRef of [journeyId, encodedJourney]) {
+      const hop = seen.find(
+        (event) => event.sessionRef === sessionRef && event.operation === "/agent-decide/feeder",
+      );
+      assert.ok(hop, `the ${sessionRef} fetch must record a decision hop`);
+      assert.deepEqual(hop.experience.needState.expressedDimensions.sort(), [
+        "budget",
+        "motivation",
+        "pets",
+      ]);
+      assert.equal(hop.experience.stage, "decision_support");
+      assert.equal(hop.experience.decision.exactMatchCount, 2);
+      assert.equal(hop.runtimeHint, "petsmart-demo/1.0 chatgpt-user");
+    }
+  } finally {
+    await started.close();
+    await collector.close();
+    delete process.env.EPODE_API_KEY;
+    delete process.env.EPODE_API_URL;
+  }
+});
+
+test("petsmart demo faceted gating: only request-carried journeys reach telemetry", async () => {
+  const collector = await startCollector();
+  process.env.EPODE_API_KEY =
+    "af_live_0123456789abcdef0123456789abcdef_secretsecretsecretsecretsecretse";
+  process.env.EPODE_API_URL = `http://127.0.0.1:${collector.port}`;
+  const gatedServer = await import("../examples/petsmart-demo/server.mjs?feeders-gate");
+  const started = await gatedServer.startServer(0);
+  const base = `http://127.0.0.1:${started.port}`;
+  const situation = "pets=multiple_cats&motivation=one_food_motivated&budget=200";
+
+  try {
+    // Organic journey-less visits — a human browsing, and a crawler the
+    // permissive robots.txt invites — must fabricate no telemetry at all.
+    for (const ua of [BROWSER_UA, "Googlebot/2.1"]) {
+      const organic = await fetch(`${base}/feeders?${situation}`, {
+        headers: { "user-agent": ua },
+      });
+      assert.equal(organic.status, 200);
+    }
+    // The organic human visit still gets the ordinary shop-page cookie drop.
+    const organicHuman = await fetch(`${base}/feeders?${situation}`, {
+      headers: { "user-agent": BROWSER_UA },
+    });
+    assert.ok(
+      setCookies(organicHuman).some((cookie) => cookie.startsWith("ps_visitor=")),
+      "the organic /feeders visit must still mint the visitor cookie",
+    );
+
+    // A human opening an agent-composed situation link IS the handoff.
+    const journeyId = `j-${randomUUID()}`;
+    const handoff = await fetch(`${base}/feeders?${situation}&journey=${journeyId}`, {
+      headers: { "user-agent": BROWSER_UA },
+    });
+    assert.equal(handoff.status, 200);
+
+    await waitForEvents(collector.batches, (seen) => {
+      return (
+        seen.some(
+          (event) =>
+            event.customerLinkSource === "product_link_click" && event.sessionRef === journeyId,
+        ) &&
+        seen.some(
+          (event) => event.operation === "/agent-decide/feeder" && event.sessionRef === journeyId,
+        )
+      );
+    });
+
+    const seen = collectedEvents(collector.batches);
+    // Every recorded event belongs to the carried journey: the three
+    // journey-less visits above recorded nothing.
+    assert.ok(
+      seen.every((event) => event.sessionRef === journeyId),
+      `journey-less visits must record nothing, saw ${JSON.stringify(seen.map((event) => [event.operation, event.sessionRef]))}`,
+    );
+    const clicks = seen.filter((event) => event.customerLinkSource === "product_link_click");
+    assert.equal(clicks.length, 1, "only the journey-carrying visit may record a click");
+    assert.equal(clicks[0].operation, "/feeders");
+    assert.match(clicks[0].anonymousRef, /^psv_/);
+    const hop = seen.find((event) => event.operation === "/agent-decide/feeder");
+    assert.deepEqual(hop.experience.needState.expressedDimensions.sort(), [
+      "budget",
+      "motivation",
+      "pets",
+    ]);
   } finally {
     await started.close();
     await collector.close();
