@@ -5388,11 +5388,6 @@ pub(crate) async fn purge_expired_product_data(
     .map_err(ApiError::internal)
 }
 
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    reason = "bounded dashboard percentages and integer-backed duration percentiles are intentionally rounded to whole-number metrics"
-)]
 /// Unverified vendor evidence naming a known assistant family, applied
 /// case-insensitively to runtime hints and observed user-agents. Mirrors the
 /// AGENT MIX vendor classifier and the reference integrations' vendor-hint
@@ -5400,6 +5395,20 @@ pub(crate) async fn purge_expired_product_data(
 const AGENT_EVIDENCE_PATTERN: &str =
     "(claude|anthropic|chatgpt|openai|gpt-|perplexity|gemini|google-extended|cohere|copilot)";
 
+/// Agent-evidenced hops that ended off the graph: hard 404s (a fabricated
+/// URL, like a live Claude run inventing its own /agent-item path), plus
+/// 400/422 on graph operations (malformed tokens or premature decisions).
+const OFF_GRAPH_CONDITION: &str = r"(COALESCE(i.runtime_hint, '') ~* $3
+        OR COALESCE(observation.user_agent, '') ~* $3
+        OR (i.surface = 'http_json' AND i.operation LIKE '/agent-%'))
+      AND (i.status_code = 404
+        OR (i.status_code IN (400, 422) AND i.operation LIKE '/agent-%'))";
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "bounded dashboard percentages and integer-backed duration percentiles are intentionally rounded to whole-number metrics"
+)]
 async fn dashboard_insights(
     pool: &PgPool,
     environment_id: Option<Uuid>,
@@ -5951,15 +5960,6 @@ async fn dashboard_insights(
         .fetch_all(pool)
         .await?,
     );
-    // Off-graph attempts: agent-evidenced hops that fell off the graph — any
-    // 404 (a fabricated URL, like a live Claude run inventing its own
-    // /agent-item path), plus 400/422 on graph operations (malformed tokens
-    // or premature decisions).
-    const OFF_GRAPH_CONDITION: &str = r"(COALESCE(i.runtime_hint, '') ~* $3
-        OR COALESCE(observation.user_agent, '') ~* $3
-        OR (i.surface = 'http_json' AND i.operation LIKE '/agent-%'))
-      AND (i.status_code = 404
-        OR (i.status_code IN (400, 422) AND i.operation LIKE '/agent-%'))";
     let off_graph_attempts = sqlx::query_scalar::<_, i64>(&format!(
         r"SELECT COUNT(*)
         FROM interactions_v2 i
