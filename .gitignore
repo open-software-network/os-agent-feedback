@@ -19,9 +19,8 @@
 .DS_Store
 *.pem
 
-# debug
-npm-debug.log*
-.pnpm-debug.log*
+# debug and tool output logs
+*.log
 
 # env files (can opt-in for committing if needed)
 .env*
@@ -35,6 +34,8 @@ npm-debug.log*
 web/.next/
 web/out/
 /.artifacts/
+.vinext/
+.wrangler/
 
 # agent coordination (shared via symlink from main checkout)
 .briefs
