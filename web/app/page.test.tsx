@@ -29,7 +29,7 @@ describe("dashboard data flow", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
-    for (const view of ["Home", "Customers", "Sessions", "Configurations"]) {
+    for (const view of ["Home", "Insights", "Customers", "Sessions", "Configurations"]) {
       expect(screen.getByRole("button", { name: view })).toBeVisible();
     }
     expect(fetchMock).toHaveBeenCalledWith(
@@ -55,6 +55,16 @@ describe("dashboard data flow", () => {
     ]) {
       expect(screen.queryByRole("button", { name: hidden })).not.toBeInTheDocument();
     }
+    fireEvent.click(screen.getByRole("button", { name: "Insights" }));
+    expect(await screen.findByRole("heading", { name: "Insights" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "How agents actually shop" })).toBeVisible();
+    expect(new URL(window.location.href).searchParams.get("view")).toBe("insights");
+    expect(
+      screen.queryByRole("heading", {
+        name: "Epode is the agent experience and analytics layer for your product.",
+      }),
+    ).not.toBeInTheDocument();
+
     fireEvent.click(screen.getByRole("button", { name: "Customers" }));
     expect(await screen.findByRole("heading", { name: "Customers" })).toBeVisible();
     expect(await screen.findByRole("row", { name: /Acme workspace/ })).toBeVisible();

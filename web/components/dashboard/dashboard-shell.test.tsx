@@ -19,13 +19,12 @@ describe("DashboardShell", () => {
       </DashboardShell>,
     );
 
-    const labels = ["Home", "Customers", "Sessions", "Configurations"];
+    const labels = ["Home", "Insights", "Customers", "Sessions", "Configurations"];
     for (const label of labels) expect(screen.getByRole("button", { name: label })).toBeVisible();
     for (const hidden of [
       "Responses",
       "Context",
       "Connectors",
-      "Insights",
       "Signals",
       "Interactions",
       "Contexts",
@@ -139,7 +138,7 @@ describe("DashboardShell", () => {
     for (const hidden of ["Connectors", "Setup", "Data controls", "Responses", "Context"]) {
       expect(screen.queryByRole("button", { name: hidden })).not.toBeInTheDocument();
     }
-    for (const label of ["Home", "Sessions", "Customers", "Configurations"]) {
+    for (const label of ["Home", "Insights", "Sessions", "Customers", "Configurations"]) {
       expect(screen.getByRole("button", { name: label })).toBeVisible();
     }
     fireEvent.click(screen.getByRole("button", { name: "Configurations" }));

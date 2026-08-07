@@ -1007,6 +1007,22 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await fixtureRequest(state, requestPath("/api/dashboard"), "initial dashboard data");
   await page.screenshot({ path: path.join(artifactDirectory, "01-home.png"), fullPage: true });
 
+  await clickText(page, "Insights");
+  await textVisible(page, "How agents actually shop");
+  await textVisible(page, "What agents could not learn");
+  assert.equal(new URL(page.url()).searchParams.get("view"), "insights");
+  assert.equal(
+    await page.evaluate(() => document.body.innerText.includes("Connect Search API")),
+    false,
+    "setup must remain on Home instead of appearing in Insights",
+  );
+  await page.screenshot({
+    path: path.join(artifactDirectory, "01-insights.png"),
+    fullPage: true,
+  });
+  await clickText(page, "Home");
+  await textVisible(page, "Epode is the agent experience and analytics layer for your product.");
+
   await page.click("button[aria-label*='open product menu']");
   await clickText(page, "Billing API");
   await textVisible(page, "Epode is the agent experience and analytics layer for your product.");

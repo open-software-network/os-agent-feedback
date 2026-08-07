@@ -19,6 +19,7 @@ import { QuestionsView } from "@/components/views/context-fields/context-fields-
 import { CustomersView } from "@/components/views/customers/customers-view";
 import { FeedbackView } from "@/components/views/feedback/feedback-view";
 import { HomeView } from "@/components/views/home/home-view";
+import { InsightsView } from "@/components/views/insights/insights-view";
 import { InteractionDetail } from "@/components/views/interactions/interaction-detail";
 import { PolicyView } from "@/components/views/policy/policy-view";
 import { SessionsView } from "@/components/views/sessions/sessions-view";
@@ -114,12 +115,9 @@ export function DashboardApp() {
             ? "sessions"
             : requestedView;
     setView(
-      // "insights" is a retired view name kept as a URL alias for bookmarked links.
-      canonicalView === "insights"
-        ? "home"
-        : DASHBOARD_VIEWS.includes(canonicalView as DashboardView)
-          ? (canonicalView as DashboardView)
-          : "home",
+      DASHBOARD_VIEWS.includes(canonicalView as DashboardView)
+        ? (canonicalView as DashboardView)
+        : "home",
     );
     const requestedWorkspaceId = url.searchParams.get("team");
     explicitWorkspaceSelection.current = Boolean(requestedWorkspaceId);
@@ -153,7 +151,7 @@ export function DashboardApp() {
         ...limits,
       }),
     enabled: ready,
-    refetchInterval: view === "home" ? 5_000 : false,
+    refetchInterval: view === "home" || view === "insights" ? 5_000 : false,
     retry: (failureCount, error) => {
       if (error instanceof ApiError && error.status === 403) return false;
       return failureCount < 1;
@@ -448,6 +446,8 @@ export function DashboardApp() {
 
   function renderView(currentData: DashboardData) {
     switch (view) {
+      case "insights":
+        return <InsightsView insights={currentData.insights} />;
       case "feedback":
         return (
           <FeedbackView

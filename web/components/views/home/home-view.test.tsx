@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { dashboardFixture } from "@/components/dashboard/test-fixture";
 import type { DashboardData } from "@/lib/api/dashboard";
 
+import { InsightsView } from "../insights/insights-view";
 import { HomeView } from "./home-view";
 
 describe("HomeView", () => {
@@ -35,10 +36,16 @@ describe("HomeView", () => {
     expect(screen.getByText("Sessions")).toBeVisible();
     expect(screen.getByRole("region", { name: "Setup" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "Connect Search API" })).toBeVisible();
+    expect(
+      screen.queryByRole("heading", { name: "How agents actually shop" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "What agents could not learn" }),
+    ).not.toBeInTheDocument();
   });
 
   it("renders the seven experience insight groups from the dashboard payload", () => {
-    renderHome(dashboardFixture());
+    renderInsights(dashboardFixture());
 
     for (const heading of [
       "What agents asked for and could not get",
@@ -85,7 +92,7 @@ describe("HomeView", () => {
   });
 
   it("renders the journey-reality region: funnel, traffic classes, channels, and off-graph attempts", () => {
-    renderHome(dashboardFixture());
+    renderInsights(dashboardFixture());
 
     expect(screen.getByRole("heading", { name: "How agents actually shop" })).toBeVisible();
     for (const label of [
@@ -137,7 +144,7 @@ describe("HomeView", () => {
       ...insights
     } = data.insights;
 
-    renderHome({ ...data, insights: insights as DashboardData["insights"] });
+    renderInsights({ ...data, insights: insights as DashboardData["insights"] });
 
     for (const heading of [
       "How agents actually shop",
@@ -217,4 +224,8 @@ function renderHome(data: DashboardData) {
       setNotice={vi.fn()}
     />,
   );
+}
+
+function renderInsights(data: DashboardData) {
+  return render(<InsightsView insights={data.insights} />);
 }
