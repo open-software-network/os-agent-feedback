@@ -129,6 +129,24 @@ test("production promotion verifies the active canary pair and can compensate ei
   assert.match(source, /id: tag_readback/);
   assert.match(source, /steps\.tag_readback\.outcome != 'success'/);
   assert.match(source, /if: steps\.tag_readback\.outcome == 'success'/);
+  assert.ok(
+    source.indexOf("Observe the production pair before publishing tags") <
+      source.indexOf("Move API production tag after both services succeed"),
+    "the monitored observation window must pass before production tags move",
+  );
+  assert.match(source, /scripts\/verify-production-observation\.sh/);
+  assert.match(source, /PRODUCTION_OBSERVATION_SECONDS \|\| '300'/);
+  assert.match(source, /PRODUCTION_OBSERVATION_FAILURE_THRESHOLD \|\| '2'/);
+  assert.match(source, /Restore the previous API after a failed production observation/);
+  assert.match(source, /Restore the previous web after a failed production observation/);
+  const observationRecovery = source.slice(
+    source.indexOf("Restore the previous API after a failed production observation"),
+    source.indexOf("Move API production tag after both services succeed"),
+  );
+  assert.match(observationRecovery, /steps\.previous\.outputs\.api_ref/);
+  assert.match(observationRecovery, /steps\.previous\.outputs\.api_digest/);
+  assert.match(observationRecovery, /steps\.previous\.outputs\.web_ref/);
+  assert.match(observationRecovery, /steps\.previous\.outputs\.web_digest/);
 });
 
 test("additive database expansion is derived, retry-safe, attested, and fail-closed", async () => {

@@ -595,9 +595,56 @@ jobs:
           fi
           exit 1
 
+      - name: Observe the production pair before publishing tags
+        id: production_observation
+        if: steps.production_smoke.outcome == 'success'
+        continue-on-error: true
+        env:
+          EPODE_OBSERVATION_SECONDS: ${{ vars.PRODUCTION_OBSERVATION_SECONDS || '300' }}
+          EPODE_OBSERVATION_INTERVAL_SECONDS: ${{ vars.PRODUCTION_OBSERVATION_INTERVAL_SECONDS || '30' }}
+          EPODE_OBSERVATION_FAILURE_THRESHOLD: ${{ vars.PRODUCTION_OBSERVATION_FAILURE_THRESHOLD || '2' }}
+          EPODE_OBSERVATION_MAX_LATENCY_SECONDS: ${{ vars.PRODUCTION_OBSERVATION_MAX_LATENCY_SECONDS || '5' }}
+        run: bash scripts/verify-production-observation.sh "$API_ORIGIN" "$WEB_ORIGIN"
+
+      - name: Restore the previous API after a failed production observation
+        id: restore_api_after_observation
+        if: always() && steps.production_observation.outcome == 'failure'
+        continue-on-error: true
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          bash scripts/railway-deploy-image.sh \
+            production \
+            "$API_SERVICE" \
+            "${{ steps.previous.outputs.api_ref }}" \
+            "${{ steps.previous.outputs.api_digest }}"
+
+      - name: Restore the previous web after a failed production observation
+        id: restore_web_after_observation
+        if: always() && steps.production_observation.outcome == 'failure'
+        continue-on-error: true
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          bash scripts/railway-deploy-image.sh \
+            production \
+            "$WEB_SERVICE" \
+            "${{ steps.previous.outputs.web_ref }}" \
+            "${{ steps.previous.outputs.web_digest }}"
+
+      - name: Fail a production observation that required restoration
+        if: always() && steps.production_observation.outcome == 'failure'
+        run: |
+          if [[ "${{ steps.restore_api_after_observation.outcome }}" != "success" || "${{ steps.restore_web_after_observation.outcome }}" != "success" ]]; then
+            echo "::error::Production observation failed and at least one independent restoration failed. Immediate operator intervention is required."
+          else
+            echo "::error::Production observation failed. The previous API and web pair were independently restored; production tags were not moved."
+          fi
+          exit 1
+
       - name: Move API production tag after both services succeed
         id: tag_api
-        if: steps.production_smoke.outcome == 'success'
+        if: steps.production_observation.outcome == 'success'
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -607,7 +654,7 @@ jobs:
 
       - name: Move web production tag after the API tag succeeds
         id: tag_web
-        if: steps.production_smoke.outcome == 'success' && steps.tag_api.outcome == 'success'
+        if: steps.production_observation.outcome == 'success' && steps.tag_api.outcome == 'success'
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -641,7 +688,7 @@ jobs:
       - name: Restore API production tag after incomplete tag movement
         id: restore_api_tag
         if: >-
-          always() && steps.production_smoke.outcome == 'success' && (
+          always() && steps.production_observation.outcome == 'success' && (
             steps.tag_api.outcome != 'success' || steps.tag_web.outcome != 'success' || steps.tag_readback.outcome != 'success'
           )
         continue-on-error: true
@@ -653,7 +700,7 @@ jobs:
       - name: Restore web production tag after incomplete tag movement
         id: restore_web_tag
         if: >-
-          always() && steps.production_smoke.outcome == 'success' && (
+          always() && steps.production_observation.outcome == 'success' && (
             steps.tag_api.outcome != 'success' || steps.tag_web.outcome != 'success' || steps.tag_readback.outcome != 'success'
           )
         continue-on-error: true
@@ -665,7 +712,7 @@ jobs:
       - name: Restore API service after incomplete tag movement
         id: restore_api_after_tags
         if: >-
-          always() && steps.production_smoke.outcome == 'success' && (
+          always() && steps.production_observation.outcome == 'success' && (
             steps.tag_api.outcome != 'success' || steps.tag_web.outcome != 'success' || steps.tag_readback.outcome != 'success'
           )
         continue-on-error: true
@@ -681,7 +728,7 @@ jobs:
       - name: Restore web service after incomplete tag movement
         id: restore_web_after_tags
         if: >-
-          always() && steps.production_smoke.outcome == 'success' && (
+          always() && steps.production_observation.outcome == 'success' && (
             steps.tag_api.outcome != 'success' || steps.tag_web.outcome != 'success' || steps.tag_readback.outcome != 'success'
           )
         continue-on-error: true
@@ -696,7 +743,7 @@ jobs:
 
       - name: Fail incomplete production tag movement
         if: >-
-          always() && steps.production_smoke.outcome == 'success' && (
+          always() && steps.production_observation.outcome == 'success' && (
             steps.tag_api.outcome != 'success' || steps.tag_web.outcome != 'success' || steps.tag_readback.outcome != 'success'
           )
         run: |
