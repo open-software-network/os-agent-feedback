@@ -144,7 +144,7 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
       assert.doesNotMatch(html, /<details[^>]*\bopen\b/);
       assert.match(html, /budget=&lt;2-5 digit USD amount&gt;/);
       assert.match(html, /budget_kind=&lt;hard\|target&gt;/);
-      assert.match(html, /The same <code>journey<\/code> value belongs on every request/);
+      assert.match(html, /Requests that reuse one <code>journey<\/code> value stay one errand/);
       assert.ok(html.includes(`journey=${renderJourney}`));
       assert.equal(setCookies(home).length, 0, "the homepage must not drop cookies");
     }
@@ -370,6 +370,63 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
     const order = await cart.json();
     assert.match(order.orderId, /^order_/);
     assert.equal(order.recorded, false);
+  } finally {
+    await started.close();
+  }
+});
+
+test("personalized hero retains the render journey on its PDP edge", async () => {
+  const calls = { context: 0, personalization: 0 };
+  const customer = (_request, _response, next) => next();
+  customer.context = {
+    get: async ({ anonymousRef, purpose }) => {
+      calls.context += 1;
+      assert.match(anonymousRef, /^psv_/);
+      assert.equal(purpose, "product_personalization");
+      return {
+        available: true,
+        retrievalId: "ctx-personalized-hero",
+        items: [
+          {
+            key: "pet.household_mix",
+            value: "multiple_cats",
+            signalId: "signal-household",
+          },
+          {
+            key: "pet.food_motivation",
+            value: "one_food_motivated",
+            signalId: "signal-motivation",
+          },
+        ],
+      };
+    },
+  };
+  customer.personalization = {
+    decide: async ({ contextRetrievalId, signalIds, variant }) => {
+      calls.personalization += 1;
+      assert.equal(contextRetrievalId, "ctx-personalized-hero");
+      assert.deepEqual(signalIds, ["signal-household", "signal-motivation"]);
+      assert.equal(variant, "pet-household-hero-v1");
+      return { recorded: true, decision: { id: "decision-personalized-hero" } };
+    },
+  };
+  customer.outcomes = { track: async () => ({ recorded: true }) };
+
+  const started = await startServer(0, { customer });
+  const base = `http://127.0.0.1:${started.port}`;
+  try {
+    const home = await navigate(`${base}/`, {
+      referer: "https://chatgpt.com/c/personalized-hero-test",
+    });
+    assert.equal(home.status, 200);
+    const html = await home.text();
+    assert.match(html, /data-personalized="true"/);
+    assert.match(html, /data-decision-id="decision-personalized-hero"/);
+    const renderJourney = assertOneListingJourney(html, base, "personalized human root");
+    const heroProductUrl = html.match(/<a href="([^"]+)">Meet the SmartTag RFID Feeder<\/a>/)?.[1];
+    assert.ok(heroProductUrl, "personalized hero must expose its PDP edge");
+    assert.equal(listingJourney(new URL(heroProductUrl, base)), renderJourney);
+    assert.deepEqual(calls, { context: 1, personalization: 1 });
   } finally {
     await started.close();
   }
