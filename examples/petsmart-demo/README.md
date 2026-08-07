@@ -58,19 +58,20 @@ increased-AI-traffic terms:
 
 ## Consumer chat behavior
 
-The matched live matrix found one website representation winner: a hybrid
-full-catalog HTML root, signed private traversal links, stable public
-situation links, a composable custom-situation URL, and the JSON graph as an
-optional deeper surface. Seven page shapes were screened in fresh chats on
-Gemini, Grok, Meta AI, Perplexity, Copilot, ChatGPT, and Claude; the hybrid was
-the only shape that preserved useful one-fetch fallbacks while still earning
-need-carrying second hops where the platform supports them.
+The matched live matrix found a robust common baseline rather than one
+universal traversal winner: a hybrid full-catalog HTML root, signed private
+traversal links, stable public situation links, a composable custom-situation
+URL, and the JSON graph as an optional deeper surface. Seven page shapes were
+screened in fresh chats on Gemini, Grok, Meta AI, Perplexity, Copilot, ChatGPT,
+and Claude. The hybrid preserves useful one-fetch fallbacks while still
+earning need-carrying second hops on platforms that support them; it cannot
+make a platform fetch links that its own browsing policy declines.
 
 The selected delivery policy is platform-specific:
 
 | Platform | Selected approach | What it optimizes |
 | --- | --- | --- |
-| ChatGPT | Facets-first root + full catalog fallback + PR #119 query anchors | Need-state fetch without losing the safe one-page answer |
+| ChatGPT | Facets-first root + full visible catalog fallback + PR #119 query anchors | Best observed chance of a need-state fetch without losing the one-page catalog fallback |
 | Gemini | Link-first root + signed situation paths | Forces live price/stock verification and yields a permanent `/s/` PDP |
 | Grok | `/agent-experience.json` JSON graph, linked from the human storefront | Exact multi-step evaluation and a permanent signed-need `/c/` PDP |
 | Claude | Full catalog facts without generic root PDP links + signed situation paths | Prevents Claude from stripping the need-bearing handoff as “tracking” |
@@ -78,15 +79,18 @@ The selected delivery policy is platform-specific:
 | Perplexity | Stable indexed hostname and product/index feeds | Its Search surface does not fetch pasted quick-tunnel pages; no response shape won |
 | Copilot | Microsoft Merchant Center/Bing catalog distribution | Shopping does not fetch the supplied storefront; no response shape won |
 
-The final adversarial loop materially changed that matrix. A strict `$90`
-no-match case let ChatGPT answer from the fallback catalog and skip stock.
-Link-first + signed paths still failed; link-first + raw query anchors worked;
-and the decisive hybrid was query facets **before** the full fallback catalog.
-That hybrid fetched the exact situation, reported zero matches and live stock,
-and returned the measured URL without reintroducing the competitor fallback
-risk. ChatGPT keeps ordinary root product anchors because removing them
-regressed its browsing layer; Claude gets the inverse policy because it
-otherwise prefers an unfiltered PDP and discards the selected needs.
+The final adversarial loop materially changed that matrix. In one clean
+same-day A/B, query facets **before** the full fallback catalog fetched the
+strict-`$90` situation, reported zero matches and live stock, and returned the
+measured URL. That result was not universal: three later fresh ChatGPT runs on
+the same production shape fetched only the root, and a final fresh-host
+link-first + schema.org JSON-LD variant also fetched only the root. The
+JSON-LD variant was rejected because it removed the visible fallback without
+making the second hop more reliable. ChatGPT therefore keeps the facets-first
+query grammar (the only shape observed to capture its need state) plus the
+full visible catalog and ordinary product anchors as a safe fallback. Claude
+gets the inverse anchor policy because it otherwise prefers an unfiltered PDP
+and discards the selected needs.
 
 Hard and target budgets are no longer rounded to the published navigation
 ladder. The graph accepts bounded exact-dollar tokens (for example
@@ -107,11 +111,15 @@ The platform behavior differs:
   measured regression: five of five fresh runs fetched only the root. In a
   same-day A/B, the exact PR #119 surface immediately fetched `/feeders`,
   reported live stock, and handed its need-bearing URL to the user. Restoring
-  that source shape with a compact signed capability restored the same
-  traversal. The clicked situation URL joins the user to the agent journey;
-  its product links are permanent signed-need `/c/` URLs. A second A/B showed
-  that order matters too: facets-first won the hard-budget no-match case while
-  the same catalog-first data stopped at the root.
+  that source shape with a compact signed capability preserved that successful
+  path, but did not make it deterministic: subsequent fresh runs, including a
+  standard Product/Offer JSON-LD treatment, stopped at the root. The selected
+  production shape is therefore the best observed Pareto choice, not a claim
+  that ChatGPT always traverses. When it does, the clicked situation URL joins
+  the user to the agent journey and its product links are permanent
+  signed-need `/c/` URLs. When it does not, the full visible catalog prevents
+  a competitor substitution but live stock and need-state capture remain
+  unverified.
 - **Claude** — regular claude.ai reliably followed the signed HTML edges and
   produced accurate price, stock, constraint, and counterfactual reasoning. An
   incognito run caught a real catalog error (a grazing hopper was incorrectly
