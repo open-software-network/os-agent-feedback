@@ -80,8 +80,11 @@ describe("CustomersView", () => {
     expect(within(profile).getByText("$4,000/month")).toBeVisible();
     expect(within(profile).getByText("Cat")).toBeVisible();
     expect(within(profile).getByText(/session-scoped evidence/i)).toBeVisible();
-    expect(within(profile).getByText("Request traits")).toBeVisible();
-    expect(within(profile).getByText("Never identity")).toBeVisible();
+    expect(within(profile).getByText("Visitor traits")).toBeVisible();
+    expect(within(profile).getByText(/Browser traits add context/)).toBeVisible();
+    expect(within(profile).getAllByText(/Last seen/).length).toBeGreaterThan(0);
+    expect(within(profile).queryByText("Never identity")).not.toBeInTheDocument();
+    expect(within(profile).queryByText("Request traits")).not.toBeInTheDocument();
     expect(within(profile).getByText("Network address")).toBeVisible();
     expect(within(profile).getByText("Client software")).toBeVisible();
     expect(screen.queryByRole("region", { name: "Recent activity" })).not.toBeInTheDocument();

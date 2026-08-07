@@ -1053,8 +1053,8 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   await clickText(page, "Acme workspace");
   await textVisible(page, "What we've observed");
   await textVisible(page, "Freshness");
-  await textVisible(page, "Request traits");
-  await textVisible(page, "Never identity");
+  await textVisible(page, "Visitor traits");
+  await textVisible(page, "Last seen");
   await textVisible(page, "Agent network address");
   await textVisible(page, "Sessions");
   await page.screenshot({ path: path.join(artifactDirectory, "02-customers.png"), fullPage: true });
