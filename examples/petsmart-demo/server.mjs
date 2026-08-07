@@ -582,14 +582,29 @@ const SITUATIONS = [
   {
     slug: "cats-and-dog-food-obsessed-under-175",
     publicSlug: "cats-and-dog-one-food-obsessed-under-175",
-    label: "Cats and a dog share the home, one is food-obsessed (strict $175 maximum)",
+    label:
+      "One feeder must serve both cats and the dog; one pet steals food (strict $175 maximum)",
     params: { pets: "cats_and_dog", motivation: "one_food_motivated", budget: "175" },
+  },
+  {
+    slug: "cats-and-dog-food-obsessed-under-190",
+    publicSlug: "cats-and-dog-one-food-obsessed-under-190",
+    label:
+      "One feeder must serve both cats and the dog; one pet steals food (strict $190 maximum)",
+    params: { pets: "cats_and_dog", motivation: "one_food_motivated", budget: "190" },
   },
   {
     slug: "cats-and-dog-food-obsessed",
     publicSlug: "cats-and-dog-one-food-obsessed",
-    label: "Cats and a dog share the home, one is food-obsessed",
+    label: "One feeder must serve both cats and the dog; one pet steals food",
     params: { pets: "cats_and_dog", motivation: "one_food_motivated" },
+  },
+  {
+    slug: "one-cat-bowl-protection-under-175",
+    publicSlug: "protect-one-cat-bowl-under-175",
+    label:
+      "Only one cat's bowl needs protection from the other pets (strict $175 maximum)",
+    params: { pets: "one_cat", motivation: "one_food_motivated", budget: "175" },
   },
   {
     slug: "one-cat-scheduled-portions-under-90",
@@ -803,7 +818,9 @@ function feedersHtml(
   situationSlug,
   publicSituationSlug,
 ) {
-  const section = (title, matches) =>
+  const activeSituation =
+    PUBLIC_SITUATION_BY_SLUG.get(publicSituationSlug) || SITUATION_BY_SLUG.get(situationSlug);
+  const section = (title, matches, eligible) =>
     matches.length
       ? `<h2>${title}</h2><ol>` +
         matches
@@ -812,22 +829,76 @@ function feedersHtml(
             const violations = (match.violatedHardConstraints || [])
               .map((violation) => `${violation.dimension}: needs ${violation.requested ?? "?"}, this is ${violation.actual ?? "different"}`)
               .join("; ");
-            return `<li><a href="${productUrlFor(origin, match.itemId, journeyId, tokens, situationSlug, publicSituationSlug)}">${match.title}</a> — $${item ? item.price.amount.toFixed(2) : ""} — ${stockFor(match.itemId)} in stock nearby${violations ? `<br><small>Near miss: ${violations}</small>` : ""}</li>`;
+            return `<li data-recommendation-eligible="${eligible}"><a href="${productUrlFor(origin, match.itemId, journeyId, tokens, situationSlug, publicSituationSlug)}">${eligible ? match.title : `Does not match: ${match.title}`}</a> — $${item ? item.price.amount.toFixed(2) : ""} — ${stockFor(match.itemId)} in stock nearby${violations ? `<br><strong>Not eligible under the active filters.</strong> <small>Near miss: ${violations}</small>` : ""}</li>`;
           })
           .join("\n") +
         "</ol>"
       : `<h2>${title}</h2><p>None.</p>`;
+  const budgetCounterfactual = (decision.counterfactuals || []).find((counterfactual) =>
+    /^raise_budget_from_[0-9.]+_to_[0-9.]+$/.test(counterfactual.change || ""),
+  );
+  let noMatchSummary = "";
+  if (decision.exactMatchCount === 0) {
+    let budgetAction = "";
+    if (budgetCounterfactual) {
+      const match = budgetCounterfactual.change.match(
+        /^raise_budget_from_([0-9.]+)_to_([0-9.]+)$/,
+      );
+      const requested = Number(match?.[1]);
+      const minimum = Number(match?.[2]);
+      if (Number.isFinite(requested) && Number.isFinite(minimum)) {
+        const relaxedBudget = Math.ceil(minimum);
+        const relaxedSituation = SITUATIONS.find(
+          (situation) =>
+            situation.params.pets === PUBLIC_SITUATION_BY_SLUG.get(publicSituationSlug)?.params.pets &&
+            situation.params.motivation ===
+              PUBLIC_SITUATION_BY_SLUG.get(publicSituationSlug)?.params.motivation &&
+            Number(situation.params.budget) === relaxedBudget,
+        );
+        const relaxedUrl = relaxedSituation
+          ? publicSituationUrl(origin, relaxedSituation)
+          : (() => {
+              const url = new URL("/feeders", origin);
+              for (const token of tokens) {
+                if (token.startsWith("budget-")) continue;
+                const expression = graph.buildNegotiation({
+                  origin,
+                  journeyId: "j-00000000-0000-4000-8000-000000000000",
+                  tokens: [token],
+                }).needState.expressions[0];
+                if (expression?.known && expression.value) {
+                  url.searchParams.set(expression.dimension, expression.value);
+                }
+              }
+              url.searchParams.set("budget", String(relaxedBudget));
+              return url.toString();
+            })();
+        budgetAction = `<p><strong>Smallest one-filter change:</strong> raise the maximum from $${requested.toFixed(0)} to $${relaxedBudget}. <a data-filter-change="budget" href="${relaxedUrl}">See the live eligible result at the $${relaxedBudget} maximum</a>.</p>`;
+      }
+    }
+    noMatchSummary = `<section data-recommendation-status="none">
+<h2>No eligible recommendation under the active filters</h2>
+<p>Zero products satisfy every required filter. The comparison products below each fail at least one active filter.</p>
+${budgetAction}
+</section>`;
+  }
+  const permanentResultUrl = activeSituation
+    ? publicSituationUrl(origin, activeSituation)
+    : undefined;
   return `<!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>Live ranked feeders | ${BRAND}</title></head>
+<head><meta charset="utf-8"><title>Live ranked feeders | ${BRAND}</title>${permanentResultUrl ? `<link rel="canonical" href="${permanentResultUrl}" />` : ""}</head>
 <body>
 <h1>${BRAND} — feeders ranked for this situation</h1>
+${activeSituation ? `<p data-active-setup="true"><strong>Active setup:</strong> ${activeSituation.label}</p>` : ""}
+${permanentResultUrl ? `<p><a rel="bookmark" href="${permanentResultUrl}">Permanent shopper link to this live result</a></p>` : ""}
 <p>Live as of ${new Date().toISOString()}. Exact matches satisfy every stated need; near
 misses show which need they violate.</p>
 <p><strong>Product pages keep these filters applied.</strong> Their URLs contain shopping filters
 only, never account or identity data.</p>
-${section(`Exact matches (${decision.exactMatchCount})`, decision.exactMatches || [])}
-${section(`Near misses (${decision.nearMissCount})`, decision.nearMisses || [])}
+${noMatchSummary}
+${section(`Exact matches (${decision.exactMatchCount})`, decision.exactMatches || [], true)}
+${section(`Near misses — comparison only (${decision.nearMissCount})`, decision.nearMisses || [], false)}
 <p><a href="${origin}/">Return to automatic feeders</a> to choose a different situation.</p>
 </body>
 </html>`;
@@ -929,13 +1000,31 @@ function storefrontHtml({ personalized, traits, decisionId, situationLinks = "" 
   );
 }
 
-function productHtml(item) {
+function productHtml(item, fitContext) {
   const features = (item.attributes?.features ?? [])
     .map((feature) => `<li>${feature}</li>`)
     .join("");
+  const fitBanner = fitContext
+    ? fitContext.eligible
+      ? `<section data-recommendation-status="eligible" style="border: 2px solid #16803a; border-radius: 10px; padding: 1rem; background: #effbf3;">
+        <strong>Matches every active shopping filter.</strong>
+        <p>${stockFor(item.id)} in stock nearby as of ${new Date().toISOString()}.</p>
+      </section>`
+      : `<section data-recommendation-status="ineligible" style="border: 2px solid #b42318; border-radius: 10px; padding: 1rem; background: #fff1f0;">
+        <strong>Does not match all active shopping filters.</strong>
+        <p>This product is shown for comparison and is not an eligible result while those filters remain fixed.</p>
+        <ul>${fitContext.violations
+          .map(
+            (violation) =>
+              `<li>${violation.dimension}: requires ${String(violation.requested)}, this product has ${Array.isArray(violation.actual) ? violation.actual.join(", ") : String(violation.actual)}</li>`,
+          )
+          .join("")}</ul>
+      </section>`
+    : "";
   return pageShell(
     `${item.title} | ${BRAND}`,
     `<article class="card" data-item-id="${item.id}" style="max-width: 34rem; margin: 0 auto;">
+      ${fitBanner}
       <span class="brand">${item.brand}</span>
       <h2 style="margin: 0.2rem 0;">${item.title}</h2>
       <span class="price">$${item.price.amount.toFixed(2)}</span>
@@ -1058,6 +1147,23 @@ export function createApp() {
         experienceTelemetryForNode(node, { channel: "faceted_html" }),
       );
     }
+    if (
+      request.situationCanonicalRedirect &&
+      request.situationPublicSlug &&
+      verifiedJourneyId
+    ) {
+      if (!agentRequest && userActivatedNavigation) {
+        response.append(
+          "Set-Cookie",
+          `ps_journey=${signedCookie("ps_journey", `${journeyId}~${request.situationPublicSlug}~agent`)}; ${cookieAttributes(request, 1800)}`,
+        );
+      }
+      response.setHeader("cache-control", "no-store");
+      return response.redirect(
+        302,
+        publicSituationUrl(origin, PUBLIC_SITUATION_BY_SLUG.get(request.situationPublicSlug)),
+      );
+    }
 
     if (!agentRequest) {
       if (userActivatedNavigation && !request.visitorId) {
@@ -1169,6 +1275,7 @@ export function createApp() {
     }
     request.situationSlug = situation.slug;
     request.situationPublicSlug = situation.publicSlug;
+    request.situationCanonicalRedirect = true;
     request.situationOperation = "/shop/automatic-feeders/:journey/:situation";
     request.situationQuery = {
       ...situation.params,
@@ -1554,6 +1661,25 @@ export function createApp() {
         : undefined;
     const journeyId =
       verifiedJourneyId || matchingContext?.journeyId || `j-${randomUUID()}`;
+    let fitContext;
+    if (ctxTokens.length) {
+      try {
+        const decision = graph.buildDecision({
+          origin: originFor(request),
+          journeyId,
+          tokens: ctxTokens,
+        });
+        const exact = (decision.exactMatches || []).find((match) => match.itemId === item.id);
+        const near = (decision.nearMisses || []).find((match) => match.itemId === item.id);
+        if (exact) fitContext = { eligible: true, violations: [] };
+        if (near) {
+          fitContext = {
+            eligible: false,
+            violations: near.violatedHardConstraints || [],
+          };
+        }
+      } catch {}
+    }
 
     if (isAgent(request)) {
       // Assistants open product anchors directly; the carried context is the
@@ -1580,7 +1706,7 @@ export function createApp() {
           experience,
         );
       }
-      return text(response, 200, productHtml(item), "text/html; charset=utf-8");
+      return text(response, 200, productHtml(item, fitContext), "text/html; charset=utf-8");
     }
 
     // The cookie drop: a product-detail visit mints the signed first-party
@@ -1654,7 +1780,7 @@ export function createApp() {
       }
     }
 
-    return text(response, 200, productHtml(item), "text/html; charset=utf-8");
+    return text(response, 200, productHtml(item, fitContext), "text/html; charset=utf-8");
   };
 
   app.get(
