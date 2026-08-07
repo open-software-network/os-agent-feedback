@@ -20,15 +20,18 @@ describe("CustomersView", () => {
     renderCustomers(fetchMock);
 
     const row = await screen.findByRole("row", { name: "Open customer Acme workspace" });
-    expect(within(row).getByText("Known")).toBeVisible();
+    expect(within(row).getByText("3")).toBeVisible();
     expect(within(row).getByText("2")).toBeVisible();
+    expect(within(row).getByText("Known · user…0042 · acct…0042")).toBeVisible();
+    expect(within(row).queryByText(/linked user|linked to account/i)).not.toBeInTheDocument();
     expect(screen.getAllByText("Anonymous")[0].parentElement).toHaveTextContent("1");
     expect(screen.queryByText("Active")).not.toBeInTheDocument();
     expect(screen.queryByText("Unresolved interactions")).not.toBeInTheDocument();
     expect(screen.queryByText(/Customers stay linked to their sessions/i)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Filters/ })).toBeVisible();
     expect(screen.queryByLabelText("Identity filter")).not.toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Identity" })).toBeVisible();
+    expect(screen.getByRole("columnheader", { name: "Traits" })).toBeVisible();
+    expect(screen.queryByRole("columnheader", { name: "Identity" })).not.toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "Type" })).not.toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "Sessions" })).toBeVisible();
     expect(screen.queryByRole("columnheader", { name: "Data use" })).not.toBeInTheDocument();
@@ -69,35 +72,61 @@ describe("CustomersView", () => {
       selectedCustomerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     });
     expect(await screen.findByRole("heading", { name: "Acme workspace" })).toBeVisible();
+    expect(screen.getAllByText("Known · user…0042 · acct…0042").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/linked user|linked to account/i)).not.toBeInTheDocument();
     expect(screen.queryByText("Known customer")).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "What we know" })).toBeVisible();
-    expect(screen.getByText("Find the newest indexed policy")).toBeVisible();
-    expect(screen.getAllByText(/search\.goal · newest_policy/).length).toBeGreaterThan(0);
-    expect(screen.getByText("shopping priority: quality")).toBeVisible();
-    expect(screen.queryByText("shopping.priority · quality")).not.toBeInTheDocument();
-    expect(screen.getAllByText(/^Customer said ·/).length).toBeGreaterThan(0);
-    expect(screen.getAllByRole("button", { name: "Open source session" }).length).toBeGreaterThan(
-      0,
-    );
-    const contextReturns = screen.getByRole("region", { name: "Context returned to product" });
-    expect(within(contextReturns).getByText("search.goal")).toBeVisible();
-    expect(within(contextReturns).queryByText("newest_policy")).not.toBeInTheDocument();
-    expect(screen.getByText("Context version:").parentElement).toHaveTextContent(
-      "ctx1_fixture_customer_context_version",
-    );
-    expect(screen.getByText("Retrieval details")).toBeInTheDocument();
-    expect(screen.getByText("Applied variant: Freshness First")).toBeVisible();
-    expect(screen.getByText("Outcome: Completion")).toBeVisible();
-    expect(screen.getByText("Used")).toBeVisible();
-    expect(screen.getByText(/Customer prompts and searches are not included/i)).toBeVisible();
-    expect(screen.queryByRole("heading", { name: "Data use" })).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Request facts" })).toBeVisible();
-    expect(screen.getByText(/IP 203\.0\.113\.42 · GET · en-US/)).toBeVisible();
-    expect(screen.queryByText(/Not mobile/)).not.toBeInTheDocument();
-    expect(screen.getByText("ExampleBrowser/1.0")).toBeVisible();
-    expect(screen.getByText(/MAC addresses are not exposed by routed HTTP/i)).toBeVisible();
-    expect(screen.getByRole("heading", { name: "Sessions" })).toBeVisible();
-    expect(screen.queryByRole("heading", { name: "Permission" })).not.toBeInTheDocument();
+    const profile = screen.getByRole("region", { name: "What we've observed" });
+    expect(within(profile).getByRole("heading", { name: "What we've observed" })).toBeVisible();
+    expect(within(profile).getByText("$4,000/month")).toBeVisible();
+    expect(within(profile).getByText("Cat")).toBeVisible();
+    expect(within(profile).getByText(/session-scoped evidence/i)).toBeVisible();
+    expect(within(profile).getByText("Request traits")).toBeVisible();
+    expect(within(profile).getByText("Never identity")).toBeVisible();
+    expect(within(profile).getByText("Network address")).toBeVisible();
+    expect(within(profile).getByText("Client software")).toBeVisible();
+    expect(screen.queryByRole("region", { name: "Recent activity" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Latest activity")).not.toBeInTheDocument();
+    expect(screen.queryByText(/deliberately remembers/i)).not.toBeInTheDocument();
+    const sessions = screen.getByRole("region", { name: "Sessions" });
+    expect(within(sessions).getByText("search")).toBeVisible();
+    expect(within(sessions).getAllByText(/1 activity/).length).toBeGreaterThan(0);
+    expect(
+      screen.queryByRole("heading", { name: "How we know this customer" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Observed traits" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "What we know" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Find the newest indexed policy")).not.toBeInTheDocument();
+    expect(screen.queryByText("Context returned to product")).not.toBeInTheDocument();
+    expect(screen.queryByText("Request facts")).not.toBeInTheDocument();
+    expect(screen.queryByText("Permissioned memory")).not.toBeInTheDocument();
+  });
+
+  it("omits repeated domain badges when every observed fact shares one domain", async () => {
+    renderCustomers(mockCustomers(), {
+      selectedCustomerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+
+    const profile = await screen.findByRole("region", { name: "What we've observed" });
+    expect(within(profile).getByText("Budget")).toBeVisible();
+    expect(within(profile).queryByText("Apartments")).not.toBeInTheDocument();
+  });
+
+  it("keeps domain badges when observed facts span multiple domains", async () => {
+    const detail = customerDetailFixture();
+    detail.observedProfile.facts.push({
+      ...detail.observedProfile.facts[0],
+      key: "petsmart.pet",
+      domain: "petsmart",
+      label: "Pet",
+      value: "Dog",
+    });
+    renderCustomers(mockCustomers(detail), {
+      selectedCustomerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+
+    const profile = await screen.findByRole("region", { name: "What we've observed" });
+    expect(within(profile).getAllByText("Apartments").length).toBeGreaterThan(0);
+    expect(within(profile).getByText("PetSmart")).toBeVisible();
   });
 
   it("opens the exact session from the full inspector row", async () => {
@@ -117,6 +146,23 @@ describe("CustomersView", () => {
     expect(sessionRow.parentElement).toHaveClass("-mx-2");
     expect(within(sessions).queryByText("Open session")).not.toBeInTheDocument();
     fireEvent.click(sessionRow);
+
+    expect(openSession).toHaveBeenCalledWith("55555555-5555-4555-8555-555555555555");
+  });
+
+  it("opens the exact journey that supports an observed customer fact", async () => {
+    const openSession = vi.fn();
+    renderCustomers(mockCustomers(), {
+      selectedCustomerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      openSession,
+    });
+
+    const profile = await screen.findByRole("region", { name: "What we've observed" });
+    fireEvent.click(
+      within(profile).getByRole("button", {
+        name: "Open evidence for Budget: $4,000/month",
+      }),
+    );
 
     expect(openSession).toHaveBeenCalledWith("55555555-5555-4555-8555-555555555555");
   });

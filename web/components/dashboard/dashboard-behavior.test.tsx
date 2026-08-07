@@ -770,6 +770,7 @@ describe("dashboard view behavior", () => {
         selectSession={vi.fn()}
         openFeedback={vi.fn()}
         openInteraction={vi.fn()}
+        openCustomer={vi.fn()}
         loadMore={vi.fn()}
         refresh={vi.fn().mockResolvedValue(undefined)}
       />,
@@ -785,6 +786,7 @@ describe("dashboard view behavior", () => {
         selectSession={selectSession}
         openFeedback={vi.fn()}
         openInteraction={vi.fn()}
+        openCustomer={vi.fn()}
         loadMore={vi.fn()}
         refresh={vi.fn().mockResolvedValue(undefined)}
       />,
@@ -942,7 +944,7 @@ describe("dashboard view behavior", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("creates a missing write key and passes its shown-once secret to the controller", async () => {
+  it("creates a missing write key only after an explicit action", async () => {
     const base = dashboardFixture();
     const data = dashboardFixture({ apiKeys: [] });
     const rememberSecret = vi.fn();
@@ -968,6 +970,8 @@ describe("dashboard view behavior", () => {
       />,
     );
 
+    expect(fetch).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Create product key" }));
     await waitFor(() =>
       expect(rememberSecret).toHaveBeenCalledWith("write", "af_live_full_secret"),
     );
@@ -987,6 +991,8 @@ describe("dashboard view behavior", () => {
     };
 
     const firstMount = renderWithQuery(<SetupView {...props} />);
+    expect(fetchMock).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Create product key" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     firstMount.unmount();
     renderWithQuery(<SetupView {...props} />);
@@ -1049,6 +1055,17 @@ describe("dashboard view behavior", () => {
     expect(screen.getAllByText("Customer answers received").length).toBeGreaterThan(0);
     expect(screen.getAllByText("SDK connected").length).toBeGreaterThan(0);
     expect(screen.getByText(/3 answers are available/)).toBeVisible();
+    expect(screen.getByText("Verify linked Sessions manually · not yet verified")).toBeVisible();
+    expect(
+      screen.getByText(
+        /Run A create, cache\/dedup replay, and ordered follow-up appear in Session A/,
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        /activation totals prove transport and answer milestones, not exact Session correlation/i,
+      ),
+    ).toBeVisible();
   });
 
   it("keeps product setup connected while a rotated key overlaps its unused successor", () => {
@@ -1091,7 +1108,13 @@ describe("dashboard view behavior", () => {
     [0, 0, 0, "Not connected", /Next: deploy the product key/],
     [1, 0, 0, "SDK connected", /company-side connection works/],
     [1, 1, 0, "Customer answers received", /Answers are ready/],
-    [1, 1, 1, "Customer answers are ready for personalization", /Setup complete/],
+    [
+      1,
+      1,
+      1,
+      "Customer answers are ready for personalization",
+      /linked Sessions still require the manual checks below/,
+    ],
   ] as const)("separates SDK, learning, and retrieval activation at %i/%i/%i", (connected, learned, retrieved, description, nextAction) => {
     const base = dashboardFixture();
     const activationMilestones = base.activationMilestones;

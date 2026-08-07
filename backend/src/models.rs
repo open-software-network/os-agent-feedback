@@ -696,6 +696,8 @@ pub(crate) struct InteractionTelemetryInput {
     pub account_ref: Option<String>,
     pub user_ref: Option<String>,
     pub anonymous_ref: Option<String>,
+    pub customer_link_source: Option<CustomerLinkSource>,
+    pub request_observation: Option<CustomerRequestObservationInput>,
     pub classification: Option<String>,
     pub confirmation_method: Option<String>,
     pub runtime_hint: Option<String>,
@@ -703,6 +705,83 @@ pub(crate) struct InteractionTelemetryInput {
     pub session_ref: Option<String>,
     pub session_source: Option<String>,
     pub occurred_at: Option<DateTime<Utc>>,
+    pub experience: Option<ExperienceTelemetryInput>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CustomerLinkSource {
+    ProductLinkClick,
+}
+
+/// Aggregate-safe experience-graph hop evidence. Dimension keys and
+/// decision-quality numbers only — never free-text customer or agent values.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ExperienceTelemetryInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub need_state: Option<ExperienceNeedStateInput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision: Option<ExperienceDecisionInput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search: Option<ExperienceSearchInput>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ExperienceNeedStateInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expressed_dimensions: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unknown_dimensions: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ExperienceDecisionInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_match_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub near_miss_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub violated_hard_constraints: Option<Vec<ExperienceViolationInput>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counterfactuals: Option<Vec<ExperienceCounterfactualInput>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ExperienceViolationInput {
+    pub dimension: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ExperienceCounterfactualInput {
+    pub change: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ExperienceSearchInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_position: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
@@ -710,6 +789,8 @@ pub(crate) struct InteractionTelemetryInput {
 pub(crate) struct EnrichmentRequestInput {
     pub interaction_id: Uuid,
     pub operation: String,
+    #[serde(default)]
+    pub handler_owner: Option<String>,
     #[serde(default)]
     pub field_keys: Option<Vec<String>>,
     #[serde(default = "default_enrichment_surface")]
@@ -816,6 +897,8 @@ pub(crate) struct EnrichmentCatalogEntry {
     pub key: String,
     #[serde(rename = "type")]
     pub signal_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question_type: Option<String>,
     pub allowed_values: Vec<String>,
     pub targeted_advertising_safe: bool,
 }
@@ -856,6 +939,7 @@ pub(crate) struct EnrichmentRequestResponse {
     pub purpose: String,
     pub surface: String,
     pub identity_level: String,
+    pub constraints: EnrichmentRequestConstraints,
     pub stage_instruction: String,
     #[schema(required = true, nullable)]
     pub question: Option<String>,
@@ -866,6 +950,43 @@ pub(crate) struct EnrichmentRequestResponse {
     pub consent: Option<EnrichmentConsentAction>,
     #[schema(required = true, nullable)]
     pub submit: Option<EnrichmentAnswerAction>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnrichmentRequestConstraints {
+    pub handler_owner: String,
+    pub purpose: String,
+    pub catalog: EnrichmentConstraintCatalog,
+    pub allowed_fields: Vec<EnrichmentConstraintField>,
+    pub retention: EnrichmentConstraintRetention,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnrichmentConstraintCatalog {
+    pub version: String,
+    pub hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnrichmentConstraintField {
+    pub key: String,
+    #[serde(rename = "type")]
+    pub signal_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question_type: Option<String>,
+    pub allowed_values: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnrichmentConstraintRetention {
+    pub remember_allowed: bool,
+    pub remember_selected: bool,
+    pub remembered_max_days: i32,
+    pub unremembered_expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
@@ -1130,10 +1251,6 @@ pub(crate) struct CustomerSignal {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CustomerSummary {
     pub id: Uuid,
-    pub kind: String,
-    #[schema(required = true, nullable)]
-    pub parent_customer_id: Option<Uuid>,
-    pub member_count: i64,
     pub display_name: String,
     pub identity_level: String,
     #[schema(required = true, nullable)]
@@ -1146,6 +1263,7 @@ pub(crate) struct CustomerSummary {
     pub last_activity_at: DateTime<Utc>,
     pub outcome_health: String,
     pub signal_count: i64,
+    pub trait_count: i64,
     pub session_count: i64,
     pub active_need_count: i64,
     pub consent_state: String,
@@ -1207,6 +1325,44 @@ pub(crate) struct CustomerDetailCounts {
     pub request_observations: i64,
 }
 
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ObservedCustomerFactEvidence {
+    pub session_id: Uuid,
+    pub session_ref: String,
+    pub operation: String,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ObservedCustomerFact {
+    pub key: String,
+    pub domain: String,
+    pub label: String,
+    pub value: String,
+    pub kind: String,
+    #[schema(required = true, nullable)]
+    pub strength: Option<String>,
+    pub status: String,
+    pub session_count: i64,
+    pub observation_count: i64,
+    pub first_observed_at: DateTime<Utc>,
+    pub last_observed_at: DateTime<Utc>,
+    pub evidence: Vec<ObservedCustomerFactEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ObservedCustomerProfile {
+    pub session_count: i64,
+    pub activity_count: i64,
+    pub truncated: bool,
+    #[schema(required = true, nullable)]
+    pub last_observed_at: Option<DateTime<Utc>>,
+    pub facts: Vec<ObservedCustomerFact>,
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DashboardContextReturnedItem {
@@ -1265,6 +1421,7 @@ pub(crate) struct DashboardCustomerContextReturn {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DashboardCustomerDetail {
     pub customer: CustomerSummary,
+    pub observed_profile: ObservedCustomerProfile,
     pub identifiers: Vec<CustomerIdentifier>,
     pub request_observations: Vec<CustomerRequestObservation>,
     pub signals: Vec<CustomerSignal>,
@@ -1451,6 +1608,107 @@ pub(crate) struct InsightCount {
     pub count: i64,
 }
 
+/// What agents asked for and could not get: stated-demand aggregates from
+/// experience-graph decision evidence.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LostDemandInsights {
+    pub decision_interactions: i64,
+    pub zero_match_decisions: i64,
+    pub expressed_dimensions: Vec<InsightCount>,
+    pub violated_dimensions: Vec<InsightCount>,
+    pub counterfactual_changes: Vec<InsightCount>,
+    #[schema(required = true, nullable)]
+    pub median_counterfactual_delta: Option<f64>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JourneyEdgeInsight {
+    pub from_operation: String,
+    pub to_operation: String,
+    pub traversals: i64,
+}
+
+/// Session-proven operation transitions and where journeys end.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JourneyFlowInsights {
+    pub edges: Vec<JourneyEdgeInsight>,
+    pub exit_operations: Vec<InsightCount>,
+}
+
+/// Agent→human handoff: `product_link_click` navigations and their rate across
+/// proven sessions.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HandoffInsights {
+    pub handoff_clicks: i64,
+    pub sessions_with_handoff: i64,
+    pub sessions: i64,
+    pub handoff_rate: i64,
+    pub landing_operations: Vec<InsightCount>,
+}
+
+/// Which customer signals were cited by personalization decisions and what
+/// outcomes followed.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SignalOutcomeInsight {
+    pub signal: String,
+    pub decisions: i64,
+    pub outcomes: i64,
+    pub conversions: i64,
+}
+
+/// Unverified runtime evidence grouped into assistant-vendor families.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AgentVendorInsight {
+    pub vendor: String,
+    pub interactions: i64,
+    pub sessions: i64,
+}
+
+/// Discovery→following funnel over agent-evidenced sessions. Stages are
+/// monotonic: a session counts in a stage only if it counts in every prior
+/// stage, so each step reads as "of those, how many went further".
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JourneyFunnelInsights {
+    /// Sessions with at least one agent-evidenced hop in the window.
+    pub arrived: i64,
+    /// Of those, sessions with a tokened graph fetch beyond the root/guide.
+    pub entered_graph: i64,
+    /// Of those, sessions where a hop expressed or admitted a need dimension.
+    pub expressed_needs: i64,
+    /// Of those, sessions that reached decision evidence.
+    pub reached_decision: i64,
+    /// Of those, sessions where a human followed a product link.
+    pub handoff_followed: i64,
+    /// Integer percent of arrived sessions that entered the graph — whether
+    /// the store's value-gating earns the need-carrying second fetch.
+    pub tokened_fetch_rate: i64,
+}
+
+/// One behavioral traffic class with its session and interaction volume.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TrafficClassInsight {
+    pub class: String,
+    pub sessions: i64,
+    pub interactions: i64,
+}
+
+/// Agent-evidenced requests that fell off the graph: fabricated URLs (404)
+/// and malformed or premature graph fetches (400/422 on graph operations).
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OffGraphAttemptInsights {
+    pub attempts: i64,
+    pub operations: Vec<InsightCount>,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Insights {
@@ -1485,6 +1743,18 @@ pub(crate) struct Insights {
     pub finding_kinds: Vec<InsightCount>,
     pub topics: Vec<InsightCount>,
     pub blocking_topics: Vec<InsightCount>,
+    pub lost_demand: LostDemandInsights,
+    pub journey_flow: JourneyFlowInsights,
+    pub handoff: HandoffInsights,
+    pub signal_outcomes: Vec<SignalOutcomeInsight>,
+    pub agent_vendors: Vec<AgentVendorInsight>,
+    pub rank_positions: Vec<InsightCount>,
+    pub unknown_dimensions: Vec<InsightCount>,
+    pub unanswered_questions: Vec<InsightCount>,
+    pub journey_funnel: JourneyFunnelInsights,
+    pub traffic_classes: Vec<TrafficClassInsight>,
+    pub channels: Vec<InsightCount>,
+    pub off_graph_attempts: OffGraphAttemptInsights,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

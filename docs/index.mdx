@@ -1,21 +1,24 @@
 ---
 title: "Epode documentation"
-description: "Learn permissioned customer context through customer agents, then personalize and measure the experience."
+description: "Serve agent experience graphs, learn permissioned customer context, personalize, and measure outcomes."
 ---
 
-Epode helps companies understand every customer—known, anonymous, or present for only one interaction—through
-the AI agent acting for them. The company installs Epode once. Customers do not create an Epode account, install
+Epode is the agent experience and analytics layer for products. It helps companies understand every
+customer—known, anonymous, or present for only one interaction—through the AI agent acting for them,
+then personalize the product and measure the outcome.
+
+The company installs Epode once. Customers do not create an Epode account, install
 a plugin, or send product keys anywhere.
 
 <CardGroup cols={2}>
+  <Card title="Serve an agent experience" icon="route" href="/concepts/agent-experience">
+    Publish a merchant-authored need graph that agents can safely traverse.
+  </Card>
   <Card title="Connect a product" icon="plug" href="/quickstart">
     Add one company-side integration and keep every normal product response fail-open.
   </Card>
   <Card title="Understand customer context" icon="users" href="/concepts/customer-enrichment">
     See how permission, provenance, expiry, and known or anonymous identity fit together.
-  </Card>
-  <Card title="Choose a surface" icon="code" href="/integrations/choose">
-    Use Express, Fastify, MCP, or the language-neutral company contract.
   </Card>
   <Card title="Protect customer trust" icon="shield" href="/reference/privacy-security">
     Keep product personalization and targeted advertising separately permissioned.
@@ -26,31 +29,36 @@ a plugin, or send product keys anywhere.
 
 | Screen | The question it answers |
 | --- | --- |
-| **Home** | What is happening across this product? |
+| **Home** | What is happening across agent experiences on this product? |
+| **Journeys** | Which agent experience paths ran, and where did they complete or stall? |
 | **Customers** | What does this customer care about, and how do we know? |
-| **Responses** | What did Epode ask, and what answer did the customer's agent return? |
-| **Sessions** | In which product journey was the question asked and answered? |
+| **Configurations → Memory** | What does this product deliberately remember across journeys? |
 
-Customers, responses, and sessions are directly linked. Setup and data controls configure collection,
-permission, retention, personalization, and advertising use.
+Journeys and customers are linked; context a customer agent shares appears on the journey that
+used it. Setup, memory, connectors, and data controls live under Configurations.
 
 ## The loop
 
 <Steps>
+  <Step title="Arrive">
+    A customer agent opens the product. Humans and crawlers still receive ordinary HTML; known agent
+    clients can receive a machine-readable guide at the same URL.
+  </Step>
   <Step title="Ask">
-    On an eligible product response, Epode returns one relevant, company-branded request for missing customer
-    context. The customer agent can answer from the current task, ask the customer, report no relevant context,
-    or decline.
+    On an eligible product response, Epode can request missing customer context or expose the next
+    merchant-authored need edge. The agent answers from the current task, asks the customer, reports
+    no relevant context, or declines.
   </Step>
   <Step title="Learn">
-    The agent sends only bounded context through the company's own same-origin endpoint. Epode records its
-    permission, provenance, confidence, allowed use, and expiry.
+    The agent sends only bounded, task-relevant need state or permissioned context. Epode records the
+    journey hop, permission, provenance, confidence, allowed use, and expiry.
   </Step>
   <Step title="Personalize">
-    The company's server retrieves only active context allowed for this exact purpose and adapts the product.
+    Ranked results use the expressed need state and any separately permissioned remembered context.
   </Step>
   <Step title="Measure">
-    The company links a conversion, completion, engagement, dismissal, or abandonment to the exact context used.
+    Journey hops, product evaluations, and business outcomes become ordinary Epode session and
+    interaction telemetry.
   </Step>
 </Steps>
 

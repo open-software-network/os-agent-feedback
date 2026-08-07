@@ -29,6 +29,9 @@ Homepage = "https://github.com/open-software-network/os-epode/tree/main/sdk/pyth
 Repository = "https://github.com/open-software-network/os-epode.git"
 Issues = "https://github.com/open-software-network/os-epode/issues"
 
+[project.optional-dependencies]
+mcp = ["mcp>=2,<3"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_feedback"]
 

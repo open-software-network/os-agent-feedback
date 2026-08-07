@@ -30,6 +30,54 @@ func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error)
 	return fn(request)
 }
 
+func TestTelemetryQueueDiagnostics(t *testing.T) {
+	var warnings bytes.Buffer
+	r := &Runtime{events: make(chan TelemetryEvent, 1), options: Options{Logger: log.New(&warnings, "", 0)}}
+	if r.enqueue(TelemetryEvent{}) {
+		r.logQueueOverflow()
+	}
+	if r.enqueue(TelemetryEvent{}) {
+		r.logQueueOverflow()
+	}
+	if r.enqueue(TelemetryEvent{}) {
+		r.logQueueOverflow()
+	}
+	if got := r.Diagnostics(); got.QueueOverflowDrops != 2 || got.ShutdownUndelivered != 0 {
+		t.Fatalf("unexpected diagnostics: %#v", got)
+	}
+	if strings.Count(warnings.String(), "queue capacity") != 1 {
+		t.Fatalf("overflow warning was not episode-limited: %q", warnings.String())
+	}
+	<-r.events
+	if r.enqueue(TelemetryEvent{}) {
+		r.logQueueOverflow()
+	} // successful enqueue resets the episode
+	if r.enqueue(TelemetryEvent{}) {
+		r.logQueueOverflow()
+	}
+	if strings.Count(warnings.String(), "queue capacity") != 2 {
+		t.Fatalf("new overflow episode was not warned: %q", warnings.String())
+	}
+}
+
+func TestShutdownCountsUndeliveredTelemetry(t *testing.T) {
+	r, err := New(Options{APIKey: conformanceKey, FlushInterval: time.Hour, MaxTelemetryAttempts: 1, Sender: func(context.Context, string, http.Header, []byte) error {
+		return errors.New("offline")
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.enqueue(TelemetryEvent{}) {
+		r.logQueueOverflow()
+	}
+	if err := r.Shutdown(context.Background()); err == nil {
+		t.Fatal("wanted delivery failure")
+	}
+	if got := r.Diagnostics().ShutdownUndelivered; got != 1 {
+		t.Fatalf("got %d shutdown-undelivered events, want 1", got)
+	}
+}
+
 type blockingConsentTransport struct {
 	calls   atomic.Int32
 	active  atomic.Int32
@@ -186,6 +234,102 @@ func TestMCPCompletionConformanceVectors(t *testing.T) {
 			}
 			_ = runtime.Shutdown(context.Background())
 		})
+	}
+}
+
+func TestSharedLinkedJourneyFixture(t *testing.T) {
+	data, err := os.ReadFile("../../protocol/v1/conformance.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type completion struct {
+		Operation, Outcome, CandidateSessionRef string
+	}
+	var contract struct {
+		MCPLinkedJourney struct {
+			Identity                            struct{ AccountRef, UserRef, AnonymousRef string }
+			RuntimeHint, PrivateContentSentinel string
+			Runs                                []struct {
+				Name, SessionRef string
+				Completions      []completion
+			}
+			Unlinked []completion
+		} `json:"mcpLinkedJourney"`
+	}
+	if err := json.Unmarshal(data, &contract); err != nil {
+		t.Fatal(err)
+	}
+	fixture := contract.MCPLinkedJourney
+	var body []byte
+	runtimeUnderTest, _ := New(Options{APIKey: conformanceKey, FlushInterval: time.Hour, Sender: func(_ context.Context, _ string, _ http.Header, value []byte) error {
+		body = append([]byte(nil), value...)
+		return nil
+	}})
+	type expectedCompletion struct{ operation, outcome, sessionRef string }
+	var expected []expectedCompletion
+	identity := fixture.Identity
+	for _, run := range fixture.Runs {
+		for _, item := range run.Completions {
+			err := runtimeUnderTest.RecordMCPCompletion(MCPCompletion{Operation: item.Operation, Outcome: MCPOutcome(item.Outcome), AccountRef: identity.AccountRef, UserRef: identity.UserRef, AnonymousRef: identity.AnonymousRef, SessionRef: run.SessionRef, RuntimeHint: fixture.RuntimeHint})
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected = append(expected, expectedCompletion{item.Operation, item.Outcome, run.SessionRef})
+		}
+	}
+	for _, item := range fixture.Unlinked {
+		// Candidate proof is product input only; unresolved values are omitted from the recorder.
+		err := runtimeUnderTest.RecordMCPCompletion(MCPCompletion{Operation: item.Operation, Outcome: MCPOutcome(item.Outcome), AccountRef: identity.AccountRef, UserRef: identity.UserRef, AnonymousRef: identity.AnonymousRef, RuntimeHint: fixture.RuntimeHint})
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected = append(expected, expectedCompletion{item.Operation, item.Outcome, ""})
+	}
+	if err := runtimeUnderTest.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Events []map[string]any `json:"events"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Events) != len(expected) {
+		t.Fatalf("got %d events, want %d", len(payload.Events), len(expected))
+	}
+	ids := make(map[string]bool)
+	for index, event := range payload.Events {
+		want := expected[index]
+		if event["operation"] != want.operation || event["statusCode"] != map[string]float64{"success": 200, "error": 500}[want.outcome] {
+			t.Fatalf("completion %d mismatch: %#v", index, event)
+		}
+		if want.sessionRef != "" && (event["sessionRef"] != want.sessionRef || event["sessionSource"] != "mcp") {
+			t.Fatalf("completion %d linked session mismatch: %#v", index, event)
+		}
+		if want.sessionRef == "" {
+			_, hasRef := event["sessionRef"]
+			_, hasSource := event["sessionSource"]
+			if hasRef || hasSource {
+				t.Fatalf("completion %d unlinked session fields were not omitted: %#v", index, event)
+			}
+		}
+		if event["surface"] != "mcp" || event["classification"] != "confirmed" || event["confirmationMethod"] != "mcp" {
+			t.Fatalf("completion %d session source mismatch: %#v", index, event)
+		}
+		if event["accountRef"] != identity.AccountRef || event["userRef"] != identity.UserRef || event["anonymousRef"] != identity.AnonymousRef || event["runtimeHint"] != fixture.RuntimeHint || event["runtimeHintSource"] != "mcp" {
+			t.Fatalf("completion %d metadata mismatch: %#v", index, event)
+		}
+		id, _ := event["interactionId"].(string)
+		if len(id) != 36 || id[8] != '-' || id[13] != '-' || id[14] != '4' || id[18] != '-' || !strings.ContainsRune("89abAB", rune(id[19])) || id[23] != '-' || ids[id] {
+			t.Fatalf("completion %d invalid or repeated UUID: %q", index, id)
+		}
+		ids[id] = true
+		if event["sequence"] != float64(index+1) {
+			t.Fatalf("completion %d sequence mismatch: %#v", index, event["sequence"])
+		}
+	}
+	if bytes.Contains(body, []byte(fixture.PrivateContentSentinel)) {
+		t.Fatal("private linked-journey content entered telemetry")
 	}
 }
 
@@ -1761,6 +1905,34 @@ func TestTelemetryRetriesTransientHTTPStatus(t *testing.T) {
 	}
 }
 
+func TestTelemetryRejectsRedirectsWithoutForwardingTheBatch(t *testing.T) {
+	var redirectedRequests atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		redirectedRequests.Add(1)
+		response.WriteHeader(http.StatusAccepted)
+	}))
+	defer target.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Location", target.URL)
+		response.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+
+	runtime, err := New(Options{
+		APIKey: conformanceKey, Endpoint: redirect.URL, FlushInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.record(TelemetryEvent{InteractionID: "redirect-test", Surface: "http_json"})
+	if err := runtime.Shutdown(context.Background()); err == nil || !strings.Contains(err.Error(), "HTTP 307") {
+		t.Fatalf("redirect was not rejected: %v", err)
+	}
+	if redirectedRequests.Load() != 0 {
+		t.Fatalf("telemetry batch was forwarded to redirect target %d times", redirectedRequests.Load())
+	}
+}
+
 func TestTelemetryDeliveryDefaults(t *testing.T) {
 	runtime, err := New(Options{APIKey: conformanceKey})
 	if err != nil {
@@ -1818,6 +1990,105 @@ func TestTelemetryShutdownBoundsAnInflightAttempt(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
 		t.Fatalf("shutdown exceeded its configured bound: %s", elapsed)
+	}
+}
+
+func TestTelemetrySuccessBeforeShutdownDeadlineIsNotLost(t *testing.T) {
+	runtime, err := New(Options{
+		APIKey: conformanceKey, FlushInterval: time.Hour,
+		ShutdownTimeout: time.Second,
+		Sender: func(context.Context, string, http.Header, []byte) error {
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.record(TelemetryEvent{InteractionID: "delivered-before-deadline", Surface: "http_json"})
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := runtime.Diagnostics().ShutdownUndelivered; got != 0 {
+		t.Fatalf("shutdown-undelivered events = %d, want 0", got)
+	}
+}
+
+func TestTelemetrySuccessAfterShutdownDeadlineIsCountedOnce(t *testing.T) {
+	senderExited := make(chan struct{})
+	runtime, err := New(Options{
+		APIKey: conformanceKey, FlushInterval: time.Hour,
+		ShutdownTimeout: 50 * time.Millisecond,
+		Sender: func(ctx context.Context, _ string, _ http.Header, _ []byte) error {
+			<-ctx.Done()
+			close(senderExited)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.record(TelemetryEvent{InteractionID: "delivered-after-deadline", Surface: "http_json"})
+	if err := runtime.Shutdown(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown error = %v, want deadline exceeded", err)
+	}
+	if got := runtime.Diagnostics().ShutdownUndelivered; got != 1 {
+		t.Fatalf("shutdown-undelivered events = %d, want 1", got)
+	}
+	select {
+	case <-senderExited:
+	case <-time.After(time.Second):
+		t.Fatal("sender did not exit after shutdown cancellation")
+	}
+	if got := runtime.Diagnostics().ShutdownUndelivered; got != 1 {
+		t.Fatalf("shutdown-undelivered events after sender exit = %d, want 1", got)
+	}
+}
+
+func TestConcurrentShutdownCannotShortenOwningDeadline(t *testing.T) {
+	senderStarted := make(chan struct{})
+	releaseSender := make(chan struct{})
+	senderCanceled := make(chan struct{})
+	runtime, err := New(Options{
+		APIKey: conformanceKey, FlushInterval: time.Hour,
+		ShutdownTimeout: time.Second,
+		Sender: func(ctx context.Context, _ string, _ http.Header, _ []byte) error {
+			close(senderStarted)
+			select {
+			case <-releaseSender:
+				return nil
+			case <-ctx.Done():
+				close(senderCanceled)
+				return ctx.Err()
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.record(TelemetryEvent{InteractionID: "concurrent-shutdown", Surface: "http_json"})
+	ownerResult := make(chan error, 1)
+	go func() { ownerResult <- runtime.Shutdown(context.Background()) }()
+	select {
+	case <-senderStarted:
+	case <-time.After(time.Second):
+		t.Fatal("owning shutdown did not start delivery")
+	}
+	shortCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := runtime.Shutdown(shortCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second shutdown error = %v, want its deadline exceeded", err)
+	}
+	select {
+	case <-senderCanceled:
+		t.Fatal("second shutdown canceled the owning shutdown's delivery")
+	default:
+	}
+	close(releaseSender)
+	if err := <-ownerResult; err != nil {
+		t.Fatalf("owning shutdown failed: %v", err)
+	}
+	if got := runtime.Diagnostics().ShutdownUndelivered; got != 0 {
+		t.Fatalf("shutdown-undelivered events = %d, want 0", got)
 	}
 }
 

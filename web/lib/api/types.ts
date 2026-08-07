@@ -971,6 +971,14 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description Unverified runtime evidence grouped into assistant-vendor families. */
+        AgentVendorInsight: {
+            /** Format: int64 */
+            interactions: number;
+            /** Format: int64 */
+            sessions: number;
+            vendor: string;
+        };
         ApiErrorEnvelope: {
             error: string;
         };
@@ -1186,6 +1194,8 @@ export interface components {
             /** Format: date-time */
             verifiedAt: string | null;
         };
+        /** @enum {string} */
+        CustomerLinkSource: "product_link_click";
         CustomerRequestObservation: {
             acceptLanguage: string | null;
             clientIp: string | null;
@@ -1267,19 +1277,16 @@ export interface components {
             /** Format: double */
             identityConfidence: number | null;
             identityLevel: string;
-            kind: string;
             /** Format: date-time */
             lastActivityAt: string;
-            /** Format: int64 */
-            memberCount: number;
             outcomeHealth: string;
-            /** Format: uuid */
-            parentCustomerId: string | null;
             segments: string[];
             /** Format: int64 */
             sessionCount: number;
             /** Format: int64 */
             signalCount: number;
+            /** Format: int64 */
+            traitCount: number;
             userRefHint: string | null;
         };
         DashboardContextReturnedItem: {
@@ -1317,6 +1324,7 @@ export interface components {
             counts: components["schemas"]["CustomerDetailCounts"];
             customer: components["schemas"]["CustomerSummary"];
             identifiers: components["schemas"]["CustomerIdentifier"][];
+            observedProfile: components["schemas"]["ObservedCustomerProfile"];
             requestObservations: components["schemas"]["CustomerRequestObservation"][];
             sessions: components["schemas"]["DashboardSessionSummary"][];
             signals: components["schemas"]["CustomerSignal"][];
@@ -1705,6 +1713,7 @@ export interface components {
         EnrichmentCatalogEntry: {
             allowedValues: string[];
             key: string;
+            questionType?: string | null;
             targetedAdvertisingSafe: boolean;
             type: string;
         };
@@ -1730,6 +1739,24 @@ export interface components {
             stageInstruction: string;
             state: string;
             submit: null | components["schemas"]["EnrichmentAnswerAction"];
+        };
+        EnrichmentConstraintCatalog: {
+            hash: string;
+            version: string;
+        };
+        EnrichmentConstraintField: {
+            allowedValues: string[];
+            key: string;
+            questionType?: string | null;
+            type: string;
+        };
+        EnrichmentConstraintRetention: {
+            rememberAllowed: boolean;
+            rememberSelected: boolean;
+            /** Format: int32 */
+            rememberedMaxDays: number;
+            /** Format: date-time */
+            unrememberedExpiresAt: string;
         };
         EnrichmentFieldDefinitionInput: {
             allowedValues: string[];
@@ -1762,6 +1789,13 @@ export interface components {
             fields: components["schemas"]["EnrichmentFieldDefinitionResponse"][];
             legacyCatalogActive: boolean;
         };
+        EnrichmentRequestConstraints: {
+            allowedFields: components["schemas"]["EnrichmentConstraintField"][];
+            catalog: components["schemas"]["EnrichmentConstraintCatalog"];
+            handlerOwner: string;
+            purpose: string;
+            retention: components["schemas"]["EnrichmentConstraintRetention"];
+        };
         EnrichmentRequestInput: {
             accountRef?: string | null;
             anonymousRef?: string | null;
@@ -1769,6 +1803,7 @@ export interface components {
             /** Format: int64 */
             durationMs?: number | null;
             fieldKeys?: string[] | null;
+            handlerOwner?: string | null;
             /** Format: uuid */
             interactionId: string;
             operation: string;
@@ -1786,6 +1821,7 @@ export interface components {
         EnrichmentRequestResponse: {
             answerInstruction: string | null;
             consent: null | components["schemas"]["EnrichmentConsentAction"];
+            constraints: components["schemas"]["EnrichmentRequestConstraints"];
             /** Format: date-time */
             expiresAt: string;
             identityLevel: string;
@@ -1802,6 +1838,46 @@ export interface components {
         };
         EnvironmentResponse: {
             environment: components["schemas"]["ProductEnvironment"];
+        };
+        ExperienceCounterfactualInput: {
+            change: string;
+            /** Format: double */
+            delta?: number | null;
+            itemId?: string | null;
+        };
+        ExperienceDecisionInput: {
+            counterfactuals?: components["schemas"]["ExperienceCounterfactualInput"][] | null;
+            /** Format: int64 */
+            exactMatchCount?: number | null;
+            /** Format: int64 */
+            nearMissCount?: number | null;
+            violatedHardConstraints?: components["schemas"]["ExperienceViolationInput"][] | null;
+        };
+        ExperienceNeedStateInput: {
+            expressedDimensions?: string[] | null;
+            unknownDimensions?: string[] | null;
+        };
+        ExperienceSearchInput: {
+            /** Format: int64 */
+            resultPosition?: number | null;
+            searchId?: string | null;
+        };
+        /**
+         * @description Aggregate-safe experience-graph hop evidence. Dimension keys and
+         *     decision-quality numbers only — never free-text customer or agent values.
+         */
+        ExperienceTelemetryInput: {
+            channel?: string | null;
+            decision?: null | components["schemas"]["ExperienceDecisionInput"];
+            needState?: null | components["schemas"]["ExperienceNeedStateInput"];
+            search?: null | components["schemas"]["ExperienceSearchInput"];
+            stage?: string | null;
+        };
+        ExperienceViolationInput: {
+            actual?: string | null;
+            dimension: string;
+            itemId?: string | null;
+            requested?: string | null;
         };
         FeatureFacets: {
             impact: components["schemas"]["InsightCount"][];
@@ -1979,6 +2055,21 @@ export interface components {
             /** @description Whether GitHub marks the repository as private. */
             private: boolean;
         };
+        /**
+         * @description Agent→human handoff: `product_link_click` navigations and their rate across
+         *     proven sessions.
+         */
+        HandoffInsights: {
+            /** Format: int64 */
+            handoffClicks: number;
+            /** Format: int64 */
+            handoffRate: number;
+            landingOperations: components["schemas"]["InsightCount"][];
+            /** Format: int64 */
+            sessions: number;
+            /** Format: int64 */
+            sessionsWithHandoff: number;
+        };
         HealthResponse: {
             database: string;
             service: string;
@@ -1990,7 +2081,9 @@ export interface components {
             name: string;
         };
         Insights: {
+            agentVendors: components["schemas"]["AgentVendorInsight"][];
             blockingTopics: components["schemas"]["InsightCount"][];
+            channels: components["schemas"]["InsightCount"][];
             /** Format: int32 */
             comparisonDays: number;
             /** Format: int64 */
@@ -2004,7 +2097,12 @@ export interface components {
             /** Format: int64 */
             customersWithContext: number;
             findingKinds: components["schemas"]["InsightCount"][];
+            handoff: components["schemas"]["HandoffInsights"];
             impacts: components["schemas"]["InsightCount"][];
+            journeyFlow: components["schemas"]["JourneyFlowInsights"];
+            journeyFunnel: components["schemas"]["JourneyFunnelInsights"];
+            lostDemand: components["schemas"]["LostDemandInsights"];
+            offGraphAttempts: components["schemas"]["OffGraphAttemptInsights"];
             /** Format: int64 */
             opportunities: number;
             /** Format: int64 */
@@ -2023,6 +2121,7 @@ export interface components {
             previousOpportunities: number;
             /** Format: int64 */
             previousReports: number;
+            rankPositions: components["schemas"]["InsightCount"][];
             /** Format: int64 */
             recentConfirmedInteractions: number;
             /** Format: int64 */
@@ -2037,9 +2136,13 @@ export interface components {
             reportsWithWorkarounds: number;
             /** Format: int64 */
             reviewRate: number;
+            signalOutcomes: components["schemas"]["SignalOutcomeInsight"][];
             surfaces: components["schemas"]["InsightCount"][];
             topOperations: components["schemas"]["InsightCount"][];
             topics: components["schemas"]["InsightCount"][];
+            trafficClasses: components["schemas"]["TrafficClassInsight"][];
+            unansweredQuestions: components["schemas"]["InsightCount"][];
+            unknownDimensions: components["schemas"]["InsightCount"][];
             /** Format: int32 */
             windowDays: number;
         };
@@ -2055,14 +2158,17 @@ export interface components {
             anonymousRef?: string | null;
             classification?: string | null;
             confirmationMethod?: string | null;
+            customerLinkSource?: null | components["schemas"]["CustomerLinkSource"];
             customerRef?: string | null;
             /** Format: int64 */
             durationMs?: number | null;
+            experience?: null | components["schemas"]["ExperienceTelemetryInput"];
             /** Format: uuid */
             interactionId: string;
             /** Format: date-time */
             occurredAt?: string | null;
             operation: string;
+            requestObservation?: null | components["schemas"]["CustomerRequestObservationInput"];
             runtimeHint?: string | null;
             runtimeHintSource?: string | null;
             /** Format: int64 */
@@ -2073,6 +2179,70 @@ export interface components {
             statusCode?: number | null;
             surface: string;
             userRef?: string | null;
+        };
+        JourneyEdgeInsight: {
+            fromOperation: string;
+            toOperation: string;
+            /** Format: int64 */
+            traversals: number;
+        };
+        /** @description Session-proven operation transitions and where journeys end. */
+        JourneyFlowInsights: {
+            edges: components["schemas"]["JourneyEdgeInsight"][];
+            exitOperations: components["schemas"]["InsightCount"][];
+        };
+        /**
+         * @description Discovery→following funnel over agent-evidenced sessions. Stages are
+         *     monotonic: a session counts in a stage only if it counts in every prior
+         *     stage, so each step reads as "of those, how many went further".
+         */
+        JourneyFunnelInsights: {
+            /**
+             * Format: int64
+             * @description Sessions with at least one agent-evidenced hop in the window.
+             */
+            arrived: number;
+            /**
+             * Format: int64
+             * @description Of those, sessions with a tokened graph fetch beyond the root/guide.
+             */
+            enteredGraph: number;
+            /**
+             * Format: int64
+             * @description Of those, sessions where a hop expressed or admitted a need dimension.
+             */
+            expressedNeeds: number;
+            /**
+             * Format: int64
+             * @description Of those, sessions where a human followed a product link.
+             */
+            handoffFollowed: number;
+            /**
+             * Format: int64
+             * @description Of those, sessions that reached decision evidence.
+             */
+            reachedDecision: number;
+            /**
+             * Format: int64
+             * @description Integer percent of arrived sessions that entered the graph — whether
+             *     the store's value-gating earns the need-carrying second fetch.
+             */
+            tokenedFetchRate: number;
+        };
+        /**
+         * @description What agents asked for and could not get: stated-demand aggregates from
+         *     experience-graph decision evidence.
+         */
+        LostDemandInsights: {
+            counterfactualChanges: components["schemas"]["InsightCount"][];
+            /** Format: int64 */
+            decisionInteractions: number;
+            expressedDimensions: components["schemas"]["InsightCount"][];
+            /** Format: double */
+            medianCounterfactualDelta: number | null;
+            violatedDimensions: components["schemas"]["InsightCount"][];
+            /** Format: int64 */
+            zeroMatchDecisions: number;
         };
         McpDiscovery: {
             discoveryMethod: string;
@@ -2096,6 +2266,51 @@ export interface components {
             /** Format: int64 */
             reportsMoved: number;
             targetGroupKey: string;
+        };
+        ObservedCustomerFact: {
+            domain: string;
+            evidence: components["schemas"]["ObservedCustomerFactEvidence"][];
+            /** Format: date-time */
+            firstObservedAt: string;
+            key: string;
+            kind: string;
+            label: string;
+            /** Format: date-time */
+            lastObservedAt: string;
+            /** Format: int64 */
+            observationCount: number;
+            /** Format: int64 */
+            sessionCount: number;
+            status: string;
+            strength: string | null;
+            value: string;
+        };
+        ObservedCustomerFactEvidence: {
+            /** Format: date-time */
+            observedAt: string;
+            operation: string;
+            /** Format: uuid */
+            sessionId: string;
+            sessionRef: string;
+        };
+        ObservedCustomerProfile: {
+            /** Format: int64 */
+            activityCount: number;
+            facts: components["schemas"]["ObservedCustomerFact"][];
+            /** Format: date-time */
+            lastObservedAt: string | null;
+            /** Format: int64 */
+            sessionCount: number;
+            truncated: boolean;
+        };
+        /**
+         * @description Agent-evidenced requests that fell off the graph: fabricated URLs (404)
+         *     and malformed or premature graph fetches (400/422 on graph operations).
+         */
+        OffGraphAttemptInsights: {
+            /** Format: int64 */
+            attempts: number;
+            operations: components["schemas"]["InsightCount"][];
         };
         /** @description Opaque JSON object whose fields depend on the MCP JSON-RPC method. */
         OpaqueJsonObject: Record<string, never>;
@@ -2368,6 +2583,19 @@ export interface components {
         RevokedResponse: {
             revoked: boolean;
         };
+        /**
+         * @description Which customer signals were cited by personalization decisions and what
+         *     outcomes followed.
+         */
+        SignalOutcomeInsight: {
+            /** Format: int64 */
+            conversions: number;
+            /** Format: int64 */
+            decisions: number;
+            /** Format: int64 */
+            outcomes: number;
+            signal: string;
+        };
         TeamInvitation: {
             /** Format: date-time */
             createdAt: string;
@@ -2418,6 +2646,14 @@ export interface components {
             config: components["schemas"]["DataDestinationConfigInput"];
             credentials?: null | components["schemas"]["DataDestinationCredentialsInput"];
             kind: string;
+        };
+        /** @description One behavioral traffic class with its session and interaction volume. */
+        TrafficClassInsight: {
+            class: string;
+            /** Format: int64 */
+            interactions: number;
+            /** Format: int64 */
+            sessions: number;
         };
         TransferredResponse: {
             transferred: boolean;
@@ -4549,7 +4785,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Customer identity, evidence, context returned to the product, linked personalization use, sessions, and scoped consent */
+            /** @description Customer identity plus an evidence-backed profile derived from retained experience-graph journeys */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -7051,7 +7287,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Question and permission action selected for the interaction */
+            /** @description Submit-ready customer context contract for the interaction */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -7107,7 +7343,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Current enrichment request stage and safe user-facing question */
+            /** @description Current enrichment request stage and submission contract */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -7149,7 +7385,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Enrichment permission decision recorded idempotently */
+            /** @description Explicit enrichment opt-out or compatibility approval recorded idempotently */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -7227,7 +7463,7 @@ export interface operations {
                     "application/json": components["schemas"]["ApiErrorEnvelope"];
                 };
             };
-            /** @description Customer context sharing is not approved */
+            /** @description Customer context sharing was declined or is inactive */
             403: {
                 headers: {
                     [name: string]: unknown;

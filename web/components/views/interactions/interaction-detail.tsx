@@ -65,6 +65,8 @@ export function InteractionDetail({
   );
   const exactAssociationError = loadedInteraction && detail.isError ? detail.error : null;
   const findingCount = linkedReport ? reportFindings(linkedReport).length : 0;
+  const customerDisplay =
+    interaction.customerRef ?? (interaction.customerId ? "Linked customer" : null);
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
@@ -87,7 +89,7 @@ export function InteractionDetail({
       <header className="min-w-0">
         <h2 className="break-words font-mono text-xl font-medium">{interaction.operation}</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          {interaction.customerRef ?? "Unknown customer"} · {formatDate(interaction.occurredAt)}
+          {customerDisplay ?? "Unknown customer"} · {formatDate(interaction.occurredAt)}
         </p>
       </header>
 
@@ -224,7 +226,7 @@ export function InteractionDetail({
                 value={interaction.runtimeHintSource ?? "Not provided"}
                 mono={Boolean(interaction.runtimeHintSource)}
               />
-              <MetadataProperty label="Customer" value={interaction.customerRef ?? "Not linked"} />
+              <MetadataProperty label="Customer" value={customerDisplay ?? "Not linked"} />
               <MetadataProperty
                 label="Session ID"
                 value={interaction.sessionId ?? "Not linked"}

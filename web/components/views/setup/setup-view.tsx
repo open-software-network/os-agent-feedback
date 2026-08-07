@@ -19,6 +19,8 @@ import { formatDate, isEditor, titleCase } from "@/lib/dashboard/format";
 import { cn } from "@/lib/utils";
 
 import {
+  LINKED_SESSION_VERIFICATION,
+  SETUP_SURFACE_OPTIONS,
   SETUP_SURFACES,
   type SetupStack,
   type SetupSurface,
@@ -55,8 +57,8 @@ export function SetupView({
   refresh: () => Promise<unknown>;
   setNotice: (message: string) => void;
 }) {
-  const [surface, setSurface] = useState<SetupSurface>("api");
-  const [stack, setStack] = useState<SetupStack>("node-express");
+  const [surface, setSurface] = useState<SetupSurface>("experience");
+  const [stack, setStack] = useState<SetupStack>("node-experience");
   const [identityExample, setIdentityExample] = useState<IdentityExample>("known");
   const [expandedSection, setExpandedSection] = useState<SetupSectionId | null>(
     () => setupSectionFromLocation() ?? "install",
@@ -120,16 +122,6 @@ export function SetupView({
     },
     [data.workspace.id, environment?.id, refresh, rememberSecret, setNotice],
   );
-
-  useEffect(() => {
-    const environmentId = environment?.id;
-    if (!environmentId || !editor) return;
-    if (writeKeys.length) {
-      finishWriteKeyEnsure(environmentId);
-      return;
-    }
-    void createWriteKey(false);
-  }, [createWriteKey, editor, environment?.id, writeKeys.length]);
 
   useEffect(() => {
     if (!stacks.includes(stack)) setStack(stacks[0]);
@@ -214,10 +206,10 @@ const result = answers.available
       />
       <Metrics
         items={[
-          { label: "Product key", value: writeKey ? "Ready" : "Preparing" },
+          { label: "Product key", value: writeKey ? "Ready" : "Missing" },
           { label: "SDK connected", value: opportunityActivated ? "Complete" : "Waiting" },
           { label: "Answers stored", value: contextLearned.toLocaleString() },
-          { label: "Customers with answers", value: customersWithContext.toLocaleString() },
+          { label: "Customers with context", value: customersWithContext.toLocaleString() },
           { label: "Ready customers", value: personalizationReady.toLocaleString() },
           { label: "Answer retrievals", value: contextRetrieved.toLocaleString() },
           { label: "Decisions", value: personalizationDecisions.toLocaleString() },
@@ -225,8 +217,8 @@ const result = answers.available
         ]}
       />
       <StatusMessage>
-        Install Epode once in your company&apos;s product. Your customers do not need an Epode
-        account, app, plugin, or SDK.
+        Install Epode once to serve a guided agent experience and optional permissioned context.
+        Your customers do not need an Epode account, app, plugin, or SDK.
       </StatusMessage>
       {error ? <StatusMessage tone="error">{error}</StatusMessage> : null}
       {legacyKey ? (
@@ -242,16 +234,20 @@ const result = answers.available
         onToggle={() => toggleSection("install")}
       >
         <p className="max-w-3xl text-sm text-muted-foreground">
-          Choose how customers&apos; agents reach your product, then add one server-side
-          integration. If Epode is unavailable, the SDK preserves the normal product response.
+          Install the guided agent experience and session telemetry. If Epode is unavailable,
+          product responses stay fail-open.
         </p>
         <div className="flex flex-wrap gap-2">
-          {(Object.keys(SETUP_SURFACES) as SetupSurface[]).map((item) => (
+          {SETUP_SURFACE_OPTIONS.map((item) => (
             <Button
               key={item}
               type="button"
               variant={surface === item ? "default" : "outline"}
-              onClick={() => setSurface(item)}
+              aria-pressed={surface === item}
+              onClick={() => {
+                setSurface(item);
+                setStack(SETUP_SURFACES[item].stacks[0] as SetupStack);
+              }}
             >
               {SETUP_SURFACES[item].name}
             </Button>
@@ -265,6 +261,7 @@ const result = answers.available
               type="button"
               size="sm"
               variant={stack === item ? "secondary" : "outline"}
+              aria-pressed={stack === item}
               onClick={() => setStack(item)}
             >
               {stackName(item)}
@@ -397,11 +394,36 @@ const result = answers.available
           {!opportunityActivated
             ? "Next: deploy the product key and call an included route or tool."
             : !contextLearned
-              ? "The company-side connection works. Next: complete one real customer-agent journey."
+              ? "The company-side connection works. Next: complete one real customer-agent session."
               : !contextRetrieved
                 ? "Answers are ready. Retrieve them from your server and personalize the experience."
-                : "Setup complete: Epode received customer answers and your product retrieved them."}
+                : "Answer activation loop complete; linked Sessions still require the manual checks below."}
         </StatusMessage>
+        <div className="rounded-lg border p-4">
+          <h3 className="text-sm font-medium">
+            Verify linked Sessions manually · not yet verified
+          </h3>
+          <p className="mt-2 text-sm text-muted-foreground">{LINKED_SESSION_VERIFICATION}</p>
+          <ul className="mt-3 list-disc space-y-1 pl-5 text-sm">
+            <li>
+              Same Customer; Run A create, cache/dedup replay, and ordered follow-up appear in
+              Session A.
+            </li>
+            <li>Run B and its ordered follow-up appear in a separate Session B, with no mixing.</li>
+            <li>Missing or invalid ownership proof remains unlinked.</li>
+            <li>Product calls survive an Epode outage.</li>
+            <li>
+              No plaintext typed identity or Session refs, arguments, prompts, results, credentials,
+              or exceptions are stored or shown.
+            </li>
+          </ul>
+          <p className="mt-2 text-xs text-muted-foreground">
+            Use Customers and Sessions for resolved linkage and ordered timelines, response records
+            for unlinked evidence, the product client for outage behavior, and a
+            persistence/dashboard audit for privacy. Current activation totals prove transport and
+            answer milestones, not exact Session correlation.
+          </p>
+        </div>
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" onClick={() => void refresh()}>
             Check now
@@ -426,7 +448,7 @@ const result = answers.available
           <p className="text-sm text-muted-foreground">
             Routes stay in code. Derive accountRef and userRef only from authenticated requests;
             anonymousRef must be a product-owned first-party ID. Add sessionRef only when your
-            product already proves a journey belongs together.
+            product already proves a session belongs together.
           </p>
           <p className="text-sm">Verify the transport: {integration.verify}</p>
           <div className="divide-y rounded-lg border px-3">

@@ -218,6 +218,66 @@ export function dashboardFixture(overrides: Partial<DashboardData> = {}): Dashbo
       blockingTopics: [],
       surfaces: [{ name: "http", count: 1 }],
       topOperations: [{ name: "search", count: 1 }],
+      lostDemand: {
+        decisionInteractions: 4,
+        zeroMatchDecisions: 1,
+        expressedDimensions: [
+          { name: "evidence:glare_control", count: 3 },
+          { name: "constraint:budget", count: 2 },
+        ],
+        violatedDimensions: [{ name: "constraint:budget", count: 2 }],
+        counterfactualChanges: [{ name: "raise_budget_from_150_to_164", count: 1 }],
+        medianCounterfactualDelta: 14,
+      },
+      journeyFlow: {
+        edges: [
+          {
+            fromOperation: "/agent-negotiate/lamp",
+            toOperation: "/agent-decide/lamp",
+            traversals: 3,
+          },
+        ],
+        exitOperations: [{ name: "/agent-decide/lamp", count: 2 }],
+      },
+      handoff: {
+        handoffClicks: 2,
+        sessionsWithHandoff: 1,
+        sessions: 3,
+        handoffRate: 33,
+        landingOperations: [{ name: "/product/feeder", count: 2 }],
+      },
+      signalOutcomes: [{ signal: "constraint/budget", decisions: 3, outcomes: 2, conversions: 1 }],
+      agentVendors: [
+        { vendor: "claude", interactions: 5, sessions: 2 },
+        { vendor: "openai", interactions: 2, sessions: 1 },
+      ],
+      rankPositions: [
+        { name: "1", count: 4 },
+        { name: "2", count: 1 },
+      ],
+      unknownDimensions: [{ name: "commute", count: 2 }],
+      unansweredQuestions: [{ name: "budget · declined", count: 1 }],
+      journeyFunnel: {
+        arrived: 6,
+        enteredGraph: 4,
+        expressedNeeds: 3,
+        reachedDecision: 2,
+        handoffFollowed: 1,
+        tokenedFetchRate: 67,
+      },
+      trafficClasses: [
+        { class: "declared_agent", sessions: 4, interactions: 18 },
+        { class: "suspected_cloud_agent", sessions: 1, interactions: 3 },
+        { class: "human", sessions: 2, interactions: 5 },
+      ],
+      channels: [
+        { name: "faceted_html", count: 5 },
+        { name: "native_graph", count: 3 },
+      ],
+      offGraphAttempts: {
+        attempts: 2,
+        operations: [{ name: "/agent-item/self-invented", count: 2 }],
+      },
     } as DashboardData["insights"] & {
       customerContextItems: number;
       customersWithContext: number;
@@ -290,27 +350,22 @@ export function customersPageFixture(): CustomersPage {
     customers: [
       {
         id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-        kind: "account",
-        parentCustomerId: null,
-        memberCount: 1,
         displayName: "Acme workspace",
         identityLevel: "verified",
         identityConfidence: 1,
         accountRefHint: "acct…0042",
-        userRefHint: null,
+        userRefHint: "user…0042",
         segments: ["Enterprise"],
         lastActivityAt: "2026-07-30T12:00:00Z",
         outcomeHealth: "blocked",
         signalCount: 4,
+        traitCount: 3,
         sessionCount: 2,
         activeNeedCount: 1,
         consentState: "approved",
       },
       {
         id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-        kind: "anonymous",
-        parentCustomerId: null,
-        memberCount: 0,
         displayName: "Anonymous actor B7D2",
         identityLevel: "pseudonymous",
         identityConfidence: null,
@@ -320,6 +375,7 @@ export function customersPageFixture(): CustomersPage {
         lastActivityAt: "2026-07-29T12:00:00Z",
         outcomeHealth: "helped",
         signalCount: 1,
+        traitCount: 1,
         sessionCount: 1,
         activeNeedCount: 0,
         consentState: "unknown",
@@ -357,7 +413,65 @@ export function customerDetailFixture(): CustomerDetail {
   const customer = customersPageFixture().customers[0];
   return {
     customer,
+    observedProfile: {
+      sessionCount: 2,
+      activityCount: 7,
+      truncated: false,
+      lastObservedAt: "2026-07-30T12:00:00Z",
+      facts: [
+        {
+          key: "apartments.budget",
+          domain: "apartments",
+          label: "Budget",
+          value: "$4,000/month",
+          kind: "constraint",
+          strength: "hard",
+          status: "observed",
+          sessionCount: 2,
+          observationCount: 3,
+          firstObservedAt: "2026-07-29T12:00:00Z",
+          lastObservedAt: "2026-07-30T12:00:00Z",
+          evidence: [
+            {
+              sessionId: dashboard.sessions[0].id,
+              sessionRef: dashboard.sessions[0].refHint,
+              operation: "/agent-decide/apartments/beds-2/has-cat/budget-hard-4000",
+              observedAt: "2026-07-30T12:00:00Z",
+            },
+          ],
+        },
+        {
+          key: "apartments.pets",
+          domain: "apartments",
+          label: "Pets",
+          value: "Cat",
+          kind: "context",
+          strength: null,
+          status: "observed",
+          sessionCount: 1,
+          observationCount: 1,
+          firstObservedAt: "2026-07-30T12:00:00Z",
+          lastObservedAt: "2026-07-30T12:00:00Z",
+          evidence: [
+            {
+              sessionId: dashboard.sessions[0].id,
+              sessionRef: dashboard.sessions[0].refHint,
+              operation: "/agent-decide/apartments/beds-2/has-cat/budget-hard-4000",
+              observedAt: "2026-07-30T12:00:00Z",
+            },
+          ],
+        },
+      ],
+    },
     identifiers: [
+      {
+        id: "identifier-user-1",
+        kind: "user_ref",
+        displayHint: "user…0042",
+        identityLevel: "verified",
+        provenance: "company_assertion",
+        verifiedAt: "2026-07-30T12:00:00Z",
+      },
       {
         id: "identifier-1",
         kind: "account_ref",

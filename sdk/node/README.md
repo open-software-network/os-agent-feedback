@@ -1,10 +1,72 @@
 # `@epode/node`
 
-Learn useful, permissioned context about known, anonymous, or ephemeral customers through the AI agents acting
-for them. Retrieve that context on the company's server, personalize the product, and link the business outcome
-to the exact context used.
+Serve agent experience graphs, learn useful permissioned context about known, anonymous, or ephemeral
+customers through the AI agents acting for them, personalize the product, and link the business outcome to the
+exact context used.
 
 The customer does not install Epode, create an Epode account, or receive a company product key.
+
+## Agent experience graph
+
+```ts
+import {
+  createExperienceGraph,
+  createLightingExperienceCatalog,
+  experienceTelemetryDetails,
+} from "@epode/node/experience-graph";
+
+const graph = createExperienceGraph(createLightingExperienceCatalog());
+const negotiation = graph.buildNegotiation({
+  origin: "https://shop.example",
+  journeyId: "j-...",
+  tokens: ["budget-hard-150", "purpose-coding"],
+});
+const decision = graph.buildDecision({
+  origin: "https://shop.example",
+  journeyId: "j-...",
+  tokens: ["budget-hard-150", "purpose-coding", "color-prefer-orange"],
+});
+```
+
+Need state stays in the product response and merchant-authored path. Map each hop onto ordinary Epode telemetry
+with `experienceTelemetryDetails({ operation, journeyId })` so the closed telemetry schema does not need a
+free-form need-state field.
+
+See `examples/agent-experience-commerce` for a complete Fieldnote reference product.
+
+### Programmable domains
+
+For categories with custom state and decision semantics, implement
+`AgentExperienceDomain<State>` and use `parseDomainNeedTokens`,
+`buildDomainNegotiationNode`, `buildDomainDecisionNode`, and `buildDomainItemNode`. The programmable
+builders use the v2 identifiers in `AGENT_EXPERIENCE_PROTOCOLS`; the existing
+`createExperienceGraph` v1 wire contract is unchanged. Catalog records include a summary, explicit
+`notSpecified` facts, and typed, attributed seller claims.
+
+### Product reverse search
+
+```ts
+import { createProductExperienceGraph } from "@epode/node/product-graph";
+
+const productGraph = createProductExperienceGraph(productDefinition);
+const graphNode = productGraph.buildProductGraph({
+  origin: "https://shop.example",
+  journeyId: "j-...",
+  itemId: "desk-lamp",
+  tokens: [],
+});
+const fitNode = productGraph.buildProductFit({
+  origin: "https://shop.example",
+  journeyId: "j-...",
+  itemId: "desk-lamp",
+  tokens: ["purpose-coding"],
+});
+```
+
+The returned graph exposes exact merchant-authored hops. Fit results separate fact-backed matches,
+hard conflicts, soft conflicts, and unknowns that matter; evidence is tagged as `catalog_fact`,
+`seller_claim`, or `unknown`. Seller claims cannot establish a fully suitable verdict, and
+`buildProductAlternatives` succeeds only after a non-suitable fit.
 
 ## Express customer enrichment
 

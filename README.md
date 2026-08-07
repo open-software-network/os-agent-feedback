@@ -1,18 +1,59 @@
 # Epode
 
-Epode helps companies learn permissioned context about every customer—known, anonymous, or ephemeral—through
-the AI agent acting for them, then use that context to personalize the product and measure the outcome.
+Epode is the agent experience and analytics layer for products.
 
-The company installs Epode. Customers do not create an Epode account, install a plugin, or receive a product
-key. The thin MVP is one complete loop:
+As customer agents mediate more journeys, companies lose their interface, intent
+signals, and ability to guide a good decision. Epode restores that loop:
 
 ```text
-Ask → learn → retrieve → personalize → measure
+Agent arrives → expresses need → product adapts → agent decides → company measures
 ```
 
-The dashboard starts at **Home** and is organized around three linked product objects:
-**Customers**, **Responses**, and **Sessions**. Setup and data controls configure how those objects are
-collected and retained.
+The company installs Epode. Customers do not create an Epode account, install a
+plugin, or receive a product key.
+
+## Agent experience graph
+
+The primary product surface is a merchant-authored **experience graph**:
+
+1. Serve known agents a small machine-readable guide at the normal product URL.
+2. Expose generic need dimensions first (budget, purpose, color, priority), never
+   profile-shaped values.
+3. Require exact merchant-authored transitions. Agents open one supplied edge at
+   a time; they never invent path segments.
+4. Rank only after at least one current-task decision input exists.
+5. Separate exact matches from near misses. Counterfactuals appear only when hard
+   requirements produce zero exact matches.
+6. Record the journey as ordinary Epode session telemetry without exporting a
+   free-form profile blob.
+
+```ts
+import {
+  createExperienceGraph,
+  createLightingExperienceCatalog,
+  experienceTelemetryDetails,
+} from "@epode/node/experience-graph";
+
+const graph = createExperienceGraph(createLightingExperienceCatalog());
+const guide = graph.buildGuide("https://shop.example", "j-...");
+const negotiation = graph.buildNegotiation({
+  origin: "https://shop.example",
+  journeyId: "j-...",
+  tokens: ["budget-hard-150", "purpose-coding"],
+});
+const decision = graph.buildDecision({
+  origin: "https://shop.example",
+  journeyId: "j-...",
+  tokens: ["budget-hard-150", "purpose-coding", "color-prefer-orange"],
+});
+```
+
+See the runnable Fieldnote reference product in
+[`examples/agent-experience-commerce`](examples/agent-experience-commerce).
+
+Permissioned customer context, personalization decisions, and structured outcome
+feedback remain part of Epode. They enhance returning customers and measurement;
+they are no longer the only entry point.
 
 ## Customer enrichment
 
@@ -32,16 +73,24 @@ const customer = epode({
 app.use(customer);
 ```
 
-HTTP answers use company-owned `/_epode/v1/...` routes. MCP registers the equivalent actions on the company's
-own MCP server. Context retrieval, personalization decisions, and business outcomes remain server-to-server with
-`EPODE_API_KEY`. Product personalization and targeted advertising are separately permissioned purposes.
+HTTP answers use company-owned `/_epode/v1/...` routes. MCP registers the
+equivalent actions on the company's own MCP server. Context retrieval,
+personalization decisions, and business outcomes remain server-to-server with
+`EPODE_API_KEY`. Product personalization and targeted advertising are separately
+permissioned purposes.
 
 See the [quickstart](docs/quickstart.mdx) and the
 [anonymous-to-known retail example](examples/mvp-retail-express).
 
 ## Structured outcome feedback foundation
 
-A company instruments selected API, website, or MCP surfaces once. Every SDK creates a short-lived, write-only interaction receipt locally and adds the same feedback contract to eligible successful responses. Telemetry is always asynchronous, and HTTP responses never wait on Epode. In Ask once mode, the receipt carries an opaque subject so Epode Companion can resolve the remembered decision through its trusted inspection tool. After the customer agent understands the product's contribution, it can submit:
+A company instruments selected API, website, or MCP surfaces once. Every SDK
+creates a short-lived, write-only interaction receipt locally and adds the same
+feedback contract to eligible successful responses. Telemetry is always
+asynchronous, and HTTP responses never wait on Epode. In Ask once mode, the
+receipt carries an opaque subject so Epode Companion can resolve the remembered
+decision through its trusted inspection tool. After the customer agent understands
+the product's contribution, it can submit:
 
 ```json
 {
@@ -56,18 +105,29 @@ A company instruments selected API, website, or MCP surfaces once. Every SDK cre
 }
 ```
 
-Agent Feedback does not identify agents. HTTP responses are unclassified opportunities until a receipt is used; generic HTTP agents may ignore response-side instructions, while a feedback-aware runtime can submit deterministically. MCP `2026-07-28` tool calls are confirmed agent interactions and expose feedback as an explicit protocol tool. The MCP transport is stateless; sessions exist only when the company supplies an explicit application-level continuity handle.
+Agent Feedback does not identify agents. HTTP responses are unclassified
+opportunities until a receipt is used; generic HTTP agents may ignore
+response-side instructions, while a feedback-aware runtime can submit
+deterministically. MCP `2026-07-28` tool calls are confirmed agent interactions
+and expose feedback as an explicit protocol tool. The MCP transport is
+stateless; sessions exist only when the company supplies an explicit
+application-level continuity handle.
 
-Dashboard data is organized as workspace → product → integration. Users choose a product once; its Home
-overview, customers, responses, sessions, keys, and collection policy stay scoped to that product.
+Dashboard data is organized as workspace → product → integration. Users choose a
+product once; its Home overview, customers, responses, sessions, keys, and
+collection policy stay scoped to that product.
 
-Workspaces support OS Account teams. Owners can invite admins or members, change roles, and remove teammates. Admins can manage products and member invitations. Members have read-only access to feedback and observability data. Email-bound invitations last seven days. Teams can also create a reusable, member-only share link that lasts 24 hours.
+Workspaces support OS Account teams. Owners can invite admins or members, change
+roles, and remove teammates. Admins can manage products and member invitations.
+Members have read-only access to feedback and observability data. Email-bound
+invitations last seven days. Teams can also create a reusable, member-only
+share link that lasts 24 hours.
 
 ## Protocol-first integrations
 
 First-class adapters currently cover:
 
-- Node: Express, Fastify, and MCP
+- Node: Express, Fastify, MCP, and the experience-graph primitive
 - Python: ASGI and WSGI
 - Go: standard `net/http`
 - Rust: Axum and Tower
@@ -86,22 +146,40 @@ app.use(agentFeedback({
 }));
 ```
 
-No handler changes, relay endpoint, agent account, or agent-side preference store is required.
+No handler changes, relay endpoint, agent account, or agent-side preference store
+is required.
 
-Collection has four modes. `never_ask` submits autonomously without interrupting the user. `ask_once` lets the agent finish the product task, then emits the exact permission question and a two-value decision action. Epode stores `approved` or `declined` for the product plus an opaque HMAC-derived customer subject; agents store nothing. Approval reveals a separate report contract, refusal suppresses future asks, and silence or ambiguity stores no decision. `ask_always` uses the same answer-first two-step flow for every report. `off` emits no feedback contract.
+Collection has four modes. `never_ask` submits autonomously without interrupting
+the user. `ask_once` lets the agent finish the product task, then emits the exact
+permission question and a two-value decision action. Epode stores `approved` or
+`declined` for the product plus an opaque HMAC-derived customer subject; agents
+store nothing. Approval reveals a separate report contract, refusal suppresses
+future asks, and silence or ambiguity stores no decision. `ask_always` uses the
+same answer-first two-step flow for every report. `off` emits no feedback
+contract.
 
-Epode remembering the decision does not force a fresh generic HTTP agent to trust or act on it. Raw HTTP stays `best_effort_without_agent_adapter`; MCP tools and trusted host adapters are the higher-confidence paths.
+Epode remembering the decision does not force a fresh generic HTTP agent to trust
+or act on it. Raw HTTP stays `best_effort_without_agent_adapter`; MCP tools and
+trusted host adapters are the higher-confidence paths.
 
-For Codex and Claude Code users, **Epode Companion** is the trusted host adapter for ordinary HTTP APIs and websites. It is installed once from the Epode marketplace, recognizes short-lived Epode response handles, and exposes only three fixed-destination MCP actions: verify a request and its canonical product/policy, record an explicit consent decision, and submit a bounded categorical outcome. It never accepts prompt, transcript, task, response, identity, or arbitrary report text. Native company MCP remains the preferred path when a product already has an MCP server.
+For Codex and Claude Code users, **Epode Companion** is the trusted host adapter
+for ordinary HTTP APIs and websites. It is installed once from the Epode
+marketplace, recognizes short-lived Epode response handles, and exposes only
+three fixed-destination MCP actions: verify a request and its canonical
+product/policy, record an explicit consent decision, and submit a bounded
+categorical outcome. It never accepts prompt, transcript, task, response,
+identity, or arbitrary report text. Native company MCP remains the preferred
+path when a product already has an MCP server.
 
 ## Repository
 
 - `backend/` — Rust/Axum/PostgreSQL API, OS Accounts dashboard, migrations, and acceptance tests
-- `sdk/node/` — `@epode/node` with company-owned Express, Fastify, MCP, and customer-context entrypoints
+- `sdk/node/` — `@epode/node` with experience-graph, Express, Fastify, MCP, and customer-context entrypoints
 - `sdk/python/` — dependency-free ASGI/WSGI middleware and agent helper
 - `sdk/go/` — standard-library HTTP middleware and agent helper
 - `sdk/rust/` — Axum/Tower middleware and agent helper
 - `protocol/v1/` — language-neutral schemas, signing algorithm, and conformance vector
+- `examples/agent-experience-commerce/` — Fieldnote reference product for the agent experience graph
 - `examples/node-express/` — hosted JSON API playground with explicit agent-session continuity
 - `examples/node-fastify/` — hosted agent-readable website example
 - `examples/node-mcp/` — hosted stateless MCP 2026-07-28 example with a 2025 compatibility fallback
@@ -146,6 +224,10 @@ make dev-web     # serves the dashboard at http://localhost:3000
 
 With developer authentication enabled, open `http://localhost:8080/__dev`, enter an email, and continue to the dashboard. The backend applies local migrations before listening, and the first login creates a personal workspace, so bootstrap does not seed data. Run `pnpm run seed:dashboard-demo` only when an optional populated demo workspace is wanted. Stop PostgreSQL later with `make dev-db-stop`. Run `make help` to list all setup and verification commands.
 
+### Local observability
+
+`make dev-observability` starts a self-contained Grafana OpenTelemetry stack (traces, metrics, logs) with Grafana on `http://localhost:3001` (`admin`/`admin`). Set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` in `backend/.env` and `web/.env.local` to export telemetry from both processes; with the variable unset, telemetry export stays off and nothing changes. Stop it with `make dev-observability-stop`. Production uses the per-component Railway stack documented in [`observability/`](observability/README.md).
+
 ## Production
 
 - Dashboard/API: https://app.epode.ai
@@ -167,33 +249,3 @@ The Fastify example and public Sites URL are assigned during the v2 rollout.
 - Go `net/http`: https://example-go-agent-v2-canary.up.railway.app
 - Rust Axum: https://example-rust-axum-agent-v2-canary.up.railway.app
 - Protocol and SDK downloads: https://agent-feedback-api-v2-canary.up.railway.app/.well-known/agent-feedback-v1.json
-
-## Dashboard release browser check
-
-Run `make web-release-e2e` for the signed-in dashboard release check. It starts a
-disposable local API fixture and the Next.js app, then drives Chrome through the
-same root-host BFF routes used by `app.epode.ai`; it never calls OS Accounts or a
-shared database. The fixture issues a localhost-only, test-value session cookie
-and exists only inside the test process, so it cannot authenticate against a
-deployed API.
-
-The command covers root routing, the failed-auth retry handoff, product switching
-and creation, Home, server-filtered/paginated Feedback and Sessions detail views,
-Setup copy, Collection policy, Team invitations, and BFF path/header forwarding.
-It writes a screenshot and request trace under `.artifacts/browser-release-e2e/`
-only when it fails. Set `EPODE_E2E_BROWSER` to an explicit Chrome/Chromium binary
-when the runner does not expose one at a standard path.
-
-This is the CI-safe canary command. Keep one protected live smoke before a release:
-sign in through OS Accounts on `https://app.epode.ai`, verify one dashboard API
-response after the real cookie exchange, and sign out. That live check deliberately
-is not automated here because the fixture cookie must remain invalid in production.
-
-## OS Platform
-
-Agents and humans share product knowledge (memory, Issues, team timeline) through
-the OS Platform. Connect the MCP endpoint `https://platform-api.opensoftware.co/mcp`
-(OAuth via OS Accounts) in your agent client, or export an API key as
-`OS_PLATFORM_API_KEY` for REST access (`https://app.opensoftware.co/api`, keys
-under your platform profile → API keys). Conventions agents follow live in
-[`AGENTS.md`](AGENTS.md) → "OS Platform (shared brain)".

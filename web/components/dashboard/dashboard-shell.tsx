@@ -1,8 +1,7 @@
 "use client";
 
-import { IconChatBubbles } from "central-icons/IconChatBubbles";
 import { IconChevronGrabberVertical } from "central-icons/IconChevronGrabberVertical";
-import { IconClock9OClock } from "central-icons/IconClock9OClock";
+import { IconFootsteps } from "central-icons/IconFootsteps";
 import { IconHome } from "central-icons/IconHome";
 import { IconPeople } from "central-icons/IconPeople";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
@@ -59,22 +58,17 @@ const navigation: Array<{
     icon: IconHome,
   },
   {
+    view: "sessions",
+    label: "Sessions",
+    icon: IconFootsteps,
+  },
+  {
     view: "customers",
     label: "Customers",
     icon: IconPeople,
   },
   {
-    view: "responses",
-    label: "Responses",
-    icon: IconChatBubbles,
-  },
-  {
-    view: "sessions",
-    label: "Sessions",
-    icon: IconClock9OClock,
-  },
-  {
-    view: "setup",
+    view: "configuration",
     label: "Configurations",
     icon: IconSettingsGear4,
   },
@@ -234,11 +228,8 @@ function AppSidebar({
               {navigation.map((item) => {
                 const active =
                   view === item.view ||
-                  (item.view === "setup" && CONFIGURATION_VIEWS.has(view)) ||
-                  (item.view === "responses" && view === "feedback") ||
-                  (item.view === "sessions" && view === "interactions");
-                const destination =
-                  item.view === "setup" && !canCreateProduct ? "configuration" : item.view;
+                  (item.view === "configuration" && CONFIGURATION_VIEWS.has(view)) ||
+                  (item.view === "sessions" && (view === "interactions" || view === "feedback"));
                 return (
                   <SidebarMenuItem key={item.view}>
                     <SidebarMenuButton
@@ -246,7 +237,7 @@ function AppSidebar({
                       isActive={active}
                       tooltip={item.label}
                       aria-current={active ? "page" : undefined}
-                      onClick={() => onNavigate(destination)}
+                      onClick={() => onNavigate(item.view)}
                       className="data-active:shadow-[inset_2px_0_0_var(--attention)]"
                     >
                       <item.icon />
@@ -286,9 +277,7 @@ function AppSidebar({
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
                 <DropdownMenuGroup>
-                  <DropdownMenuItem
-                    onClick={() => onNavigate(canCreateProduct ? "setup" : "configuration")}
-                  >
+                  <DropdownMenuItem onClick={() => onNavigate("configuration")}>
                     <IconSettingsGear4 />
                     Configurations
                   </DropdownMenuItem>
@@ -324,14 +313,12 @@ export function DashboardShell({
   const shellTitle: Record<DashboardView, string> = {
     home: "Home",
     customers: "Customers",
-    responses: "Responses",
-    feedback: "Response",
+    feedback: "Report",
     sessions: "Sessions",
     configuration: "Configurations",
-    setup: "Configurations",
     policy: "Configurations",
-    "context-fields": "Configurations",
-    connectors: "Configurations",
+    questions: "Memory",
+    connectors: "Connectors",
     team: "Configurations",
     interactions: "Interaction",
   };

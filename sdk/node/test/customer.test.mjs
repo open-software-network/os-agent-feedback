@@ -11,6 +11,10 @@ import { createEpode } from "../dist/customer.js";
 import { epode as epodeExpress } from "../dist/customer-express.js";
 import { epode as epodeFastify } from "../dist/customer-fastify.js";
 import { epode as epodeMcp } from "../dist/customer-mcp.js";
+import { agentFeedback as feedbackExpress } from "../dist/express.js";
+import { agentFeedback as feedbackFastify } from "../dist/fastify.js";
+import { createMcpInstrumentation } from "../dist/mcp.js";
+import { operationTimer } from "../dist/operation-state.js";
 
 const key = `af_live_0123456789abcdef0123456789abcdef_${"x".repeat(32)}`;
 const ids = {
@@ -418,6 +422,33 @@ function customerAnswer(requestHandle, remember = true) {
   };
 }
 
+function afr2InteractionId(handle) {
+  assert.match(handle, /^afr2_/);
+  const payload = handle.split(".")[1];
+  assert.ok(payload);
+  return JSON.parse(Buffer.from(payload, "base64url").toString("utf8")).i;
+}
+
+function composedFetch(service, telemetry) {
+  return async (url, init) => {
+    if (String(url).endsWith("/api/v2/telemetry/batches")) {
+      const batch = JSON.parse(String(init.body));
+      telemetry.push(...batch.events);
+      return json({ accepted: batch.events.length, dropped: 0 }, 202);
+    }
+    return service.fetch(url, init);
+  };
+}
+
+test("operation timing accepts an injected clock and preserves the duration bound", () => {
+  let now = 1_000;
+  const durationMs = operationTimer(() => now, 500);
+  now = 1_125;
+  assert.equal(durationMs(), 125);
+  now = 2_000;
+  assert.equal(durationMs(), 500);
+});
+
 let customerMcpRequestId = 0;
 
 function realCustomerMcpContext(extra = {}) {
@@ -455,6 +486,446 @@ function callRealCustomerMcpTool(server, name, arguments_, context = realCustome
     context,
   );
 }
+
+test("composed MCP instrumentation shares one interaction across telemetry, afr2, and aqr1", async (t) => {
+  for (const order of ["feedback-first", "customer-first"]) {
+    await t.test(order, async () => {
+      const service = backend();
+      const telemetry = [];
+      const fetch = composedFetch(service, telemetry);
+      const feedback = createMcpInstrumentation({
+        apiKey: key,
+        endpoint: "https://epode.test",
+        fetch,
+        flushIntervalMs: 60_000,
+      });
+      const customer = epodeMcp({
+        apiKey: key,
+        endpoint: "https://epode.test",
+        fetch,
+        includeTools: ["search_catalog"],
+      });
+      const tools = new Map();
+      const server = {
+        registerTool(name, configuration, handler) {
+          tools.set(name, { configuration, handler });
+        },
+      };
+      for (const instrumentation of order === "feedback-first"
+        ? [feedback, customer]
+        : [customer, feedback]) {
+        instrumentation.instrument(server);
+      }
+      let businessCalls = 0;
+      server.registerTool("search_catalog", { inputSchema: {} }, async () => {
+        businessCalls += 1;
+        return {
+          content: [{ type: "text", text: "Two products found." }],
+          structuredContent: { products: 2 },
+        };
+      });
+
+      const result = await tools.get("search_catalog").handler({}, {});
+      await feedback.shutdown();
+
+      const enrichment = service.calls.find(
+        (call) => call.path === "/api/v2/enrichment/requests",
+      ).body;
+      const feedbackHandle = result.structuredContent._agentFeedback.feedbackHandle;
+      assert.equal(businessCalls, 1);
+      assert.equal(telemetry.length, 1);
+      assert.equal(telemetry[0].interactionId, enrichment.interactionId);
+      assert.equal(afr2InteractionId(feedbackHandle), enrichment.interactionId);
+      assert.equal(
+        result.structuredContent._epode.customerContext.interactionId,
+        enrichment.interactionId,
+      );
+    });
+  }
+});
+
+test("composed MCP instrumentation preserves one operation across input_required rounds", async (t) => {
+  for (const order of ["feedback-first", "customer-first"]) {
+    await t.test(order, async () => {
+      const service = backend();
+      const telemetry = [];
+      const fetch = composedFetch(service, telemetry);
+      const feedback = createMcpInstrumentation({
+        apiKey: key,
+        endpoint: "https://epode.test",
+        fetch,
+        flushIntervalMs: 60_000,
+      });
+      const customer = epodeMcp({
+        apiKey: key,
+        endpoint: "https://epode.test",
+        fetch,
+        includeTools: ["search_catalog"],
+      });
+      const tools = new Map();
+      const server = {
+        registerTool(name, configuration, handler) {
+          tools.set(name, { configuration, handler });
+        },
+      };
+      for (const instrumentation of order === "feedback-first"
+        ? [feedback, customer]
+        : [customer, feedback]) {
+        instrumentation.instrument(server);
+      }
+      let round = 0;
+      server.registerTool("search_catalog", { inputSchema: {} }, async () => {
+        round += 1;
+        if (round === 1) {
+          return {
+            resultType: "input_required",
+            content: [{ type: "text", text: "More input is required." }],
+          };
+        }
+        return {
+          content: [{ type: "text", text: "Two products found." }],
+          structuredContent: { products: 2 },
+        };
+      });
+
+      const context = {};
+      const intermediate = await tools.get("search_catalog").handler({}, context);
+      assert.equal(intermediate.resultType, "input_required");
+      assert.equal(service.calls.length, 0);
+      assert.equal(telemetry.length, 0);
+
+      const result = await tools.get("search_catalog").handler({}, context);
+      const firstEnrichment = service.calls.find(
+        (call) => call.path === "/api/v2/enrichment/requests",
+      ).body;
+      assert.equal(
+        afr2InteractionId(result.structuredContent._agentFeedback.feedbackHandle),
+        firstEnrichment.interactionId,
+      );
+      assert.equal(
+        result.structuredContent._epode.customerContext.interactionId,
+        firstEnrichment.interactionId,
+      );
+
+      const nextResult = await tools.get("search_catalog").handler({}, context);
+      await feedback.shutdown();
+      const enrichments = service.calls
+        .filter((call) => call.path === "/api/v2/enrichment/requests")
+        .map((call) => call.body);
+      assert.equal(enrichments.length, 2);
+      assert.equal(telemetry.length, 2);
+      assert.equal(telemetry[0].interactionId, enrichments[0].interactionId);
+      assert.equal(telemetry[1].interactionId, enrichments[1].interactionId);
+      assert.notEqual(enrichments[1].interactionId, enrichments[0].interactionId);
+      assert.equal(
+        afr2InteractionId(nextResult.structuredContent._agentFeedback.feedbackHandle),
+        enrichments[1].interactionId,
+      );
+    });
+  }
+});
+
+test("composed Express and Fastify instrumentation share a continued interaction ID", async (t) => {
+  const continuation = "20000000-0000-4000-8000-000000000001";
+  for (const framework of ["express", "fastify"]) {
+    for (const order of ["feedback-first", "customer-first"]) {
+      await t.test(`${framework}-${order}`, async () => {
+        const service = backend();
+        const telemetry = [];
+        const fetch = composedFetch(service, telemetry);
+        if (framework === "express") {
+          const feedback = feedbackExpress({
+            apiKey: key,
+            endpoint: "https://epode.test",
+            fetch,
+            include: ["/api/shared"],
+            flushIntervalMs: 60_000,
+          });
+          const customer = epodeExpress({
+            apiKey: key,
+            endpoint: "https://epode.test",
+            fetch,
+            include: ["/api/shared"],
+          });
+          const app = express();
+          for (const middleware of order === "feedback-first"
+            ? [feedback, customer]
+            : [customer, feedback]) {
+            app.use(middleware);
+          }
+          app.get("/api/shared", (_request, response) => response.json({ ok: true }));
+          const server = await serve(app);
+          const response = await globalThis.fetch(`${server.url}/api/shared`, {
+            headers: { "Epode-Context-Interaction": continuation.toUpperCase() },
+          });
+          const payload = await response.json();
+          await feedback.shutdown();
+          await server.close();
+          const enrichment = service.calls.find(
+            (call) => call.path === "/api/v2/enrichment/requests",
+          ).body;
+          assert.match(response.headers.get("vary") || "", /Epode-Context-Interaction/i);
+          assert.equal(
+            service.calls.filter((call) => call.path === "/api/v2/enrichment/requests").length,
+            1,
+          );
+          assert.equal(telemetry.length, 1);
+          assert.equal(payload._epode.customerContext.interactionId, continuation);
+          assert.equal(telemetry[0].interactionId, continuation);
+          assert.equal(
+            afr2InteractionId(
+              payload._agentFeedback.submit.authorization.replace(/^Bearer\s+/, ""),
+            ),
+            continuation,
+          );
+          assert.equal(enrichment.interactionId, continuation);
+          for (const field of ["surface", "operation", "statusCode", "durationMs"]) {
+            assert.equal(telemetry[0][field], enrichment[field]);
+          }
+        } else {
+          const feedback = feedbackFastify({
+            apiKey: key,
+            endpoint: "https://epode.test",
+            fetch,
+            include: ["/api/shared"],
+            flushIntervalMs: 60_000,
+          });
+          const customer = epodeFastify({
+            apiKey: key,
+            endpoint: "https://epode.test",
+            fetch,
+            include: ["/api/shared"],
+          });
+          const app = Fastify();
+          for (const plugin of order === "feedback-first"
+            ? [feedback, customer]
+            : [customer, feedback]) {
+            await app.register(plugin);
+          }
+          app.get("/api/shared", async () => ({ ok: true }));
+          const response = await app.inject({
+            method: "GET",
+            url: "/api/shared",
+            headers: { "Epode-Context-Interaction": continuation.toUpperCase() },
+          });
+          const payload = response.json();
+          await feedback.flush();
+          await app.close();
+          const enrichment = service.calls.find(
+            (call) => call.path === "/api/v2/enrichment/requests",
+          ).body;
+          assert.match(response.headers.vary || "", /Epode-Context-Interaction/i);
+          assert.equal(
+            service.calls.filter((call) => call.path === "/api/v2/enrichment/requests").length,
+            1,
+          );
+          assert.equal(telemetry.length, 1);
+          assert.equal(payload._epode.customerContext.interactionId, continuation);
+          assert.equal(telemetry[0].interactionId, continuation);
+          assert.equal(
+            afr2InteractionId(
+              payload._agentFeedback.submit.authorization.replace(/^Bearer\s+/, ""),
+            ),
+            continuation,
+          );
+          assert.equal(enrichment.interactionId, continuation);
+          for (const field of ["surface", "operation", "statusCode", "durationMs"]) {
+            assert.equal(telemetry[0][field], enrichment[field]);
+          }
+        }
+      });
+    }
+  }
+});
+
+test("composed HTTP artifacts reject unsupported continuation UUID versions", async () => {
+  const unsupported = "20000000-0000-8000-8000-000000000001";
+  const service = backend();
+  const telemetry = [];
+  const fetch = composedFetch(service, telemetry);
+  const feedback = feedbackExpress({
+    apiKey: key,
+    endpoint: "https://epode.test",
+    fetch,
+    include: ["/api/shared"],
+    flushIntervalMs: 60_000,
+  });
+  const customer = epodeExpress({
+    apiKey: key,
+    endpoint: "https://epode.test",
+    fetch,
+    include: ["/api/shared"],
+  });
+  const app = express();
+  app.use(feedback);
+  app.use(customer);
+  app.get("/api/shared", (_request, response) => response.json({ ok: true }));
+  const server = await serve(app);
+  try {
+    const response = await globalThis.fetch(`${server.url}/api/shared`, {
+      headers: { "Epode-Context-Interaction": unsupported },
+    });
+    const payload = await response.json();
+    await feedback.flush();
+    const enrichment = service.calls.find(
+      (call) => call.path === "/api/v2/enrichment/requests",
+    ).body;
+    const actual = enrichment.interactionId;
+    assert.notEqual(actual, unsupported);
+    assert.equal(payload._epode.customerContext.interactionId, actual);
+    assert.equal(telemetry[0].interactionId, actual);
+    assert.equal(
+      afr2InteractionId(payload._agentFeedback.submit.authorization.replace(/^Bearer\s+/, "")),
+      actual,
+    );
+  } finally {
+    await feedback.shutdown();
+    await server.close();
+  }
+});
+
+test("Express feedback skips an artifact that conflicts with frozen customer facts", async () => {
+  const service = backend();
+  const telemetry = [];
+  const warnings = [];
+  const fetch = composedFetch(service, telemetry);
+  const feedback = feedbackExpress({
+    apiKey: key,
+    endpoint: "https://epode.test",
+    fetch,
+    include: ["/api/conflict"],
+    flushIntervalMs: 60_000,
+    logger: { debug() {}, warn: (message) => warnings.push(message) },
+  });
+  const customer = epodeExpress({
+    apiKey: key,
+    endpoint: "https://epode.test",
+    fetch,
+    include: ["/api/conflict"],
+  });
+  const app = express();
+  app.use(feedback);
+  app.use(customer);
+  app.get(
+    "/api/conflict",
+    feedback.wrap("different_operation", (_request, response) => response.json({ ok: true })),
+  );
+  const server = await serve(app);
+  try {
+    const response = await globalThis.fetch(`${server.url}/api/conflict`);
+    const payload = await response.json();
+    await feedback.flush();
+    assert.equal(Object.hasOwn(payload, "_agentFeedback"), false);
+    assert.equal(telemetry.length, 0);
+    assert.equal(
+      service.calls.filter((call) => call.path === "/api/v2/enrichment/requests").length,
+      1,
+    );
+    assert.equal(
+      warnings.some((message) => message.includes("Conflicting operation")),
+      true,
+    );
+  } finally {
+    await feedback.shutdown();
+    await server.close();
+  }
+});
+
+test("composed Express and Fastify feedback ignores internal relay endpoints", async (t) => {
+  const relayRequests = [
+    {
+      path: "/_epode/v1/enrichment/consent",
+      authorization: "Bearer aqr1_request-1",
+      body: { decision: "approved" },
+    },
+    {
+      path: "/_epode/v1/enrichment/answers",
+      authorization: "Bearer aqr1_answer-1",
+      body: { status: "no_relevant_context", items: [] },
+    },
+  ];
+  for (const framework of ["express", "fastify"]) {
+    await t.test(framework, async () => {
+      const service = backend();
+      const telemetry = [];
+      const fetch = composedFetch(service, telemetry);
+      if (framework === "express") {
+        const feedback = feedbackExpress({
+          apiKey: key,
+          endpoint: "https://epode.test",
+          fetch,
+          flushIntervalMs: 60_000,
+        });
+        const customer = epodeExpress({
+          apiKey: key,
+          endpoint: "https://epode.test",
+          fetch,
+          include: ["/api/shared"],
+        });
+        const app = express();
+        app.use(express.json());
+        app.use(feedback);
+        app.use(customer);
+        const server = await serve(app);
+        try {
+          for (const relay of relayRequests) {
+            const response = await globalThis.fetch(`${server.url}${relay.path}`, {
+              method: "POST",
+              headers: {
+                authorization: relay.authorization,
+                "content-type": "application/json",
+              },
+              body: JSON.stringify(relay.body),
+            });
+            assert.equal(response.ok, true);
+            assert.equal(JSON.stringify(await response.json()).includes("_agentFeedback"), false);
+          }
+          await feedback.flush();
+          assert.equal(telemetry.length, 0);
+        } finally {
+          await feedback.shutdown();
+          await server.close();
+        }
+      } else {
+        const feedback = feedbackFastify({
+          apiKey: key,
+          endpoint: "https://epode.test",
+          fetch,
+          flushIntervalMs: 60_000,
+        });
+        const customer = epodeFastify({
+          apiKey: key,
+          endpoint: "https://epode.test",
+          fetch,
+          include: ["/api/shared"],
+        });
+        const app = Fastify();
+        await app.register(feedback);
+        await app.register(customer);
+        try {
+          for (const relay of relayRequests) {
+            const response = await app.inject({
+              method: "POST",
+              url: relay.path,
+              headers: {
+                authorization: relay.authorization,
+                "content-type": "application/json",
+              },
+              payload: relay.body,
+            });
+            assert.equal(response.statusCode >= 200 && response.statusCode < 300, true);
+            assert.equal(response.body.includes("_agentFeedback"), false);
+          }
+          await feedback.flush();
+          assert.equal(telemetry.length, 0);
+        } finally {
+          await feedback.shutdown();
+          await app.close();
+        }
+      }
+    });
+  }
+});
 
 test("company-side Express completes learn, retrieve, personalize, and measure", async () => {
   const service = backend();
@@ -548,7 +1019,7 @@ test("company-side Express completes learn, retrieve, personalize, and measure",
       items: [
         {
           key: "budget",
-          type: "constraint",
+          type: "customer_goal",
           value: "under_150_usd",
           summary: "Customer explicitly stated a budget under $150.",
           provenance: "agent_reports_user_statement",

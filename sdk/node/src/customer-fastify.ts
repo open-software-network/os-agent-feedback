@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import type { FastifyPluginCallback, FastifyReply, FastifyRequest } from "fastify";
 import fastifyPlugin from "fastify-plugin";
 import { isPlainObject, matchPattern, normalizeOperation } from "./core.js";
@@ -16,6 +14,7 @@ import {
   injectCustomerContextHtml,
   sameOriginEnrichmentRequest,
 } from "./customer.js";
+import { completeOperation, operationState, operationTimer } from "./operation-state.js";
 
 export interface EpodeFastifyOptions extends EpodeClientOptions {
   include: string[];
@@ -103,13 +102,14 @@ export function epode(options: EpodeFastifyOptions): EpodeFastify {
     throw new Error("Epode Fastify maxHtmlBytes must be an integer of at least 1024");
   }
   const client = createEpode(options);
-  const startedAt = new WeakMap<FastifyRequest, number>();
+  const durationMs = new WeakMap<FastifyRequest, () => number>();
   const interactionId = (request: FastifyRequest) =>
     customerContextInteractionId(request.headers[EPODE_CONTEXT_INTERACTION_HEADER.toLowerCase()]);
   const identity = (request: FastifyRequest): CustomerIdentity => options.identify?.(request) || {};
   const implementation: FastifyPluginCallback = (app, _pluginOptions, done) => {
     app.addHook("onRequest", (request, _reply, next) => {
-      startedAt.set(request, Date.now());
+      operationState(request, request.headers[EPODE_CONTEXT_INTERACTION_HEADER.toLowerCase()]);
+      durationMs.set(request, operationTimer());
       next();
     });
     app.addHook("preHandler", async (request, reply) => {
@@ -181,13 +181,25 @@ export function epode(options: EpodeFastifyOptions): EpodeFastify {
       );
       const operation =
         options.operation?.(request)?.trim() || request.routeOptions?.url || pathOf(request);
+      const completed = completeOperation(request, {
+        surface: "http_json",
+        operation: normalizeOperation(operation),
+        statusCode: reply.statusCode,
+        durationMs: durationMs.get(request)?.() ?? 0,
+      });
+      if (completed.conflict) {
+        client.logger.warn(
+          "[epode] Conflicting operation completion; optional enrichment was skipped.",
+        );
+        return payload;
+      }
       const enrichment = await client.enrichment.request({
         ...identity,
-        interactionId: interactionId(request) || randomUUID(),
-        operation: normalizeOperation(operation),
+        interactionId: completed.facts.interactionId,
+        operation: completed.facts.operation,
         surface: "http_json",
-        statusCode: reply.statusCode,
-        durationMs: Math.min(Date.now() - (startedAt.get(request) ?? Date.now()), 86_400_000),
+        statusCode: completed.facts.statusCode,
+        durationMs: completed.facts.durationMs,
         requestObservation: requestObservation(request),
         ...(sessionRef ? { sessionRef } : {}),
         ...(runtimeHint ? { runtimeHint } : {}),
@@ -244,13 +256,25 @@ export function epode(options: EpodeFastifyOptions): EpodeFastify {
       );
       const operation =
         options.operation?.(request)?.trim() || request.routeOptions?.url || pathOf(request);
+      const completed = completeOperation(request, {
+        surface: "http_html",
+        operation: normalizeOperation(operation),
+        statusCode: reply.statusCode,
+        durationMs: durationMs.get(request)?.() ?? 0,
+      });
+      if (completed.conflict) {
+        client.logger.warn(
+          "[epode] Conflicting operation completion; optional enrichment was skipped.",
+        );
+        return payload;
+      }
       const enrichment = await client.enrichment.request({
         ...resolvedIdentity,
-        interactionId: interactionId(request) || randomUUID(),
-        operation: normalizeOperation(operation),
+        interactionId: completed.facts.interactionId,
+        operation: completed.facts.operation,
         surface: "html",
-        statusCode: reply.statusCode,
-        durationMs: Math.min(Date.now() - (startedAt.get(request) ?? Date.now()), 86_400_000),
+        statusCode: completed.facts.statusCode,
+        durationMs: completed.facts.durationMs,
         requestObservation: requestObservation(request),
         ...(sessionRef ? { sessionRef } : {}),
         ...(runtimeHint ? { runtimeHint } : {}),

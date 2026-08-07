@@ -16,9 +16,12 @@ describe("observability onboarding states", () => {
     window.history.replaceState({}, "", "/");
   });
 
-  it("routes an editor with no activity from Home to Setup", () => {
-    const onPopState = vi.fn();
-    window.addEventListener("popstate", onPopState);
+  it("keeps setup on Home and scrolls editors to it", () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
@@ -35,16 +38,18 @@ describe("observability onboarding states", () => {
     renderWithQuery(
       <HomeView
         data={emptyDashboard()}
-        openFeedback={vi.fn()}
+        secrets={null}
+        rememberSecret={vi.fn()}
         refresh={vi.fn().mockResolvedValue(undefined)}
+        setNotice={vi.fn()}
       />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Finish setup" }));
 
-    expect(new URL(window.location.href).searchParams.get("view")).toBe("setup");
-    expect(onPopState).toHaveBeenCalledOnce();
-    window.removeEventListener("popstate", onPopState);
+    expect(screen.getByRole("region", { name: "Setup" })).toBeVisible();
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+    expect(new URL(window.location.href).searchParams.get("view")).toBeNull();
   });
 
   it("distinguishes first feedback from an empty filtered result", async () => {
@@ -59,7 +64,8 @@ describe("observability onboarding states", () => {
     expect(screen.queryByRole("button", { name: "Clear filters" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Open Setup" }));
 
-    expect(new URL(window.location.href).searchParams.get("view")).toBe("setup");
+    expect(new URL(window.location.href).searchParams.get("view")).toBeNull();
+    expect(window.location.hash).toBe("#setup");
   });
 
   it("does not flash unfiltered feedback while a server search is pending", async () => {
@@ -88,7 +94,7 @@ describe("observability onboarding states", () => {
     expect(screen.queryByText("No matching feedback")).not.toBeInTheDocument();
   });
 
-  it("explains why a product has no sessions instead of offering a no-op filter reset", () => {
+  it("explains why a product has no journeys instead of offering a no-op filter reset", () => {
     const data = emptyDashboard();
     vi.stubGlobal(
       "fetch",
@@ -103,8 +109,8 @@ describe("observability onboarding states", () => {
     );
     renderWithQuery(sessionsView(data));
 
-    expect(screen.getByText("No proven sessions yet")).toBeVisible();
-    expect(screen.getByText(/stable application-level reference/i)).toBeVisible();
+    expect(screen.getByText("No sessions yet")).toBeVisible();
+    expect(screen.getAllByText(/stable session reference/i).length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: "Clear filters" })).not.toBeInTheDocument();
   });
 
@@ -222,6 +228,7 @@ function sessionsView(data: DashboardData) {
       selectSession={vi.fn()}
       openFeedback={vi.fn()}
       openInteraction={vi.fn()}
+      openCustomer={vi.fn()}
       refresh={vi.fn().mockResolvedValue(undefined)}
     />
   );

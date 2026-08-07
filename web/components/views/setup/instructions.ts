@@ -1,4 +1,10 @@
 export const SETUP_SURFACES = {
+  experience: {
+    name: "Guided agent experience",
+    description:
+      "Serve a merchant-authored decision flow and measure customer-agent activity as Epode sessions.",
+    stacks: ["node-experience"],
+  },
   api: {
     name: "HTTP API",
     description: "Add permissioned customer-answer requests to selected JSON responses.",
@@ -18,15 +24,22 @@ export const SETUP_SURFACES = {
 } as const;
 
 export type SetupSurface = keyof typeof SETUP_SURFACES;
-export type SetupStack = "node-express" | "node-fastify" | "node-mcp";
+export type SetupStack = "node-experience" | "node-express" | "node-fastify" | "node-mcp";
+
+export const SETUP_SURFACE_OPTIONS = ["experience"] as const satisfies readonly SetupSurface[];
 
 const STACK_NAMES: Record<SetupStack, string> = {
+  "node-experience": "JavaScript · Guided experience",
   "node-express": "Node · Express",
   "node-fastify": "Node · Fastify",
   "node-mcp": "Node · MCP",
 };
 
 type Instructions = { install: string; code: string; verify: string };
+
+export const LINKED_SESSION_CONTRACT = `Use a stable typed Customer identity and a stable opaque workflow ID owned by your product. Resolve sessionRef from authenticated product state only after proving that workflow belongs to that Customer. Reuse the canonical ID returned by workflow creation for follow-ups, cached results, and deduplicated creates; omit sessionRef when that proof is missing or invalid. Never substitute request or trace IDs, telemetry-only cache keys, transport sessions, caller-controlled or model/tool-proposed values, timestamps, prompts, labels, or customerRef. With typed refs, customerId may show Epode's resolved linkage while raw customerRef remains absent; a legacy Ask-once customerRef, when deliberately configured, is retained but is never Session proof. Keep plaintext account/user/anonymous/session references, arguments, prompts, results, credentials, and exceptions out of persistence and the dashboard.`;
+
+export const LINKED_SESSION_VERIFICATION = `Using one authenticated Customer, create Run A, replay its cached or deduplicated result, and send an ordered follow-up with the canonical result-derived workflow ID; all must appear in Session A. Create Run B with its own ordered follow-up and confirm it appears in a separate Session B with no mixing. In response records, confirm missing and invalid ownership proof remain unlinked. In the product client, confirm normal calls still succeed during an Epode outage. Audit persistence/dashboard for plaintext typed identity or Session references, arguments, prompts, results, credentials, or exceptions.`;
 
 export function stackName(stack: SetupStack): string {
   return STACK_NAMES[stack];
@@ -37,6 +50,76 @@ export function setupInstructions(
   surface: SetupSurface,
   _origin: string,
 ): Instructions {
+  if (stack === "node-experience" || surface === "experience") {
+    return {
+      install: "npm install @epode/node@0.4 express",
+      code: `import { randomUUID } from "node:crypto";
+import express from "express";
+import { AgentFeedbackRuntime } from "@epode/node";
+import {
+  createExperienceGraph,
+  createLightingExperienceCatalog,
+  experienceTelemetryDetails,
+} from "@epode/node/experience-graph";
+
+const graph = createExperienceGraph(createLightingExperienceCatalog());
+const runtime = new AgentFeedbackRuntime({
+  apiKey: process.env.EPODE_API_KEY,
+  include: ["/agent-negotiate/**", "/agent-decide/**", "/agent-item"],
+  runtimeHint: () => "agent-experience/1.0",
+});
+
+const app = express();
+
+app.get("/agent-negotiate/:journeyId/:category/*tokens", (req, res) => {
+  const tokens = String(req.params.tokens || "")
+    .split("/")
+    .filter(Boolean);
+  const node = graph.buildNegotiation({
+    origin: \`\${req.protocol}://\${req.get("host")}\`,
+    journeyId: req.params.journeyId,
+    tokens,
+  });
+  runtime.record(
+    runtime.prepare(),
+    experienceTelemetryDetails({
+      operation: node.operation,
+      journeyId: node.journeyId,
+      statusCode: 200,
+      runtimeHint: "agent-experience/1.0",
+    }),
+  );
+  void runtime.flush();
+  res.json(node);
+});
+
+app.get("/agent-decide/:journeyId/:category/*tokens", (req, res) => {
+  const tokens = String(req.params.tokens || "")
+    .split("/")
+    .filter(Boolean);
+  const node = graph.buildDecision({
+    origin: \`\${req.protocol}://\${req.get("host")}\`,
+    journeyId: req.params.journeyId,
+    tokens,
+    searchId: randomUUID(),
+  });
+  runtime.record(
+    runtime.prepare(),
+    experienceTelemetryDetails({
+      operation: node.operation,
+      journeyId: node.journeyId,
+      statusCode: node.error ? 422 : 200,
+      runtimeHint: "agent-experience/1.0",
+    }),
+  );
+  void runtime.flush();
+  res.status(node.error ? 422 : 200).json(node);
+});`,
+      verify:
+        "Open / as an agent user agent, follow one supplied decision step, call /agent-decide after a decision input, and confirm Epode receives session telemetry.",
+    };
+  }
+
   const route = surface === "website" ? "/recommendations" : "/api/recommendations";
   const install = "npm install @epode/node@0.4 express";
 
@@ -49,6 +132,11 @@ app.use(express.json());
 app.use(productAuthentication);
 app.use(issueOrVerifyFirstPartyVisitor);
 
+// Product code stores the opaque ID returned by createWorkflow after checking Customer ownership.
+// Follow-ups reload that same canonical ID; failed/missing ownership proof leaves this undefined.
+app.use(loadOwnedWorkflowFromProductState);
+// A successful create handler sets req.ownedWorkflow from its result before response serialization.
+
 const customer = epode({
   apiKey: process.env.EPODE_API_KEY,
   include: ["${route}"],
@@ -58,6 +146,7 @@ const customer = epode({
     userRef: req.user?.id,
     anonymousRef: req.firstPartyVisitorId,
   }),
+  sessionRef: req => req.ownedWorkflow?.canonicalId,
 });
 
 app.use(customer);`,
@@ -72,6 +161,8 @@ app.use(customer);`,
 
 app.addHook("preHandler", productAuthentication);
 app.addHook("preHandler", issueOrVerifyFirstPartyVisitor);
+app.addHook("preHandler", loadOwnedWorkflowFromProductState);
+// A successful create handler sets request.ownedWorkflow from its result before response serialization.
 
 const customer = epode({
   apiKey: process.env.EPODE_API_KEY,
@@ -82,6 +173,7 @@ const customer = epode({
     userRef: request.user?.id,
     anonymousRef: request.firstPartyVisitorId,
   }),
+  sessionRef: request => request.ownedWorkflow?.canonicalId,
 });
 
 await app.register(customer);`,
@@ -94,15 +186,22 @@ await app.register(customer);`,
       "npm install @epode/node@0.4 @modelcontextprotocol/server @modelcontextprotocol/node @modelcontextprotocol/express zod",
     code: `import { epode } from "@epode/node/mcp";
 
+const ownedWorkflowByInvocation = new WeakMap<object, string>();
+
 const customer = epode({
   apiKey: process.env.EPODE_API_KEY,
   includeTools: ["search_products"],
   purpose: "product_personalization",
-  identify: (_args, context) => ({
-    accountRef: context.http?.authInfo?.extra?.accountId,
-    userRef: context.http?.authInfo?.extra?.userId,
-    anonymousRef: context.http?.authInfo?.extra?.visitorId,
-  }),
+  identify: (args, context, result) => {
+    const authenticatedCustomer = customers.fromAuthInfo(context.http?.authInfo);
+    const candidate = workflowCandidate(args, result);
+    // Typed result/input IDs are candidates only; the product registry returns its canonical owned ID.
+    const ownedWorkflow = workflows.findOwned(authenticatedCustomer, candidate);
+    if (ownedWorkflow) ownedWorkflowByInvocation.set(context, ownedWorkflow.canonicalId);
+    return authenticatedCustomer.refs;
+  },
+  // The customer MCP API calls sessionRef with context only, so identify hands off proof per invocation.
+  sessionRef: context => ownedWorkflowByInvocation.get(context),
 });
 
 customer.instrument(server);
@@ -118,6 +217,30 @@ export function setupAgentPrompt(
   instructions: Instructions,
   _origin: string,
 ): string {
+  if (surface === "experience" || stack === "node-experience") {
+    return `Install Epode's guided agent experience in this repository.
+
+Surface: ${SETUP_SURFACES.experience.name}
+Stack: ${stackName(stack)}
+
+Requirements:
+- Use EPODE_API_KEY only from the server environment. Never print, log, or expose it.
+- Install exactly: ${instructions.install}
+- Serve humans/crawlers ordinary HTML and known agent clients a machine-readable guide at the same product URL.
+- Expose generic need dimensions first and only exact merchant-authored transitions.
+- Require at least one current-task decision input before ranked results.
+- Map each hop onto Epode session telemetry with experienceTelemetryDetails; do not invent free-form need-state telemetry fields.
+- Keep product responses independent of telemetry delivery.
+- Do not invent customer identity, permission, answers, or a successful verification.
+
+Reference integration:
+
+${instructions.code}
+
+Verification:
+${instructions.verify}`;
+  }
+
   const boundary =
     surface === "mcp"
       ? "Keep includeTools limited to customer-facing product tools."
@@ -131,6 +254,7 @@ Requirements:
 - Use EPODE_API_KEY only from the server environment. Never print, log, or expose it.
 - Install exactly: ${instructions.install}
 - Run existing product authentication before Epode. accountRef and userRef may come only from verified server state; anonymousRef may come only from a product-owned first-party visitor ID.
+- ${LINKED_SESSION_CONTRACT}
 - ${boundary}
 - Keep the original product result and error behavior intact.
 - Do not invent customer identity, permission, answers, or a successful verification.
@@ -140,5 +264,6 @@ Reference integration:
 ${instructions.code}
 
 Verification:
-${instructions.verify}`;
+${instructions.verify}
+${LINKED_SESSION_VERIFICATION}`;
 }

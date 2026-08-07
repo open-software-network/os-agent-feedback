@@ -7,7 +7,8 @@ export const EPODE_CUSTOMER_CONTEXT_META = "epode-customer-context";
 
 export type CustomerPurpose = "product_personalization" | "targeted_advertising";
 export type CustomerIdentityLevel = "verified" | "pseudonymous" | "ephemeral";
-export type CustomerSignalType = "intent" | "preference" | "constraint" | "interest";
+/** Product-defined lowercase snake_case question type. */
+export type CustomerSignalType = string;
 export type CustomerSignalProvenance =
   | "agent_reports_user_statement"
   | "agent_reports_current_task"
@@ -345,7 +346,8 @@ function validateAnswerItem(value: unknown): value is CustomerAnswerItem {
     ]) ||
     typeof value.key !== "string" ||
     !/^[a-z0-9][a-z0-9_.-]{0,63}$/.test(value.key) ||
-    !["intent", "preference", "constraint", "interest"].includes(String(value.type)) ||
+    typeof value.type !== "string" ||
+    !/^[a-z][a-z0-9_]{0,47}$/.test(value.type) ||
     typeof value.value !== "string" ||
     value.value.length < 1 ||
     value.value.length > 160 ||

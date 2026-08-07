@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::{
     code_match::CodeMatchVerificationOutcome,
+    customer_profile::{ObservedActivity, PROFILE_NODE_LIMIT, derive_observed_customer_profile},
     error::ApiError,
     github::validate_repo_full_name,
     grouping::{GroupInput, ReportGrouper},
@@ -26,36 +27,40 @@ use crate::{
         IssueCount, IssueFindingRollup, IssueTemplateData, contains_sensitive_report_text,
     },
     models::{
-        ApiKeyPublic, CapabilityInspectionResponse, ConsentDecisionInput, ConsentEventSummary,
-        ConsentGrant, ConsentStateInput, ConsentStateResponse, CreateProductInput,
-        CreateTeamInvitationInput, CustomerContextInput, CustomerContextItem,
+        AgentVendorInsight, ApiKeyPublic, CapabilityInspectionResponse, ConsentDecisionInput,
+        ConsentEventSummary, ConsentGrant, ConsentStateInput, ConsentStateResponse,
+        CreateProductInput, CreateTeamInvitationInput, CustomerContextInput, CustomerContextItem,
         CustomerContextResponse, CustomerDetailCounts, CustomerFacets, CustomerIdentifier,
-        CustomerRequestObservation, CustomerRequestObservationInput, CustomerRollup,
-        CustomerSignal, CustomerSummary, DashboardContext, DashboardContextReturnedItem,
-        DashboardCustomerContextReturn, DashboardCustomerDetail, DashboardCustomerFilters,
-        DashboardCustomersPage, DashboardData, DashboardFeedbackFacets, DashboardFeedbackFilters,
-        DashboardFeedbackPage, DashboardListState, DashboardPersonalizationDecision,
-        DashboardPersonalizationOutcome, DashboardResponseAnswer, DashboardResponseFilters,
-        DashboardResponseRollup, DashboardResponseSummary, DashboardResponsesPage,
-        DashboardSessionDetail, DashboardSessionFilters, DashboardSessionResponse,
-        DashboardSessionRollup, DashboardSessionSummary, DashboardSessionsPage,
-        DashboardSignalFilters, DashboardSignalsPage, DeleteProductInput, EnrichmentAnswerAction,
-        EnrichmentAnswerBodySchema, EnrichmentAnswerInput, EnrichmentAnswerItemsSchema,
-        EnrichmentAnswerResponse, EnrichmentCatalogEntry, EnrichmentConsentAction,
-        EnrichmentConsentBodySchema, EnrichmentConsentDecisionInput,
-        EnrichmentConsentDecisionResponse, EnrichmentFieldDefinitionInput,
-        EnrichmentFieldDefinitionResponse, EnrichmentFieldListResponse, EnrichmentRequestInput,
-        EnrichmentRequestResponse, FeedbackFindingInput, FeedbackInteractionItem,
+        CustomerLinkSource, CustomerRequestObservation, CustomerRequestObservationInput,
+        CustomerRollup, CustomerSignal, CustomerSummary, DashboardContext,
+        DashboardContextReturnedItem, DashboardCustomerContextReturn, DashboardCustomerDetail,
+        DashboardCustomerFilters, DashboardCustomersPage, DashboardData, DashboardFeedbackFacets,
+        DashboardFeedbackFilters, DashboardFeedbackPage, DashboardListState,
+        DashboardPersonalizationDecision, DashboardPersonalizationOutcome, DashboardResponseAnswer,
+        DashboardResponseFilters, DashboardResponseRollup, DashboardResponseSummary,
+        DashboardResponsesPage, DashboardSessionDetail, DashboardSessionFilters,
+        DashboardSessionResponse, DashboardSessionRollup, DashboardSessionSummary,
+        DashboardSessionsPage, DashboardSignalFilters, DashboardSignalsPage, DeleteProductInput,
+        EnrichmentAnswerAction, EnrichmentAnswerBodySchema, EnrichmentAnswerInput,
+        EnrichmentAnswerItemsSchema, EnrichmentAnswerResponse, EnrichmentCatalogEntry,
+        EnrichmentConsentAction, EnrichmentConsentBodySchema, EnrichmentConsentDecisionInput,
+        EnrichmentConsentDecisionResponse, EnrichmentConstraintCatalog, EnrichmentConstraintField,
+        EnrichmentConstraintRetention, EnrichmentFieldDefinitionInput,
+        EnrichmentFieldDefinitionResponse, EnrichmentFieldListResponse,
+        EnrichmentRequestConstraints, EnrichmentRequestInput, EnrichmentRequestResponse,
+        ExperienceTelemetryInput, FeedbackFindingInput, FeedbackInteractionItem,
         FeedbackInteractionsPage, FeedbackListInteractionsInput, FeedbackListReportsInput,
         FeedbackOperationSummary, FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse,
-        FeedbackSummary, FeedbackSurfaceSummary, FeedbackWindow, GithubIssueLink, InsightCount,
-        Insights, InteractionTelemetryInput, MergeReportGroupsResponse, PersonalizationDecision,
-        PersonalizationDecisionInput, PersonalizationDecisionResponse, PersonalizationOutcome,
-        PersonalizationOutcomeInput, PersonalizationOutcomeResponse, PolicyInput, Product,
-        ProductActivationMilestones, ProductAuth, ProductEnvironment, ProductFeedbackReport,
-        ProductFeedbackReportInput, ProductFeedbackReportWithInteraction, ProductGithubRepo,
-        ProductGithubRepoInput, ProductInteraction, ProductReportGroup, ProductSession,
-        TeamInvitation, TeamMember, TelemetryBatchInput, TelemetryBatchResult,
+        FeedbackSummary, FeedbackSurfaceSummary, FeedbackWindow, GithubIssueLink, HandoffInsights,
+        InsightCount, Insights, InteractionTelemetryInput, JourneyEdgeInsight, JourneyFlowInsights,
+        JourneyFunnelInsights, LostDemandInsights, MergeReportGroupsResponse,
+        OffGraphAttemptInsights, PersonalizationDecision, PersonalizationDecisionInput,
+        PersonalizationDecisionResponse, PersonalizationOutcome, PersonalizationOutcomeInput,
+        PersonalizationOutcomeResponse, PolicyInput, Product, ProductActivationMilestones,
+        ProductAuth, ProductEnvironment, ProductFeedbackReport, ProductFeedbackReportInput,
+        ProductFeedbackReportWithInteraction, ProductGithubRepo, ProductGithubRepoInput,
+        ProductInteraction, ProductReportGroup, ProductSession, SignalOutcomeInsight,
+        TeamInvitation, TeamMember, TelemetryBatchInput, TelemetryBatchResult, TrafficClassInsight,
         UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput, Workspace,
         WorkspaceMembership,
     },
@@ -3604,6 +3609,7 @@ pub(crate) async fn dashboard_sessions_page(
     .bind(limit + 1)
     .fetch_all(pool)
     .await?;
+    humanize_session_customer_names(&mut sessions);
     let next_cursor = if sessions.len() > page_size {
         let last = &sessions[page_size - 1];
         Some(encode_feedback_cursor(last.last_seen_at, last.id)?)
@@ -3693,6 +3699,20 @@ async fn customer_facets(
           FROM customers customer
           WHERE customer.workspace_id = $1
             AND customer.merged_into_customer_id IS NULL
+            AND NOT (
+              customer.kind = 'account' AND EXISTS (
+                SELECT 1 FROM customers member
+                WHERE member.workspace_id = customer.workspace_id
+                  AND member.parent_customer_id = customer.id
+                  AND member.merged_into_customer_id IS NULL
+                  AND EXISTS (
+                    SELECT 1 FROM customer_identifiers member_identifier
+                    WHERE member_identifier.workspace_id = $1
+                      AND member_identifier.product_id = $2
+                      AND member_identifier.customer_id = member.id
+                  )
+              )
+            )
             AND EXISTS (
               SELECT 1 FROM customer_identifiers identifier
               WHERE identifier.workspace_id = $1 AND identifier.product_id = $2
@@ -3797,11 +3817,7 @@ pub(crate) async fn dashboard_customers_page(
 
     let mut customers = sqlx::query_as::<_, CustomerSummary>(
         r"WITH summaries AS (
-          SELECT customer.id, customer.kind, customer.parent_customer_id,
-            (SELECT COUNT(*) FROM customers member
-              WHERE member.workspace_id = customer.workspace_id
-                AND member.parent_customer_id = customer.id
-                AND member.merged_into_customer_id IS NULL)::BIGINT AS member_count,
+          SELECT customer.id,
             COALESCE(customer.display_name, user_identifier.display_hint,
               account_identifier.display_hint, any_identifier.display_hint,
               CASE WHEN customer.identity_level = 'pseudonymous'
@@ -3813,6 +3829,7 @@ pub(crate) async fn dashboard_customers_page(
             COALESCE(activity.last_activity_at, customer.last_seen_at) AS last_activity_at,
             COALESCE(outcome.outcome_health, 'unknown') AS outcome_health,
             COALESCE(activity.signal_count, 0)::BIGINT AS signal_count,
+            COALESCE(activity.trait_count, 0)::BIGINT AS trait_count,
             COALESCE(activity.session_count, 0)::BIGINT AS session_count,
             COALESCE(activity.active_need_count, 0)::BIGINT AS active_need_count,
             COALESCE(consent.consent_state, 'unknown') AS consent_state
@@ -3828,7 +3845,8 @@ pub(crate) async fn dashboard_customers_page(
             SELECT identifier.display_hint
             FROM customer_identifiers identifier
             WHERE identifier.workspace_id = $1 AND identifier.product_id = $2
-              AND identifier.customer_id = customer.id AND identifier.kind = 'account_ref'
+              AND identifier.customer_id = COALESCE(customer.parent_customer_id, customer.id)
+              AND identifier.kind = 'account_ref'
             ORDER BY identifier.created_at, identifier.id LIMIT 1
           ) account_identifier ON TRUE
           LEFT JOIN LATERAL (
@@ -3841,6 +3859,8 @@ pub(crate) async fn dashboard_customers_page(
           LEFT JOIN LATERAL (
             SELECT MAX(interaction.occurred_at) AS last_activity_at,
               COUNT(signal.id)::BIGINT AS signal_count,
+              COUNT(signal.id) FILTER (WHERE signal.signal_type IN ('intent', 'preference',
+                'constraint'))::BIGINT AS trait_count,
               COUNT(DISTINCT interaction.session_id)::BIGINT AS session_count,
               COUNT(signal.id) FILTER (WHERE signal.signal_type IN ('feature_need', 'friction')
                 AND (signal.expires_at IS NULL OR signal.expires_at > NOW()))::BIGINT
@@ -3894,6 +3914,20 @@ pub(crate) async fn dashboard_customers_page(
             ORDER BY grant_row.id LIMIT 1
           ) consent ON TRUE
           WHERE customer.workspace_id = $1 AND customer.merged_into_customer_id IS NULL
+            AND NOT (
+              customer.kind = 'account' AND EXISTS (
+                SELECT 1 FROM customers member
+                WHERE member.workspace_id = customer.workspace_id
+                  AND member.parent_customer_id = customer.id
+                  AND member.merged_into_customer_id IS NULL
+                  AND EXISTS (
+                    SELECT 1 FROM customer_identifiers member_identifier
+                    WHERE member_identifier.workspace_id = $1
+                      AND member_identifier.product_id = $2
+                      AND member_identifier.customer_id = member.id
+                  )
+              )
+            )
         )
         SELECT * FROM summaries
         WHERE last_activity_at IS NOT NULL
@@ -3931,6 +3965,9 @@ pub(crate) async fn dashboard_customers_page(
     .bind(limit + 1)
     .fetch_all(pool)
     .await?;
+    for customer in &mut customers {
+        humanize_customer_summary_name(customer);
+    }
     let next_cursor = if customers.len() > page_size {
         let last = &customers[page_size - 1];
         Some(encode_feedback_cursor(last.last_activity_at, last.id)?)
@@ -3957,6 +3994,20 @@ pub(crate) async fn dashboard_customers_page(
               ))
             FROM customers customer
             WHERE customer.workspace_id = $1 AND customer.merged_into_customer_id IS NULL
+              AND NOT (
+                customer.kind = 'account' AND EXISTS (
+                  SELECT 1 FROM customers member
+                  WHERE member.workspace_id = customer.workspace_id
+                    AND member.parent_customer_id = customer.id
+                    AND member.merged_into_customer_id IS NULL
+                    AND EXISTS (
+                      SELECT 1 FROM customer_identifiers member_identifier
+                      WHERE member_identifier.workspace_id = $1
+                        AND member_identifier.product_id = $2
+                        AND member_identifier.customer_id = member.id
+                    )
+                )
+              )
               AND EXISTS (SELECT 1 FROM customer_identifiers identifier
                 WHERE identifier.workspace_id = $1 AND identifier.product_id = $2
                   AND identifier.customer_id = customer.id)",
@@ -4158,6 +4209,9 @@ pub(crate) async fn dashboard_responses_page(
     .bind(limit + 1)
     .fetch_all(pool)
     .await?;
+    for response in &mut responses {
+        humanize_response_customer_name(response.customer_id, &mut response.customer_name);
+    }
 
     let next_cursor = if responses.len() > page_size {
         let last = &responses[page_size - 1];
@@ -4281,21 +4335,14 @@ pub(crate) async fn dashboard_signals_page(
           signal.confidence, signal.collected_at, signal.expires_at,
           signal.consent_scope,
           CASE WHEN request.id IS NULL THEN grant_row.state
-            WHEN effective_personalize.state <> 'revoked'
-              AND effective_personalize.expires_at <= NOW() THEN 'expired'
-            ELSE effective_personalize.state END AS consent_state,
+            WHEN effective_consent.state <> 'revoked'
+              AND effective_consent.expires_at <= NOW() THEN 'expired'
+            ELSE effective_consent.state END AS consent_state,
           CASE WHEN signal.provenance = 'agent_inference'
-              OR effective_share.id IS NULL OR effective_share.state <> 'approved'
-              OR (effective_share.expires_at IS NOT NULL
-                AND effective_share.expires_at <= NOW())
-              OR effective_personalize.id IS NULL
-              OR effective_personalize.state <> 'approved'
-              OR (effective_personalize.expires_at IS NOT NULL
-                AND effective_personalize.expires_at <= NOW())
-              OR grant_row.state <> 'approved'
-              OR (grant_row.expires_at IS NOT NULL AND grant_row.expires_at <= NOW())
-              OR (COALESCE(enrichment.remembered, FALSE)
-                AND remember_grant.id IS NULL)
+              OR request.id IS NULL
+              OR (effective_consent.state IN ('declined', 'revoked')
+                AND (effective_consent.expires_at IS NULL
+                  OR effective_consent.expires_at > NOW()))
             THEN '{}'::TEXT[]
             ELSE ARRAY[request.purpose] END AS allowed_uses
         FROM customer_signals signal
@@ -4312,7 +4359,7 @@ pub(crate) async fn dashboard_signals_page(
         LEFT JOIN enrichment_requests request ON request.id = answer.request_id
           AND request.workspace_id = answer.workspace_id
         LEFT JOIN LATERAL (
-          SELECT candidate.subject
+          SELECT candidate.state, candidate.expires_at
           FROM consent_grants candidate
           WHERE candidate.environment_id = request.environment_id
             AND candidate.workspace_id = request.workspace_id
@@ -4324,23 +4371,6 @@ pub(crate) async fn dashboard_signals_page(
             CASE WHEN candidate.state IN ('declined', 'revoked') THEN 1 ELSE 0 END DESC,
             candidate.subject, candidate.id LIMIT 1
         ) effective_consent ON request.id IS NOT NULL
-        LEFT JOIN consent_grants effective_share
-          ON effective_share.environment_id = request.environment_id
-          AND effective_share.subject = effective_consent.subject
-          AND effective_share.scope = 'share_preferences'
-          AND effective_share.enrichment_purpose = request.purpose
-        LEFT JOIN consent_grants effective_personalize
-          ON effective_personalize.environment_id = request.environment_id
-          AND effective_personalize.subject = effective_consent.subject
-          AND effective_personalize.scope = 'personalize'
-          AND effective_personalize.enrichment_purpose = request.purpose
-        LEFT JOIN consent_grants remember_grant
-          ON remember_grant.environment_id = request.environment_id
-          AND remember_grant.subject = effective_consent.subject
-          AND remember_grant.scope = 'remember_preferences'
-          AND remember_grant.enrichment_purpose = request.purpose
-          AND remember_grant.state = 'approved'
-          AND (remember_grant.expires_at IS NULL OR remember_grant.expires_at > NOW())
         WHERE signal.workspace_id = $1 AND signal.product_id = $2
           AND signal.collected_at >= $3
           AND (signal.expires_at IS NULL OR signal.expires_at > NOW())
@@ -4397,12 +4427,8 @@ async fn dashboard_customer_summary_by_id(
     customer_id: Uuid,
     retained_since: DateTime<Utc>,
 ) -> Result<CustomerSummary, ApiError> {
-    sqlx::query_as::<_, CustomerSummary>(
-        r"SELECT customer.id, customer.kind, customer.parent_customer_id,
-          (SELECT COUNT(*) FROM customers member
-            WHERE member.workspace_id = customer.workspace_id
-              AND member.parent_customer_id = customer.id
-              AND member.merged_into_customer_id IS NULL)::BIGINT AS member_count,
+    let mut customer = sqlx::query_as::<_, CustomerSummary>(
+        r"SELECT customer.id,
           COALESCE(customer.display_name, user_identifier.display_hint,
             account_identifier.display_hint, any_identifier.display_hint,
             CASE WHEN customer.identity_level = 'pseudonymous'
@@ -4413,6 +4439,7 @@ async fn dashboard_customer_summary_by_id(
           COALESCE(activity.last_activity_at, customer.last_seen_at) AS last_activity_at,
           COALESCE(outcome.outcome_health, 'unknown') AS outcome_health,
           COALESCE(activity.signal_count, 0)::BIGINT AS signal_count,
+          COALESCE(activity.trait_count, 0)::BIGINT AS trait_count,
           COALESCE(activity.session_count, 0)::BIGINT AS session_count,
           COALESCE(activity.active_need_count, 0)::BIGINT AS active_need_count,
           COALESCE(consent.consent_state, 'unknown') AS consent_state
@@ -4423,7 +4450,8 @@ async fn dashboard_customer_summary_by_id(
           ORDER BY identifier.created_at, identifier.id LIMIT 1) any_identifier ON TRUE
         LEFT JOIN LATERAL (SELECT identifier.display_hint FROM customer_identifiers identifier
           WHERE identifier.workspace_id = $1 AND identifier.product_id = $2
-            AND identifier.customer_id = customer.id AND identifier.kind = 'account_ref'
+            AND identifier.customer_id = COALESCE(customer.parent_customer_id, customer.id)
+            AND identifier.kind = 'account_ref'
           ORDER BY identifier.created_at, identifier.id LIMIT 1) account_identifier ON TRUE
         LEFT JOIN LATERAL (SELECT identifier.display_hint FROM customer_identifiers identifier
           WHERE identifier.workspace_id = $1 AND identifier.product_id = $2
@@ -4431,6 +4459,8 @@ async fn dashboard_customer_summary_by_id(
           ORDER BY identifier.created_at, identifier.id LIMIT 1) user_identifier ON TRUE
         LEFT JOIN LATERAL (SELECT MAX(interaction.occurred_at) AS last_activity_at,
           COUNT(signal.id)::BIGINT AS signal_count,
+          COUNT(signal.id) FILTER (WHERE signal.signal_type IN ('intent', 'preference',
+            'constraint'))::BIGINT AS trait_count,
           COUNT(DISTINCT interaction.session_id)::BIGINT AS session_count,
           COUNT(signal.id) FILTER (WHERE signal.signal_type IN ('feature_need', 'friction')
             AND (signal.expires_at IS NULL OR signal.expires_at > NOW()))::BIGINT active_need_count
@@ -4469,7 +4499,21 @@ async fn dashboard_customer_summary_by_id(
             )
           ORDER BY grant_row.id LIMIT 1) consent ON TRUE
         WHERE customer.id = $3 AND customer.workspace_id = $1
-          AND customer.merged_into_customer_id IS NULL",
+          AND customer.merged_into_customer_id IS NULL
+          AND NOT (
+            customer.kind = 'account' AND EXISTS (
+              SELECT 1 FROM customers member
+              WHERE member.workspace_id = customer.workspace_id
+                AND member.parent_customer_id = customer.id
+                AND member.merged_into_customer_id IS NULL
+                AND EXISTS (
+                  SELECT 1 FROM customer_identifiers member_identifier
+                  WHERE member_identifier.workspace_id = $1
+                    AND member_identifier.product_id = $2
+                    AND member_identifier.customer_id = member.id
+                )
+            )
+          )",
     )
     .bind(workspace_id)
     .bind(product_id)
@@ -4477,7 +4521,9 @@ async fn dashboard_customer_summary_by_id(
     .bind(retained_since)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(|| ApiError::not_found("Customer not found for product"))
+    .ok_or_else(|| ApiError::not_found("Customer not found for product"))?;
+    humanize_customer_summary_name(&mut customer);
+    Ok(customer)
 }
 
 async fn dashboard_customer_context_returns(
@@ -4669,7 +4715,13 @@ pub(crate) async fn dashboard_customer_by_id(
     let identifiers = sqlx::query_as::<_, CustomerIdentifier>(
         r"SELECT id, kind, display_hint, identity_level, provenance, verified_at
         FROM customer_identifiers WHERE workspace_id = $1 AND product_id = $2
-          AND customer_id = $3 ORDER BY created_at, id",
+          AND customer_id IN (
+            $3,
+            (SELECT parent_customer_id FROM customers
+              WHERE workspace_id = $1 AND id = $3)
+          )
+        ORDER BY CASE kind WHEN 'user_ref' THEN 0 WHEN 'account_ref' THEN 1 ELSE 2 END,
+          created_at, id",
     )
     .bind(workspace_id)
     .bind(product_id)
@@ -4719,7 +4771,7 @@ pub(crate) async fn dashboard_customer_by_id(
         retained_since,
     )
     .await?;
-    let sessions = sqlx::query_as::<_, DashboardSessionSummary>(
+    let mut sessions = sqlx::query_as::<_, DashboardSessionSummary>(
         r"SELECT session.id, session.workspace_id, session.environment_id,
           session.source, session.ref_hint, session.started_at, session.last_seen_at,
           session.created_at, activity.interaction_count, activity.report_count,
@@ -4774,6 +4826,31 @@ pub(crate) async fn dashboard_customer_by_id(
     .bind(retained_since)
     .fetch_all(pool)
     .await?;
+    humanize_session_customer_names(&mut sessions);
+    let observed_profile = derive_observed_customer_profile(
+        sqlx::query_as::<_, ObservedActivity>(
+            r"SELECT interaction.session_id, session.ref_hint AS session_ref,
+              interaction.operation, interaction.occurred_at AS observed_at
+            FROM interactions_v2 interaction
+            JOIN sessions_v2 session ON session.id = interaction.session_id
+              AND session.workspace_id = interaction.workspace_id
+            WHERE interaction.workspace_id = $1 AND interaction.customer_id = $3
+              AND interaction.environment_id IN (SELECT id FROM product_environments
+                WHERE workspace_id = $1 AND product_id = $2)
+              AND interaction.occurred_at >= $4
+              AND interaction.operation LIKE '/agent-%'
+            ORDER BY interaction.occurred_at DESC,
+              interaction.client_sequence DESC NULLS LAST, interaction.id DESC
+            LIMIT $5",
+        )
+        .bind(workspace_id)
+        .bind(product_id)
+        .bind(customer_id)
+        .bind(retained_since)
+        .bind(i64::try_from(PROFILE_NODE_LIMIT + 1).map_err(ApiError::internal)?)
+        .fetch_all(pool)
+        .await?,
+    );
     let consent = sqlx::query_as::<_, ConsentGrant>(
         r"SELECT id, scope, enrichment_purpose,
           CASE WHEN state <> 'revoked' AND expires_at <= NOW() THEN 'expired' ELSE state END AS state,
@@ -4859,6 +4936,7 @@ pub(crate) async fn dashboard_customer_by_id(
             request_observations: request_observation_count,
         },
         customer,
+        observed_profile,
         identifiers,
         request_observations,
         signals: signal_page.signals,
@@ -5310,6 +5388,22 @@ pub(crate) async fn purge_expired_product_data(
     .map_err(ApiError::internal)
 }
 
+/// Unverified vendor evidence naming a known assistant family, applied
+/// case-insensitively to runtime hints and observed user-agents. Mirrors the
+/// AGENT MIX vendor classifier and the reference integrations' vendor-hint
+/// suffixes (for example `petsmart-demo/1.0 chatgpt-user`).
+const AGENT_EVIDENCE_PATTERN: &str =
+    "(claude|anthropic|chatgpt|openai|gpt-|perplexity|gemini|google-extended|cohere|copilot)";
+
+/// Agent-evidenced hops that ended off the graph: hard 404s (a fabricated
+/// URL, like a live Claude run inventing its own /agent-item path), plus
+/// 400/422 on graph operations (malformed tokens or premature decisions).
+const OFF_GRAPH_CONDITION: &str = r"(COALESCE(i.runtime_hint, '') ~* $3
+        OR COALESCE(observation.user_agent, '') ~* $3
+        OR (i.surface = 'http_json' AND i.operation LIKE '/agent-%'))
+      AND (i.status_code = 404
+        OR (i.status_code IN (400, 422) AND i.operation LIKE '/agent-%'))";
+
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
@@ -5377,14 +5471,13 @@ async fn dashboard_insights(
         r"WITH eligible_context AS (
           SELECT item.signal_id AS id, item.customer_id
           FROM enrichment_signal_items item
-          JOIN customer_signals signal ON signal.id = item.signal_id
-            AND signal.workspace_id = item.workspace_id
           JOIN enrichment_answers answer ON answer.id = item.enrichment_answer_id
             AND answer.workspace_id = item.workspace_id
           JOIN enrichment_requests request ON request.id = answer.request_id
             AND request.workspace_id = answer.workspace_id
-          JOIN LATERAL (
-            SELECT candidate.subject
+          LEFT JOIN LATERAL (
+            SELECT (candidate.state IN ('declined', 'revoked')
+              AND (candidate.expires_at IS NULL OR candidate.expires_at > NOW())) AS opted_out
             FROM consent_grants candidate
             WHERE candidate.environment_id = request.environment_id
               AND candidate.workspace_id = request.workspace_id
@@ -5395,35 +5488,10 @@ async fn dashboard_insights(
               CASE WHEN candidate.state IN ('declined', 'revoked') THEN 1 ELSE 0 END DESC,
               candidate.subject, candidate.id LIMIT 1
           ) effective_consent ON TRUE
-          JOIN consent_grants original_share ON original_share.id = signal.consent_grant_id
-            AND original_share.workspace_id = signal.workspace_id
-            AND original_share.enrichment_purpose = request.purpose
-            AND original_share.state = 'approved'
-            AND (original_share.expires_at IS NULL OR original_share.expires_at > NOW())
-          JOIN consent_grants share_grant
-            ON share_grant.environment_id = request.environment_id
-            AND share_grant.subject = effective_consent.subject
-            AND share_grant.scope = 'share_preferences'
-            AND share_grant.enrichment_purpose = request.purpose
-            AND share_grant.state = 'approved'
-            AND (share_grant.expires_at IS NULL OR share_grant.expires_at > NOW())
-          JOIN consent_grants purpose_grant
-            ON purpose_grant.environment_id = request.environment_id
-            AND purpose_grant.subject = effective_consent.subject
-            AND purpose_grant.scope = 'personalize'
-            AND purpose_grant.enrichment_purpose = request.purpose
-            AND purpose_grant.state = 'approved'
-            AND (purpose_grant.expires_at IS NULL OR purpose_grant.expires_at > NOW())
-          JOIN consent_grants remember_grant
-            ON remember_grant.environment_id = request.environment_id
-            AND remember_grant.subject = effective_consent.subject
-            AND remember_grant.scope = 'remember_preferences'
-            AND remember_grant.enrichment_purpose = request.purpose
-            AND remember_grant.state = 'approved'
-            AND (remember_grant.expires_at IS NULL OR remember_grant.expires_at > NOW())
           WHERE item.environment_id = $1 AND item.collected_at >= $2
             AND item.customer_id IS NOT NULL
             AND item.provenance <> 'agent_inference'
+            AND NOT COALESCE(effective_consent.opted_out, FALSE)
             AND item.remembered AND item.expires_at > NOW()
         )
         SELECT
@@ -5525,6 +5593,400 @@ async fn dashboard_insights(
         .fetch_all(pool)
         .await?,
     );
+    let decision_counts = sqlx::query_as::<_, (i64, i64)>(
+        r"SELECT
+          COUNT(*) FILTER (WHERE experience ? 'decision'),
+          COUNT(*) FILTER (WHERE (experience -> 'decision' ->> 'exactMatchCount')::BIGINT = 0)
+        FROM interactions_v2
+        WHERE environment_id = $1 AND occurred_at >= $2 AND experience IS NOT NULL",
+    )
+    .bind(environment_id)
+    .bind(window_start)
+    .fetch_one(pool)
+    .await?;
+    let expressed_dimensions = insight_counts(
+        sqlx::query_as::<_, (String, i64)>(
+            r"SELECT dimension.value, COUNT(*)
+            FROM interactions_v2 i,
+            LATERAL jsonb_array_elements_text(i.experience -> 'needState' -> 'expressedDimensions') dimension
+            WHERE i.environment_id = $1 AND i.occurred_at >= $2
+              AND i.experience -> 'needState' -> 'expressedDimensions' IS NOT NULL
+            GROUP BY dimension.value ORDER BY COUNT(*) DESC, dimension.value LIMIT 8",
+        )
+        .bind(environment_id)
+        .bind(window_start)
+        .fetch_all(pool)
+        .await?,
+    );
+    let violated_dimensions = insight_counts(
+        sqlx::query_as::<_, (String, i64)>(
+            r"SELECT violation ->> 'dimension', COUNT(*)
+            FROM interactions_v2 i,
+            LATERAL jsonb_array_elements(i.experience -> 'decision' -> 'violatedHardConstraints') violation
+            WHERE i.environment_id = $1 AND i.occurred_at >= $2
+              AND i.experience -> 'decision' -> 'violatedHardConstraints' IS NOT NULL
+            GROUP BY violation ->> 'dimension'
+            ORDER BY COUNT(*) DESC, violation ->> 'dimension' LIMIT 8",
+        )
+        .bind(environment_id)
+        .bind(window_start)
+        .fetch_all(pool)
+        .await?,
+    );
+    let counterfactual_changes = insight_counts(
+        sqlx::query_as::<_, (String, i64)>(
+            r"SELECT counterfactual ->> 'change', COUNT(*)
+            FROM interactions_v2 i,
+            LATERAL jsonb_array_elements(i.experience -> 'decision' -> 'counterfactuals') counterfactual
+            WHERE i.environment_id = $1 AND i.occurred_at >= $2
+              AND i.experience -> 'decision' -> 'counterfactuals' IS NOT NULL
+            GROUP BY counterfactual ->> 'change'
+            ORDER BY COUNT(*) DESC, counterfactual ->> 'change' LIMIT 8",
+        )
+        .bind(environment_id)
+        .bind(window_start)
+        .fetch_all(pool)
+        .await?,
+    );
+    let median_counterfactual_delta = sqlx::query_scalar::<_, Option<f64>>(
+        r"SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (
+            ORDER BY (counterfactual ->> 'delta')::DOUBLE PRECISION)
+        FROM interactions_v2 i,
+        LATERAL jsonb_array_elements(i.experience -> 'decision' -> 'counterfactuals') counterfactual
+        WHERE i.environment_id = $1 AND i.occurred_at >= $2
+          AND i.experience -> 'decision' -> 'counterfactuals' IS NOT NULL
+          AND counterfactual ? 'delta'",
+    )
+    .bind(environment_id)
+    .bind(window_start)
+    .fetch_one(pool)
+    .await?;
+    let journey_edges = sqlx::query_as::<_, (String, String, i64)>(
+        r"WITH ordered AS (
+          SELECT operation, LEAD(operation) OVER (
+            PARTITION BY session_id
+            ORDER BY occurred_at, client_sequence NULLS LAST, id
+          ) AS next_operation
+          FROM interactions_v2
+          WHERE environment_id = $1 AND occurred_at >= $2 AND session_id IS NOT NULL
+        )
+        SELECT operation, next_operation, COUNT(*)
+        FROM ordered WHERE next_operation IS NOT NULL
+        GROUP BY operation, next_operation
+        ORDER BY COUNT(*) DESC, operation, next_operation LIMIT 12",
+    )
+    .bind(environment_id)
+    .bind(window_start)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(
+        |(from_operation, to_operation, traversals)| JourneyEdgeInsight {
+            from_operation,
+            to_operation,
+            traversals,
+        },
+    )
+    .collect::<Vec<_>>();
+    let exit_operations = insight_counts(
+        sqlx::query_as::<_, (String, i64)>(
+            r"WITH ordered AS (
+              SELECT operation, LEAD(operation) OVER (
+                PARTITION BY session_id
+                ORDER BY occurred_at, client_sequence NULLS LAST, id
+              ) AS next_operation
+              FROM interactions_v2
+              WHERE environment_id = $1 AND occurred_at >= $2 AND session_id IS NOT NULL
+            )
+            SELECT operation, COUNT(*)
+            FROM ordered WHERE next_operation IS NULL
+            GROUP BY operation ORDER BY COUNT(*) DESC, operation LIMIT 8",
+        )
+        .bind(environment_id)
+        .bind(window_start)
+        .fetch_all(pool)
+        .await?,
+    );
+    let handoff_counts = sqlx::query_as::<_, (i64, i64, i64)>(
+        r"SELECT
+          COUNT(*) FILTER (WHERE customer_link_source = 'product_link_click'),
+          COUNT(DISTINCT session_id) FILTER (
+            WHERE customer_link_source = 'product_link_click' AND session_id IS NOT NULL),
+          COUNT(DISTINCT session_id) FILTER (WHERE session_id IS NOT NULL)
+        FROM interactions_v2
+        WHERE environment_id = $1 AND occurred_at >= $2",
+    )
+    .bind(environment_id)
+    .bind(window_start)
+    .fetch_one(pool)
+    .await?;
+    let landing_operations = insight_counts(
+        sqlx::query_as::<_, (String, i64)>(
+            r"SELECT operation, COUNT(*) FROM interactions_v2
+            WHERE environment_id = $1 AND occurred_at >= $2
+              AND customer_link_source = 'product_link_click'
+            GROUP BY operation ORDER BY COUNT(*) DESC, operation LIMIT 8",
+        )
+        .bind(environment_id)
+        .bind(window_start)
+        .fetch_all(pool)
+        .await?,
+    );
+    let signal_outcomes = sqlx::query_as::<_, (String, i64, i64, i64)>(
+        r"SELECT signal.signal_type || '/' || signal.source_item_key,
+          COUNT(DISTINCT decision.id),
+          COUNT(outcome.id),
+          COUNT(outcome.id) FILTER (WHERE outcome.outcome IN ('conversion', 'completion'))
+        FROM personalization_decision_signals link
+        JOIN personalization_decisions decision ON decision.id = link.decision_id
+          AND decision.workspace_id = link.workspace_id
+        JOIN customer_signals signal ON signal.id = link.signal_id
+        LEFT JOIN personalization_outcomes outcome ON outcome.decision_id = decision.id
+        WHERE decision.environment_id = $1 AND decision.created_at >= $2
+        GROUP BY signal.signal_type || '/' || signal.source_item_key
+        ORDER BY COUNT(outcome.id) FILTER (WHERE outcome.outcome IN ('conversion', 'completion')) DESC,
+          COUNT(DISTINCT decision.id) DESC, signal.signal_type || '/' || signal.source_item_key
+        LIMIT 8",
+    )
+    .bind(environment_id)
+    .bind(window_start)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|(signal, decisions, outcomes, conversions)| SignalOutcomeInsight {
+        signal,
+        decisions,
+        outcomes,
+        conversions,
+    })
+    .collect::<Vec<_>>();
+    let agent_vendors = sqlx::query_as::<_, (String, i64, i64)>(
+        r"SELECT CASE
+            WHEN source.evidence ~* '(claude|anthropic)' THEN 'claude'
+            WHEN source.evidence ~* '(chatgpt|openai|gpt-)' THEN 'openai'
+            WHEN source.evidence ~* 'perplexity' THEN 'perplexity'
+            WHEN source.evidence ~* '(gemini|google-extended)' THEN 'gemini'
+            WHEN source.evidence ~* 'cohere' THEN 'cohere'
+            WHEN source.evidence ~* 'copilot' THEN 'copilot'
+            ELSE 'other'
+          END,
+          COUNT(*),
+          COUNT(DISTINCT source.session_id) FILTER (WHERE source.session_id IS NOT NULL)
+        FROM (
+          SELECT i.id, i.session_id,
+            COALESCE(observation.user_agent, i.runtime_hint, '') AS evidence
+          FROM interactions_v2 i
+          LEFT JOIN customer_request_observations observation
+            ON observation.interaction_id = i.id
+          WHERE i.environment_id = $1 AND i.occurred_at >= $2
+        ) source
+        WHERE source.evidence <> ''
+        GROUP BY 1 ORDER BY COUNT(*) DESC, 1 LIMIT 8",
+    )
+    .bind(environment_id)
+    .bind(window_start)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|(vendor, interactions, sessions)| AgentVendorInsight {
+        vendor,
+        interactions,
+        sessions,
+    })
+    .collect::<Vec<_>>();
+    let rank_positions = insight_counts(
+        sqlx::query_as::<_, (String, i64)>(
+            r"SELECT i.experience -> 'search' ->> 'resultPosition', COUNT(*)
+            FROM interactions_v2 i
+            WHERE i.environment_id = $1 AND i.occurred_at >= $2
+              AND i.experience -> 'search' ->> 'resultPosition' ~ '^[0-9]+$'
+            GROUP BY i.experience -> 'search' ->> 'resultPosition'
+            ORDER BY (i.experience -> 'search' ->> 'resultPosition')::BIGINT LIMIT 12",
+        )
+        .bind(environment_id)
+        .bind(window_start)
+        .fetch_all(pool)
+        .await?,
+    );
+    let unknown_dimensions = insight_counts(
+        sqlx::query_as::<_, (String, i64)>(
+            r"SELECT dimension.value, COUNT(*)
+            FROM interactions_v2 i,
+            LATERAL jsonb_array_elements_text(i.experience -> 'needState' -> 'unknownDimensions') dimension
+            WHERE i.environment_id = $1 AND i.occurred_at >= $2
+              AND i.experience -> 'needState' -> 'unknownDimensions' IS NOT NULL
+            GROUP BY dimension.value ORDER BY COUNT(*) DESC, dimension.value LIMIT 8",
+        )
+        .bind(environment_id)
+        .bind(window_start)
+        .fetch_all(pool)
+        .await?,
+    );
+    let unanswered_questions = insight_counts(
+        sqlx::query_as::<_, (String, i64)>(
+            r"SELECT question_key || ' · ' || state, COUNT(*)
+            FROM enrichment_requests
+            WHERE environment_id = $1 AND created_at >= $2
+              AND state IN ('declined', 'no_relevant_context')
+            GROUP BY question_key || ' · ' || state
+            ORDER BY COUNT(*) DESC, question_key || ' · ' || state LIMIT 8",
+        )
+        .bind(environment_id)
+        .bind(window_start)
+        .fetch_all(pool)
+        .await?,
+    );
+    // Discovery→following funnel over agent-evidenced sessions. A hop counts
+    // as agent evidence when its runtime hint or observed user-agent names a
+    // known assistant family, or when it is a server-recorded JSON graph hop
+    // (the reference integrations record every graph fetch as `http_json` on
+    // an `/agent-…` operation). "Root/guide" is the graph's front door — the
+    // `/` root and the `/agent-guide` storefront hop the examples record —
+    // so entering the graph means a tokened fetch past that door: any hop
+    // carrying an `experience` payload, or any `/agent-…` operation beyond
+    // the guide. Stages are monotonic: each stage requires all prior stages.
+    let journey_funnel_counts = sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
+        r"WITH hop AS (
+          SELECT i.session_id, i.surface, i.operation, i.experience, i.customer_link_source,
+            COALESCE(i.runtime_hint, '') AS hint,
+            COALESCE(observation.user_agent, '') AS user_agent
+          FROM interactions_v2 i
+          LEFT JOIN customer_request_observations observation
+            ON observation.interaction_id = i.id
+          WHERE i.environment_id = $1 AND i.occurred_at >= $2 AND i.session_id IS NOT NULL
+        ),
+        journey AS (
+          SELECT session_id,
+            BOOL_OR(hint ~* $3 OR user_agent ~* $3
+              OR (surface = 'http_json' AND operation LIKE '/agent-%')) AS agent_evidenced,
+            BOOL_OR(experience IS NOT NULL
+              OR (operation LIKE '/agent-%' AND operation NOT IN ('/', '/agent-guide')))
+              AS entered_graph,
+            BOOL_OR(jsonb_array_length(COALESCE(
+                experience -> 'needState' -> 'expressedDimensions', '[]'::jsonb)) > 0
+              OR jsonb_array_length(COALESCE(
+                experience -> 'needState' -> 'unknownDimensions', '[]'::jsonb)) > 0)
+              AS expressed_needs,
+            BOOL_OR(experience ? 'decision' OR experience ->> 'stage' = 'decision_support')
+              AS reached_decision,
+            BOOL_OR(customer_link_source = 'product_link_click') AS handoff_followed
+          FROM hop GROUP BY session_id
+        )
+        SELECT COUNT(*),
+          COUNT(*) FILTER (WHERE entered_graph),
+          COUNT(*) FILTER (WHERE entered_graph AND expressed_needs),
+          COUNT(*) FILTER (WHERE entered_graph AND expressed_needs AND reached_decision),
+          COUNT(*) FILTER (WHERE entered_graph AND expressed_needs AND reached_decision
+            AND handoff_followed)
+        FROM journey WHERE agent_evidenced",
+    )
+    .bind(environment_id)
+    .bind(window_start)
+    .bind(AGENT_EVIDENCE_PATTERN)
+    .fetch_one(pool)
+    .await?;
+    // Behavioral traffic classes per session. `declared_agent` follows the
+    // journey-funnel evidence rule above. `suspected_cloud_agent` is the
+    // closest defensible heuristic for a cloud browser driven by an agent
+    // behind a human Chrome user-agent: no vendor evidence anywhere in the
+    // session, at least one HTML hop observed with a human browser UA, and
+    // the session's FIRST hop landing on a deep faceted/product operation
+    // rather than the human root. The available data cannot distinguish this
+    // from a human who opened an agent-composed link in a fresh browser
+    // session and whose agent's own hops were never recorded — both begin
+    // mid-graph with no prior human browsing hop — so this class is an
+    // honest upper bound labelled "suspected", never a verified count.
+    let traffic_classes = sqlx::query_as::<_, (String, i64, i64)>(
+        r"WITH hop AS (
+          SELECT i.session_id, i.surface, i.operation,
+            COALESCE(i.runtime_hint, '') AS hint,
+            COALESCE(observation.user_agent, '') AS user_agent,
+            ROW_NUMBER() OVER (PARTITION BY i.session_id
+              ORDER BY i.occurred_at, i.client_sequence NULLS LAST, i.id) AS hop_rank
+          FROM interactions_v2 i
+          LEFT JOIN customer_request_observations observation
+            ON observation.interaction_id = i.id
+          WHERE i.environment_id = $1 AND i.occurred_at >= $2 AND i.session_id IS NOT NULL
+        ),
+        session_class AS (
+          SELECT session_id, COUNT(*) AS interactions,
+            BOOL_OR(hint ~* $3 OR user_agent ~* $3
+              OR (surface = 'http_json' AND operation LIKE '/agent-%')) AS declared,
+            BOOL_OR(surface = 'http_html' AND user_agent ~* 'mozilla'
+              AND user_agent !~* $3) AS human_browser,
+            BOOL_OR(hop_rank = 1 AND surface = 'http_html' AND operation <> '/'
+              AND operation NOT LIKE '/agent-%') AS deep_html_entry
+          FROM hop GROUP BY session_id
+        )
+        SELECT class, sessions, interactions FROM (
+          SELECT CASE
+              WHEN declared THEN 'declared_agent'
+              WHEN human_browser AND deep_html_entry THEN 'suspected_cloud_agent'
+              ELSE 'human'
+            END AS class,
+            COUNT(*) AS sessions,
+            COALESCE(SUM(interactions), 0)::BIGINT AS interactions
+          FROM session_class GROUP BY 1
+        ) classes
+        ORDER BY CASE class
+            WHEN 'declared_agent' THEN 0
+            WHEN 'suspected_cloud_agent' THEN 1
+            ELSE 2
+          END",
+    )
+    .bind(environment_id)
+    .bind(window_start)
+    .bind(AGENT_EVIDENCE_PATTERN)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|(class, sessions, interactions)| TrafficClassInsight {
+        class,
+        sessions,
+        interactions,
+    })
+    .collect::<Vec<_>>();
+    // Channel mix over experience-bearing hops. Hops recorded by SDKs that
+    // predate the channel marker aggregate honestly as `unlabeled`.
+    let channels = insight_counts(
+        sqlx::query_as::<_, (String, i64)>(
+            r"SELECT COALESCE(experience ->> 'channel', 'unlabeled'), COUNT(*)
+            FROM interactions_v2
+            WHERE environment_id = $1 AND occurred_at >= $2 AND experience IS NOT NULL
+            GROUP BY 1 ORDER BY COUNT(*) DESC, 1 LIMIT 8",
+        )
+        .bind(environment_id)
+        .bind(window_start)
+        .fetch_all(pool)
+        .await?,
+    );
+    let off_graph_attempts = sqlx::query_scalar::<_, i64>(&format!(
+        r"SELECT COUNT(*)
+        FROM interactions_v2 i
+        LEFT JOIN customer_request_observations observation
+          ON observation.interaction_id = i.id
+        WHERE i.environment_id = $1 AND i.occurred_at >= $2 AND {OFF_GRAPH_CONDITION}",
+    ))
+    .bind(environment_id)
+    .bind(window_start)
+    .bind(AGENT_EVIDENCE_PATTERN)
+    .fetch_one(pool)
+    .await?;
+    let off_graph_operations = insight_counts(
+        sqlx::query_as::<_, (String, i64)>(&format!(
+            r"SELECT i.operation, COUNT(*)
+            FROM interactions_v2 i
+            LEFT JOIN customer_request_observations observation
+              ON observation.interaction_id = i.id
+            WHERE i.environment_id = $1 AND i.occurred_at >= $2 AND {OFF_GRAPH_CONDITION}
+            GROUP BY i.operation ORDER BY COUNT(*) DESC, i.operation LIMIT 8",
+        ))
+        .bind(environment_id)
+        .bind(window_start)
+        .bind(AGENT_EVIDENCE_PATTERN)
+        .fetch_all(pool)
+        .await?,
+    );
     Ok(Insights {
         window_days: WINDOW_DAYS,
         comparison_days: COMPARISON_DAYS,
@@ -5563,6 +6025,53 @@ async fn dashboard_insights(
         finding_kinds,
         topics,
         blocking_topics,
+        lost_demand: LostDemandInsights {
+            decision_interactions: decision_counts.0,
+            zero_match_decisions: decision_counts.1,
+            expressed_dimensions,
+            violated_dimensions,
+            counterfactual_changes,
+            median_counterfactual_delta,
+        },
+        journey_flow: JourneyFlowInsights {
+            edges: journey_edges,
+            exit_operations,
+        },
+        handoff: HandoffInsights {
+            handoff_clicks: handoff_counts.0,
+            sessions_with_handoff: handoff_counts.1,
+            sessions: handoff_counts.2,
+            handoff_rate: if handoff_counts.2 == 0 {
+                0
+            } else {
+                (handoff_counts.1 as f64 / handoff_counts.2 as f64 * 100.0).round() as i64
+            },
+            landing_operations,
+        },
+        signal_outcomes,
+        agent_vendors,
+        rank_positions,
+        unknown_dimensions,
+        unanswered_questions,
+        journey_funnel: JourneyFunnelInsights {
+            arrived: journey_funnel_counts.0,
+            entered_graph: journey_funnel_counts.1,
+            expressed_needs: journey_funnel_counts.2,
+            reached_decision: journey_funnel_counts.3,
+            handoff_followed: journey_funnel_counts.4,
+            tokened_fetch_rate: if journey_funnel_counts.0 == 0 {
+                0
+            } else {
+                (journey_funnel_counts.1 as f64 / journey_funnel_counts.0 as f64 * 100.0).round()
+                    as i64
+            },
+        },
+        traffic_classes,
+        channels,
+        off_graph_attempts: OffGraphAttemptInsights {
+            attempts: off_graph_attempts,
+            operations: off_graph_operations,
+        },
     })
 }
 
@@ -5721,7 +6230,7 @@ pub(crate) async fn dashboard_with_limits(
     .bind(report_limit)
     .fetch_all(pool)
     .await?;
-    let sessions = sqlx::query_as::<_, DashboardSessionSummary>(
+    let mut sessions = sqlx::query_as::<_, DashboardSessionSummary>(
         r"WITH selected_sessions AS (
           SELECT id, workspace_id, environment_id, source, ref_hint,
             started_at, last_seen_at, created_at
@@ -5790,6 +6299,7 @@ pub(crate) async fn dashboard_with_limits(
     .bind(session_limit)
     .fetch_all(pool)
     .await?;
+    humanize_session_customer_names(&mut sessions);
     let insights = dashboard_insights(pool, environment_id, retained_since).await?;
     let (interactions_total, reports_total, sessions_total) =
         sqlx::query_as::<_, (i64, i64, i64)>(
@@ -6180,6 +6690,9 @@ pub(crate) async fn dashboard_session_by_id(
     .bind(product_id)
     .fetch_all(pool)
     .await?;
+    for response in &mut responses {
+        humanize_response_customer_name(response.customer_id, &mut response.customer_name);
+    }
     let request_ids = responses
         .iter()
         .map(|response| response.id)
@@ -6405,6 +6918,42 @@ fn customer_identifier_hash(
 fn customer_identifier_hint(kind: &str, ref_hash: &[u8]) -> String {
     let encoded = URL_SAFE_NO_PAD.encode(ref_hash);
     format!("{}-{}", kind.trim_end_matches("_ref"), &encoded[..8])
+}
+
+/// Replaces auto-generated anonymous placeholder labels ("anonymous-XXXXXXXX"
+/// hints and the "Anonymous customer" fallback) with a deterministic,
+/// human-friendly `<Adjective> <Animal>` label derived from the customer id.
+/// Real product-provided names and hints are kept as-is.
+pub(crate) fn humanize_session_customer_names(sessions: &mut [DashboardSessionSummary]) {
+    for session in sessions {
+        if let Some(label) = crate::friendly_names::friendly_label_for(
+            session.identity_level.as_deref(),
+            session.customer_id,
+            session.customer_display_name.as_deref(),
+        ) {
+            session.customer_display_name = Some(label);
+        }
+    }
+}
+
+pub(crate) fn humanize_customer_summary_name(customer: &mut CustomerSummary) {
+    if let Some(label) = crate::friendly_names::friendly_label_for(
+        Some(customer.identity_level.as_str()),
+        Some(customer.id),
+        Some(customer.display_name.as_str()),
+    ) {
+        customer.display_name = label;
+    }
+}
+
+/// Same humanization for read models that only carry a customer name and id,
+/// without the identity level. Only generated placeholder labels are replaced.
+fn humanize_response_customer_name(customer_id: Option<Uuid>, customer_name: &mut Option<String>) {
+    if let Some(label) =
+        crate::friendly_names::friendly_label_for_placeholder(customer_id, customer_name.as_deref())
+    {
+        *customer_name = Some(label);
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -6868,7 +7417,145 @@ async fn resolve_telemetry_customer(
     }
 }
 
+const EXPERIENCE_STAGES: [&str; 8] = [
+    "decision_input_required",
+    "express_more_or_decide",
+    "ready_to_decide",
+    "decision_support",
+    "express_more_or_evaluate",
+    "ready_to_evaluate",
+    "item",
+    "product",
+];
+
+/// Which surface of the same experience graph a hop traversed: the faceted
+/// HTML-link storefront or the tokened native JSON graph.
+const EXPERIENCE_CHANNELS: [&str; 2] = ["faceted_html", "native_graph"];
+
+fn valid_experience_label(value: &str, max: usize) -> bool {
+    // `:` admits namespaced dimensions like the SDK's `evidence:glare_control`.
+    !value.is_empty()
+        && value.chars().count() <= max
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "_.:-".contains(character))
+}
+
+fn valid_experience_text(value: &str, max: usize) -> bool {
+    !value.trim().is_empty()
+        && value.chars().count() <= max
+        && !value.chars().any(char::is_control)
+        && !contains_sensitive_report_text(value)
+}
+
+fn validate_experience_dimensions(dimensions: Option<&Vec<String>>) -> Result<(), ApiError> {
+    if let Some(dimensions) = dimensions
+        && (dimensions.len() > 24
+            || dimensions
+                .iter()
+                .any(|dimension| !valid_experience_label(dimension, 80)))
+    {
+        return Err(ApiError::bad_request(
+            "experience dimensions must be at most 24 bounded dimension keys",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_experience(input: Option<&ExperienceTelemetryInput>) -> Result<(), ApiError> {
+    let Some(experience) = input else {
+        return Ok(());
+    };
+    if let Some(channel) = experience.channel.as_deref()
+        && !EXPERIENCE_CHANNELS.contains(&channel)
+    {
+        return Err(ApiError::bad_request("Invalid experience channel"));
+    }
+    if let Some(stage) = experience.stage.as_deref()
+        && !EXPERIENCE_STAGES.contains(&stage)
+    {
+        return Err(ApiError::bad_request("Invalid experience stage"));
+    }
+    if let Some(need_state) = experience.need_state.as_ref() {
+        validate_experience_dimensions(need_state.expressed_dimensions.as_ref())?;
+        validate_experience_dimensions(need_state.unknown_dimensions.as_ref())?;
+    }
+    if let Some(decision) = experience.decision.as_ref() {
+        if decision
+            .exact_match_count
+            .is_some_and(|value| !(0..=100_000).contains(&value))
+            || decision
+                .near_miss_count
+                .is_some_and(|value| !(0..=100_000).contains(&value))
+        {
+            return Err(ApiError::bad_request("Invalid experience match counts"));
+        }
+        if let Some(violations) = decision.violated_hard_constraints.as_ref() {
+            if violations.len() > 40 {
+                return Err(ApiError::bad_request(
+                    "experience violations must contain at most 40 entries",
+                ));
+            }
+            for violation in violations {
+                if !valid_experience_label(&violation.dimension, 80)
+                    || violation
+                        .requested
+                        .as_deref()
+                        .is_some_and(|value| !valid_experience_text(value, 120))
+                    || violation
+                        .actual
+                        .as_deref()
+                        .is_some_and(|value| !valid_experience_text(value, 120))
+                    || violation
+                        .item_id
+                        .as_deref()
+                        .is_some_and(|value| !valid_experience_label(value, 120))
+                {
+                    return Err(ApiError::bad_request(
+                        "experience violations must use bounded dimension keys and values",
+                    ));
+                }
+            }
+        }
+        if let Some(counterfactuals) = decision.counterfactuals.as_ref() {
+            if counterfactuals.len() > 8 {
+                return Err(ApiError::bad_request(
+                    "experience counterfactuals must contain at most 8 entries",
+                ));
+            }
+            for counterfactual in counterfactuals {
+                if !valid_experience_text(&counterfactual.change, 160)
+                    || counterfactual.delta.is_some_and(|value| !value.is_finite())
+                    || counterfactual
+                        .item_id
+                        .as_deref()
+                        .is_some_and(|value| !valid_experience_label(value, 120))
+                {
+                    return Err(ApiError::bad_request(
+                        "experience counterfactuals must be bounded change descriptions",
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(search) = experience.search.as_ref()
+        && (search
+            .search_id
+            .as_deref()
+            .is_some_and(|value| !valid_experience_label(value, 120))
+            || search
+                .result_position
+                .is_some_and(|value| !(1..=100_000).contains(&value)))
+    {
+        return Err(ApiError::bad_request(
+            "Invalid experience search attribution",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_telemetry(input: &InteractionTelemetryInput) -> Result<(), ApiError> {
+    validate_experience(input.experience.as_ref())?;
     validate_identity_refs(input)?;
     if !["http_json", "http_html", "http_headers", "mcp"].contains(&input.surface.as_str()) {
         return Err(ApiError::bad_request("Invalid interaction surface"));
@@ -6972,6 +7659,7 @@ pub(crate) async fn ingest_telemetry_batch(
     let mut accepted_interaction_ids = Vec::with_capacity(event_count);
     let mut changed_interaction_ids = Vec::with_capacity(event_count);
     let mut session_evidence_by_interaction = BTreeMap::new();
+    let mut product_link_claims = Vec::new();
     let mut events = input.events;
     events.sort_by_key(|event| event.interaction_id);
     let mut tx = pool.begin().await?;
@@ -6988,7 +7676,16 @@ pub(crate) async fn ingest_telemetry_batch(
                     .entry(result.interaction_id)
                     .or_insert(None);
                 if evidence.is_none() {
-                    *evidence = result.session_evidence;
+                    evidence.clone_from(&result.session_evidence);
+                }
+                if result.customer_link_source.as_deref() == Some("product_link_click") {
+                    let (session_ref, source) = result.session_evidence.ok_or_else(|| {
+                        ApiError::internal("accepted product link click has no session evidence")
+                    })?;
+                    let customer_id = result.customer_id.ok_or_else(|| {
+                        ApiError::internal("accepted product link click has no customer")
+                    })?;
+                    product_link_claims.push((source, sha256(&session_ref), customer_id));
                 }
                 accepted_confirmed_interaction |= result.confirmed;
                 accepted += 1;
@@ -7006,6 +7703,11 @@ pub(crate) async fn ingest_telemetry_batch(
         }
     }
     correlate_telemetry_sessions(&mut tx, auth, session_evidence_by_interaction).await?;
+    product_link_claims.sort();
+    product_link_claims.dedup();
+    for (source, session_ref_hash, customer_id) in product_link_claims {
+        claim_product_link_session(&mut tx, auth, &source, &session_ref_hash, customer_id).await?;
+    }
     reconcile_signal_links_for_interactions(&mut tx, auth, &accepted_interaction_ids).await?;
     regroup_changed_interaction_reports(&mut tx, &changed_interaction_ids).await?;
     if accepted > 0 {
@@ -7065,6 +7767,8 @@ struct AcceptedTelemetryEvent {
     confirmed: bool,
     grouping_facts_changed: bool,
     session_evidence: Option<(String, String)>,
+    customer_link_source: Option<String>,
+    customer_id: Option<Uuid>,
 }
 
 async fn ingest_telemetry_event(
@@ -7083,11 +7787,34 @@ async fn ingest_telemetry_event(
         ));
     }
     let identity_refs = validate_identity_refs(&event)?;
+    let request_observation =
+        validate_request_observation(&event.surface, event.request_observation.as_ref())?;
     let session_evidence = session_evidence(event.session_ref, event.session_source)?;
+    let customer_link_source = match event.customer_link_source {
+        None => None,
+        Some(CustomerLinkSource::ProductLinkClick)
+            if event.surface == "http_html"
+                && session_evidence.is_some()
+                && identity_refs.anonymous_ref.is_some() =>
+        {
+            Some("product_link_click".to_owned())
+        }
+        Some(CustomerLinkSource::ProductLinkClick) => {
+            return Err(ApiError::bad_request(
+                "product_link_click requires an HTTP HTML event with sessionRef and anonymousRef",
+            ));
+        }
+    };
     let customer_id =
         resolve_telemetry_customer(tx, auth, identity_hmac_secret, &identity_refs, occurred_at)
             .await?;
     let customer_ref = identity_refs.customer_ref;
+    let experience_json = event
+        .experience
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|_| ApiError::internal("experience payload serialization failed"))?;
     let confirmed = event.surface == "mcp";
     let classification = if confirmed {
         "confirmed".to_string()
@@ -7108,9 +7835,9 @@ async fn ingest_telemetry_event(
           INSERT INTO interactions_v2
         (id, workspace_id, environment_id, api_key_id, session_id, surface, operation, status_code,
          duration_ms, customer_ref, customer_id, classification, confirmation_method, runtime_hint,
-         runtime_hint_source, client_sequence, occurred_at)
+         runtime_hint_source, client_sequence, occurred_at, experience, customer_link_source)
         SELECT COALESCE(p.id, input.id), $2, $3, $4, $5, $6, $7, $8,
-          $9, $10, $11, $12, $13, $14, $15, $16, $17
+          $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
         FROM (VALUES ($1::uuid)) AS input(id)
         LEFT JOIN previous p ON p.id = input.id
         ON CONFLICT (id) DO UPDATE SET
@@ -7128,6 +7855,8 @@ async fn ingest_telemetry_event(
           runtime_hint = COALESCE(interactions_v2.runtime_hint, EXCLUDED.runtime_hint),
           runtime_hint_source = COALESCE(interactions_v2.runtime_hint_source, EXCLUDED.runtime_hint_source),
           client_sequence = COALESCE(interactions_v2.client_sequence, EXCLUDED.client_sequence),
+          experience = COALESCE(interactions_v2.experience, EXCLUDED.experience),
+          customer_link_source = COALESCE(interactions_v2.customer_link_source, EXCLUDED.customer_link_source),
           occurred_at = CASE
             WHEN interactions_v2.surface = 'unknown' AND interactions_v2.operation = 'pending'
               THEN EXCLUDED.occurred_at
@@ -7167,16 +7896,75 @@ async fn ingest_telemetry_event(
     .bind(event.runtime_hint_source)
     .bind(event.sequence)
     .bind(occurred_at)
+    .bind(experience_json)
+    .bind(customer_link_source.as_deref())
     .fetch_optional(&mut **tx)
     .await?;
     let row =
         row.ok_or_else(|| ApiError::conflict("interactionId belongs to another workspace"))?;
+    if let Some(observation) = request_observation.as_ref() {
+        insert_customer_request_observation(
+            tx,
+            auth,
+            row.id,
+            customer_id,
+            observation,
+            occurred_at,
+        )
+        .await?;
+    }
     Ok(AcceptedTelemetryEvent {
         interaction_id: row.id,
         confirmed,
         grouping_facts_changed: row.grouping_facts_changed,
         session_evidence,
+        customer_link_source,
+        customer_id,
     })
+}
+
+async fn insert_customer_request_observation(
+    tx: &mut Transaction<'_, Postgres>,
+    auth: &ProductAuth,
+    interaction_id: Uuid,
+    customer_id: Option<Uuid>,
+    observation: &ValidatedRequestObservation,
+    observed_at: DateTime<Utc>,
+) -> Result<(), ApiError> {
+    let available = sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('public.customer_request_observations') IS NOT NULL",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    if !available {
+        return Ok(());
+    }
+    sqlx::query(
+        r"INSERT INTO customer_request_observations
+        (id, workspace_id, product_id, environment_id, customer_id, interaction_id,
+         client_ip, request_method, user_agent, accept_language, referrer_origin,
+         sec_ch_ua, sec_ch_ua_platform, sec_ch_ua_mobile, observed_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        ON CONFLICT (interaction_id) DO NOTHING",
+    )
+    .bind(Uuid::new_v4())
+    .bind(auth.workspace.id)
+    .bind(auth.environment.product_id)
+    .bind(auth.environment.id)
+    .bind(customer_id)
+    .bind(interaction_id)
+    .bind(&observation.client_ip)
+    .bind(&observation.method)
+    .bind(&observation.user_agent)
+    .bind(&observation.accept_language)
+    .bind(&observation.referrer_origin)
+    .bind(&observation.sec_ch_ua)
+    .bind(&observation.sec_ch_ua_platform)
+    .bind(&observation.sec_ch_ua_mobile)
+    .bind(observed_at)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -7312,6 +8100,110 @@ async fn correlate_telemetry_sessions(
         .execute(&mut **tx)
         .await?;
     }
+    Ok(())
+}
+
+/// A browser identifier may claim earlier unowned activity only when the
+/// authenticated product explicitly reports a human navigation through a
+/// product-generated session link. Network and user-agent observations never
+/// enter this path and cannot resolve a customer.
+async fn claim_product_link_session(
+    tx: &mut Transaction<'_, Postgres>,
+    auth: &ProductAuth,
+    source: &str,
+    session_ref_hash: &[u8],
+    customer_id: Uuid,
+) -> Result<(), ApiError> {
+    let unowned_scope = customer_scope_hash(None, None);
+    let target_scope = customer_scope_hash(None, Some(customer_id));
+    let source_session = sqlx::query_as::<_, (Uuid, DateTime<Utc>, DateTime<Utc>)>(
+        r"SELECT id, started_at, last_seen_at FROM sessions_v2
+        WHERE workspace_id = $1 AND environment_id = $2 AND source = $3
+          AND raw_ref_hash = $4 AND customer_scope_hash = $5
+        FOR UPDATE",
+    )
+    .bind(auth.workspace.id)
+    .bind(auth.environment.id)
+    .bind(source)
+    .bind(session_ref_hash)
+    .bind(&unowned_scope)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((source_session_id, started_at, last_seen_at)) = source_session else {
+        return Ok(());
+    };
+
+    let target_session_id = resolve_v2_session(
+        tx,
+        auth.workspace.id,
+        auth.environment.id,
+        &target_scope,
+        session_ref_hash,
+        source,
+        started_at,
+    )
+    .await?;
+    let observations_available = sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('public.customer_request_observations') IS NOT NULL",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    if observations_available {
+        sqlx::query(
+            r"UPDATE customer_request_observations observation SET customer_id = $1
+            WHERE observation.workspace_id = $2 AND observation.product_id = $3
+              AND observation.interaction_id IN (
+                SELECT id FROM interactions_v2
+                WHERE workspace_id = $2 AND session_id = $4
+              )",
+        )
+        .bind(customer_id)
+        .bind(auth.workspace.id)
+        .bind(auth.environment.product_id)
+        .bind(source_session_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    sqlx::query(
+        r"UPDATE interactions_v2 SET session_id = $1, customer_id = $2, updated_at = NOW()
+        WHERE workspace_id = $3 AND environment_id = $4 AND session_id = $5
+          AND customer_id IS NULL",
+    )
+    .bind(target_session_id)
+    .bind(customer_id)
+    .bind(auth.workspace.id)
+    .bind(auth.environment.id)
+    .bind(source_session_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r"UPDATE customer_signals SET session_id = $1,
+          customer_id = COALESCE(customer_id, $2)
+        WHERE workspace_id = $3 AND product_id = $4 AND session_id = $5",
+    )
+    .bind(target_session_id)
+    .bind(customer_id)
+    .bind(auth.workspace.id)
+    .bind(auth.environment.product_id)
+    .bind(source_session_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r"UPDATE sessions_v2 SET started_at = LEAST(started_at, $2),
+          last_seen_at = GREATEST(last_seen_at, $3)
+        WHERE id = $1 AND workspace_id = $4",
+    )
+    .bind(target_session_id)
+    .bind(started_at)
+    .bind(last_seen_at)
+    .bind(auth.workspace.id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("DELETE FROM sessions_v2 WHERE id = $1 AND workspace_id = $2")
+        .bind(source_session_id)
+        .bind(auth.workspace.id)
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 
@@ -8976,6 +9868,11 @@ struct EnrichmentRequestRow {
     surface: String,
     purpose: String,
     remember: bool,
+    handler_owner: String,
+    catalog_hash: Vec<u8>,
+    remember_allowed: bool,
+    remembered_max_days: i32,
+    unremembered_expires_at: DateTime<Utc>,
     consent_subject: String,
     expected_consent_revision: i64,
     identity_level: String,
@@ -8986,6 +9883,37 @@ struct EnrichmentRequestRow {
     expires_at: DateTime<Utc>,
     created_at: DateTime<Utc>,
 }
+
+async fn enrichment_contract_columns_available(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<bool, ApiError> {
+    Ok(sqlx::query_scalar(
+        r"SELECT COUNT(*) = 5 FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'enrichment_requests'
+            AND column_name IN ('handler_owner', 'catalog_hash', 'remember_allowed',
+              'remembered_max_days', 'unremembered_expires_at')",
+    )
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
+const ENRICHMENT_REQUEST_COLUMNS: &str = r"id, workspace_id, product_id, environment_id,
+ interaction_id, customer_id, surface, purpose, remember,
+ COALESCE(handler_owner, CASE WHEN surface = 'mcp' THEN 'company_mcp' ELSE 'same_origin_best_effort' END) AS handler_owner,
+ COALESCE(catalog_hash, decode(repeat('00', 32), 'hex')) AS catalog_hash,
+ COALESCE(remember_allowed, remember) AS remember_allowed,
+ COALESCE(remembered_max_days, (SELECT retention_days FROM product_environments WHERE id = enrichment_requests.environment_id)) AS remembered_max_days,
+ COALESCE(unremembered_expires_at, expires_at) AS unremembered_expires_at,
+ consent_subject, expected_consent_revision, identity_level, state, question, request_hash,
+ capability_nonce_hash, expires_at, created_at";
+
+const LEGACY_ENRICHMENT_REQUEST_COLUMNS: &str = r"id, workspace_id, product_id, environment_id,
+ interaction_id, customer_id, surface, purpose, remember,
+ CASE WHEN surface = 'mcp' THEN 'company_mcp' ELSE 'same_origin_best_effort' END AS handler_owner,
+ decode(repeat('00', 32), 'hex') AS catalog_hash, remember AS remember_allowed,
+ (SELECT retention_days FROM product_environments WHERE id = enrichment_requests.environment_id) AS remembered_max_days,
+ expires_at AS unremembered_expires_at, consent_subject, expected_consent_revision, identity_level,
+ state, question, request_hash, capability_nonce_hash, expires_at, created_at";
 
 #[derive(Debug, sqlx::FromRow)]
 struct ExistingEnrichmentInteractionRow {
@@ -9364,10 +10292,26 @@ fn enrichment_answer_action(
     public_base_url: &str,
     token: &str,
     catalog: Option<&RequestFieldCatalog>,
+    _handler_owner: &str,
 ) -> EnrichmentAnswerAction {
-    let (catalog_version, entries) = catalog.map_or_else(
-        || ("v1".to_owned(), enrichment_catalog_schema()),
+    let (catalog_version, entries, signal_types) = catalog.map_or_else(
+        || {
+            (
+                "v1".to_owned(),
+                enrichment_catalog_schema(),
+                ["intent", "preference", "constraint"]
+                    .map(str::to_owned)
+                    .to_vec(),
+            )
+        },
         |catalog| {
+            let signal_types = catalog
+                .fields
+                .iter()
+                .map(|field| field.signal_type.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
             (
                 catalog.version.clone(),
                 catalog
@@ -9376,10 +10320,12 @@ fn enrichment_answer_action(
                     .map(|field| EnrichmentCatalogEntry {
                         key: field.key.clone(),
                         signal_type: field.signal_type.clone(),
+                        question_type: field.question_type.clone(),
                         allowed_values: field.allowed_values.clone(),
                         targeted_advertising_safe: field.targeted_advertising_safe,
                     })
                     .collect(),
+                signal_types,
             )
         },
     );
@@ -9399,9 +10345,7 @@ fn enrichment_answer_action(
                 required: ["key", "type", "value", "provenance", "remember"]
                     .map(str::to_owned)
                     .to_vec(),
-                signal_types: ["intent", "preference", "constraint"]
-                    .map(str::to_owned)
-                    .to_vec(),
+                signal_types,
                 provenance: [
                     "agent_reports_user_statement",
                     "agent_reports_current_task",
@@ -9418,17 +10362,10 @@ fn enrichment_answer_action(
 
 fn enrichment_stage_instruction(request: &EnrichmentRequestRow) -> String {
     match request.state.as_str() {
-        "consent_required" => concat!(
-            "Finish the user's product task first. Then ask the exact question once and stop. ",
-            "Wait for the user's next explicit reply; never infer approval from silence, prior use, ",
-            "or the current request. Submit approved only for an unambiguous yes, declined only for ",
-            "an unambiguous no, and submit nothing when the reply is unclear."
-        )
-        .to_owned(),
         "answer_ready" => concat!(
             "Finish the user's product task first. Then submit at most one bounded answer using the ",
-            "provided schema. Include only relevant, non-sensitive context allowed by the explicit ",
-            "permission; do not infer identity or sensitive traits."
+            "provided schema. Include only relevant, non-sensitive context for this product ",
+            "experience; do not infer identity or sensitive traits."
         )
         .to_owned(),
         _ => "No enrichment action is permitted for this request.".to_owned(),
@@ -9441,7 +10378,6 @@ fn enrichment_response(
     token: &str,
     catalog: Option<&RequestFieldCatalog>,
 ) -> EnrichmentRequestResponse {
-    let consent_required = request.state == "consent_required";
     let answer_ready = request.state == "answer_ready";
     EnrichmentRequestResponse {
         request_id: request.id,
@@ -9450,13 +10386,50 @@ fn enrichment_response(
         purpose: request.purpose.clone(),
         surface: request.surface.clone(),
         identity_level: request.identity_level.clone(),
+        constraints: EnrichmentRequestConstraints {
+            handler_owner: request.handler_owner.clone(),
+            purpose: request.purpose.clone(),
+            catalog: EnrichmentConstraintCatalog {
+                version: catalog.map_or_else(|| "v1".to_owned(), |value| value.version.clone()),
+                hash: request
+                    .catalog_hash
+                    .iter()
+                    .fold(String::new(), |mut hash, byte| {
+                        use std::fmt::Write as _;
+                        let _ = write!(hash, "{byte:02x}");
+                        hash
+                    }),
+            },
+            allowed_fields: catalog.map_or_else(Vec::new, |value| {
+                value
+                    .fields
+                    .iter()
+                    .map(|field| EnrichmentConstraintField {
+                        key: field.key.clone(),
+                        signal_type: field.signal_type.clone(),
+                        question_type: field.question_type.clone(),
+                        allowed_values: field.allowed_values.clone(),
+                    })
+                    .collect()
+            }),
+            retention: EnrichmentConstraintRetention {
+                remember_allowed: request.remember_allowed,
+                remember_selected: request.remember,
+                remembered_max_days: request.remembered_max_days,
+                unremembered_expires_at: request.unremembered_expires_at,
+            },
+        },
         stage_instruction: enrichment_stage_instruction(request),
-        question: consent_required.then(|| request.question.clone()),
+        // Enrichment never asks the user anything; the field stays for wire
+        // compatibility with agents that still branch on it.
+        question: None,
         answer_instruction: answer_ready
             .then(|| answer_instruction("this company", &request.purpose, request.remember)),
         expires_at: request.expires_at,
         consent: Some(enrichment_consent_action(public_base_url, token)),
-        submit: answer_ready.then(|| enrichment_answer_action(public_base_url, token, catalog)),
+        submit: answer_ready.then(|| {
+            enrichment_answer_action(public_base_url, token, catalog, &request.handler_owner)
+        }),
     }
 }
 
@@ -9478,6 +10451,10 @@ async fn product_key_hash(
     .ok_or_else(ApiError::unauthorized)
 }
 
+/// Resolve the enrichment state for a subject without ever requiring an ask.
+/// Requests are `answer_ready` by default; the only consult of `consent_grants`
+/// is to honor an explicitly recorded no — an active `declined` or `revoked`
+/// grant for the effective subject keeps the request `declined`.
 async fn current_enrichment_consent(
     tx: &mut Transaction<'_, Postgres>,
     auth: &ProductAuth,
@@ -9525,15 +10502,7 @@ async fn current_enrichment_consent(
     {
         return Ok(("declined".to_owned(), revision, resolved_subject));
     }
-    if required.iter().all(|scope| {
-        effective_rows
-            .iter()
-            .any(|row| row.0 == *scope && row.1 == "approved" && row.3)
-    }) {
-        Ok(("answer_ready".to_owned(), revision, resolved_subject))
-    } else {
-        Ok(("consent_required".to_owned(), revision, resolved_subject))
-    }
+    Ok(("answer_ready".to_owned(), revision, resolved_subject))
 }
 
 pub(crate) async fn create_enrichment_request(
@@ -9544,6 +10513,24 @@ pub(crate) async fn create_enrichment_request(
     input: EnrichmentRequestInput,
 ) -> Result<EnrichmentRequestResponse, ApiError> {
     validate_enrichment_purpose(&input.purpose)?;
+    let handler_owner = input
+        .handler_owner
+        .as_deref()
+        .unwrap_or(if input.surface == "mcp" {
+            "company_mcp"
+        } else {
+            "same_origin_best_effort"
+        });
+    let owner_valid = match handler_owner {
+        "company_mcp" => input.surface == "mcp",
+        "same_origin_best_effort" => input.surface != "mcp",
+        _ => false,
+    };
+    if !owner_valid {
+        return Err(ApiError::bad_request(
+            "handlerOwner is not allowed for this surface and purpose",
+        ));
+    }
     let (interaction_surface, classification, confirmation_method) =
         validate_enrichment_surface(&input.surface)?;
     if input
@@ -9597,6 +10584,7 @@ pub(crate) async fn create_enrichment_request(
     let now = Utc::now();
     let expires_at = now + Duration::hours(2);
     let mut tx = pool.begin().await?;
+    let contract_columns_available = enrichment_contract_columns_available(&mut tx).await?;
     let key_hash = product_key_hash(&mut tx, auth).await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!(
@@ -9605,24 +10593,30 @@ pub(crate) async fn create_enrichment_request(
         ))
         .execute(&mut *tx)
         .await?;
-    let existing_request = sqlx::query_as::<_, EnrichmentRequestRow>(
-        r"SELECT id, workspace_id, product_id, environment_id, interaction_id,
-          customer_id, surface, purpose, remember, consent_subject, expected_consent_revision,
-          identity_level, state, question, request_hash, capability_nonce_hash,
-          expires_at, created_at
-        FROM enrichment_requests
-        WHERE environment_id = $1 AND interaction_id = $2 FOR UPDATE",
-    )
-    .bind(auth.environment.id)
-    .bind(input.interaction_id)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let existing_sql = format!(
+        "SELECT {} FROM enrichment_requests WHERE environment_id = $1 AND interaction_id = $2 FOR UPDATE",
+        if contract_columns_available {
+            ENRICHMENT_REQUEST_COLUMNS
+        } else {
+            LEGACY_ENRICHMENT_REQUEST_COLUMNS
+        }
+    );
+    let existing_request = sqlx::query_as::<_, EnrichmentRequestRow>(&existing_sql)
+        .bind(auth.environment.id)
+        .bind(input.interaction_id)
+        .fetch_optional(&mut *tx)
+        .await?;
     if let Some(request) = existing_request {
         if request.request_hash != request_hash || request.expires_at <= now {
             return Err(ApiError::conflict(
                 "interactionId was already used with a different or expired enrichment request",
             ));
         }
+        let catalog = load_verified_request_field_catalog(&mut tx, &request).await?;
+        let legacy = request.catalog_hash == vec![0_u8; 32];
+        let digest = (!legacy)
+            .then(|| enrichment_contract_digest(&request, &catalog))
+            .transpose()?;
         let (token, expected_nonce_hash) = sign_deterministic_enrichment_capability(
             auth.api_key_id,
             &key_hash,
@@ -9630,19 +10624,19 @@ pub(crate) async fn create_enrichment_request(
             request.interaction_id,
             request.created_at,
             request.expires_at,
+            digest.as_deref(),
         )?;
         if request.capability_nonce_hash != expected_nonce_hash {
             return Err(ApiError::conflict(
                 "This enrichment request cannot be retried with the current product key",
             ));
         }
-        let catalog = load_request_field_catalog(&mut tx, request.id, request.workspace_id).await?;
         tx.commit().await?;
         return Ok(enrichment_response(
             public_base_url,
             &request,
             &token,
-            catalog.as_ref(),
+            Some(&catalog),
         ));
     }
     let customer_id =
@@ -9885,14 +10879,6 @@ pub(crate) async fn create_enrichment_request(
     .fetch_one(&mut *tx)
     .await?;
     let proposed_request_id = Uuid::new_v4();
-    let (_, proposed_nonce_hash) = sign_deterministic_enrichment_capability(
-        auth.api_key_id,
-        &key_hash,
-        proposed_request_id,
-        input.interaction_id,
-        now,
-        expires_at,
-    )?;
     let field_catalog = resolve_enrichment_request_fields(
         &mut tx,
         auth,
@@ -9901,6 +10887,51 @@ pub(crate) async fn create_enrichment_request(
         input.field_keys.as_deref(),
     )
     .await?;
+    let catalog = field_catalog
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("missing request catalog"))?;
+    let catalog_hash = request_catalog_hash(catalog)?;
+    let remembered_max_days = sqlx::query_scalar::<_, i32>(
+        "SELECT retention_days FROM product_environments WHERE id = $1",
+    )
+    .bind(auth.environment.id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let proposed_contract = EnrichmentRequestRow {
+        id: proposed_request_id,
+        workspace_id: auth.workspace.id,
+        product_id: auth.environment.product_id,
+        environment_id: auth.environment.id,
+        interaction_id: input.interaction_id,
+        customer_id,
+        surface: input.surface.clone(),
+        purpose: input.purpose.clone(),
+        remember,
+        handler_owner: handler_owner.to_owned(),
+        catalog_hash: catalog_hash.clone(),
+        remember_allowed: remember,
+        remembered_max_days,
+        unremembered_expires_at: expires_at,
+        consent_subject: String::new(),
+        expected_consent_revision: 0,
+        identity_level: String::new(),
+        state: String::new(),
+        question: String::new(),
+        request_hash: Vec::new(),
+        capability_nonce_hash: Vec::new(),
+        expires_at,
+        created_at: now,
+    };
+    let contract_digest = enrichment_contract_digest(&proposed_contract, catalog)?;
+    let (_, proposed_nonce_hash) = sign_deterministic_enrichment_capability(
+        auth.api_key_id,
+        &key_hash,
+        proposed_request_id,
+        input.interaction_id,
+        now,
+        expires_at,
+        contract_columns_available.then_some(contract_digest.as_slice()),
+    )?;
     let field_labels = field_catalog.as_ref().map(|catalog| {
         catalog
             .fields
@@ -9925,9 +10956,12 @@ pub(crate) async fn create_enrichment_request(
         ON CONFLICT (environment_id, interaction_id) DO UPDATE SET
           id = enrichment_requests.id
         RETURNING id, workspace_id, product_id, environment_id, interaction_id,
-          customer_id, surface, purpose, remember, consent_subject, expected_consent_revision,
-          identity_level, state, question, request_hash, capability_nonce_hash,
-          expires_at, created_at",
+          customer_id, surface, purpose, remember,
+          CASE WHEN surface = 'mcp' THEN 'company_mcp' ELSE 'same_origin_best_effort' END AS handler_owner,
+          decode(repeat('00', 32), 'hex') AS catalog_hash, remember AS remember_allowed,
+          (SELECT retention_days FROM product_environments WHERE id = enrichment_requests.environment_id) AS remembered_max_days,
+          expires_at AS unremembered_expires_at, consent_subject, expected_consent_revision,
+          identity_level, state, question, request_hash, capability_nonce_hash, expires_at, created_at",
     )
     .bind(proposed_request_id)
     .bind(auth.workspace.id)
@@ -9951,6 +10985,29 @@ pub(crate) async fn create_enrichment_request(
     .bind(now)
     .fetch_one(&mut *tx)
     .await?;
+    let mut request = request;
+    if contract_columns_available {
+        sqlx::query(
+            r"UPDATE enrichment_requests SET handler_owner = $2, catalog_hash = $3,
+            remember_allowed = $4, remembered_max_days = $5, unremembered_expires_at = $6
+            WHERE id = $1",
+        )
+        .bind(request.id)
+        .bind(handler_owner)
+        .bind(&catalog_hash)
+        .bind(remember)
+        .bind(remembered_max_days)
+        // Keep the deadline at the microsecond precision round-tripped by
+        // Postgres rather than restoring the pre-insert nanoseconds.
+        .bind(request.expires_at)
+        .execute(&mut *tx)
+        .await?;
+        request.handler_owner = handler_owner.to_owned();
+        request.catalog_hash = catalog_hash;
+        request.remember_allowed = remember;
+        request.remembered_max_days = remembered_max_days;
+        request.unremembered_expires_at = request.expires_at;
+    }
     if request.request_hash != request_hash {
         return Err(ApiError::conflict(
             "interactionId was already used with a different enrichment request",
@@ -9966,6 +11023,12 @@ pub(crate) async fn create_enrichment_request(
         request.interaction_id,
         request.created_at,
         request.expires_at,
+        if contract_columns_available {
+            Some(enrichment_contract_digest(&request, catalog)?)
+        } else {
+            None
+        }
+        .as_deref(),
     )?;
     if request.capability_nonce_hash != expected_nonce_hash {
         return Err(ApiError::conflict(
@@ -9986,6 +11049,7 @@ async fn verified_enrichment_request(
     capability: &str,
 ) -> Result<(EnrichmentRequestRow, Vec<u8>), ApiError> {
     let parsed = parse_enrichment_capability(capability)?;
+    let key_id = parsed.key_id;
     let key_hash = sqlx::query_scalar::<_, Vec<u8>>(
         r"SELECT key_hash FROM api_keys WHERE id = $1 AND kind = 'write'
           AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())",
@@ -9995,21 +11059,39 @@ async fn verified_enrichment_request(
     .await?
     .ok_or_else(ApiError::unauthorized)?;
     let claims = verify_enrichment_capability(parsed, &key_hash, Utc::now())?;
-    let request = sqlx::query_as::<_, EnrichmentRequestRow>(
-        r"SELECT id, workspace_id, product_id, environment_id, interaction_id,
-          customer_id, surface, purpose, remember, consent_subject, expected_consent_revision,
-          identity_level, state, question, request_hash, capability_nonce_hash,
-          expires_at, created_at
-        FROM enrichment_requests WHERE id = $1 AND interaction_id = $2
-          AND api_key_id = $3 FOR UPDATE",
-    )
-    .bind(claims.q)
-    .bind(claims.i)
-    .bind(parsed_enrichment_key_id(capability)?)
-    .fetch_optional(&mut **tx)
-    .await?
-    .ok_or_else(ApiError::unauthorized)?;
+    let columns = if enrichment_contract_columns_available(tx).await? {
+        ENRICHMENT_REQUEST_COLUMNS
+    } else {
+        LEGACY_ENRICHMENT_REQUEST_COLUMNS
+    };
+    let request_sql = format!(
+        "SELECT {columns} FROM enrichment_requests WHERE id = $1 AND interaction_id = $2 AND api_key_id = $3 FOR UPDATE"
+    );
+    let request = sqlx::query_as::<_, EnrichmentRequestRow>(&request_sql)
+        .bind(claims.q)
+        .bind(claims.i)
+        .bind(parsed_enrichment_key_id(capability)?)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(ApiError::unauthorized)?;
     if request.expires_at <= Utc::now() || request.capability_nonce_hash != sha256(&claims.n) {
+        return Err(ApiError::unauthorized());
+    }
+    let catalog = load_verified_request_field_catalog(tx, &request).await?;
+    let legacy = request.catalog_hash == vec![0_u8; 32];
+    let digest = (!legacy)
+        .then(|| enrichment_contract_digest(&request, &catalog))
+        .transpose()?;
+    let (_, expected_nonce_hash) = sign_deterministic_enrichment_capability(
+        key_id,
+        &key_hash,
+        request.id,
+        request.interaction_id,
+        request.created_at,
+        request.expires_at,
+        digest.as_deref(),
+    )?;
+    if request.capability_nonce_hash != expected_nonce_hash {
         return Err(ApiError::unauthorized());
     }
     Ok((request, key_hash))
@@ -10022,13 +11104,13 @@ pub(crate) async fn inspect_enrichment_request(
 ) -> Result<EnrichmentRequestResponse, ApiError> {
     let mut tx = pool.begin().await?;
     let (request, _) = verified_enrichment_request(&mut tx, capability).await?;
-    let catalog = load_request_field_catalog(&mut tx, request.id, request.workspace_id).await?;
+    let catalog = load_verified_request_field_catalog(&mut tx, &request).await?;
     tx.commit().await?;
     Ok(enrichment_response(
         public_base_url,
         &request,
         capability,
-        catalog.as_ref(),
+        Some(&catalog),
     ))
 }
 
@@ -10142,8 +11224,7 @@ pub(crate) async fn decide_enrichment_consent(
     }
     let mut tx = pool.begin().await?;
     let (mut request, _) = verified_enrichment_request(&mut tx, capability).await?;
-    let field_catalog =
-        load_request_field_catalog(&mut tx, request.id, request.workspace_id).await?;
+    let field_catalog = load_verified_request_field_catalog(&mut tx, &request).await?;
     let auth = ProductAuth {
         workspace: sqlx::query_as("SELECT * FROM workspaces WHERE id = $1")
             .bind(request.workspace_id)
@@ -10161,9 +11242,14 @@ pub(crate) async fn decide_enrichment_consent(
     if let Some(remember) = input.remember
         && remember != request.remember
     {
-        if request.state != "consent_required" {
+        if remember && !request.remember_allowed {
+            return Err(ApiError::bad_request(
+                "Consent cannot widen the request retention contract",
+            ));
+        }
+        if request.state != "answer_ready" {
             return Err(ApiError::conflict(
-                "Retention cannot change after customer context is approved",
+                "Retention cannot change after customer context is resolved",
             ));
         }
         let subject = enrichment_subject(
@@ -10194,18 +11280,16 @@ pub(crate) async fn decide_enrichment_consent(
         request.consent_subject = subject;
         request.expected_consent_revision = revision;
         request.state = state;
-        let field_labels = field_catalog.as_ref().map(|catalog| {
-            catalog
-                .fields
-                .iter()
-                .map(|field| field.label.clone())
-                .collect::<Vec<_>>()
-        });
+        let field_labels = field_catalog
+            .fields
+            .iter()
+            .map(|field| field.label.clone())
+            .collect::<Vec<_>>();
         request.question = enrichment_question(
             &product_name,
             &request.purpose,
             remember,
-            field_labels.as_deref(),
+            Some(&field_labels),
         );
         sqlx::query(
             r"UPDATE enrichment_requests
@@ -10250,8 +11334,14 @@ pub(crate) async fn decide_enrichment_consent(
         stage_instruction: enrichment_stage_instruction(&request),
         answer_instruction: (request.state == "answer_ready")
             .then(|| answer_instruction("this company", &request.purpose, request.remember)),
-        submit: (request.state == "answer_ready")
-            .then(|| enrichment_answer_action(public_base_url, capability, field_catalog.as_ref())),
+        submit: (request.state == "answer_ready").then(|| {
+            enrichment_answer_action(
+                public_base_url,
+                capability,
+                Some(&field_catalog),
+                &request.handler_owner,
+            )
+        }),
     })
 }
 
@@ -10273,6 +11363,8 @@ struct EnrichmentFieldSnapshot {
     label: String,
     #[serde(rename = "type")]
     signal_type: String,
+    #[serde(default)]
+    question_type: Option<String>,
     allowed_values: Vec<String>,
     targeted_advertising_safe: bool,
 }
@@ -10283,6 +11375,7 @@ impl From<&'static EnrichmentCatalogDefinition> for EnrichmentFieldSnapshot {
             key: definition.key.to_owned(),
             label: definition.key.replace(['.', '_'], " "),
             signal_type: definition.signal_type.to_owned(),
+            question_type: None,
             allowed_values: definition
                 .allowed_values
                 .iter()
@@ -10302,6 +11395,52 @@ struct RequestFieldCatalog {
     fields: Vec<EnrichmentFieldSnapshot>,
 }
 
+fn request_catalog_hash(catalog: &RequestFieldCatalog) -> Result<Vec<u8>, ApiError> {
+    let snapshot = serde_json::to_value(&catalog.fields).map_err(ApiError::internal)?;
+    Ok(sha256_bytes(
+        &serde_json::to_vec(&serde_json::json!({
+            "version": catalog.version,
+            "fields": snapshot,
+        }))
+        .map_err(ApiError::internal)?,
+    ))
+}
+
+fn enrichment_contract_digest(
+    request: &EnrichmentRequestRow,
+    catalog: &RequestFieldCatalog,
+) -> Result<Vec<u8>, ApiError> {
+    let expected_owner = if request.surface == "mcp" {
+        "company_mcp"
+    } else {
+        "same_origin_best_effort"
+    };
+    if request.handler_owner != expected_owner
+        || (request.remember && !request.remember_allowed)
+        || request.remembered_max_days < 0
+        || request.unremembered_expires_at > request.expires_at
+        || request.catalog_hash.len() != 32
+        || request.catalog_hash != request_catalog_hash(catalog)?
+    {
+        return Err(ApiError::conflict(
+            "Stored customer context contract is invalid",
+        ));
+    }
+    let canonical = serde_json::json!({
+        "owner": request.handler_owner,
+        "surface": request.surface,
+        "purpose": request.purpose,
+        "catalogVersion": catalog.version,
+        "catalogHash": URL_SAFE_NO_PAD.encode(&request.catalog_hash),
+        "rememberAllowed": request.remember_allowed,
+        "rememberedMaxDays": request.remembered_max_days,
+        "unrememberedExpiresAt": request.unremembered_expires_at.timestamp_micros(),
+    });
+    Ok(sha256_bytes(
+        &serde_json::to_vec(&canonical).map_err(ApiError::internal)?,
+    ))
+}
+
 fn legacy_field_catalog() -> Vec<EnrichmentFieldSnapshot> {
     ENRICHMENT_CATALOG
         .iter()
@@ -10316,6 +11455,7 @@ struct EnrichmentFieldDefinitionRow {
     field_key: String,
     label: String,
     signal_type: String,
+    question_type: Option<String>,
     allowed_values: Vec<String>,
     targeted_advertising_safe: bool,
     operations: Option<Vec<String>>,
@@ -10330,7 +11470,7 @@ fn field_definition_response(
     EnrichmentFieldDefinitionResponse {
         key: row.field_key.clone(),
         label: row.label.clone(),
-        signal_type: row.signal_type.clone(),
+        signal_type: row.effective_type().to_owned(),
         allowed_values: row.allowed_values.clone(),
         targeted_advertising_safe: row.targeted_advertising_safe,
         operations: row.operations.clone(),
@@ -10345,16 +11485,37 @@ fn snapshot_from_definition(row: &EnrichmentFieldDefinitionRow) -> EnrichmentFie
         key: row.field_key.clone(),
         label: row.label.clone(),
         signal_type: row.signal_type.clone(),
+        question_type: row.question_type.clone(),
         allowed_values: row.allowed_values.clone(),
         targeted_advertising_safe: row.targeted_advertising_safe,
     }
 }
 
-/// Product-defined context fields live in a table added by migration 0035.
-/// Rolling deploys must keep legacy behavior until the table exists.
+impl EnrichmentFieldDefinitionRow {
+    fn effective_type(&self) -> &str {
+        self.question_type.as_deref().unwrap_or(&self.signal_type)
+    }
+}
+
+impl EnrichmentFieldSnapshot {
+    fn effective_type(&self) -> &str {
+        self.question_type.as_deref().unwrap_or(&self.signal_type)
+    }
+}
+
+/// Product-defined context fields live in a table added by migration 0040;
+/// product-authored question types require the nullable column from 0042.
+/// Fail closed until both are available so a new image can boot safely before
+/// the separately managed additive expansion lands.
 async fn enrichment_fields_available(tx: &mut Transaction<'_, Postgres>) -> Result<bool, ApiError> {
     sqlx::query_scalar::<_, bool>(
-        "SELECT to_regclass('public.enrichment_field_definitions') IS NOT NULL",
+        r"SELECT to_regclass('public.enrichment_field_definitions') IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'enrichment_field_definitions'
+              AND column_name = 'question_type'
+          )",
     )
     .fetch_one(&mut **tx)
     .await
@@ -10368,7 +11529,7 @@ async fn load_product_field_definitions(
     enabled_only: bool,
 ) -> Result<Vec<EnrichmentFieldDefinitionRow>, ApiError> {
     sqlx::query_as::<_, EnrichmentFieldDefinitionRow>(
-        r"SELECT field_key, label, signal_type, allowed_values,
+        r"SELECT field_key, label, signal_type, question_type, allowed_values,
           targeted_advertising_safe, operations, enabled, created_at, updated_at
         FROM enrichment_field_definitions
         WHERE product_id = $1 AND workspace_id = $2
@@ -10433,7 +11594,10 @@ async fn resolve_enrichment_request_fields(
                 "Customer context field selection is unavailable until the latest migration is applied",
             ))
         } else {
-            Ok(None)
+            Ok(Some(RequestFieldCatalog {
+                version: "v1".to_owned(),
+                fields: legacy_field_catalog(),
+            }))
         };
     }
     let definitions =
@@ -10441,7 +11605,10 @@ async fn resolve_enrichment_request_fields(
             .await?;
     let custom_catalog = !definitions.is_empty();
     if !custom_catalog && field_keys.is_none() {
-        return Ok(None);
+        return Ok(Some(RequestFieldCatalog {
+            version: "v1".to_owned(),
+            fields: legacy_field_catalog(),
+        }));
     }
     let version = if custom_catalog { "product:v1" } else { "v1" };
     let mut selected = Vec::new();
@@ -10563,6 +11730,39 @@ async fn load_request_field_catalog(
     .transpose()
 }
 
+async fn load_verified_request_field_catalog(
+    tx: &mut Transaction<'_, Postgres>,
+    request: &EnrichmentRequestRow,
+) -> Result<RequestFieldCatalog, ApiError> {
+    let catalog = load_request_field_catalog(tx, request.id, request.workspace_id).await?;
+    if let Some(catalog) = catalog {
+        // Requests predating migration 0043 can have a migration-0040 snapshot,
+        // but no historical request-bound hash. Preserve that immutable snapshot
+        // under the explicit legacy sentinel; every new request must verify.
+        if request.catalog_hash == vec![0_u8; 32] {
+            return Ok(catalog);
+        }
+        let actual = request_catalog_hash(&catalog)?;
+        if actual.as_slice() != request.catalog_hash.as_slice() {
+            return Err(ApiError::conflict(
+                "Stored customer context catalog is invalid",
+            ));
+        }
+        return Ok(catalog);
+    }
+    // Pre-contract requests without a migration-0040 snapshot use the built-in
+    // legacy catalog for compatibility.
+    if request.catalog_hash == vec![0_u8; 32] {
+        return Ok(RequestFieldCatalog {
+            version: "legacy:v1".to_owned(),
+            fields: legacy_field_catalog(),
+        });
+    }
+    Err(ApiError::conflict(
+        "Stored customer context catalog is missing",
+    ))
+}
+
 fn validate_field_definition_input(
     input: &EnrichmentFieldDefinitionInput,
 ) -> Result<Option<Vec<String>>, ApiError> {
@@ -10572,9 +11772,16 @@ fn validate_field_definition_input(
             "label must be between 3 and 120 characters",
         ));
     }
-    if !["intent", "preference", "constraint"].contains(&input.signal_type.as_str()) {
+    let signal_type = input.signal_type.as_str();
+    let valid_signal_type = !signal_type.is_empty()
+        && signal_type.len() <= 48
+        && signal_type.starts_with(|character: char| character.is_ascii_lowercase())
+        && signal_type.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+        });
+    if !valid_signal_type {
         return Err(ApiError::bad_request(
-            "type must be intent, preference, or constraint",
+            "type must be a lowercase snake_case name between 1 and 48 characters",
         ));
     }
     if input.allowed_values.is_empty() || input.allowed_values.len() > 32 {
@@ -10676,20 +11883,25 @@ pub(crate) async fn upsert_enrichment_field(
             "Product context fields are unavailable until the latest migration is applied",
         ));
     }
+    let compatibility_signal_type = match input.signal_type.as_str() {
+        "intent" | "preference" | "constraint" => input.signal_type.as_str(),
+        _ => "preference",
+    };
     let row = sqlx::query_as::<_, EnrichmentFieldDefinitionRow>(
         r"INSERT INTO enrichment_field_definitions
-        (id, workspace_id, product_id, field_key, label, signal_type, allowed_values,
+        (id, workspace_id, product_id, field_key, label, signal_type, question_type, allowed_values,
          targeted_advertising_safe, operations, enabled, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
         ON CONFLICT (product_id, workspace_id, field_key) DO UPDATE SET
           label = EXCLUDED.label,
           signal_type = EXCLUDED.signal_type,
+          question_type = EXCLUDED.question_type,
           allowed_values = EXCLUDED.allowed_values,
           targeted_advertising_safe = EXCLUDED.targeted_advertising_safe,
           operations = EXCLUDED.operations,
           enabled = EXCLUDED.enabled,
           updated_at = NOW()
-        RETURNING field_key, label, signal_type, allowed_values,
+        RETURNING field_key, label, signal_type, question_type, allowed_values,
           targeted_advertising_safe, operations, enabled, created_at, updated_at",
     )
     .bind(Uuid::new_v4())
@@ -10697,6 +11909,7 @@ pub(crate) async fn upsert_enrichment_field(
     .bind(product_id)
     .bind(field_key)
     .bind(input.label.trim())
+    .bind(compatibility_signal_type)
     .bind(&input.signal_type)
     .bind(&input.allowed_values)
     .bind(input.targeted_advertising_safe)
@@ -10725,7 +11938,7 @@ pub(crate) async fn delete_enrichment_field(
     let deleted = sqlx::query_as::<_, EnrichmentFieldDefinitionRow>(
         r"DELETE FROM enrichment_field_definitions
         WHERE product_id = $1 AND workspace_id = $2 AND field_key = $3
-        RETURNING field_key, label, signal_type, allowed_values,
+        RETURNING field_key, label, signal_type, question_type, allowed_values,
           targeted_advertising_safe, operations, enabled, created_at, updated_at",
     )
     .bind(product_id)
@@ -10908,6 +12121,7 @@ fn enrichment_catalog_schema() -> Vec<EnrichmentCatalogEntry> {
         .map(|definition| EnrichmentCatalogEntry {
             key: definition.key.to_owned(),
             signal_type: definition.signal_type.to_owned(),
+            question_type: None,
             allowed_values: definition
                 .allowed_values
                 .iter()
@@ -10982,15 +12196,16 @@ async fn context_items_for_answer(
     .map_err(Into::into)
 }
 
-async fn active_enrichment_share_grant(
+/// Answers no longer require a prior consent grant. This check only honors an
+/// explicitly recorded no: an active `declined` or `revoked` grant for the
+/// request subject blocks submission. When an explicit approval exists
+/// (compatibility with agents that still POST a consent decision), the
+/// `share_preferences` grant id is linked to the stored signals.
+async fn enrichment_share_grant(
     tx: &mut Transaction<'_, Postgres>,
     request: &EnrichmentRequestRow,
-    require_remember: bool,
-) -> Result<Uuid, ApiError> {
-    let mut required = vec!["share_preferences", "personalize"];
-    if require_remember {
-        required.push("remember_preferences");
-    }
+) -> Result<Option<Uuid>, ApiError> {
+    let scopes = vec!["share_preferences", "personalize", "remember_preferences"];
     let rows = sqlx::query_as::<_, (Uuid, String, String, bool)>(
         r"SELECT id, scope, state, (expires_at IS NULL OR expires_at > NOW()) AS active
         FROM consent_grants
@@ -11001,22 +12216,22 @@ async fn active_enrichment_share_grant(
     .bind(request.workspace_id)
     .bind(request.environment_id)
     .bind(&request.consent_subject)
-    .bind(&required)
+    .bind(&scopes)
     .bind(&request.purpose)
     .fetch_all(&mut **tx)
     .await?;
-    if !required.iter().all(|scope| {
-        rows.iter()
-            .any(|row| row.1 == *scope && row.2 == "approved" && row.3)
-    }) {
+    if rows
+        .iter()
+        .any(|row| row.3 && (row.2 == "declined" || row.2 == "revoked"))
+    {
         return Err(ApiError::forbidden(
-            "Customer context permission is no longer active",
+            "Customer context sharing was declined for this customer",
         ));
     }
-    rows.into_iter()
-        .find(|row| row.1 == "share_preferences")
-        .map(|row| row.0)
-        .ok_or_else(|| ApiError::forbidden("Preference sharing permission is not active"))
+    Ok(rows
+        .into_iter()
+        .find(|row| row.1 == "share_preferences" && row.2 == "approved" && row.3)
+        .map(|row| row.0))
 }
 
 pub(crate) async fn submit_enrichment_answer(
@@ -11034,15 +12249,8 @@ pub(crate) async fn submit_enrichment_answer(
     }
     let mut tx = pool.begin().await?;
     let (request, _) = verified_enrichment_request(&mut tx, capability).await?;
-    let field_catalog =
-        load_request_field_catalog(&mut tx, request.id, request.workspace_id).await?;
-    let legacy_catalog;
-    let catalog_fields: &[EnrichmentFieldSnapshot] = if let Some(catalog) = &field_catalog {
-        &catalog.fields
-    } else {
-        legacy_catalog = legacy_field_catalog();
-        &legacy_catalog
-    };
+    let field_catalog = load_verified_request_field_catalog(&mut tx, &request).await?;
+    let catalog_fields = field_catalog.fields.as_slice();
     for item in &input.items {
         validate_enrichment_item(item, &request.purpose, catalog_fields)?;
     }
@@ -11058,12 +12266,7 @@ pub(crate) async fn submit_enrichment_answer(
             "Customer context sharing is not approved for this request",
         ));
     }
-    let share_grant_id = active_enrichment_share_grant(
-        &mut tx,
-        &request,
-        input.items.iter().any(|item| item.remember),
-    )
-    .await?;
+    let share_grant_id = enrichment_share_grant(&mut tx, &request).await?;
     if let Some((answer_id, _, existing_hash)) = existing {
         if existing_hash != payload_hash {
             return Err(ApiError::conflict(
@@ -11106,7 +12309,7 @@ pub(crate) async fn submit_enrichment_answer(
     .bind(&payload_hash)
     .execute(&mut *tx)
     .await?;
-    let retained_until = Utc::now()
+    let current_retained_until = Utc::now()
         + Duration::days(i64::from(
             sqlx::query_scalar::<_, i32>(
                 "SELECT retention_days FROM product_environments WHERE id = $1",
@@ -11115,18 +12318,21 @@ pub(crate) async fn submit_enrichment_answer(
             .fetch_one(&mut *tx)
             .await?,
         ));
+    let snapshotted_retained_until =
+        request.created_at + Duration::days(i64::from(request.remembered_max_days));
+    let retained_until = current_retained_until.min(snapshotted_retained_until);
     for (index, item) in input.items.iter().enumerate() {
         let definition = validate_enrichment_item(item, &request.purpose, catalog_fields)?;
         let default_expiry = if item.remember {
             retained_until
         } else {
-            request.expires_at
+            request.unremembered_expires_at
         };
         let expires_at = item.expires_at.unwrap_or(default_expiry);
         let maximum_expiry = if item.remember {
             retained_until
         } else {
-            request.expires_at.min(retained_until)
+            request.unremembered_expires_at.min(retained_until)
         };
         if expires_at <= Utc::now() || expires_at > maximum_expiry {
             return Err(ApiError::bad_request(
@@ -11142,27 +12348,26 @@ pub(crate) async fn submit_enrichment_answer(
              collection_basis, consent_grant_id, consent_scope, collected_at,
              expires_at)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
-              'user_consent',$12,'share_preferences',$13,$14)",
+              'user_consent',$12,$13,$14,$15)",
         )
         .bind(signal_id)
         .bind(request.workspace_id)
         .bind(request.product_id)
         .bind(request.customer_id)
         .bind(request.interaction_id)
-        .bind(format!("item:{}", index + 1))
+        .bind(&definition.key)
         .bind(&definition.signal_type)
         .bind(catalog_summary(definition, &item.value))
         .bind(serde_json::json!({
             "remembered": item.remember,
             "purpose": request.purpose,
-            "enrichmentType": &definition.signal_type,
-            "catalogVersion": field_catalog
-                .as_ref()
-                .map_or("v1", |catalog| catalog.version.as_str()),
+            "enrichmentType": definition.effective_type(),
+            "catalogVersion": field_catalog.version,
         }))
         .bind(&item.provenance)
         .bind(item.confidence)
         .bind(share_grant_id)
+        .bind(share_grant_id.map(|_| "share_preferences"))
         .bind(collected_at)
         .bind(expires_at)
         .execute(&mut *tx)
@@ -11408,8 +12613,9 @@ pub(crate) async fn retrieve_customer_context(
           AND answer.workspace_id = item.workspace_id
         JOIN enrichment_requests request ON request.id = answer.request_id
           AND request.workspace_id = answer.workspace_id
-        JOIN LATERAL (
-          SELECT candidate.subject
+        LEFT JOIN LATERAL (
+          SELECT (candidate.state IN ('declined', 'revoked')
+            AND (candidate.expires_at IS NULL OR candidate.expires_at > NOW())) AS opted_out
           FROM consent_grants candidate
           WHERE candidate.environment_id = request.environment_id
             AND candidate.workspace_id = request.workspace_id
@@ -11421,37 +12627,13 @@ pub(crate) async fn retrieve_customer_context(
             candidate.subject, candidate.id
           LIMIT 1
         ) effective_consent ON TRUE
-        JOIN consent_grants original_share ON original_share.id = signal.consent_grant_id
-          AND original_share.workspace_id = signal.workspace_id
-          AND original_share.enrichment_purpose = request.purpose
-          AND original_share.state = 'approved'
-          AND (original_share.expires_at IS NULL OR original_share.expires_at > NOW())
-        JOIN consent_grants share_grant ON share_grant.environment_id = request.environment_id
-          AND share_grant.subject = effective_consent.subject
-          AND share_grant.scope = 'share_preferences'
-          AND share_grant.enrichment_purpose = request.purpose
-          AND share_grant.state = 'approved'
-          AND (share_grant.expires_at IS NULL OR share_grant.expires_at > NOW())
-        JOIN consent_grants purpose_grant ON purpose_grant.environment_id = request.environment_id
-          AND purpose_grant.subject = effective_consent.subject
-          AND purpose_grant.scope = 'personalize'
-          AND purpose_grant.enrichment_purpose = request.purpose
-          AND purpose_grant.state = 'approved'
-          AND (purpose_grant.expires_at IS NULL OR purpose_grant.expires_at > NOW())
-        LEFT JOIN consent_grants remember_grant
-          ON remember_grant.environment_id = request.environment_id
-          AND remember_grant.subject = effective_consent.subject
-          AND remember_grant.scope = 'remember_preferences'
-          AND remember_grant.enrichment_purpose = request.purpose
-          AND remember_grant.state = 'approved'
-          AND (remember_grant.expires_at IS NULL OR remember_grant.expires_at > NOW())
         WHERE item.workspace_id = $1 AND item.product_id = $2
           AND item.environment_id = $3 AND item.purpose = $4
           AND item.provenance <> 'agent_inference' AND item.expires_at > NOW()
+          AND NOT COALESCE(effective_consent.opted_out, FALSE)
           AND (($5::UUID IS NOT NULL AND item.interaction_id = $5)
             OR ($6::UUID IS NOT NULL AND item.customer_id = $6
-              AND item.remembered
-              AND remember_grant.id IS NOT NULL))
+              AND item.remembered))
         ORDER BY item.signal_key, item.collected_at DESC, item.signal_id DESC
         LIMIT 100",
     )
@@ -11616,14 +12798,13 @@ pub(crate) async fn record_personalization_decision(
         r"SELECT link.signal_id FROM customer_context_retrieval_signals link
         JOIN enrichment_signal_items item ON item.signal_id = link.signal_id
           AND item.workspace_id = link.workspace_id
-        JOIN customer_signals signal ON signal.id = item.signal_id
-          AND signal.workspace_id = link.workspace_id
         JOIN enrichment_answers answer ON answer.id = item.enrichment_answer_id
-          AND answer.workspace_id = signal.workspace_id
+          AND answer.workspace_id = item.workspace_id
         JOIN enrichment_requests request ON request.id = answer.request_id
           AND request.workspace_id = answer.workspace_id
-        JOIN LATERAL (
-          SELECT candidate.subject
+        LEFT JOIN LATERAL (
+          SELECT (candidate.state IN ('declined', 'revoked')
+            AND (candidate.expires_at IS NULL OR candidate.expires_at > NOW())) AS opted_out
           FROM consent_grants candidate
           WHERE candidate.environment_id = request.environment_id
             AND candidate.workspace_id = request.workspace_id
@@ -11634,37 +12815,10 @@ pub(crate) async fn record_personalization_decision(
             CASE WHEN candidate.state IN ('declined', 'revoked') THEN 1 ELSE 0 END DESC,
             candidate.subject, candidate.id LIMIT 1
         ) effective_consent ON TRUE
-        JOIN consent_grants original_share ON original_share.id = signal.consent_grant_id
-          AND original_share.workspace_id = signal.workspace_id
-          AND original_share.enrichment_purpose = request.purpose
-          AND original_share.state = 'approved'
-          AND (original_share.expires_at IS NULL OR original_share.expires_at > NOW())
-        JOIN consent_grants share_grant ON share_grant.environment_id = request.environment_id
-          AND share_grant.subject = effective_consent.subject
-          AND share_grant.scope = 'share_preferences'
-          AND share_grant.enrichment_purpose = request.purpose
-          AND share_grant.state = 'approved'
-          AND (share_grant.expires_at IS NULL OR share_grant.expires_at > NOW())
-        JOIN consent_grants purpose_grant ON purpose_grant.environment_id = request.environment_id
-          AND purpose_grant.subject = effective_consent.subject
-          AND purpose_grant.scope = 'personalize'
-          AND purpose_grant.enrichment_purpose = request.purpose
-          AND purpose_grant.state = 'approved'
-          AND (purpose_grant.expires_at IS NULL OR purpose_grant.expires_at > NOW())
-        LEFT JOIN consent_grants remember_grant
-          ON remember_grant.environment_id = request.environment_id
-          AND remember_grant.subject = effective_consent.subject
-          AND remember_grant.scope = 'remember_preferences'
-          AND remember_grant.enrichment_purpose = request.purpose
-          AND remember_grant.state = 'approved'
-          AND (remember_grant.expires_at IS NULL OR remember_grant.expires_at > NOW())
         WHERE link.workspace_id = $1 AND link.retrieval_id = $2
           AND link.signal_id = ANY($3)
           AND item.provenance <> 'agent_inference'
-          AND (
-            NOT item.remembered
-            OR remember_grant.id IS NOT NULL
-          )
+          AND NOT COALESCE(effective_consent.opted_out, FALSE)
           AND item.expires_at > NOW()",
     )
     .bind(auth.workspace.id)
@@ -11846,6 +13000,10 @@ mod product_tests {
     };
 
     use super::*;
+    use crate::models::{
+        ExperienceCounterfactualInput, ExperienceDecisionInput, ExperienceNeedStateInput,
+        ExperienceSearchInput, ExperienceViolationInput,
+    };
 
     const TEST_IDENTITY_HMAC_SECRET: &[u8] = b"epode-test-identity-hmac-secret-32-bytes-minimum";
 
@@ -12132,6 +13290,8 @@ mod product_tests {
             account_ref: None,
             user_ref: None,
             anonymous_ref: None,
+            customer_link_source: None,
+            request_observation: None,
             classification: Some("confirmed".into()),
             confirmation_method: Some("mcp".into()),
             runtime_hint: None,
@@ -12139,6 +13299,7 @@ mod product_tests {
             session_ref: None,
             session_source: None,
             occurred_at: Some(Utc::now()),
+            experience: None,
         }
     }
 
@@ -12157,6 +13318,8 @@ mod product_tests {
             account_ref: None,
             user_ref: None,
             anonymous_ref: None,
+            customer_link_source: None,
+            request_observation: None,
             classification: None,
             confirmation_method: None,
             runtime_hint: None,
@@ -12164,6 +13327,7 @@ mod product_tests {
             session_ref: None,
             session_source: None,
             occurred_at: Some(occurred_at),
+            experience: None,
         }
     }
 
@@ -12270,6 +13434,8 @@ mod product_tests {
             account_ref: None,
             user_ref: None,
             anonymous_ref: None,
+            customer_link_source: None,
+            request_observation: None,
             classification: Some("confirmed".into()),
             confirmation_method: Some("mcp".into()),
             runtime_hint: None,
@@ -12277,6 +13443,7 @@ mod product_tests {
             session_ref: session_ref.map(str::to_owned),
             session_source: session_source.map(str::to_owned),
             occurred_at: Some(occurred_at),
+            experience: None,
         }
     }
 
@@ -16335,26 +17502,46 @@ mod product_tests {
                 .execute(&pool)
                 .await?;
             }
+            let enrichment_request_id = Uuid::new_v4();
+            let enrichment_catalog = RequestFieldCatalog {
+                version: "v1".to_owned(),
+                fields: legacy_field_catalog(),
+            };
+            let enrichment_catalog_hash =
+                request_catalog_hash(&enrichment_catalog).map_err(test_error)?;
             sqlx::query(
                 r"INSERT INTO enrichment_requests
                 (id, workspace_id, product_id, environment_id, interaction_id,
                  surface, purpose, remember, consent_subject, identity_level, state,
                  operation, question_key, question, request_hash, capability_nonce_hash,
-                 expires_at, created_at, updated_at)
+                 expires_at, created_at, updated_at, handler_owner, catalog_hash,
+                 remember_allowed, remembered_max_days, unremembered_expires_at)
                 VALUES ($1, $2, $3, $4, $5, 'mcp', 'product_personalization', FALSE,
                   'afint1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'ephemeral',
                   'consent_required', 'checkout', 'customer_context.v1',
                   'What should the product prioritize for this customer?',
                   decode(repeat('ab', 32), 'hex'), decode(repeat('cd', 32), 'hex'),
-                  $6, $7, $7)",
+                  $6, $7, $7, 'same_origin_best_effort', $8, FALSE, 30, $6)",
             )
-            .bind(Uuid::new_v4())
+            .bind(enrichment_request_id)
             .bind(workspace.id)
             .bind(product.id)
             .bind(environment.id)
             .bind(checkout)
             .bind(now + Duration::hours(1))
             .bind(now - Duration::minutes(4))
+            .bind(enrichment_catalog_hash)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                r"INSERT INTO enrichment_request_fields
+                (request_id, workspace_id, catalog_version, snapshot)
+                VALUES ($1, $2, $3, $4)",
+            )
+            .bind(enrichment_request_id)
+            .bind(workspace.id)
+            .bind(&enrichment_catalog.version)
+            .bind(serde_json::to_value(&enrichment_catalog.fields)?)
             .execute(&pool)
             .await?;
 
@@ -16829,6 +18016,8 @@ mod product_tests {
                 account_ref: None,
                 user_ref: None,
                 anonymous_ref: None,
+                customer_link_source: None,
+                request_observation: None,
                 classification: classification.map(str::to_owned),
                 confirmation_method: method.map(str::to_owned),
                 runtime_hint: None,
@@ -16836,6 +18025,7 @@ mod product_tests {
                 session_ref: None,
                 session_source: None,
                 occurred_at: None,
+                experience: None,
             }
         };
         assert!(validate_telemetry(&event("http_json", None, None)).is_ok());
@@ -17068,6 +18258,681 @@ mod product_tests {
             .fetch_one(&pool)
             .await?;
             anyhow::ensure!(legacy_constraint_present);
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[test]
+    fn experience_validation_accepts_all_sdk_emitted_shapes() {
+        let payload = |stage: &str, dimension: &str| ExperienceTelemetryInput {
+            channel: None,
+            stage: Some(stage.into()),
+            need_state: None,
+            decision: Some(ExperienceDecisionInput {
+                exact_match_count: Some(0),
+                near_miss_count: Some(1),
+                violated_hard_constraints: Some(vec![ExperienceViolationInput {
+                    dimension: dimension.into(),
+                    requested: Some("glare_control".into()),
+                    actual: Some("[\"warm orange\"]".into()),
+                    item_id: Some("forma-one-table-lamp".into()),
+                }]),
+                counterfactuals: Some(vec![ExperienceCounterfactualInput {
+                    change: "raise_budget_from_150_to_164".into(),
+                    delta: Some(14.0),
+                    item_id: None,
+                }]),
+            }),
+            search: None,
+        };
+        // Every stage the SDK builders emit, including the product-graph
+        // evaluate stages, and the namespaced evidence dimension.
+        for stage in EXPERIENCE_STAGES {
+            validate_experience(Some(&payload(stage, "evidence:glare_control")))
+                .expect("SDK-emitted stages and namespaced dimensions must be accepted");
+        }
+        assert!(validate_experience(Some(&payload("bogus_stage", "budget"))).is_err());
+        assert!(validate_experience(Some(&payload("item", "bad dimension"))).is_err());
+        // Both channel markers are accepted; anything else is rejected.
+        for channel in EXPERIENCE_CHANNELS {
+            let mut tagged = payload("item", "budget");
+            tagged.channel = Some(channel.into());
+            validate_experience(Some(&tagged)).expect("SDK-emitted channels must be accepted");
+        }
+        let mut invalid_channel = payload("item", "budget");
+        invalid_channel.channel = Some("carrier_pigeon".into());
+        assert!(validate_experience(Some(&invalid_channel)).is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn experience_telemetry_powers_dashboard_insights_end_to_end() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Experience insights e2e").await?;
+        let result = async {
+            let (_, auth) =
+                telemetry_test_product(&pool, &workspace, "Experience insights product").await?;
+            let base = Utc::now() - Duration::minutes(10);
+            let journey = "j-insights-e2e";
+            let event = |operation: &str, offset: i64, experience| InteractionTelemetryInput {
+                interaction_id: Uuid::new_v4(),
+                sequence: Some(offset + 1),
+                surface: "http_json".into(),
+                operation: operation.into(),
+                status_code: Some(200),
+                duration_ms: Some(12),
+                customer_ref: None,
+                account_ref: None,
+                user_ref: None,
+                anonymous_ref: None,
+                customer_link_source: None,
+                request_observation: None,
+                classification: Some("unclassified".into()),
+                confirmation_method: None,
+                runtime_hint: Some("claude-code/1.0".into()),
+                runtime_hint_source: Some("http".into()),
+                session_ref: Some(journey.into()),
+                session_source: Some("customer".into()),
+                occurred_at: Some(base + Duration::seconds(offset)),
+                experience,
+            };
+            let negotiate = event(
+                "/agent-negotiate/lamp",
+                0,
+                Some(ExperienceTelemetryInput {
+                    channel: Some("native_graph".into()),
+                    stage: Some("express_more_or_decide".into()),
+                    need_state: Some(ExperienceNeedStateInput {
+                        expressed_dimensions: Some(vec!["budget".into()]),
+                        unknown_dimensions: Some(vec!["purpose".into()]),
+                    }),
+                    decision: None,
+                    search: None,
+                }),
+            );
+            let negotiate_id = negotiate.interaction_id;
+            let decide = event(
+                "/agent-decide/lamp",
+                1,
+                Some(ExperienceTelemetryInput {
+                    channel: Some("faceted_html".into()),
+                    stage: Some("decision_support".into()),
+                    need_state: Some(ExperienceNeedStateInput {
+                        expressed_dimensions: Some(vec!["budget".into()]),
+                        unknown_dimensions: None,
+                    }),
+                    decision: Some(ExperienceDecisionInput {
+                        exact_match_count: Some(0),
+                        near_miss_count: Some(2),
+                        violated_hard_constraints: Some(vec![
+                            ExperienceViolationInput {
+                                dimension: "budget".into(),
+                                requested: Some("100".into()),
+                                actual: Some("158".into()),
+                                item_id: Some("everyday-chair".into()),
+                            },
+                            ExperienceViolationInput {
+                                dimension: "budget".into(),
+                                requested: Some("100".into()),
+                                actual: Some("250".into()),
+                                item_id: Some("luxe-chair".into()),
+                            },
+                            ExperienceViolationInput {
+                                dimension: "evidence:glare_control".into(),
+                                requested: Some("glare_control".into()),
+                                actual: Some("not_specified".into()),
+                                item_id: Some("luxe-chair".into()),
+                            },
+                        ]),
+                        counterfactuals: Some(vec![ExperienceCounterfactualInput {
+                            change: "raise_budget_from_100_to_158".into(),
+                            delta: Some(58.0),
+                            item_id: Some("everyday-chair".into()),
+                        }]),
+                    }),
+                    search: None,
+                }),
+            );
+            let item = event(
+                "/agent-item",
+                2,
+                Some(ExperienceTelemetryInput {
+                    channel: None,
+                    stage: Some("item".into()),
+                    need_state: None,
+                    decision: None,
+                    search: Some(ExperienceSearchInput {
+                        search_id: Some("search-1".into()),
+                        result_position: Some(1),
+                    }),
+                }),
+            );
+            let mut click = event("/product/feeder", 3, None);
+            click.surface = "http_html".into();
+            click.customer_link_source = Some(CustomerLinkSource::ProductLinkClick);
+            click.anonymous_ref = Some("anon-insights".into());
+            click.runtime_hint = None;
+            click.runtime_hint_source = None;
+            click.request_observation = Some(CustomerRequestObservationInput {
+                client_ip: Some("203.0.113.9".into()),
+                method: Some("GET".into()),
+                user_agent: Some("Mozilla/5.0 Claude-User/1.0".into()),
+                accept_language: None,
+                referrer_origin: None,
+                sec_ch_ua: None,
+                sec_ch_ua_platform: None,
+                sec_ch_ua_mobile: None,
+            });
+            let accepted = ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![negotiate, decide, item, click],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(accepted.accepted == 4 && accepted.dropped == 0);
+
+            let mut invalid = event("/agent-decide/lamp", 4, None);
+            invalid.experience = Some(ExperienceTelemetryInput {
+                channel: None,
+                stage: Some("bogus_stage".into()),
+                need_state: None,
+                decision: None,
+                search: None,
+            });
+            let rejected = ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![invalid],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(rejected.accepted == 0 && rejected.dropped == 1);
+
+            sqlx::query(
+                r"INSERT INTO enrichment_requests
+                (id, workspace_id, product_id, environment_id, interaction_id, surface,
+                 purpose, remember, consent_subject, expected_consent_revision, identity_level,
+                 state, operation, question_key, question, request_hash, capability_nonce_hash,
+                 expires_at)
+                VALUES ($1, $2, $3, $4, $5, 'http_json', 'product_personalization', FALSE,
+                  $6, 0, 'ephemeral', 'declined', '/agent-negotiate/lamp', 'budget',
+                  'What budget applies to this purchase?', $7, $8, NOW() + INTERVAL '1 hour')",
+            )
+            .bind(Uuid::new_v4())
+            .bind(workspace.id)
+            .bind(auth.environment.product_id)
+            .bind(auth.environment.id)
+            .bind(negotiate_id)
+            .bind(format!("afint1_{}", Uuid::new_v4().simple()))
+            .bind(vec![0u8; 32])
+            .bind(vec![1u8; 32])
+            .execute(&pool)
+            .await?;
+
+            let signal_id = Uuid::new_v4();
+            sqlx::query(
+                r"INSERT INTO customer_signals
+                (id, workspace_id, product_id, interaction_id, source_item_key, signal_type,
+                 summary, provenance, collection_basis, collected_at)
+                VALUES ($1, $2, $3, $4, 'budget', 'constraint', 'Hard budget of $100',
+                  'agent_reports_current_task', 'required_product_data', NOW())",
+            )
+            .bind(signal_id)
+            .bind(workspace.id)
+            .bind(auth.environment.product_id)
+            .bind(negotiate_id)
+            .execute(&pool)
+            .await?;
+            let retrieval_id = Uuid::new_v4();
+            sqlx::query(
+                r"INSERT INTO customer_context_retrievals
+                (id, workspace_id, product_id, environment_id, interaction_id, purpose,
+                 identity_level, context_version, item_count)
+                VALUES ($1, $2, $3, $4, $5, 'product_personalization', 'ephemeral',
+                  'ctxv-insights-e2e-0001', 1)",
+            )
+            .bind(retrieval_id)
+            .bind(workspace.id)
+            .bind(auth.environment.product_id)
+            .bind(auth.environment.id)
+            .bind(negotiate_id)
+            .execute(&pool)
+            .await?;
+            let decision_id = Uuid::new_v4();
+            sqlx::query(
+                r"INSERT INTO personalization_decisions
+                (id, workspace_id, product_id, environment_id, retrieval_id,
+                 external_decision_id, purpose, variant, payload_hash)
+                VALUES ($1, $2, $3, $4, $5, 'dec-insights-1', 'product_personalization',
+                  'hero-a', $6)",
+            )
+            .bind(decision_id)
+            .bind(workspace.id)
+            .bind(auth.environment.product_id)
+            .bind(auth.environment.id)
+            .bind(retrieval_id)
+            .bind(vec![2u8; 32])
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                r"INSERT INTO personalization_decision_signals (workspace_id, decision_id, signal_id)
+                VALUES ($1, $2, $3)",
+            )
+            .bind(workspace.id)
+            .bind(decision_id)
+            .bind(signal_id)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                r"INSERT INTO personalization_outcomes
+                (id, workspace_id, product_id, decision_id, external_outcome_id, outcome,
+                 payload_hash, occurred_at)
+                VALUES ($1, $2, $3, $4, 'out-insights-1', 'conversion', $5, NOW())",
+            )
+            .bind(Uuid::new_v4())
+            .bind(workspace.id)
+            .bind(auth.environment.product_id)
+            .bind(decision_id)
+            .bind(vec![3u8; 32])
+            .execute(&pool)
+            .await?;
+
+            let insights = dashboard_insights(&pool, Some(auth.environment.id), None)
+                .await
+                .map_err(test_error)?;
+            anyhow::ensure!(insights.lost_demand.decision_interactions == 1);
+            anyhow::ensure!(insights.lost_demand.zero_match_decisions == 1);
+            anyhow::ensure!(
+                insights
+                    .lost_demand
+                    .expressed_dimensions
+                    .iter()
+                    .any(|row| row.name == "budget" && row.count == 2)
+            );
+            anyhow::ensure!(
+                insights
+                    .lost_demand
+                    .violated_dimensions
+                    .iter()
+                    .any(|row| row.name == "budget" && row.count == 2)
+            );
+            anyhow::ensure!(
+                insights
+                    .lost_demand
+                    .violated_dimensions
+                    .iter()
+                    .any(|row| row.name == "evidence:glare_control" && row.count == 1),
+                "namespaced evidence dimensions must aggregate: {:?}",
+                insights.lost_demand.violated_dimensions
+            );
+            anyhow::ensure!(
+                insights
+                    .lost_demand
+                    .counterfactual_changes
+                    .iter()
+                    .any(|row| row.name == "raise_budget_from_100_to_158" && row.count == 1)
+            );
+            anyhow::ensure!(
+                insights.lost_demand.median_counterfactual_delta == Some(58.0),
+                "median counterfactual delta should be 58, got {:?}",
+                insights.lost_demand.median_counterfactual_delta
+            );
+            anyhow::ensure!(
+                insights
+                    .unknown_dimensions
+                    .iter()
+                    .any(|row| row.name == "purpose" && row.count == 1)
+            );
+            anyhow::ensure!(
+                insights.journey_flow.edges.iter().any(|edge| {
+                    edge.from_operation == "/agent-negotiate/lamp"
+                        && edge.to_operation == "/agent-decide/lamp"
+                        && edge.traversals == 1
+                }),
+                "journey edges should include negotiate → decide: {:?}",
+                insights.journey_flow.edges
+            );
+            anyhow::ensure!(
+                insights
+                    .journey_flow
+                    .exit_operations
+                    .iter()
+                    .any(|row| row.name == "/product/feeder")
+            );
+            anyhow::ensure!(insights.handoff.handoff_clicks == 1);
+            anyhow::ensure!(insights.handoff.sessions_with_handoff == 1);
+            anyhow::ensure!(insights.handoff.sessions >= 1);
+            anyhow::ensure!(insights.handoff.handoff_rate >= 1);
+            anyhow::ensure!(
+                insights
+                    .handoff
+                    .landing_operations
+                    .iter()
+                    .any(|row| row.name == "/product/feeder" && row.count == 1)
+            );
+            anyhow::ensure!(
+                insights
+                    .rank_positions
+                    .iter()
+                    .any(|row| row.name == "1" && row.count == 1)
+            );
+            anyhow::ensure!(
+                insights
+                    .agent_vendors
+                    .iter()
+                    .any(|row| row.vendor == "claude" && row.interactions == 4),
+                "agent vendors should classify claude evidence: {:?}",
+                insights.agent_vendors
+            );
+            anyhow::ensure!(
+                insights.signal_outcomes.iter().any(|row| {
+                    row.signal == "constraint/budget"
+                        && row.decisions == 1
+                        && row.outcomes == 1
+                        && row.conversions == 1
+                }),
+                "signal outcomes should attribute the conversion: {:?}",
+                insights.signal_outcomes
+            );
+            anyhow::ensure!(
+                insights
+                    .unanswered_questions
+                    .iter()
+                    .any(|row| row.name == "budget \u{b7} declined" && row.count == 1),
+                "unanswered questions should surface the declined budget question: {:?}",
+                insights.unanswered_questions
+            );
+            anyhow::ensure!(
+                insights
+                    .channels
+                    .iter()
+                    .any(|row| row.name == "native_graph" && row.count == 1)
+                    && insights
+                        .channels
+                        .iter()
+                        .any(|row| row.name == "faceted_html" && row.count == 1)
+                    && insights
+                        .channels
+                        .iter()
+                        .any(|row| row.name == "unlabeled" && row.count == 1),
+                "channel-tagged hops should aggregate and untagged hops stay unlabeled: {:?}",
+                insights.channels
+            );
+            anyhow::ensure!(
+                insights.journey_funnel.arrived == 1
+                    && insights.journey_funnel.entered_graph == 1
+                    && insights.journey_funnel.expressed_needs == 1
+                    && insights.journey_funnel.reached_decision == 1
+                    && insights.journey_funnel.handoff_followed == 1
+                    && insights.journey_funnel.tokened_fetch_rate == 100,
+                "the full graph journey should fill every funnel stage: {:?}",
+                insights.journey_funnel
+            );
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn journey_reality_insights_classify_sessions_end_to_end() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Journey reality e2e").await?;
+        let result = async {
+            let (_, auth) =
+                telemetry_test_product(&pool, &workspace, "Journey reality product").await?;
+            let base = Utc::now() - Duration::minutes(10);
+            let event = |session: &str, operation: &str, offset: i64, experience| {
+                InteractionTelemetryInput {
+                    interaction_id: Uuid::new_v4(),
+                    sequence: Some(offset + 1),
+                    surface: "http_json".into(),
+                    operation: operation.into(),
+                    status_code: Some(200),
+                    duration_ms: Some(12),
+                    customer_ref: None,
+                    account_ref: None,
+                    user_ref: None,
+                    anonymous_ref: None,
+                    customer_link_source: None,
+                    request_observation: None,
+                    classification: Some("unclassified".into()),
+                    confirmation_method: None,
+                    runtime_hint: Some("petsmart-demo/1.0 chatgpt-user".into()),
+                    runtime_hint_source: Some("http".into()),
+                    session_ref: Some(session.into()),
+                    session_source: Some("customer".into()),
+                    occurred_at: Some(base + Duration::seconds(offset)),
+                    experience,
+                }
+            };
+            let human_observation = || CustomerRequestObservationInput {
+                client_ip: Some("203.0.113.20".into()),
+                method: Some("GET".into()),
+                user_agent: Some(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/126.0.0.0".into(),
+                ),
+                accept_language: None,
+                referrer_origin: None,
+                sec_ch_ua: None,
+                sec_ch_ua_platform: None,
+                sec_ch_ua_mobile: None,
+            };
+
+            // Session A: an agent fetches the agent root and silently defects
+            // — the costliest failure mode live testing surfaced.
+            let arrived_only = event("j-arrive-only", "/agent-guide", 0, None);
+
+            // Session B: the full discovery→following funnel over the faceted
+            // storefront, ending in a human handoff click.
+            let full_guide = event("j-full-funnel", "/agent-guide", 10, None);
+            let full_decide = event(
+                "j-full-funnel",
+                "/agent-decide/feeder",
+                11,
+                Some(ExperienceTelemetryInput {
+                    channel: Some("faceted_html".into()),
+                    stage: Some("decision_support".into()),
+                    need_state: Some(ExperienceNeedStateInput {
+                        expressed_dimensions: Some(vec!["pets".into(), "budget".into()]),
+                        unknown_dimensions: None,
+                    }),
+                    decision: Some(ExperienceDecisionInput {
+                        exact_match_count: Some(2),
+                        near_miss_count: Some(3),
+                        violated_hard_constraints: None,
+                        counterfactuals: None,
+                    }),
+                    search: None,
+                }),
+            );
+            let mut full_click = event("j-full-funnel", "/product/:id", 12, None);
+            full_click.surface = "http_html".into();
+            full_click.customer_link_source = Some(CustomerLinkSource::ProductLinkClick);
+            full_click.anonymous_ref = Some("anon-full-funnel".into());
+            full_click.runtime_hint = Some("petsmart-demo/1.0".into());
+            full_click.request_observation = Some(human_observation());
+
+            // Session C: the cloud-agent shape — a human Chrome UA with no
+            // vendor evidence, entering the session on a deep journey-carrying
+            // product operation, never the human root.
+            let mut cloud_click = event("j-cloud-shape", "/product/:id", 20, None);
+            cloud_click.surface = "http_html".into();
+            cloud_click.customer_link_source = Some(CustomerLinkSource::ProductLinkClick);
+            cloud_click.anonymous_ref = Some("anon-cloud-shape".into());
+            cloud_click.runtime_hint = Some("petsmart-demo/1.0".into());
+            cloud_click.request_observation = Some(human_observation());
+            let mut cloud_context = event(
+                "j-cloud-shape",
+                "/product-context",
+                21,
+                Some(ExperienceTelemetryInput {
+                    channel: None,
+                    stage: None,
+                    need_state: Some(ExperienceNeedStateInput {
+                        expressed_dimensions: Some(vec!["pets".into()]),
+                        unknown_dimensions: None,
+                    }),
+                    decision: None,
+                    search: None,
+                }),
+            );
+            cloud_context.runtime_hint = Some("petsmart-demo/1.0".into());
+
+            // Session D: off-graph attempts — a fabricated /agent-item URL
+            // (the live Claude run's 404) and a premature 422 decide.
+            let mut fabricated_item = event("j-off-graph", "/agent-item", 30, None);
+            fabricated_item.status_code = Some(404);
+            fabricated_item.runtime_hint = Some("petsmart-demo/1.0 claude-user".into());
+            let mut premature_decide = event(
+                "j-off-graph",
+                "/agent-decide/feeder",
+                31,
+                Some(ExperienceTelemetryInput {
+                    channel: Some("native_graph".into()),
+                    stage: Some("decision_input_required".into()),
+                    need_state: None,
+                    decision: None,
+                    search: None,
+                }),
+            );
+            premature_decide.status_code = Some(422);
+            premature_decide.runtime_hint = Some("petsmart-demo/1.0 claude-user".into());
+
+            // Session E: a plain human browsing session on the root.
+            let mut human_root = event("pss-human-1", "/", 40, None);
+            human_root.surface = "http_html".into();
+            human_root.runtime_hint = None;
+            human_root.runtime_hint_source = None;
+            human_root.request_observation = Some(human_observation());
+
+            let accepted = ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![
+                        arrived_only,
+                        full_guide,
+                        full_decide,
+                        full_click,
+                        cloud_click,
+                        cloud_context,
+                        fabricated_item,
+                        premature_decide,
+                        human_root,
+                    ],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(accepted.accepted == 9 && accepted.dropped == 0);
+
+            let insights = dashboard_insights(&pool, Some(auth.environment.id), None)
+                .await
+                .map_err(test_error)?;
+
+            // Funnel: A, B, D arrived; B and D entered (D via its fabricated
+            // graph fetch); only B expressed needs, reached a decision, and
+            // was followed by a human.
+            anyhow::ensure!(
+                insights.journey_funnel.arrived == 3
+                    && insights.journey_funnel.entered_graph == 2
+                    && insights.journey_funnel.expressed_needs == 1
+                    && insights.journey_funnel.reached_decision == 1
+                    && insights.journey_funnel.handoff_followed == 1,
+                "funnel stages should be monotonic across the four agent sessions: {:?}",
+                insights.journey_funnel
+            );
+            anyhow::ensure!(
+                insights.journey_funnel.tokened_fetch_rate == 67,
+                "tokened-fetch rate should be round(2/3): {:?}",
+                insights.journey_funnel
+            );
+
+            // Traffic classes: declared first, then the suspected cloud
+            // browser, then the human root session.
+            anyhow::ensure!(
+                insights.traffic_classes.first().is_some_and(|row| {
+                    row.class == "declared_agent" && row.sessions == 3 && row.interactions == 6
+                }),
+                "declared agents should lead the class list: {:?}",
+                insights.traffic_classes
+            );
+            anyhow::ensure!(
+                insights.traffic_classes.iter().any(|row| {
+                    row.class == "suspected_cloud_agent"
+                        && row.sessions == 1
+                        && row.interactions == 2
+                }),
+                "the deep-entry human-UA session should be suspected: {:?}",
+                insights.traffic_classes
+            );
+            anyhow::ensure!(
+                insights
+                    .traffic_classes
+                    .iter()
+                    .any(|row| row.class == "human" && row.sessions == 1 && row.interactions == 1),
+                "the root browsing session should stay human: {:?}",
+                insights.traffic_classes
+            );
+
+            // Channels: one faceted hop, one native hop, one untagged hop.
+            for (channel, count) in [("faceted_html", 1), ("native_graph", 1), ("unlabeled", 1)] {
+                anyhow::ensure!(
+                    insights
+                        .channels
+                        .iter()
+                        .any(|row| row.name == channel && row.count == count),
+                    "channel mix should include {channel}: {:?}",
+                    insights.channels
+                );
+            }
+
+            // Off-graph attempts: the fabricated 404 and the premature 422.
+            anyhow::ensure!(
+                insights.off_graph_attempts.attempts == 2,
+                "both off-graph hops should count: {:?}",
+                insights.off_graph_attempts
+            );
+            for operation in ["/agent-item", "/agent-decide/feeder"] {
+                anyhow::ensure!(
+                    insights
+                        .off_graph_attempts
+                        .operations
+                        .iter()
+                        .any(|row| row.name == operation && row.count == 1),
+                    "off-graph operations should include {operation}: {:?}",
+                    insights.off_graph_attempts
+                );
+            }
             Ok::<(), anyhow::Error>(())
         }
         .await;
@@ -19073,6 +20938,8 @@ mod product_tests {
                         account_ref: None,
                         user_ref: None,
                         anonymous_ref: None,
+                        customer_link_source: None,
+                        request_observation: None,
                         classification: Some("unclassified".into()),
                         confirmation_method: None,
                         runtime_hint: None,
@@ -19080,6 +20947,7 @@ mod product_tests {
                         session_ref: None,
                         session_source: None,
                         occurred_at: Some(Utc::now()),
+                        experience: None,
                     }],
                 },
             )
@@ -19605,9 +21473,12 @@ mod product_tests {
             operations: None,
             enabled: true,
         };
-        anyhow::ensure!(validate_field_definition_input(&valid).is_err());
+        anyhow::ensure!(validate_field_definition_input(&valid).is_ok());
+        let mut invalid_type = valid.clone();
+        invalid_type.signal_type = "Customer Goal".into();
+        anyhow::ensure!(validate_field_definition_input(&invalid_type).is_err());
         let mut valid_typed = valid;
-        valid_typed.signal_type = "preference".into();
+        valid_typed.signal_type = "customer_goal".into();
         anyhow::ensure!(validate_field_definition_input(&valid_typed).is_ok());
         let mut duplicate_values = valid_typed.clone();
         duplicate_values.allowed_values = vec!["gift".into(), "gift".into()];
@@ -19630,6 +21501,34 @@ mod product_tests {
         anyhow::ensure!(
             normalized == Some(vec!["/search".to_owned(), "search_catalog".to_owned()])
         );
+        Ok(())
+    }
+
+    #[test]
+    fn custom_question_snapshots_remain_compatible_with_the_previous_api() -> anyhow::Result<()> {
+        let snapshot = EnrichmentFieldSnapshot {
+            key: "journey.occasion".into(),
+            label: "Shopping occasion".into(),
+            signal_type: "preference".into(),
+            question_type: Some("customer_goal".into()),
+            allowed_values: vec!["gift".into()],
+            targeted_advertising_safe: false,
+        };
+        anyhow::ensure!(snapshot.effective_type() == "customer_goal");
+        let encoded = serde_json::to_value(&snapshot)?;
+        anyhow::ensure!(encoded["type"] == "preference");
+        anyhow::ensure!(encoded["questionType"] == "customer_goal");
+
+        let previous_snapshot: EnrichmentFieldSnapshot =
+            serde_json::from_value(serde_json::json!({
+                "key": "journey.occasion",
+                "label": "Shopping occasion",
+                "type": "preference",
+                "allowedValues": ["gift"],
+                "targetedAdvertisingSafe": false
+            }))?;
+        anyhow::ensure!(previous_snapshot.question_type.is_none());
+        anyhow::ensure!(previous_snapshot.effective_type() == "preference");
         Ok(())
     }
 
@@ -19697,35 +21596,34 @@ mod product_tests {
             surface: "http_json".into(),
             purpose: "targeted_advertising".into(),
             remember: false,
+            handler_owner: "same_origin_best_effort".into(),
+            catalog_hash: vec![0; 32],
+            remember_allowed: false,
+            remembered_max_days: 0,
+            unremembered_expires_at: Utc::now() + Duration::hours(2),
             consent_subject: transient,
             expected_consent_revision: 0,
             identity_level: "verified".into(),
-            state: "consent_required".into(),
+            state: "answer_ready".into(),
             question: "May I share context?".into(),
             request_hash: vec![0; 32],
             capability_nonce_hash: vec![0; 32],
             expires_at: Utc::now() + Duration::hours(2),
             created_at: Utc::now(),
         };
-        let response = enrichment_response("https://app.epode.ai", &row, "aqr1_test", None);
-        let json = serde_json::to_value(response)?;
-        anyhow::ensure!(
-            json["consent"]["bodySchema"]["decision"]
-                == serde_json::json!(["approved", "declined"])
-        );
-        anyhow::ensure!(
-            json["stageInstruction"]
-                .as_str()
-                .is_some_and(|value| value.contains("never infer approval"))
-        );
-        anyhow::ensure!(json["submit"].is_null());
-        row.state = "answer_ready".into();
         let answer_json = serde_json::to_value(enrichment_response(
-            "https://app.epode.ai",
+            "https://app.tryintents.com",
             &row,
             "aqr1_test",
             None,
         ))?;
+        // Enrichment requests are submit-ready immediately: no ask happens, no
+        // question is surfaced, and the opt-out endpoint stays advertised.
+        anyhow::ensure!(
+            answer_json["consent"]["bodySchema"]["decision"]
+                == serde_json::json!(["approved", "declined"])
+        );
+        anyhow::ensure!(answer_json["question"].is_null());
         anyhow::ensure!(
             answer_json["submit"]["bodySchema"]["status"]
                 == serde_json::json!(["answered", "declined", "no_relevant_context"])
@@ -19736,9 +21634,30 @@ mod product_tests {
                 .as_str()
                 .is_some_and(|value| value.contains("submit at most one bounded answer"))
         );
+        anyhow::ensure!(
+            answer_json["stageInstruction"]
+                .as_str()
+                .is_some_and(|value| !value.contains("permission"))
+        );
+        // Legacy rows persisted in the pre-consentless ask state stay inert:
+        // no question, no submit action, and no instruction implying an ask.
+        row.state = "consent_required".into();
+        let legacy_json = serde_json::to_value(enrichment_response(
+            "https://app.epode.ai",
+            &row,
+            "aqr1_test",
+            None,
+        ))?;
+        anyhow::ensure!(legacy_json["question"].is_null());
+        anyhow::ensure!(legacy_json["submit"].is_null());
+        anyhow::ensure!(
+            legacy_json["stageInstruction"]
+                .as_str()
+                .is_some_and(|value| value.contains("No enrichment action is permitted"))
+        );
         row.state = "declined".into();
         let declined_json = serde_json::to_value(enrichment_response(
-            "https://app.epode.ai",
+            "https://app.tryintents.com",
             &row,
             "aqr1_test",
             None,
@@ -19771,7 +21690,9 @@ mod product_tests {
         let result = Box::pin(async {
             let interaction_id = Uuid::new_v4();
             let request_input = EnrichmentRequestInput {
-                interaction_id,                field_keys: None,
+                interaction_id,
+                handler_owner: None,
+                field_keys: None,
                 operation: "/search".into(),
                 surface: "html".into(),
                 status_code: Some(200),
@@ -19791,15 +21712,15 @@ mod product_tests {
                     &pool,
                     &auth_a,
                     TEST_IDENTITY_HMAC_SECRET,
-                    "https://app.epode.ai",
+                    "https://app.tryintents.com",
                     request_input.clone(),
                 ),
                 create_enrichment_request(
                     &pool,
                     &auth_a,
                     TEST_IDENTITY_HMAC_SECRET,
-                    "https://app.epode.ai",
-                    request_input,
+                    "https://app.tryintents.com",
+                    request_input.clone(),
                 )
             );
             let request = first_request.map_err(test_error)?;
@@ -19812,10 +21733,61 @@ mod product_tests {
                         .as_ref()
                         .map(|action| &action.authorization)
             );
-            anyhow::ensure!(request.state == "consent_required");
+            anyhow::ensure!(request.state == "answer_ready");
             anyhow::ensure!(request.identity_level == "pseudonymous");
             anyhow::ensure!(request.surface == "html");
-            anyhow::ensure!(request.submit.is_none() && request.consent.is_some());
+            // The very first response is submit-ready and still advertises the
+            // explicit opt-out endpoint.
+            anyhow::ensure!(request.submit.is_some() && request.consent.is_some());
+            anyhow::ensure!(request.question.is_none());
+
+            // Simulate a row created before the immutable contract columns were
+            // available. Its request hash uses the original v1 material, and
+            // its capability nonce is not bound to a contract digest.
+            let (created_at, expires_at) = sqlx::query_as::<
+                _,
+                (DateTime<Utc>, DateTime<Utc>),
+            >("SELECT created_at, expires_at FROM enrichment_requests WHERE id = $1")
+            .bind(request.request_id)
+            .fetch_one(&pool)
+            .await?;
+            let key_hash = sqlx::query_scalar::<_, Vec<u8>>(
+                "SELECT key_hash FROM api_keys WHERE id = $1",
+            )
+            .bind(auth_a.api_key_id)
+            .fetch_one(&pool)
+            .await?;
+            let (_, legacy_nonce_hash) = sign_deterministic_enrichment_capability(
+                auth_a.api_key_id,
+                &key_hash,
+                request.request_id,
+                interaction_id,
+                created_at,
+                expires_at,
+                None,
+            )
+            .map_err(test_error)?;
+            sqlx::query(
+                r"UPDATE enrichment_requests SET handler_owner = NULL, catalog_hash = NULL,
+                  remember_allowed = NULL, remembered_max_days = NULL,
+                  unremembered_expires_at = NULL, capability_nonce_hash = $2
+                WHERE id = $1",
+            )
+            .bind(request.request_id)
+            .bind(legacy_nonce_hash)
+            .execute(&pool)
+            .await?;
+            let bridge_retry = create_enrichment_request(
+                &pool,
+                &auth_a,
+                TEST_IDENTITY_HMAC_SECRET,
+                "https://app.tryintents.com",
+                request_input.clone(),
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(bridge_retry.request_id == request.request_id);
+
             let first_interaction = sqlx::query_as::<
                 _,
                 (String, String, Option<String>, Option<i32>, Option<i64>, Option<String>, Option<Uuid>),
@@ -19834,7 +21806,7 @@ mod product_tests {
             anyhow::ensure!(first_interaction.4 == Some(24));
             anyhow::ensure!(first_interaction.5.as_deref() == Some("codex/1"));
             anyhow::ensure!(first_interaction.6.is_some());
-            let capability = request
+            let capability = bridge_retry
                 .consent
                 .as_ref()
                 .and_then(|action| action.authorization.strip_prefix("Bearer "))
@@ -19842,7 +21814,7 @@ mod product_tests {
             let consent = decide_enrichment_consent(
                 &pool,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 capability,
                 EnrichmentConsentDecisionInput {
                     decision: "approved".into(),
@@ -19979,9 +21951,9 @@ mod product_tests {
             let session_response = &session_detail.responses[0];
             anyhow::ensure!(session_response.id == request.request_id);
             anyhow::ensure!(session_response.interaction_id == interaction_id);
-            anyhow::ensure!(
-                request.question.as_deref() == Some(session_response.question.as_str())
-            );
+            // The API never surfaces a question, but the dashboard read model
+            // still shows the stored request description.
+            anyhow::ensure!(!session_response.question.is_empty());
             anyhow::ensure!(session_response.status == "answered");
             anyhow::ensure!(session_response.answers.len() == 2);
             anyhow::ensure!(
@@ -20018,9 +21990,10 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 EnrichmentRequestInput {
                     interaction_id: mcp_interaction_id,
+                    handler_owner: None,
                     field_keys: None,
                     operation: "catalog_search".into(),
                     surface: "mcp".into(),
@@ -20132,9 +22105,10 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 EnrichmentRequestInput {
                     interaction_id: resolved_interaction_id,
+                    handler_owner: None,
                     field_keys: None,
                     operation: "/search".into(),
                     surface: "http_json".into(),
@@ -20273,7 +22247,7 @@ mod product_tests {
             let revoked = decide_enrichment_consent(
                 &pool,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 revoke_capability,
                 EnrichmentConsentDecisionInput {
                     decision: "declined".into(),
@@ -20324,9 +22298,10 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 EnrichmentRequestInput {
                     interaction_id: Uuid::new_v4(),
+                    handler_owner: None,
                     field_keys: None,
                     operation: "/recommend".into(),
                     surface: "mcp".into(),
@@ -20353,7 +22328,7 @@ mod product_tests {
             let session_choice_consent = decide_enrichment_consent(
                 &pool,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 session_choice_capability,
                 EnrichmentConsentDecisionInput {
                     decision: "approved".into(),
@@ -20394,9 +22369,10 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 EnrichmentRequestInput {
                     interaction_id: transient_known_interaction,
+                    handler_owner: None,
                     field_keys: None,
                     operation: "/recommend".into(),
                     surface: "http_json".into(),
@@ -20415,7 +22391,7 @@ mod product_tests {
             )
             .await
             .map_err(test_error)?;
-            anyhow::ensure!(transient_known.state == "consent_required");
+            anyhow::ensure!(transient_known.state == "answer_ready");
             let transient_subject = sqlx::query_scalar::<_, String>(
                 "SELECT consent_subject FROM enrichment_requests WHERE id = $1",
             )
@@ -20431,7 +22407,7 @@ mod product_tests {
             decide_enrichment_consent(
                 &pool,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 transient_capability,
                 EnrichmentConsentDecisionInput {
                     decision: "approved".into(),
@@ -20454,9 +22430,10 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 EnrichmentRequestInput {
                     interaction_id: Uuid::new_v4(),
+                    handler_owner: None,
                     field_keys: None,
                     operation: "/recommend".into(),
                     surface: "http_json".into(),
@@ -20475,7 +22452,8 @@ mod product_tests {
             )
             .await
             .map_err(test_error)?;
-            anyhow::ensure!(second_transient_known.state == "consent_required");
+            anyhow::ensure!(second_transient_known.state == "answer_ready");
+            anyhow::ensure!(second_transient_known.submit.is_some());
             sqlx::query(
                 r"UPDATE consent_grants SET state = 'revoked', revoked_at = NOW(), updated_at = NOW()
                 WHERE environment_id = $1 AND subject = $2 AND scope = $3",
@@ -20512,9 +22490,10 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 EnrichmentRequestInput {
                     interaction_id: transient_anonymous_interaction,
+                    handler_owner: None,
                     field_keys: None,
                     operation: "/recommend".into(),
                     surface: "http_json".into(),
@@ -20584,6 +22563,7 @@ mod product_tests {
             preexisting_tx.commit().await?;
             let preexisting_input = EnrichmentRequestInput {
                 interaction_id: preexisting_interaction_id,
+                handler_owner: None,
                 field_keys: None,
                 operation: "/preexisting".into(),
                 surface: "http_json".into(),
@@ -20603,7 +22583,7 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 preexisting_input.clone(),
             )
             .await
@@ -20621,7 +22601,7 @@ mod product_tests {
                     &pool,
                     &auth_a,
                     TEST_IDENTITY_HMAC_SECRET,
-                    "https://app.epode.ai",
+                    "https://app.tryintents.com",
                     mismatched_preexisting,
                 )
                 .await
@@ -20641,9 +22621,10 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 EnrichmentRequestInput {
                     interaction_id: Uuid::new_v4(),
+                    handler_owner: None,
                     field_keys: None,
                     operation: "/consent-merge".into(),
                     surface: "http_json".into(),
@@ -20670,7 +22651,7 @@ mod product_tests {
             decide_enrichment_consent(
                 &pool,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 merge_anonymous_capability,
                 EnrichmentConsentDecisionInput {
                     decision: "approved".into(),
@@ -20727,9 +22708,10 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 EnrichmentRequestInput {
                     interaction_id: Uuid::new_v4(),
+                    handler_owner: None,
                     field_keys: None,
                     operation: "/consent-merge".into(),
                     surface: "http_json".into(),
@@ -20756,7 +22738,7 @@ mod product_tests {
             decide_enrichment_consent(
                 &pool,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 merge_known_capability,
                 EnrichmentConsentDecisionInput {
                     decision: "declined".into(),
@@ -20769,9 +22751,10 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 EnrichmentRequestInput {
                     interaction_id: Uuid::new_v4(),
+                    handler_owner: None,
                     field_keys: None,
                     operation: "/consent-merge".into(),
                     surface: "http_json".into(),
@@ -20855,7 +22838,7 @@ mod product_tests {
             let stale_replay = decide_enrichment_consent(
                 &pool,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 merge_anonymous_capability,
                 EnrichmentConsentDecisionInput {
                     decision: "approved".into(),
@@ -20869,6 +22852,7 @@ mod product_tests {
             let conflicting_request_interaction = Uuid::new_v4();
             let conflicting_request = EnrichmentRequestInput {
                 interaction_id: conflicting_request_interaction,
+                handler_owner: None,
                 field_keys: None,
                 operation: "/recommend".into(),
                 surface: "http_json".into(),
@@ -20908,14 +22892,14 @@ mod product_tests {
                     &pool,
                     &auth_a,
                     TEST_IDENTITY_HMAC_SECRET,
-                    "https://app.epode.ai",
+                    "https://app.tryintents.com",
                     conflicting_request.clone(),
                 ),
                 create_enrichment_request(
                     &pool,
                     &auth_a,
                     TEST_IDENTITY_HMAC_SECRET,
-                    "https://app.epode.ai",
+                    "https://app.tryintents.com",
                     different_payload.clone(),
                 )
             );
@@ -20938,14 +22922,14 @@ mod product_tests {
                     &pool,
                     &auth_a,
                     TEST_IDENTITY_HMAC_SECRET,
-                    "https://app.epode.ai",
+                    "https://app.tryintents.com",
                     conflicting_request,
                 ),
                 create_enrichment_request(
                     &pool,
                     &auth_a,
                     TEST_IDENTITY_HMAC_SECRET,
-                    "https://app.epode.ai",
+                    "https://app.tryintents.com",
                     different_payload,
                 )
             );
@@ -20995,9 +22979,10 @@ mod product_tests {
                 &pool,
                 &auth_a,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 EnrichmentRequestInput {
                     interaction_id: ephemeral_interaction_id,
+                    handler_owner: None,
                     field_keys: None,
                     operation: "/recommend".into(),
                     surface: "http_json".into(),
@@ -21017,21 +23002,16 @@ mod product_tests {
             .await
             .map_err(test_error)?;
             anyhow::ensure!(ephemeral.identity_level == "ephemeral");
-            anyhow::ensure!(
-                ephemeral
-                    .question
-                    .as_deref()
-                    .is_some_and(|question| question.contains("for this interaction only"))
-            );
-            anyhow::ensure!(
-                sqlx::query_as::<_, (Option<Uuid>, bool)>(
-                    "SELECT customer_id, remember FROM enrichment_requests WHERE id = $1",
+            anyhow::ensure!(ephemeral.question.is_none());
+            let (ephemeral_customer, ephemeral_remember, ephemeral_question) =
+                sqlx::query_as::<_, (Option<Uuid>, bool, String)>(
+                    "SELECT customer_id, remember, question FROM enrichment_requests WHERE id = $1",
                 )
                 .bind(ephemeral.request_id)
                 .fetch_one(&pool)
-                .await?
-                    == (None, false)
-            );
+                .await?;
+            anyhow::ensure!(ephemeral_customer.is_none() && !ephemeral_remember);
+            anyhow::ensure!(ephemeral_question.contains("for this interaction only"));
             let ephemeral_capability = ephemeral
                 .consent
                 .as_ref()
@@ -21040,7 +23020,7 @@ mod product_tests {
             decide_enrichment_consent(
                 &pool,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 ephemeral_capability,
                 EnrichmentConsentDecisionInput {
                     decision: "approved".into(),
@@ -21150,7 +23130,7 @@ mod product_tests {
         let consent = decide_enrichment_consent(
             pool,
             TEST_IDENTITY_HMAC_SECRET,
-            "https://app.epode.ai",
+            "https://app.tryintents.com",
             &capability,
             EnrichmentConsentDecisionInput {
                 decision: "approved".into(),
@@ -21169,6 +23149,21 @@ mod product_tests {
         )
         .await;
         Ok((consent, answer))
+    }
+
+    /// The API response never carries a question anymore; the stored request
+    /// description still names the frozen field selection for dashboards.
+    async fn stored_enrichment_question(
+        pool: &PgPool,
+        request: &EnrichmentRequestResponse,
+    ) -> anyhow::Result<String> {
+        anyhow::ensure!(request.question.is_none());
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT question FROM enrichment_requests WHERE id = $1",
+        )
+        .bind(request.request_id)
+        .fetch_one(pool)
+        .await?)
     }
 
     #[tokio::test]
@@ -21200,6 +23195,7 @@ mod product_tests {
         let request_input =
             |operation: &str, field_keys: Option<Vec<String>>| EnrichmentRequestInput {
                 interaction_id: Uuid::new_v4(),
+                handler_owner: None,
                 operation: operation.into(),
                 field_keys,
                 surface: "mcp".into(),
@@ -21224,7 +23220,7 @@ mod product_tests {
                 "journey.occasion",
                 EnrichmentFieldDefinitionInput {
                     label: "Shopping occasion".into(),
-                    signal_type: "preference".into(),
+                    signal_type: "customer_goal".into(),
                     allowed_values: vec!["gift".into(), "self_purchase".into()],
                     targeted_advertising_safe: false,
                     operations: Some(vec!["/search".into(), "/checkout".into()]),
@@ -21234,6 +23230,7 @@ mod product_tests {
             .await
             .map_err(test_error)?;
             anyhow::ensure!(occasion.key == "journey.occasion" && occasion.enabled);
+            anyhow::ensure!(occasion.signal_type == "customer_goal");
             upsert_enrichment_field(
                 &pool,
                 auth.workspace.id,
@@ -21314,16 +23311,14 @@ mod product_tests {
                 &pool,
                 &auth,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 request_input("/search", None),
             )
             .await
             .map_err(test_error)?;
             anyhow::ensure!(
-                search_request.question.as_deref()
-                    == Some(
-                        "May I share your Shopping occasion with Journey Co so it can personalize your product experience for this interaction only?"
-                    )
+                stored_enrichment_question(&pool, &search_request).await?
+                    == "May I share your Shopping occasion with Journey Co so it can personalize your product experience for this interaction only?"
             );
             let (version, snapshot) = sqlx::query_as::<_, (String, serde_json::Value)>(
                 "SELECT catalog_version, snapshot FROM enrichment_request_fields
@@ -21352,20 +23347,30 @@ mod product_tests {
             anyhow::ensure!(
                 submit_schema.catalog.len() == 1
                     && submit_schema.catalog[0].key == "journey.occasion"
+                    && submit_schema.catalog[0].signal_type == "preference"
+                    && submit_schema.catalog[0].question_type.as_deref() == Some("customer_goal")
             );
+            anyhow::ensure!(submit_schema.signal_types == vec!["preference"]);
             let search_answer = search_answer.map_err(test_error)?;
             anyhow::ensure!(search_answer.signals.len() == 1);
             anyhow::ensure!(search_answer.signals[0].summary == "Shopping occasion: gift");
             anyhow::ensure!(
-                sqlx::query_scalar::<_, String>(
-                    "SELECT attributes->>'catalogVersion' FROM customer_signals
+                sqlx::query_as::<_, (String, String, String, String)>(
+                    "SELECT signal_type, attributes->>'enrichmentType',
+                      attributes->>'catalogVersion', source_item_key FROM customer_signals
                     WHERE id = $1 AND workspace_id = $2",
                 )
                 .bind(search_answer.signals[0].signal_id)
                 .bind(auth.workspace.id)
                 .fetch_one(&pool)
                 .await?
-                    == "product:v1"
+                    == (
+                        "preference".to_owned(),
+                        "customer_goal".to_owned(),
+                        "product:v1".to_owned(),
+                        "journey.occasion".to_owned(),
+                    ),
+                "context signals must carry the enrichment field key, not a positional item label"
             );
 
             // The closed custom catalog replaces the legacy global catalog.
@@ -21373,7 +23378,7 @@ mod product_tests {
                 &pool,
                 &auth,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 request_input("/search", None),
             )
             .await
@@ -21392,7 +23397,7 @@ mod product_tests {
                 &pool,
                 &auth,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 request_input("/search", Some(vec!["journey.delivery".into()])),
             )
             .await
@@ -21403,7 +23408,7 @@ mod product_tests {
                 &pool,
                 &auth,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 request_input("/support", None),
             )
             .await
@@ -21415,7 +23420,7 @@ mod product_tests {
                 &pool,
                 &auth,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 request_input(
                     "/checkout",
                     Some(vec!["journey.occasion".into(), "journey.delivery".into()]),
@@ -21424,10 +23429,8 @@ mod product_tests {
             .await
             .map_err(test_error)?;
             anyhow::ensure!(
-                checkout_request.question.as_deref()
-                    == Some(
-                        "May I share your Shopping occasion and Delivery timing with Journey Co so it can personalize your product experience for this interaction only?"
-                    )
+                stored_enrichment_question(&pool, &checkout_request).await?
+                    == "May I share your Shopping occasion and Delivery timing with Journey Co so it can personalize your product experience for this interaction only?"
             );
             // Editing the definition must not change the in-flight request.
             upsert_enrichment_field(
@@ -21437,7 +23440,7 @@ mod product_tests {
                 "journey.occasion",
                 EnrichmentFieldDefinitionInput {
                     label: "Shopping occasion".into(),
-                    signal_type: "preference".into(),
+                    signal_type: "customer_goal".into(),
                     allowed_values: vec!["replacement".into()],
                     targeted_advertising_safe: false,
                     operations: Some(vec!["/search".into(), "/checkout".into()]),
@@ -21466,7 +23469,7 @@ mod product_tests {
                 "journey.occasion",
                 EnrichmentFieldDefinitionInput {
                     label: "Shopping occasion".into(),
-                    signal_type: "preference".into(),
+                    signal_type: "customer_goal".into(),
                     allowed_values: vec!["gift".into(), "self_purchase".into()],
                     targeted_advertising_safe: false,
                     operations: Some(vec!["/search".into(), "/checkout".into()]),
@@ -21488,22 +23491,20 @@ mod product_tests {
                 &pool,
                 &legacy_auth,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 subset_input.clone(),
             )
             .await
             .map_err(test_error)?;
             anyhow::ensure!(
-                subset_request.question.as_deref()
-                    == Some(
-                        "May I share your shopping priority and shopping budget band with Legacy Co so it can personalize your product experience for this interaction only?"
-                    )
+                stored_enrichment_question(&pool, &subset_request).await?
+                    == "May I share your shopping priority and shopping budget band with Legacy Co so it can personalize your product experience for this interaction only?"
             );
             let retry_request = create_enrichment_request(
                 &pool,
                 &legacy_auth,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 subset_input,
             )
             .await
@@ -21518,7 +23519,7 @@ mod product_tests {
                 &pool,
                 &legacy_auth,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 conflicting_input,
             )
             .await
@@ -21553,24 +23554,39 @@ mod product_tests {
                 &pool,
                 &legacy_auth,
                 TEST_IDENTITY_HMAC_SECRET,
-                "https://app.epode.ai",
+                "https://app.tryintents.com",
                 request_input("/search", None),
             )
             .await
             .map_err(test_error)?;
             anyhow::ensure!(
-                legacy_request.question.as_deref().is_some_and(|question| {
-                    question.contains("relevant, non-sensitive preferences")
-                })
+                stored_enrichment_question(&pool, &legacy_request)
+                    .await?
+                    .contains("relevant, non-sensitive preferences")
             );
-            anyhow::ensure!(
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*) FROM enrichment_request_fields WHERE request_id = $1",
+            let (legacy_version, legacy_snapshot, legacy_hash) =
+                sqlx::query_as::<_, (String, serde_json::Value, Vec<u8>)>(
+                    r"SELECT fields.catalog_version, fields.snapshot, requests.catalog_hash
+                    FROM enrichment_request_fields fields
+                    JOIN enrichment_requests requests
+                      ON requests.id = fields.request_id
+                     AND requests.workspace_id = fields.workspace_id
+                    WHERE fields.request_id = $1",
                 )
                 .bind(legacy_request.request_id)
                 .fetch_one(&pool)
-                .await?
-                    == 0
+                .await?;
+            let expected_legacy_catalog = RequestFieldCatalog {
+                version: "v1".to_owned(),
+                fields: legacy_field_catalog(),
+            };
+            anyhow::ensure!(legacy_version == expected_legacy_catalog.version);
+            anyhow::ensure!(
+                legacy_snapshot == serde_json::to_value(&expected_legacy_catalog.fields)?
+            );
+            anyhow::ensure!(
+                legacy_hash
+                    == request_catalog_hash(&expected_legacy_catalog).map_err(test_error)?
             );
             let (legacy_consent, _) = enrichment_test_approve_and_answer(
                 &pool,
@@ -21594,6 +23610,129 @@ mod product_tests {
                 .execute(&pool)
                 .await?;
         }
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn product_link_click_claims_unowned_session_without_using_request_traits_as_identity()
+    -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Product link attribution").await?;
+        let (_product, auth) =
+            telemetry_test_product(&pool, &workspace, "Product link attribution").await?;
+
+        let result = async {
+            let session_ref = "session_link_claim_1";
+            let agent_interaction_id = Uuid::new_v4();
+            let mut agent =
+                http_telemetry_event(agent_interaction_id, Utc::now() - Duration::seconds(2));
+            agent.session_ref = Some(session_ref.into());
+            agent.session_source = Some("customer".into());
+            agent.request_observation = Some(CustomerRequestObservationInput {
+                client_ip: Some("203.0.113.10".into()),
+                method: Some("GET".into()),
+                user_agent: Some("claude-user/1.0".into()),
+                accept_language: None,
+                referrer_origin: None,
+                sec_ch_ua: None,
+                sec_ch_ua_platform: None,
+                sec_ch_ua_mobile: None,
+            });
+            ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![agent],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, Option<Uuid>>(
+                    "SELECT customer_id FROM interactions_v2 WHERE id = $1",
+                )
+                .bind(agent_interaction_id)
+                .fetch_one(&pool)
+                .await?
+                .is_none()
+            );
+
+            let click_interaction_id = Uuid::new_v4();
+            let mut click = http_telemetry_event(click_interaction_id, Utc::now());
+            click.surface = "http_html".into();
+            click.operation = "/attributed-product-visit/petsmart".into();
+            click.session_ref = Some(session_ref.into());
+            click.session_source = Some("customer".into());
+            click.anonymous_ref = Some("s-first-party-browser".into());
+            click.customer_link_source = Some(CustomerLinkSource::ProductLinkClick);
+            click.request_observation = Some(CustomerRequestObservationInput {
+                client_ip: Some("198.51.100.20".into()),
+                method: Some("GET".into()),
+                user_agent: Some("Mozilla/5.0 Browser".into()),
+                accept_language: Some("en-US".into()),
+                referrer_origin: Some("https://customer.example".into()),
+                sec_ch_ua: None,
+                sec_ch_ua_platform: Some("\"macOS\"".into()),
+                sec_ch_ua_mobile: Some("?0".into()),
+            });
+            ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![click],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+
+            let linked = sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT customer_id, session_id FROM interactions_v2 WHERE id = $1",
+            )
+            .bind(agent_interaction_id)
+            .fetch_one(&pool)
+            .await?;
+            let clicked = sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT customer_id, session_id FROM interactions_v2 WHERE id = $1",
+            )
+            .bind(click_interaction_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(linked == clicked);
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM customer_identifiers
+                    WHERE workspace_id = $1 AND product_id = $2 AND customer_id = $3",
+                )
+                .bind(workspace.id)
+                .bind(auth.environment.product_id)
+                .bind(linked.0)
+                .fetch_one(&pool)
+                .await?
+                    == 1
+            );
+            anyhow::ensure!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM customer_request_observations
+                    WHERE customer_id = $1 AND client_ip IN ('203.0.113.10', '198.51.100.20')",
+                )
+                .bind(linked.0)
+                .fetch_one(&pool)
+                .await?
+                    == 2
+            );
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
+            .execute(&pool)
+            .await?;
         result
     }
 
@@ -21713,6 +23852,8 @@ mod product_tests {
             .fetch_one(&pool)
             .await?;
             anyhow::ensure!(level == "verified" && parent_customer_id.is_some());
+            let account_customer_id = parent_customer_id
+                .ok_or_else(|| anyhow::anyhow!("verified customer should retain account linkage"))?;
             anyhow::ensure!(
                 sqlx::query_scalar::<_, i64>(
                     "SELECT COUNT(*) FROM customer_resolution_events WHERE from_customer_id = $1 AND to_customer_id = $2",
@@ -21758,7 +23899,11 @@ mod product_tests {
                     .iter()
                     .any(|customer| customer.id == verified_customer_id)
             );
-            anyhow::ensure!(customers.rollup.verified == 2);
+            anyhow::ensure!(customers.customers.len() == 1);
+            anyhow::ensure!(customers.rollup.customers == 1);
+            anyhow::ensure!(customers.rollup.verified == 1);
+            anyhow::ensure!(customers.customers[0].account_ref_hint.is_some());
+            anyhow::ensure!(customers.customers[0].user_ref_hint.is_some());
             dashboard_customers_page(
                 &pool,
                 workspace_a.id,
@@ -21779,10 +23924,21 @@ mod product_tests {
             .await
             .map_err(test_error)?;
             anyhow::ensure!(detail.customer.identity_level == "verified");
-            anyhow::ensure!(detail.customer.kind == "user");
-            anyhow::ensure!(detail.customer.parent_customer_id.is_some());
-            anyhow::ensure!(detail.customer.member_count == 0);
-            anyhow::ensure!(detail.identifiers.len() == 2);
+            anyhow::ensure!(detail.customer.account_ref_hint.is_some());
+            anyhow::ensure!(detail.customer.user_ref_hint.is_some());
+            anyhow::ensure!(detail.identifiers.len() == 3);
+            anyhow::ensure!(detail.identifiers.iter().any(|identifier| identifier.kind == "account_ref"));
+            anyhow::ensure!(detail.identifiers.iter().any(|identifier| identifier.kind == "user_ref"));
+            anyhow::ensure!(
+                dashboard_customer_by_id(
+                    &pool,
+                    workspace_a.id,
+                    product_a.id,
+                    account_customer_id,
+                )
+                .await
+                .is_err()
+            );
             anyhow::ensure!(
                 dashboard_customer_by_id(
                     &pool,

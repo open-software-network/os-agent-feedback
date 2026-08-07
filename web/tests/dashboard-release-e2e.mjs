@@ -33,7 +33,12 @@ const ids = {
 };
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const artifactDirectory = path.resolve(repositoryRoot, "..", ".artifacts", "browser-release-e2e");
+const artifactDirectory = path.resolve(
+  repositoryRoot,
+  "..",
+  ".artifacts",
+  "real-dashboard-screenshots",
+);
 
 function product(id, name) {
   return {
@@ -204,18 +209,16 @@ const secondSession = session({
 });
 const firstCustomer = {
   id: ids.customerOne,
-  kind: "account",
-  parentCustomerId: null,
-  memberCount: 1,
   displayName: "Acme workspace",
   identityLevel: "verified",
   identityConfidence: 1,
   accountRefHint: "acco…t-42",
-  userRefHint: null,
+  userRefHint: "user…r-42",
   segments: ["Enterprise"],
   lastActivityAt: now,
   outcomeHealth: "blocked",
   signalCount: 1,
+  traitCount: 1,
   sessionCount: 1,
   activeNeedCount: 1,
   consentState: "approved",
@@ -514,6 +517,35 @@ function createFixture() {
     if (url.pathname === `/api/dashboard/customers/${ids.customerOne}`) {
       json(response, 200, {
         customer: firstCustomer,
+        observedProfile: {
+          sessionCount: 1,
+          activityCount: 4,
+          truncated: false,
+          lastObservedAt: now,
+          facts: [
+            {
+              key: "search.priority",
+              domain: "search",
+              label: "Priority",
+              value: "Freshness",
+              kind: "preference",
+              strength: "preferred",
+              status: "observed",
+              sessionCount: 1,
+              observationCount: 2,
+              firstObservedAt: now,
+              lastObservedAt: now,
+              evidence: [
+                {
+                  sessionId: ids.sessionOne,
+                  sessionRef: firstSession.refHint,
+                  operation: "/agent-decide/search/priority-freshness",
+                  observedAt: now,
+                },
+              ],
+            },
+          ],
+        },
         identifiers: [
           {
             id: "identifier-1",
@@ -523,6 +555,14 @@ function createFixture() {
             provenance: "company_assertion",
             verifiedAt: now,
           },
+          {
+            id: "identifier-2",
+            kind: "anonymous_ref",
+            displayHint: "anonymous-link-42",
+            identityLevel: "pseudonymous",
+            provenance: "first_party_anonymous",
+            verifiedAt: null,
+          },
         ],
         requestObservations: [
           {
@@ -530,7 +570,7 @@ function createFixture() {
             interactionId: firstSignal.interactionId,
             clientIp: "203.0.113.42",
             method: "GET",
-            userAgent: "Release-E2E-Browser/1.0",
+            userAgent: "claude-user/1.0",
             acceptLanguage: "en-US",
             referrerOrigin: "https://customer.example.test",
             secChUa: null,
@@ -908,7 +948,7 @@ async function clickText(page, text) {
 
 async function textVisible(page, text) {
   await page.waitForFunction(
-    (target) => document.body.innerText.includes(target),
+    (target) => document.body.innerText.toLocaleLowerCase().includes(target.toLocaleLowerCase()),
     { timeout: 15_000 },
     text,
   );
@@ -942,6 +982,7 @@ function requestPath(pathname) {
 }
 
 async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
+  await mkdir(artifactDirectory, { recursive: true });
   const initialResponse = await page.goto(`${baseUrl}/`, { waitUntil: "networkidle0" });
   assert.match(
     initialResponse?.headers()["content-security-policy"] ?? "",
@@ -960,54 +1001,63 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   );
 
   await clickText(page, "Continue");
-  await textVisible(page, "Epode asks customer agents questions and records their answers.");
+  await textVisible(page, "Epode is the agent experience and analytics layer for your product.");
   assert.equal(new URL(page.url()).pathname, "/", "the dashboard must live at the root, not /app");
   assert.equal(state.authStarts, 2, "retry should reach the same OS Accounts handoff route");
   await fixtureRequest(state, requestPath("/api/dashboard"), "initial dashboard data");
+  await page.screenshot({ path: path.join(artifactDirectory, "01-home.png"), fullPage: true });
 
   await page.click("button[aria-label*='open product menu']");
   await clickText(page, "Billing API");
-  await textVisible(page, "Epode asks customer agents questions and records their answers.");
+  await textVisible(page, "Epode is the agent experience and analytics layer for your product.");
   await page.click("button[aria-label*='open product menu']");
   await clickText(page, "Search API");
-  await textVisible(page, "Epode asks customer agents questions and records their answers.");
+  await textVisible(page, "Epode is the agent experience and analytics layer for your product.");
 
-  await clickText(page, "Responses");
-  const responses = await fixtureRequest(
+  await clickText(page, "Sessions");
+  await metricVisible(page, "Sessions", "2");
+  await clickText(page, "session-42");
+  const journeyDetail = await fixtureRequest(
     state,
-    (request) =>
-      request.path.startsWith("/api/dashboard/responses?") &&
-      request.path.includes(`productId=${ids.search}`),
-    "question and answer list for Responses",
+    requestPath(`/api/dashboard/sessions/${ids.sessionOne}`),
+    "journey detail BFF route",
   );
-  assert.equal(responses.headers["x-workspace-id"], ids.workspace);
+  assert.equal(journeyDetail.headers["x-workspace-id"], ids.workspace);
   assert.equal(
-    responses.headers.host,
+    journeyDetail.headers.host,
     upstreamHost,
-    "the browser must reach responses only through the root-host BFF",
+    "the browser must reach journey detail only through the root-host BFF",
   );
   assert.ok(
-    String(responses.headers.cookie).includes(TEST_COOKIE),
-    "the responses BFF must forward the real browser session cookie",
+    String(journeyDetail.headers.cookie).includes(TEST_COOKIE),
+    "the journey detail BFF must forward the real browser session cookie",
   );
-  await textVisible(page, "Tool called");
-  await textVisible(page, "search_catalog");
-  await textVisible(page, "Find the newest indexed policy");
-  await textVisible(page, "Acme workspace");
-  await textVisible(page, "session-42");
+  await textVisible(page, "Observed activity");
+  await textVisible(page, "search");
+  await page.screenshot({ path: path.join(artifactDirectory, "05-session.png"), fullPage: true });
+  await page.click('button[aria-label="Close session detail"]');
+
+  await page.click('button[aria-label="Open customer Acme workspace"]');
+  await textVisible(page, "What we've observed");
+  assert.equal(
+    new URL(page.url()).searchParams.get("view"),
+    "customers",
+    "the sessions table customer link must open the customers view",
+  );
+  await page.click('button[aria-label="Close customer detail"]');
 
   await clickText(page, "Customers");
   await page.waitForSelector('input[aria-label="Search customers"]', { visible: true });
   await metricVisible(page, "Customers", "1");
   await metricVisible(page, "Known", "1");
   await clickText(page, "Acme workspace");
-  await textVisible(page, "What we know");
-  await textVisible(page, "Context returned to product");
-  await textVisible(page, "Freshness First");
-  await textVisible(page, "Request facts");
-  await textVisible(page, "IP 203.0.113.42");
-  await textVisible(page, "MAC addresses are not exposed by routed HTTP");
+  await textVisible(page, "What we've observed");
+  await textVisible(page, "Freshness");
+  await textVisible(page, "Request traits");
+  await textVisible(page, "Never identity");
+  await textVisible(page, "Agent network address");
   await textVisible(page, "Sessions");
+  await page.screenshot({ path: path.join(artifactDirectory, "02-customers.png"), fullPage: true });
   const customerDetail = await fixtureRequest(
     state,
     requestPath(`/api/dashboard/customers/${ids.customerOne}`),
@@ -1025,6 +1075,8 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   );
 
   await clickText(page, "Sessions");
+  await metricVisible(page, "Sessions", "2");
+  await page.screenshot({ path: path.join(artifactDirectory, "03-sessions.png"), fullPage: true });
   await clickText(page, "Filters");
   await textVisible(page, "Has response");
   await textVisible(page, "No response");
@@ -1038,24 +1090,35 @@ async function runBrowserChecks({ page, baseUrl, state, upstreamHost }) {
   );
   assert.equal(responseFilteredSessions.headers["x-workspace-id"], ids.workspace);
 
-  await clickText(page, "Configurations");
-  await clickText(page, "Setup");
+  await clickText(page, "Home");
   await textVisible(page, "Connect Search API");
-  await textVisible(page, "Install Epode once in your company's product.");
+  await textVisible(
+    page,
+    "Install Epode once to serve a guided agent experience and optional permissioned context.",
+  );
+  await textVisible(page, "Guided agent experience");
   await metricVisible(page, "Product key", "Ready");
   await metricVisible(page, "SDK connected", "Complete");
   await metricVisible(page, "Answers stored", "1");
-  await metricVisible(page, "Customers with answers", "1");
+  await metricVisible(page, "Customers with context", "1");
   await metricVisible(page, "Ready customers", "1");
   await metricVisible(page, "Answer retrievals", "2");
+  await page.screenshot({ path: path.join(artifactDirectory, "04-setup.png"), fullPage: true });
   await textVisible(page, "1. Install Epode");
   await textVisible(page, "2. Identify customers when possible");
   await textVisible(page, "3. Use answers to personalize");
   await clickText(page, "4. Verify the complete loop");
   await textVisible(
     page,
-    "Setup complete: Epode received customer answers and your product retrieved them.",
+    "Answer activation loop complete; linked Sessions still require the manual checks below.",
   );
+  await textVisible(page, "Verify linked Sessions manually · not yet verified");
+
+  await clickText(page, "Configurations");
+  await clickText(page, "Connectors");
+  await textVisible(page, "Destinations");
+  await textVisible(page, "Apps");
+  await textVisible(page, "Code");
 
   await clickText(page, "Data controls");
   await textVisible(page, "Allowed customer information");

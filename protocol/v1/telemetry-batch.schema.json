@@ -45,6 +45,33 @@
             "maxLength": 160,
             "pattern": "^[A-Za-z0-9_.:-]+$"
           },
+          "customerLinkSource": { "enum": ["product_link_click"] },
+          "requestObservation": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "clientIp": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 45,
+                "oneOf": [
+                  { "format": "ipv4" },
+                  { "format": "ipv6" }
+                ]
+              },
+              "method": { "type": "string", "pattern": "^[A-Za-z]{1,16}$" },
+              "userAgent": { "type": "string", "minLength": 1, "maxLength": 512 },
+              "acceptLanguage": { "type": "string", "minLength": 1, "maxLength": 256 },
+              "referrerOrigin": {
+                "type": "string",
+                "pattern": "^https?://[^/?#@]+$",
+                "maxLength": 300
+              },
+              "secChUa": { "type": "string", "minLength": 1, "maxLength": 512 },
+              "secChUaPlatform": { "type": "string", "minLength": 1, "maxLength": 80 },
+              "secChUaMobile": { "enum": ["?0", "?1"] }
+            }
+          },
           "classification": { "enum": ["unclassified", "confirmed"] },
           "confirmationMethod": { "enum": ["mcp"] },
           "runtimeHint": { "type": "string", "minLength": 1, "maxLength": 200 },
@@ -56,8 +83,106 @@
             "pattern": "^[A-Za-z0-9_.:-]+$"
           },
           "sessionSource": { "enum": ["customer", "mcp", "continuation"] },
-          "occurredAt": { "type": "string", "format": "date-time" }
-        }
+          "occurredAt": { "type": "string", "format": "date-time" },
+          "experience": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "channel": { "enum": ["faceted_html", "native_graph"] },
+              "stage": {
+                "enum": [
+                  "decision_input_required",
+                  "express_more_or_decide",
+                  "ready_to_decide",
+                  "decision_support",
+                  "express_more_or_evaluate",
+                  "ready_to_evaluate",
+                  "item",
+                  "product"
+                ]
+              },
+              "needState": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "expressedDimensions": {
+                    "type": "array",
+                    "maxItems": 24,
+                    "items": { "type": "string", "minLength": 1, "maxLength": 80 }
+                  },
+                  "unknownDimensions": {
+                    "type": "array",
+                    "maxItems": 24,
+                    "items": { "type": "string", "minLength": 1, "maxLength": 80 }
+                  }
+                }
+              },
+              "decision": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "exactMatchCount": { "type": "integer", "minimum": 0, "maximum": 100000 },
+                  "nearMissCount": { "type": "integer", "minimum": 0, "maximum": 100000 },
+                  "violatedHardConstraints": {
+                    "type": "array",
+                    "maxItems": 40,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["dimension"],
+                      "properties": {
+                        "dimension": { "type": "string", "minLength": 1, "maxLength": 80 },
+                        "requested": { "type": "string", "maxLength": 120 },
+                        "actual": { "type": "string", "maxLength": 120 },
+                        "itemId": { "type": "string", "maxLength": 120 }
+                      }
+                    }
+                  },
+                  "counterfactuals": {
+                    "type": "array",
+                    "maxItems": 8,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["change"],
+                      "properties": {
+                        "change": { "type": "string", "minLength": 1, "maxLength": 160 },
+                        "delta": { "type": "number" },
+                        "itemId": { "type": "string", "maxLength": 120 }
+                      }
+                    }
+                  }
+                }
+              },
+              "search": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "searchId": { "type": "string", "minLength": 1, "maxLength": 120 },
+                  "resultPosition": { "type": "integer", "minimum": 1, "maximum": 100000 }
+                }
+              }
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "customerLinkSource": { "const": "product_link_click" }
+              },
+              "required": ["customerLinkSource"]
+            },
+            "then": {
+              "required": ["anonymousRef", "sessionRef"],
+              "properties": {
+                "anonymousRef": {},
+                "sessionRef": {},
+                "surface": { "const": "http_html" }
+              }
+            }
+          }
+        ]
       }
     }
   }

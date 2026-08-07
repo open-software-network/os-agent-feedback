@@ -3130,7 +3130,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Customer identity, evidence, context returned to the product, linked personalization use, sessions, and scoped consent",
+            "description": "Customer identity plus an evidence-backed profile derived from retained experience-graph journeys",
             "content": {
               "application/json": {
                 "schema": {
@@ -6788,7 +6788,7 @@
         },
         "responses": {
           "200": {
-            "description": "Question and permission action selected for the interaction",
+            "description": "Submit-ready customer context contract for the interaction",
             "content": {
               "application/json": {
                 "schema": {
@@ -6853,7 +6853,7 @@
         "operationId": "enrichment_request_inspection_handler",
         "responses": {
           "200": {
-            "description": "Current enrichment request stage and safe user-facing question",
+            "description": "Current enrichment request stage and submission contract",
             "content": {
               "application/json": {
                 "schema": {
@@ -6908,7 +6908,7 @@
         },
         "responses": {
           "200": {
-            "description": "Enrichment permission decision recorded idempotently",
+            "description": "Explicit enrichment opt-out or compatibility approval recorded idempotently",
             "content": {
               "application/json": {
                 "schema": {
@@ -7003,7 +7003,7 @@
             }
           },
           "403": {
-            "description": "Customer context sharing is not approved",
+            "description": "Customer context sharing was declined or is inactive",
             "content": {
               "application/json": {
                 "schema": {
@@ -8031,6 +8031,28 @@
   },
   "components": {
     "schemas": {
+      "AgentVendorInsight": {
+        "type": "object",
+        "description": "Unverified runtime evidence grouped into assistant-vendor families.",
+        "required": [
+          "vendor",
+          "interactions",
+          "sessions"
+        ],
+        "properties": {
+          "interactions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sessions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "vendor": {
+            "type": "string"
+          }
+        }
+      },
       "ApiErrorEnvelope": {
         "type": "object",
         "required": [
@@ -8800,6 +8822,12 @@
           }
         }
       },
+      "CustomerLinkSource": {
+        "type": "string",
+        "enum": [
+          "product_link_click"
+        ]
+      },
       "CustomerRequestObservation": {
         "type": "object",
         "required": [
@@ -9099,9 +9127,6 @@
         "type": "object",
         "required": [
           "id",
-          "kind",
-          "parentCustomerId",
-          "memberCount",
           "displayName",
           "identityLevel",
           "identityConfidence",
@@ -9111,6 +9136,7 @@
           "lastActivityAt",
           "outcomeHealth",
           "signalCount",
+          "traitCount",
           "sessionCount",
           "activeNeedCount",
           "consentState"
@@ -9146,26 +9172,12 @@
           "identityLevel": {
             "type": "string"
           },
-          "kind": {
-            "type": "string"
-          },
           "lastActivityAt": {
             "type": "string",
             "format": "date-time"
           },
-          "memberCount": {
-            "type": "integer",
-            "format": "int64"
-          },
           "outcomeHealth": {
             "type": "string"
-          },
-          "parentCustomerId": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
           },
           "segments": {
             "type": "array",
@@ -9178,6 +9190,10 @@
             "format": "int64"
           },
           "signalCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "traitCount": {
             "type": "integer",
             "format": "int64"
           },
@@ -9298,6 +9314,7 @@
         "type": "object",
         "required": [
           "customer",
+          "observedProfile",
           "identifiers",
           "requestObservations",
           "signals",
@@ -9337,6 +9354,9 @@
             "items": {
               "$ref": "#/components/schemas/CustomerIdentifier"
             }
+          },
+          "observedProfile": {
+            "$ref": "#/components/schemas/ObservedCustomerProfile"
           },
           "requestObservations": {
             "type": "array",
@@ -10767,6 +10787,12 @@
           "key": {
             "type": "string"
           },
+          "questionType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "targetedAdvertisingSafe": {
             "type": "boolean"
           },
@@ -10873,6 +10899,74 @@
                 "$ref": "#/components/schemas/EnrichmentAnswerAction"
               }
             ]
+          }
+        }
+      },
+      "EnrichmentConstraintCatalog": {
+        "type": "object",
+        "required": [
+          "version",
+          "hash"
+        ],
+        "properties": {
+          "hash": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "EnrichmentConstraintField": {
+        "type": "object",
+        "required": [
+          "key",
+          "type",
+          "allowedValues"
+        ],
+        "properties": {
+          "allowedValues": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "key": {
+            "type": "string"
+          },
+          "questionType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "EnrichmentConstraintRetention": {
+        "type": "object",
+        "required": [
+          "rememberAllowed",
+          "rememberSelected",
+          "rememberedMaxDays",
+          "unrememberedExpiresAt"
+        ],
+        "properties": {
+          "rememberAllowed": {
+            "type": "boolean"
+          },
+          "rememberSelected": {
+            "type": "boolean"
+          },
+          "rememberedMaxDays": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "unrememberedExpiresAt": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -10995,6 +11089,36 @@
           }
         }
       },
+      "EnrichmentRequestConstraints": {
+        "type": "object",
+        "required": [
+          "handlerOwner",
+          "purpose",
+          "catalog",
+          "allowedFields",
+          "retention"
+        ],
+        "properties": {
+          "allowedFields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EnrichmentConstraintField"
+            }
+          },
+          "catalog": {
+            "$ref": "#/components/schemas/EnrichmentConstraintCatalog"
+          },
+          "handlerOwner": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "retention": {
+            "$ref": "#/components/schemas/EnrichmentConstraintRetention"
+          }
+        }
+      },
       "EnrichmentRequestInput": {
         "type": "object",
         "required": [
@@ -11037,6 +11161,12 @@
             "items": {
               "type": "string"
             }
+          },
+          "handlerOwner": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "interactionId": {
             "type": "string",
@@ -11102,6 +11232,7 @@
           "purpose",
           "surface",
           "identityLevel",
+          "constraints",
           "stageInstruction",
           "question",
           "answerInstruction",
@@ -11125,6 +11256,9 @@
                 "$ref": "#/components/schemas/EnrichmentConsentAction"
               }
             ]
+          },
+          "constraints": {
+            "$ref": "#/components/schemas/EnrichmentRequestConstraints"
           },
           "expiresAt": {
             "type": "string",
@@ -11181,6 +11315,191 @@
             "$ref": "#/components/schemas/ProductEnvironment"
           }
         }
+      },
+      "ExperienceCounterfactualInput": {
+        "type": "object",
+        "required": [
+          "change"
+        ],
+        "properties": {
+          "change": {
+            "type": "string"
+          },
+          "delta": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "itemId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExperienceDecisionInput": {
+        "type": "object",
+        "properties": {
+          "counterfactuals": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ExperienceCounterfactualInput"
+            }
+          },
+          "exactMatchCount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "nearMissCount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "violatedHardConstraints": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ExperienceViolationInput"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExperienceNeedStateInput": {
+        "type": "object",
+        "properties": {
+          "expressedDimensions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "unknownDimensions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExperienceSearchInput": {
+        "type": "object",
+        "properties": {
+          "resultPosition": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "searchId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExperienceTelemetryInput": {
+        "type": "object",
+        "description": "Aggregate-safe experience-graph hop evidence. Dimension keys and\ndecision-quality numbers only — never free-text customer or agent values.",
+        "properties": {
+          "channel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "decision": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExperienceDecisionInput"
+              }
+            ]
+          },
+          "needState": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExperienceNeedStateInput"
+              }
+            ]
+          },
+          "search": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExperienceSearchInput"
+              }
+            ]
+          },
+          "stage": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExperienceViolationInput": {
+        "type": "object",
+        "required": [
+          "dimension"
+        ],
+        "properties": {
+          "actual": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dimension": {
+            "type": "string"
+          },
+          "itemId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requested": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
       },
       "FeatureFacets": {
         "type": "object",
@@ -11787,6 +12106,41 @@
           }
         }
       },
+      "HandoffInsights": {
+        "type": "object",
+        "description": "Agent→human handoff: `product_link_click` navigations and their rate across\nproven sessions.",
+        "required": [
+          "handoffClicks",
+          "sessionsWithHandoff",
+          "sessions",
+          "handoffRate",
+          "landingOperations"
+        ],
+        "properties": {
+          "handoffClicks": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "handoffRate": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "landingOperations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "sessions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sessionsWithHandoff": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "HealthResponse": {
         "type": "object",
         "required": [
@@ -11853,10 +12207,34 @@
           "impacts",
           "findingKinds",
           "topics",
-          "blockingTopics"
+          "blockingTopics",
+          "lostDemand",
+          "journeyFlow",
+          "handoff",
+          "signalOutcomes",
+          "agentVendors",
+          "rankPositions",
+          "unknownDimensions",
+          "unansweredQuestions",
+          "journeyFunnel",
+          "trafficClasses",
+          "channels",
+          "offGraphAttempts"
         ],
         "properties": {
+          "agentVendors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentVendorInsight"
+            }
+          },
           "blockingTopics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "channels": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/InsightCount"
@@ -11892,11 +12270,26 @@
               "$ref": "#/components/schemas/InsightCount"
             }
           },
+          "handoff": {
+            "$ref": "#/components/schemas/HandoffInsights"
+          },
           "impacts": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/InsightCount"
             }
+          },
+          "journeyFlow": {
+            "$ref": "#/components/schemas/JourneyFlowInsights"
+          },
+          "journeyFunnel": {
+            "$ref": "#/components/schemas/JourneyFunnelInsights"
+          },
+          "lostDemand": {
+            "$ref": "#/components/schemas/LostDemandInsights"
+          },
+          "offGraphAttempts": {
+            "$ref": "#/components/schemas/OffGraphAttemptInsights"
           },
           "opportunities": {
             "type": "integer",
@@ -11940,6 +12333,12 @@
             "type": "integer",
             "format": "int64"
           },
+          "rankPositions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
           "recentConfirmedInteractions": {
             "type": "integer",
             "format": "int64"
@@ -11968,6 +12367,12 @@
             "type": "integer",
             "format": "int64"
           },
+          "signalOutcomes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SignalOutcomeInsight"
+            }
+          },
           "surfaces": {
             "type": "array",
             "items": {
@@ -11981,6 +12386,24 @@
             }
           },
           "topics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "trafficClasses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TrafficClassInsight"
+            }
+          },
+          "unansweredQuestions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "unknownDimensions": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/InsightCount"
@@ -12051,6 +12474,16 @@
               "null"
             ]
           },
+          "customerLinkSource": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CustomerLinkSource"
+              }
+            ]
+          },
           "customerRef": {
             "type": [
               "string",
@@ -12063,6 +12496,16 @@
               "null"
             ],
             "format": "int64"
+          },
+          "experience": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExperienceTelemetryInput"
+              }
+            ]
           },
           "interactionId": {
             "type": "string",
@@ -12077,6 +12520,16 @@
           },
           "operation": {
             "type": "string"
+          },
+          "requestObservation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CustomerRequestObservationInput"
+              }
+            ]
           },
           "runtimeHint": {
             "type": [
@@ -12127,6 +12580,139 @@
           }
         },
         "additionalProperties": false
+      },
+      "JourneyEdgeInsight": {
+        "type": "object",
+        "required": [
+          "fromOperation",
+          "toOperation",
+          "traversals"
+        ],
+        "properties": {
+          "fromOperation": {
+            "type": "string"
+          },
+          "toOperation": {
+            "type": "string"
+          },
+          "traversals": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "JourneyFlowInsights": {
+        "type": "object",
+        "description": "Session-proven operation transitions and where journeys end.",
+        "required": [
+          "edges",
+          "exitOperations"
+        ],
+        "properties": {
+          "edges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JourneyEdgeInsight"
+            }
+          },
+          "exitOperations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          }
+        }
+      },
+      "JourneyFunnelInsights": {
+        "type": "object",
+        "description": "Discovery→following funnel over agent-evidenced sessions. Stages are\nmonotonic: a session counts in a stage only if it counts in every prior\nstage, so each step reads as \"of those, how many went further\".",
+        "required": [
+          "arrived",
+          "enteredGraph",
+          "expressedNeeds",
+          "reachedDecision",
+          "handoffFollowed",
+          "tokenedFetchRate"
+        ],
+        "properties": {
+          "arrived": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sessions with at least one agent-evidenced hop in the window."
+          },
+          "enteredGraph": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, sessions with a tokened graph fetch beyond the root/guide."
+          },
+          "expressedNeeds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, sessions where a hop expressed or admitted a need dimension."
+          },
+          "handoffFollowed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, sessions where a human followed a product link."
+          },
+          "reachedDecision": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, sessions that reached decision evidence."
+          },
+          "tokenedFetchRate": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Integer percent of arrived sessions that entered the graph — whether\nthe store's value-gating earns the need-carrying second fetch."
+          }
+        }
+      },
+      "LostDemandInsights": {
+        "type": "object",
+        "description": "What agents asked for and could not get: stated-demand aggregates from\nexperience-graph decision evidence.",
+        "required": [
+          "decisionInteractions",
+          "zeroMatchDecisions",
+          "expressedDimensions",
+          "violatedDimensions",
+          "counterfactualChanges",
+          "medianCounterfactualDelta"
+        ],
+        "properties": {
+          "counterfactualChanges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "decisionInteractions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "expressedDimensions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "medianCounterfactualDelta": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "violatedDimensions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "zeroMatchDecisions": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
       },
       "McpDiscovery": {
         "type": "object",
@@ -12217,6 +12803,152 @@
           },
           "targetGroupKey": {
             "type": "string"
+          }
+        }
+      },
+      "ObservedCustomerFact": {
+        "type": "object",
+        "required": [
+          "key",
+          "domain",
+          "label",
+          "value",
+          "kind",
+          "strength",
+          "status",
+          "sessionCount",
+          "observationCount",
+          "firstObservedAt",
+          "lastObservedAt",
+          "evidence"
+        ],
+        "properties": {
+          "domain": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ObservedCustomerFactEvidence"
+            }
+          },
+          "firstObservedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "key": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "lastObservedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "observationCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sessionCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "status": {
+            "type": "string"
+          },
+          "strength": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "ObservedCustomerFactEvidence": {
+        "type": "object",
+        "required": [
+          "sessionId",
+          "sessionRef",
+          "operation",
+          "observedAt"
+        ],
+        "properties": {
+          "observedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "operation": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sessionRef": {
+            "type": "string"
+          }
+        }
+      },
+      "ObservedCustomerProfile": {
+        "type": "object",
+        "required": [
+          "sessionCount",
+          "activityCount",
+          "truncated",
+          "lastObservedAt",
+          "facts"
+        ],
+        "properties": {
+          "activityCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "facts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ObservedCustomerFact"
+            }
+          },
+          "lastObservedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "sessionCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "OffGraphAttemptInsights": {
+        "type": "object",
+        "description": "Agent-evidenced requests that fell off the graph: fabricated URLs (404)\nand malformed or premature graph fetches (400/422 on graph operations).",
+        "required": [
+          "attempts",
+          "operations"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "operations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
           }
         }
       },
@@ -13223,6 +13955,33 @@
           }
         }
       },
+      "SignalOutcomeInsight": {
+        "type": "object",
+        "description": "Which customer signals were cited by personalization decisions and what\noutcomes followed.",
+        "required": [
+          "signal",
+          "decisions",
+          "outcomes",
+          "conversions"
+        ],
+        "properties": {
+          "conversions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "decisions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "outcomes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "signal": {
+            "type": "string"
+          }
+        }
+      },
       "TeamInvitation": {
         "type": "object",
         "required": [
@@ -13413,6 +14172,28 @@
           }
         },
         "additionalProperties": false
+      },
+      "TrafficClassInsight": {
+        "type": "object",
+        "description": "One behavioral traffic class with its session and interaction volume.",
+        "required": [
+          "class",
+          "sessions",
+          "interactions"
+        ],
+        "properties": {
+          "class": {
+            "type": "string"
+          },
+          "interactions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sessions": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
       },
       "TransferredResponse": {
         "type": "object",

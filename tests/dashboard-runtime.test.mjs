@@ -95,6 +95,7 @@ const dashboard = {
       operation: "search",
       statusCode: 200,
       durationMs: 190,
+      customerId: "customer-resolved-3",
       customerRef: null,
       classification: "unclassified",
       confirmationMethod: null,
@@ -205,6 +206,69 @@ const dashboard = {
       { name: "document_access", count: 1 },
     ],
     blockingTopics: [{ name: "document_access", count: 1 }],
+    lostDemand: {
+      decisionInteractions: 4,
+      zeroMatchDecisions: 1,
+      expressedDimensions: [
+        { name: "budget", count: 3 },
+        { name: "color", count: 2 },
+      ],
+      violatedDimensions: [
+        { name: "budget", count: 2 },
+        { name: "evidence:glare_control", count: 1 },
+      ],
+      counterfactualChanges: [{ name: "raise_budget_from_150_to_164", count: 1 }],
+      medianCounterfactualDelta: 14,
+    },
+    journeyFlow: {
+      edges: [
+        {
+          fromOperation: "/agent-negotiate/lamp",
+          toOperation: "/agent-decide/lamp",
+          traversals: 3,
+        },
+      ],
+      exitOperations: [{ name: "/agent-decide/lamp", count: 2 }],
+    },
+    handoff: {
+      handoffClicks: 2,
+      sessionsWithHandoff: 1,
+      sessions: 3,
+      handoffRate: 33,
+      landingOperations: [{ name: "/product/feeder", count: 2 }],
+    },
+    signalOutcomes: [{ signal: "constraint/budget", decisions: 3, outcomes: 2, conversions: 1 }],
+    agentVendors: [
+      { vendor: "claude", interactions: 5, sessions: 2 },
+      { vendor: "openai", interactions: 2, sessions: 1 },
+    ],
+    rankPositions: [
+      { name: "1", count: 4 },
+      { name: "2", count: 1 },
+    ],
+    unknownDimensions: [{ name: "commute", count: 2 }],
+    unansweredQuestions: [{ name: "budget · declined", count: 1 }],
+    journeyFunnel: {
+      arrived: 6,
+      enteredGraph: 4,
+      expressedNeeds: 3,
+      reachedDecision: 2,
+      handoffFollowed: 1,
+      tokenedFetchRate: 67,
+    },
+    trafficClasses: [
+      { class: "declared_agent", sessions: 4, interactions: 18 },
+      { class: "suspected_cloud_agent", sessions: 1, interactions: 3 },
+      { class: "human", sessions: 2, interactions: 5 },
+    ],
+    channels: [
+      { name: "faceted_html", count: 5 },
+      { name: "native_graph", count: 3 },
+    ],
+    offGraphAttempts: {
+      attempts: 2,
+      operations: [{ name: "/agent-item/self-invented", count: 2 }],
+    },
   },
   listState: {
     interactionsTotal: 3,
@@ -233,7 +297,15 @@ async function loadDashboard({
     },
   };
   const elements = new Map([
-    ["#page", { innerHTML: "", setAttribute() {}, querySelector: () => heading }],
+    [
+      "#page",
+      {
+        innerHTML: "",
+        setAttribute() {},
+        querySelector: () => heading,
+        querySelectorAll: () => [],
+      },
+    ],
     [
       "#notice",
       {
@@ -324,7 +396,7 @@ test("feedback, interaction, and session explorers render and preserve linked co
   await handlers.click({ target: { closest: () => button({ report: "report-1" }) } });
   assert.equal(heading.focused, true);
   assert.match(page.innerHTML, /Linked product context/);
-  assert.match(page.innerHTML, /Open session/);
+  assert.match(page.innerHTML, /Open journey/);
 
   await handlers.click({ target: { closest: () => button({ openSession: "session-1" }) } });
   assert.match(page.innerHTML, /Interaction journey/);
@@ -334,6 +406,61 @@ test("feedback, interaction, and session explorers render and preserve linked co
   await handlers.click({ target: { closest: () => button({ interaction: "interaction-2" }) } });
   assert.match(page.innerHTML, /What proves this interaction/);
   assert.match(page.innerHTML, /Open feedback/);
+});
+
+test("interaction detail displays resolved customer linkage when the raw customer ref is absent", async () => {
+  const { handlers, page } = await loadDashboard();
+  await handlers.click({ target: { closest: () => button({ view: "interactions" }) } });
+  await handlers.click({ target: { closest: () => button({ interaction: "interaction-3" }) } });
+  assert.match(page.innerHTML, /customer-resolved-3/);
+  assert.doesNotMatch(page.innerHTML, /<dt>Customer<\/dt><dd>Not linked<\/dd>/);
+});
+
+test("product customer refs remain the display fallback when resolved IDs coexist", async () => {
+  const state = structuredClone(dashboard);
+  state.sessions[0].customerId = "customer-internal-session";
+  state.sessions[0].customerRef = "acct_42";
+  state.interactions[1].customerId = "customer-internal-interaction";
+  const { handlers, page } = await loadDashboard({
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => structuredClone(state) }),
+  });
+
+  await handlers.click({ target: { closest: () => button({ view: "sessions" }) } });
+  assert.match(page.innerHTML, /acct_42/);
+  assert.doesNotMatch(page.innerHTML, /customer-internal-session/);
+  await handlers.click({ target: { closest: () => button({ session: "session-1" }) } });
+  assert.match(page.innerHTML, /<dt>Customer<\/dt><dd>acct_42<\/dd>/);
+  assert.doesNotMatch(page.innerHTML, /customer-internal-session/);
+
+  await handlers.click({ target: { closest: () => button({ interaction: "interaction-2" }) } });
+  assert.match(page.innerHTML, /<dt>Customer<\/dt><dd>acct_42<\/dd>/);
+  assert.doesNotMatch(page.innerHTML, /customer-internal-interaction/);
+});
+
+test("session summary displays resolved customer linkage outside the interaction window", async () => {
+  const state = structuredClone(dashboard);
+  state.sessions.push({
+    id: "session-outside-window",
+    source: "mcp",
+    refHint: "sess_resolved",
+    startedAt: iso(-40),
+    lastSeenAt: iso(-30),
+    interactionCount: 2,
+    reportCount: 0,
+    customerId: "customer-resolved-session",
+    customerDisplayName: "Anonymous customer",
+    customerRef: null,
+  });
+  const { handlers, page } = await loadDashboard({
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => structuredClone(state) }),
+  });
+  await handlers.click({ target: { closest: () => button({ view: "sessions" }) } });
+  assert.match(page.innerHTML, /Anonymous customer/);
+  await handlers.click({
+    target: { closest: () => button({ session: "session-outside-window" }) },
+  });
+  assert.match(page.innerHTML, /<dt>Customer<\/dt><dd>Anonymous customer<\/dd>/);
+  assert.doesNotMatch(page.innerHTML, /<dt>Customer<\/dt><dd>Not linked<\/dd>/);
 });
 
 test("the latest team navigation wins when dashboard responses arrive out of order", async () => {
@@ -722,4 +849,125 @@ test("the product root opens a Home overview with recent feedback and usage", as
   assert.match(page.innerHTML, /Top operations/);
   assert.match(page.innerHTML, /Where to look next/);
   assert.match(page.innerHTML, /The document could not be opened/);
+});
+
+test("the Home overview surfaces lost demand, journey flow, handoff, context ROI, agent mix, rank, and unknowns", async () => {
+  const { page } = await loadDashboard({ href: "https://app.epode.ai/" });
+  assert.doesNotMatch(page.innerHTML, /style="width/);
+  assert.match(page.innerHTML, /data-bar-width="\d+"/);
+  assert.match(page.innerHTML, /LOST DEMAND/);
+  assert.match(page.innerHTML, /What agents asked for and could not get/);
+  assert.match(page.innerHTML, /Zero exact matches \(25%\)/);
+  assert.match(page.innerHTML, /Dealbreaker dimensions/);
+  assert.match(page.innerHTML, /evidence:glare_control/);
+  assert.match(page.innerHTML, /Cheapest fixes/);
+  assert.match(page.innerHTML, /raise_budget_from_150_to_164/);
+  assert.match(page.innerHTML, /JOURNEY FLOW/);
+  assert.match(page.innerHTML, /\/agent-negotiate\/lamp → \/agent-decide\/lamp/);
+  assert.match(page.innerHTML, /Where journeys end/);
+  assert.match(page.innerHTML, /HANDOFF/);
+  assert.match(page.innerHTML, /Sessions with a handoff \(33%\)/);
+  assert.match(page.innerHTML, /Handoff landing pages/);
+  assert.match(page.innerHTML, /\/product\/feeder/);
+  const handoffFunnel =
+    page.innerHTML.match(
+      /<section class="funnel"><div><p class="eyebrow">HANDOFF<\/p>[\s\S]*?<\/section>/,
+    )?.[0] ?? "";
+  assert.match(handoffFunnel, /Product link clicks/);
+  assert.doesNotMatch(handoffFunnel, /Handoff landing pages/);
+  assert.match(page.innerHTML, /CONTEXT ROI/);
+  assert.match(page.innerHTML, /constraint\/budget/);
+  assert.match(page.innerHTML, /3 decisions · 2 outcomes · 1 conversion</);
+  assert.match(page.innerHTML, /AGENT MIX/);
+  assert.match(page.innerHTML, /Claude/);
+  assert.match(page.innerHTML, /OpenAI/);
+  assert.match(page.innerHTML, /Result position views/);
+  assert.match(page.innerHTML, /Position 1/);
+  assert.match(page.innerHTML, /Unknown dimensions/);
+  assert.match(page.innerHTML, /Unanswered questions/);
+  assert.match(page.innerHTML, /budget · declined/);
+});
+
+test("the Home overview surfaces the journey-reality funnel, traffic classes, channels, and off-graph attempts", async () => {
+  const { page } = await loadDashboard({ href: "https://app.epode.ai/" });
+  assert.match(page.innerHTML, /JOURNEY REALITY/);
+  assert.match(page.innerHTML, /How agents actually shop/);
+  const journeyFunnel =
+    page.innerHTML.match(
+      /<section class="funnel"><div><p class="eyebrow">JOURNEY REALITY<\/p>[\s\S]*?<\/section>/,
+    )?.[0] ?? "";
+  for (const label of [
+    "Arrived",
+    "Entered the graph",
+    "Expressed needs",
+    "Reached a decision",
+    "Handoff followed",
+  ]) {
+    assert.match(journeyFunnel, new RegExp(label));
+  }
+  // The tokened-fetch rate is called out on the funnel itself.
+  assert.match(journeyFunnel, /Tokened-fetch rate 67%/);
+  // Class first, vendor breakdown within declared agent traffic.
+  assert.match(page.innerHTML, /Traffic by class and assistant runtime/);
+  assert.match(page.innerHTML, /Declared agent/);
+  assert.match(page.innerHTML, /Suspected cloud agent/);
+  assert.match(page.innerHTML, /4 sessions · 18 interactions/);
+  assert.match(page.innerHTML, /Within declared agent traffic/);
+  assert.match(page.innerHTML, /behavioral upper bound/);
+  // Channel names stay raw machine labels.
+  assert.match(page.innerHTML, /CHANNELS/);
+  assert.match(page.innerHTML, /faceted_html/);
+  assert.match(page.innerHTML, /native_graph/);
+  assert.doesNotMatch(page.innerHTML, /Faceted_html/);
+  assert.match(page.innerHTML, /OFF-GRAPH ATTEMPTS/);
+  assert.match(page.innerHTML, /2 attempts/);
+  assert.match(page.innerHTML, /\/agent-item\/self-invented/);
+});
+
+test("proportion bars use CSP-safe data attributes instead of inline width styles", () => {
+  assert.doesNotMatch(source, /style="width/);
+  assert.match(source, /data-bar-width/);
+  assert.match(source, /page\.querySelectorAll\?\.\("\[data-bar-width\]"\)/);
+});
+
+test("the Home overview renders safe empty states when new insight groups are absent", async () => {
+  const { page } = await loadDashboard({
+    href: "https://app.epode.ai/",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        const legacy = structuredClone(dashboard);
+        delete legacy.insights.lostDemand;
+        delete legacy.insights.journeyFlow;
+        delete legacy.insights.handoff;
+        delete legacy.insights.signalOutcomes;
+        delete legacy.insights.agentVendors;
+        delete legacy.insights.rankPositions;
+        delete legacy.insights.unknownDimensions;
+        delete legacy.insights.unansweredQuestions;
+        delete legacy.insights.journeyFunnel;
+        delete legacy.insights.trafficClasses;
+        delete legacy.insights.channels;
+        delete legacy.insights.offGraphAttempts;
+        return legacy;
+      },
+    }),
+  });
+  assert.match(page.innerHTML, /LOST DEMAND/);
+  assert.match(page.innerHTML, /No expressed dimensions yet\./);
+  assert.match(page.innerHTML, /Transitions appear when journeys carry a session reference\./);
+  assert.match(page.innerHTML, /No personalization decisions cited customer signals yet\./);
+  assert.match(page.innerHTML, /Runtime evidence has not named an assistant yet\./);
+  assert.match(page.innerHTML, /JOURNEY REALITY/);
+  assert.match(page.innerHTML, /Tokened-fetch rate 0%/);
+  assert.match(page.innerHTML, /Traffic classes appear when proven sessions are recorded\./);
+  assert.match(
+    page.innerHTML,
+    /Channels appear when graph hops carry a channel-tagged experience payload\./,
+  );
+  assert.match(
+    page.innerHTML,
+    /No fabricated URLs or malformed graph fetches from agent traffic\./,
+  );
 });

@@ -7,6 +7,7 @@ import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { useEffect, useMemo, useState } from "react";
 
 import { DetailRail, DetailWorkspace } from "@/components/dashboard/detail-rail";
+import { identityLabel } from "@/components/dashboard/intelligence-badges";
 import { MetricStrip } from "@/components/dashboard/metric-strip";
 import { EmptyState, ErrorState, NativeSelect } from "@/components/dashboard/view-primitives";
 import { Badge } from "@/components/ui/badge";
@@ -188,6 +189,7 @@ export function SessionsView({
   selectSession,
   openFeedback,
   openInteraction,
+  openCustomer,
   refresh,
 }: {
   data: DashboardData;
@@ -195,6 +197,7 @@ export function SessionsView({
   selectSession: (sessionId: string | null) => void;
   openFeedback: (reportId: string) => void;
   openInteraction: (interactionId: string) => void;
+  openCustomer: (customerId: string) => void;
   /** @deprecated Pagination is now owned by the server-backed list query. */
   loadMore?: () => void;
   refresh: () => Promise<unknown>;
@@ -298,25 +301,28 @@ export function SessionsView({
           <SessionInspector
             requestedId={selectedSessionId}
             detail={detail.data}
+            summary={sessionRows.find((entry) => entry.id === selectedSessionId)}
             error={detail.isError ? detail.error : null}
             close={() => selectSession(null)}
             retry={() => detail.refetch()}
             openFeedback={openFeedback}
             openInteraction={openInteraction}
+            openCustomer={openCustomer}
           />
         ) : null
       }
     >
       <MetricStrip
         items={[
-          { label: "Proven sessions", value: rollup.sessions.toLocaleString() },
+          { label: "Sessions", value: rollup.sessions.toLocaleString() },
           { label: "Interactions", value: rollup.interactions.toLocaleString() },
           { label: "Multi-step", value: rollup.multiStepSessions.toLocaleString() },
           { label: "Average", value: rollup.averageInteractions.toFixed(1) },
         ]}
       />
       <p className="border-b bg-muted/25 px-4 py-2 text-xs text-muted-foreground">
-        Sessions exist only when the product supplies a stable reference.
+        Sessions appear when the product supplies a stable session reference. Epode never groups
+        activity by timing, IP address, or user-agent.
       </p>
       <div className="flex shrink-0 flex-col gap-2 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <InputGroup className="w-full bg-background sm:w-80 sm:flex-none">
@@ -327,7 +333,7 @@ export function SessionsView({
             aria-label="Search sessions"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search session, customer, or operation"
+            placeholder="Search session, customer, or activity"
           />
         </InputGroup>
         <div className="flex shrink-0 items-center gap-2">
@@ -406,6 +412,7 @@ export function SessionsView({
                   session={session}
                   selected={selectedSessionId === session.id}
                   onOpen={() => selectSession(session.id)}
+                  openCustomer={openCustomer}
                 />
               ))}
             </TableBody>
@@ -414,13 +421,11 @@ export function SessionsView({
           <div className="h-full bg-canvas p-4">
             <EmptyState
               title={
-                data.listState.sessionsTotal === 0
-                  ? "No proven sessions yet"
-                  : "No matching sessions"
+                data.listState.sessionsTotal === 0 ? "No sessions yet" : "No matching sessions"
               }
               description={
                 data.listState.sessionsTotal === 0
-                  ? "Sessions appear only after the product supplies a stable application-level reference."
+                  ? "Sessions appear after a customer agent starts a product-guided experience with a stable session reference."
                   : "Clear the search and constraints or choose a different session view."
               }
               action={
@@ -497,7 +502,7 @@ function SessionFilters({
       </PopoverTrigger>
       <PopoverContent align="end" className="w-[min(22rem,calc(100vw-2rem))]">
         <PopoverHeader>
-          <PopoverTitle>Filter proven sessions</PopoverTitle>
+          <PopoverTitle>Filter sessions</PopoverTitle>
         </PopoverHeader>
         <div className="grid gap-3">
           <fieldset className="grid gap-1.5">
@@ -622,11 +627,15 @@ function SessionRow({
   session,
   selected,
   onOpen,
+  openCustomer,
 }: {
   session: EnrichedSessionSummary;
   selected: boolean;
   onOpen: () => void;
+  openCustomer: (customerId: string) => void;
 }) {
+  const customerName = session.customerDisplayName ?? session.customerRef ?? "Unresolved actor";
+
   return (
     <TableRow
       data-state={selected ? "selected" : undefined}
@@ -658,11 +667,23 @@ function SessionRow({
         </p>
       </TableCell>
       <TableCell className="overflow-hidden">
-        <p className="truncate text-xs font-medium">
-          {session.customerDisplayName ?? session.customerRef ?? "Unresolved actor"}
-        </p>
+        {session.customerId ? (
+          <Button
+            variant="link"
+            className="h-auto max-w-full justify-start truncate p-0 text-xs font-medium"
+            aria-label={`Open customer ${customerName}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              openCustomer(session.customerId as string);
+            }}
+          >
+            {customerName}
+          </Button>
+        ) : (
+          <p className="truncate text-xs font-medium">{customerName}</p>
+        )}
         <p className="mt-1 truncate text-xs text-muted-foreground">
-          {session.identityLevel ? titleCase(session.identityLevel) : "Identity not resolved"}
+          {session.identityLevel ? identityLabel(session.identityLevel) : "Identity not resolved"}
         </p>
       </TableCell>
       <TableCell className="text-xs">{session.interactionCount}</TableCell>
@@ -679,19 +700,23 @@ function SessionRow({
 function SessionInspector({
   requestedId,
   detail,
+  summary,
   error,
   close,
   retry,
   openFeedback,
   openInteraction,
+  openCustomer,
 }: {
   requestedId: string;
   detail?: DashboardSessionDetail;
+  summary?: EnrichedSessionSummary;
   error: Error | null;
   close: () => void;
   retry: () => Promise<unknown>;
   openFeedback: (reportId: string) => void;
   openInteraction: (interactionId: string) => void;
+  openCustomer: (customerId: string) => void;
 }) {
   return (
     <DetailRail open onClose={close} label="Session detail">
@@ -713,8 +738,10 @@ function SessionInspector({
           ) : detail?.session ? (
             <SessionJourney
               detail={detail}
+              summary={summary}
               openFeedback={openFeedback}
               openInteraction={openInteraction}
+              openCustomer={openCustomer}
             />
           ) : (
             <p className="text-sm text-muted-foreground" role="status">
@@ -729,12 +756,16 @@ function SessionInspector({
 
 function SessionJourney({
   detail,
+  summary,
   openFeedback,
   openInteraction,
+  openCustomer,
 }: {
   detail: DashboardSessionDetail;
+  summary?: EnrichedSessionSummary;
   openFeedback: (reportId: string) => void;
   openInteraction: (interactionId: string) => void;
+  openCustomer: (customerId: string) => void;
 }) {
   const reportsByInteraction = new Map(
     detail.reports.map((report) => [report.interactionId, report]),
@@ -742,7 +773,9 @@ function SessionJourney({
   const interactions = [...detail.interactions].sort((left, right) =>
     left.occurredAt.localeCompare(right.occurredAt),
   );
-  const responses = detail.responses ?? [];
+  const customerName = summary
+    ? (summary.customerDisplayName ?? summary.customerRef ?? null)
+    : null;
 
   return (
     <>
@@ -758,21 +791,35 @@ function SessionJourney({
         <dd>{formatDate(detail.session.startedAt)}</dd>
         <dt className="text-muted-foreground">Source</dt>
         <dd>{interfaceLabel(detail.session.source)}</dd>
+        <dt className="text-muted-foreground">Customer</dt>
+        <dd>
+          {summary?.customerId && customerName ? (
+            <Button
+              variant="link"
+              className="h-auto justify-start p-0 text-xs font-medium"
+              onClick={() => openCustomer(summary.customerId as string)}
+            >
+              {customerName}
+            </Button>
+          ) : summary ? (
+            (customerName ?? "Unresolved actor")
+          ) : (
+            "—"
+          )}
+        </dd>
         <dt className="text-muted-foreground">Observed for</dt>
         <dd>{sessionDuration(detail.session.startedAt, detail.session.lastSeenAt)}</dd>
         <dt className="text-muted-foreground">Interactions</dt>
         <dd>{interactions.length}</dd>
         <dt className="text-muted-foreground">Feedback reports</dt>
         <dd>{detail.reports.length}</dd>
-        <dt className="text-muted-foreground">Questions</dt>
-        <dd>{responses.length}</dd>
       </dl>
 
       <Separator className="my-5" />
 
-      <section aria-labelledby="observed-journey-heading">
-        <h3 id="observed-journey-heading" className="text-xs font-medium">
-          Observed journey
+      <section aria-labelledby="observed-session-heading">
+        <h3 id="observed-session-heading" className="text-xs font-medium">
+          Observed activity
         </h3>
         <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
           Structured interaction metadata in chronological order.
@@ -859,73 +906,8 @@ function SessionJourney({
           <JourneyCap label="Last observed" timestamp={detail.session.lastSeenAt} last />
         </ol>
       </section>
-
-      <Separator className="my-5" />
-
-      <section aria-labelledby="session-responses-heading">
-        <h3 id="session-responses-heading" className="text-xs font-medium">
-          Questions and answers
-        </h3>
-        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-          Canonical Epode questions and bounded answers associated with this session.
-        </p>
-        {responses.length ? (
-          <div className="mt-4 grid gap-3">
-            {responses.map((response) => (
-              <article key={response.id} className="border bg-muted/20 p-3">
-                <p className="text-xs font-medium leading-5">{response.question}</p>
-                {response.answers.length ? (
-                  <dl className="mt-3 grid gap-2 border-t pt-3">
-                    {response.answers.map((answer) => (
-                      <div key={`${answer.key}-${answer.value}`}>
-                        <dt className="font-mono text-[10px] text-muted-foreground">
-                          {answer.key}
-                        </dt>
-                        <dd className="mt-0.5 break-words text-xs leading-5">{answer.value}</dd>
-                        <dd className="text-[10px] text-muted-foreground">
-                          {titleCase(answer.type)} ·{" "}
-                          {answer.remembered ? "Remembered" : "Session only"}
-                        </dd>
-                      </div>
-                    ))}
-                  </dl>
-                ) : (
-                  <p className="mt-3 border-t pt-3 text-xs text-muted-foreground">
-                    {sessionResponseEmptyState(response.status)}
-                  </p>
-                )}
-                <div className="mt-3 flex items-center justify-between gap-3 border-t pt-3">
-                  <p className="min-w-0 truncate text-[10px] text-muted-foreground">
-                    {response.customerName ?? "Unresolved customer"} · {titleCase(response.purpose)}
-                  </p>
-                  <Button
-                    variant="link"
-                    className="h-auto shrink-0 p-0 text-[11px]"
-                    onClick={() => openInteraction(response.interactionId)}
-                  >
-                    Open interaction
-                  </Button>
-                </div>
-              </article>
-            ))}
-          </div>
-        ) : (
-          <p className="mt-4 text-xs text-muted-foreground">
-            No enrichment questions were associated with this session.
-          </p>
-        )}
-      </section>
     </>
   );
-}
-
-function sessionResponseEmptyState(status: string): string {
-  const labels: Record<string, string> = {
-    awaiting_answer: "Waiting for shared context.",
-    declined: "The customer agent declined to share context.",
-    no_relevant_context: "No relevant context was shared.",
-  };
-  return labels[status] ?? "No answer content was recorded.";
 }
 
 function JourneyCap({

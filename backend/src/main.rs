@@ -1,9 +1,11 @@
 mod api_types;
 mod code_match;
 mod customer_features;
+mod customer_profile;
 mod destinations;
 mod dev_auth;
 mod error;
+mod friendly_names;
 mod github;
 mod grouping;
 mod issue_template;
@@ -12,6 +14,7 @@ mod models;
 mod os_accounts;
 mod security;
 mod store;
+mod telemetry;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -42,7 +45,7 @@ use tower_http::{
     compression::CompressionLayer,
     cors::{Any, CorsLayer},
     services::ServeDir,
-    trace::TraceLayer,
+    trace::{DefaultMakeSpan, TraceLayer},
 };
 use utoipa::{
     Modify, OpenApi,
@@ -351,7 +354,21 @@ fn build_app_router(dev_auth_enabled: bool) -> OpenApiRouter<Arc<AppState>> {
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(cors)
         .layer(CompressionLayer::new())
-        .layer(TraceLayer::new_for_http())
+        // Telemetry middleware runs inside the TraceLayer span: axum applies
+        // layers added earlier after layers added later, so the request span
+        // already exists when the parent context is extracted. Both hooks
+        // no-op unless OTLP export is configured.
+        .layer(from_fn(telemetry::record_request_metrics))
+        .layer(from_fn(telemetry::extract_parent_context))
+        // The request span is created at INFO (tower-http's make-span default
+        // is DEBUG) so the `tower_http=info` filter enables it and the
+        // OpenTelemetry layer converts it into an exported trace span. The
+        // per-request events keep their DEBUG defaults, so stdout stays free
+        // of per-request log lines.
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO)),
+        )
         .layer(from_fn(security_headers))
 }
 
@@ -380,16 +397,7 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     let production = env::var("RAILWAY_ENVIRONMENT").is_ok()
         || env::var("APP_ENV").as_deref() == Ok("production");
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "agent_feedback=info,tower_http=info".into());
-    if production {
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .json()
-            .init();
-    } else {
-        tracing_subscriber::fmt().with_env_filter(filter).init();
-    }
+    let telemetry = telemetry::init(production)?;
 
     let database_url =
         env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL is required"))?;
@@ -648,6 +656,8 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+    // The server has drained; flush any buffered spans, metrics, and logs.
+    telemetry.shutdown();
     Ok(())
 }
 
@@ -4789,7 +4799,7 @@ async fn dashboard_customers_list_handler(
         ("x-workspace-id" = Option<Uuid>, Header, description = "Team to access; defaults to the caller's personal team")
     ),
     responses(
-        (status = 200, description = "Customer identity, evidence, context returned to the product, linked personalization use, sessions, and scoped consent", body = DashboardCustomerDetail),
+        (status = 200, description = "Customer identity plus an evidence-backed profile derived from retained experience-graph journeys", body = DashboardCustomerDetail),
         (status = 400, description = "Invalid path, query, or team header", body = ApiErrorEnvelope),
         (status = 401, description = "Dashboard authentication is required", body = ApiErrorEnvelope),
         (status = 403, description = "Caller cannot access the requested team", body = ApiErrorEnvelope),
@@ -6155,7 +6165,7 @@ async fn product_feedback_handler(
     tag = "enrichment",
     request_body = EnrichmentRequestInput,
     responses(
-        (status = 200, description = "Question and permission action selected for the interaction", body = EnrichmentRequestResponse),
+        (status = 200, description = "Submit-ready customer context contract for the interaction", body = EnrichmentRequestResponse),
         (status = 400, description = "Invalid purpose, operation, or identity context", body = ApiErrorEnvelope),
         (status = 401, description = "Invalid product API key", body = ApiErrorEnvelope),
         (status = 409, description = "Interaction or identity context conflicts", body = ApiErrorEnvelope),
@@ -6190,7 +6200,7 @@ async fn enrichment_request_handler(
     path = "/api/v2/enrichment/requests/inspect",
     tag = "enrichment",
     responses(
-        (status = 200, description = "Current enrichment request stage and safe user-facing question", body = EnrichmentRequestResponse),
+        (status = 200, description = "Current enrichment request stage and submission contract", body = EnrichmentRequestResponse),
         (status = 401, description = "Invalid or expired enrichment capability", body = ApiErrorEnvelope),
         (status = 500, description = "Enrichment request could not be inspected", body = ApiErrorEnvelope)
     ),
@@ -6219,7 +6229,7 @@ async fn enrichment_request_inspection_handler(
     tag = "enrichment",
     request_body = EnrichmentConsentDecisionInput,
     responses(
-        (status = 200, description = "Enrichment permission decision recorded idempotently", body = EnrichmentConsentDecisionResponse),
+        (status = 200, description = "Explicit enrichment opt-out or compatibility approval recorded idempotently", body = EnrichmentConsentDecisionResponse),
         (status = 400, description = "Invalid decision", body = ApiErrorEnvelope),
         (status = 401, description = "Invalid or expired enrichment capability", body = ApiErrorEnvelope),
         (status = 500, description = "Decision could not be stored", body = ApiErrorEnvelope)
@@ -6259,7 +6269,7 @@ async fn enrichment_consent_decision_handler(
         (status = 200, description = "Permissioned customer context accepted idempotently", body = EnrichmentAnswerResponse),
         (status = 400, description = "Invalid, sensitive, or unbounded customer context", body = ApiErrorEnvelope),
         (status = 401, description = "Invalid or expired enrichment capability", body = ApiErrorEnvelope),
-        (status = 403, description = "Customer context sharing is not approved", body = ApiErrorEnvelope),
+        (status = 403, description = "Customer context sharing was declined or is inactive", body = ApiErrorEnvelope),
         (status = 409, description = "Request already has a different answer", body = ApiErrorEnvelope),
         (status = 500, description = "Answer could not be stored", body = ApiErrorEnvelope)
     ),

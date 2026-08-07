@@ -16,5 +16,8 @@ allowBuilds:
   "@central-icons-react/round-outlined-radius-3-stroke-2": false
   "@scarf/scarf": false
   keytar: false
+  # OTLP exporter dependency; its postinstall is a legacy browser-field check
+  # that the Node SDK does not need.
+  protobufjs: false
   puppeteer: false
   sharp: false

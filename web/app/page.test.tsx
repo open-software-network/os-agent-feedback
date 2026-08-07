@@ -29,7 +29,7 @@ describe("dashboard data flow", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "Home" })).toBeVisible();
-    for (const view of ["Home", "Customers", "Responses", "Sessions", "Configurations"]) {
+    for (const view of ["Home", "Customers", "Sessions", "Configurations"]) {
       expect(screen.getByRole("button", { name: view })).toBeVisible();
     }
     expect(fetchMock).toHaveBeenCalledWith(
@@ -89,6 +89,8 @@ describe("dashboard data flow", () => {
       </Providers>,
     );
 
+    fireEvent.click(await screen.findByRole("button", { name: "Create product key" }));
+    expect(window.location.hash).toBe("#setup");
     expect((await screen.findAllByText(secret)).length).toBeGreaterThan(0);
     const storedValues = Array.from({ length: window.sessionStorage.length }, (_, index) => {
       const key = window.sessionStorage.key(index);
@@ -180,6 +182,7 @@ describe("dashboard data flow", () => {
     expect(screen.getByRole("button", { name: "Configurations" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Setup" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Data controls" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Context" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Connectors" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "New product" })).not.toBeInTheDocument();
     await waitFor(() => expect(window.location.search).not.toContain("view=connectors"));
@@ -219,9 +222,15 @@ describe("dashboard data flow", () => {
       </Providers>,
     );
 
-    expect(await screen.findByRole("tab", { name: "Connectors" })).toHaveAttribute(
-      "aria-selected",
-      "true",
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Connectors" })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      ),
+    );
+    expect(screen.getByRole("button", { name: "Configurations" })).toHaveAttribute(
+      "aria-current",
+      "page",
     );
     expect(await screen.findByText(message)).toHaveAttribute("role", role);
     expect(window.location.search).not.toContain("github=");
@@ -252,9 +261,11 @@ describe("dashboard data flow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Configurations" }));
     fireEvent.click(await screen.findByRole("tab", { name: "Connectors" }));
 
-    expect(await screen.findByRole("tab", { name: "Connectors" })).toHaveAttribute(
-      "aria-selected",
-      "true",
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Connectors" })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      ),
     );
     expect(screen.queryByText(message)).not.toBeInTheDocument();
   });
@@ -301,7 +312,7 @@ describe("dashboard data flow", () => {
     expect(message).not.toBeInTheDocument();
   });
 
-  it("opens Setup and Data controls as tabs within Configurations", async () => {
+  it("keeps Setup on Home and opens Data controls within Configurations", async () => {
     window.history.replaceState({}, "", "/?view=policy");
     vi.stubGlobal(
       "fetch",
@@ -322,20 +333,52 @@ describe("dashboard data flow", () => {
       "page",
     );
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
-      "Setup",
       "Product",
+      "Memory",
       "Connectors",
-      "Team",
       "Data controls",
-      "Context fields",
+      "Team",
     ]);
     expect(screen.getByRole("tab", { name: "Data controls" })).toHaveAttribute(
       "aria-selected",
       "true",
     );
-    fireEvent.click(screen.getByRole("tab", { name: "Setup" }));
+    fireEvent.click(screen.getByRole("button", { name: "Home" }));
     expect(await screen.findByRole("heading", { name: "Connect Search API" })).toBeVisible();
-    expect(new URL(window.location.href).searchParams.get("view")).toBe("setup");
+    expect(screen.getByRole("region", { name: "Setup" })).toBeVisible();
+    expect(new URL(window.location.href).searchParams.get("view")).toBeNull();
+  });
+
+  it("opens Memory inside Configurations", async () => {
+    const data = dashboardFixture();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        if (String(input).includes("/context-fields")) {
+          return Promise.resolve(
+            json({ fields: [], legacyCatalogActive: false, defaultCatalog: [] }),
+          );
+        }
+        return Promise.resolve(json(data));
+      }),
+    );
+
+    render(
+      <Providers>
+        <Home />
+      </Providers>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Configurations" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Memory" }));
+
+    expect((await screen.findAllByRole("heading", { name: "Memory" })).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Configurations" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(screen.getByRole("tab", { name: "Memory" })).toHaveAttribute("aria-selected", "true");
+    expect(new URL(window.location.href).searchParams.get("view")).toBe("questions");
   });
 
   it("clears a success notice when navigating to another view", async () => {

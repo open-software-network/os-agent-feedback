@@ -40,7 +40,8 @@
     "analyze:agent-compliance": "node experiments/agent-compliance/analyze.mjs .artifacts/agent-compliance/*.json",
     "docs:validate": "cd docs && pnpm exec mint validate",
     "docs:a11y": "cd docs && pnpm exec mint a11y",
-    "test:docs-loop": "pnpm run docs:validate && pnpm run docs:a11y && node --test tests/docs-contract.test.mjs && SETUP_MATRIX_BACKEND_URL=https://agent-feedback-api-v2-canary.up.railway.app SETUP_MATRIX_DB_ENVIRONMENT=v2-canary SETUP_MATRIX_SKIP_BUILD=true node tests/setup-matrix-e2e.mjs"
+    "test:docs-loop": "pnpm run docs:validate && pnpm run docs:a11y && node --test tests/docs-contract.test.mjs && SETUP_MATRIX_BACKEND_URL=https://agent-feedback-api-v2-canary.up.railway.app SETUP_MATRIX_DB_ENVIRONMENT=v2-canary SETUP_MATRIX_SKIP_BUILD=true node tests/setup-matrix-e2e.mjs",
+    "test:agent-experience": "pnpm --dir sdk/node build && node --test sdk/node/test/experience-graph.test.mjs tests/agent-experience-commerce-e2e.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.12",
@@ -51,7 +52,7 @@
   },
   "name": "os-epode",
   "version": "1.0.0",
-  "description": "Epode learns permissioned customer context through customer agents, then helps companies personalize and measure the experience.",
+  "description": "Epode is the agent experience and analytics layer for products: serve machine-readable journeys, learn permissioned context, personalize, and measure outcomes.",
   "main": "index.js",
   "directories": {
     "doc": "docs",

@@ -48,6 +48,39 @@ test("telemetry rejects unbounded, personal, and unknown identity fields", () =>
   }
 });
 
+test("a product link click joins by first-party browser reference while request details stay traits", () => {
+  const linked = {
+    ...event,
+    surface: "http_html",
+    anonymousRef: "s-first-party-browser",
+    sessionRef: "session-generated-by-product",
+    sessionSource: "customer",
+    customerLinkSource: "product_link_click",
+    requestObservation: {
+      clientIp: "203.0.113.10",
+      method: "GET",
+      userAgent: "Mozilla/5.0 Browser",
+    },
+  };
+  assert.equal(
+    validateTelemetry({ events: [linked] }),
+    true,
+    ajv.errorsText(validateTelemetry.errors),
+  );
+  assert.equal(
+    validateTelemetry({
+      events: [{ ...linked, anonymousRef: undefined }],
+    }),
+    false,
+  );
+  assert.equal(
+    validateTelemetry({
+      events: [{ ...linked, surface: "http_json" }],
+    }),
+    false,
+  );
+});
+
 test("agent-visible envelope cannot contain company identity references", () => {
   const envelope = {
     v: 1,

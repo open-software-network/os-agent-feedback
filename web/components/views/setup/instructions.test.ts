@@ -1,12 +1,33 @@
 import { describe, expect, it } from "vitest";
 
-import { SETUP_SURFACES, setupAgentPrompt, setupInstructions } from "./instructions";
+import {
+  SETUP_SURFACE_OPTIONS,
+  SETUP_SURFACES,
+  setupAgentPrompt,
+  setupInstructions,
+} from "./instructions";
 
 const origin = "https://app.epode.ai";
 
 describe("company-side customer enrichment setup", () => {
-  it("offers the three implemented product surfaces", () => {
-    expect(Object.keys(SETUP_SURFACES)).toEqual(["api", "website", "mcp"]);
+  it("configures the agent experience graph surface with journey telemetry", () => {
+    const instructions = setupInstructions("node-experience", "experience", origin);
+    expect(instructions.install).toContain("@epode/node@0.4");
+    expect(instructions.code).toContain("@epode/node/experience-graph");
+    expect(instructions.code).toContain("createExperienceGraph");
+    expect(instructions.code).toContain("experienceTelemetryDetails");
+    expect(instructions.code).toContain("/agent-negotiate");
+    expect(instructions.code).toContain("/agent-decide");
+    expect(instructions.verify).toMatch(/session telemetry/i);
+  });
+
+  it("offers only the guided agent experience in product setup", () => {
+    expect(SETUP_SURFACE_OPTIONS).toEqual(["experience"]);
+  });
+
+  it("keeps the implemented integration recipes available", () => {
+    expect(Object.keys(SETUP_SURFACES)).toEqual(["experience", "api", "website", "mcp"]);
+    expect(SETUP_SURFACES.experience.stacks).toEqual(["node-experience"]);
     expect(SETUP_SURFACES.api.stacks).toEqual(["node-express", "node-fastify"]);
     expect(SETUP_SURFACES.website.stacks).toEqual(["node-express", "node-fastify"]);
     expect(SETUP_SURFACES.mcp.stacks).toEqual(["node-mcp"]);
@@ -28,6 +49,9 @@ describe("company-side customer enrichment setup", () => {
     expect(instructions.code).toContain("accountRef:");
     expect(instructions.code).toContain("userRef:");
     expect(instructions.code).toContain("anonymousRef:");
+    expect(instructions.code).toContain("sessionRef:");
+    expect(instructions.code).toContain("canonicalId");
+    expect(instructions.code).toMatch(/\}\),\n {2}sessionRef: (?:req|request) =>/);
     expect(instructions.code).not.toContain("AGENT_FEEDBACK_KEY");
     expect(instructions.code).not.toContain("af_live_");
   });
@@ -48,9 +72,30 @@ describe("company-side customer enrichment setup", () => {
     expect(instructions.code).toContain('from "@epode/node/mcp"');
     expect(instructions.code).toContain('includeTools: ["search_products"]');
     expect(instructions.code).toContain('purpose: "product_personalization"');
-    expect(instructions.code).toContain("context.http?.authInfo?.extra?.accountId");
+    expect(instructions.code).toContain("new WeakMap<object, string>()");
+    expect(instructions.code).toContain("identify: (args, context, result)");
+    expect(instructions.code).toContain("customers.fromAuthInfo(context.http?.authInfo)");
+    expect(instructions.code).toContain("workflowCandidate(args, result)");
+    expect(instructions.code).toContain("workflows.findOwned(authenticatedCustomer, candidate)");
+    expect(instructions.code).toContain(
+      "ownedWorkflowByInvocation.set(context, ownedWorkflow.canonicalId)",
+    );
+    expect(instructions.code).toContain(
+      "sessionRef: context => ownedWorkflowByInvocation.get(context)",
+    );
     expect(instructions.code).toContain("customer.instrument(server)");
     expect(instructions.verify).toMatch(/real MCP client/i);
+  });
+
+  it("gives coding agents an experience-graph implementation contract", () => {
+    const instructions = setupInstructions("node-experience", "experience", origin);
+    const prompt = setupAgentPrompt("experience", "node-experience", instructions, origin);
+    expect(prompt).toContain("guided agent experience");
+    expect(prompt).toContain("experienceTelemetryDetails");
+    expect(prompt).toContain("/agent-negotiate");
+    expect(prompt).toMatch(/current-task decision input/i);
+    expect(prompt).not.toContain("AGENT_FEEDBACK_KEY");
+    expect(prompt).not.toContain("af_live_");
   });
 
   it("gives coding agents an exact, privacy-bounded implementation contract", () => {
@@ -62,6 +107,13 @@ describe("company-side customer enrichment setup", () => {
     expect(prompt).toMatch(/authentication before Epode/i);
     expect(prompt).toMatch(/product-owned first-party visitor ID/i);
     expect(prompt).toMatch(/do not invent customer identity, permission, answers/i);
+    expect(prompt).toMatch(/stable typed Customer identity/i);
+    expect(prompt).toMatch(/canonical ID returned by workflow creation/i);
+    expect(prompt).toMatch(/request or trace IDs/i);
+    expect(prompt).toMatch(/Run A[\s\S]*Session A[\s\S]*Run B[\s\S]*Session B/i);
+    expect(prompt).toMatch(/missing and invalid ownership proof[\s\S]*unlinked/i);
+    expect(prompt).toMatch(/Epode outage/i);
+    expect(prompt).toMatch(/arguments, prompts, results, credentials, or exceptions/i);
     expect(prompt).not.toContain("AGENT_FEEDBACK_KEY");
     expect(prompt).not.toContain("af_live_");
     expect(prompt).not.toContain("agent-feedback-node");

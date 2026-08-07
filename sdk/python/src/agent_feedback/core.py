@@ -55,6 +55,16 @@ SHARED_CACHE_CONTROL = re.compile(
     r"(?:^|,)\s*(?:public|s-maxage\s*=|max-age\s*=|immutable|stale-while-revalidate\s*=)",
     re.IGNORECASE,
 )
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> None:
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect)
 SHARED_CACHE_HEADER_NAMES = frozenset(
     {
         "cache-control",
@@ -66,6 +76,10 @@ SHARED_CACHE_HEADER_NAMES = frozenset(
 MAX_CONCURRENT_CONSENT_WARMS = 8
 
 logger = logging.getLogger("agent_feedback")
+
+_MCP_OPERATION = re.compile(r"[A-Za-z0-9/_:.*{}-]{1,160}\Z", re.ASCII)
+_MCP_REFERENCE = re.compile(r"[A-Za-z0-9_.:-]{1,160}\Z", re.ASCII)
+_ASCII_EDGE_WHITESPACE = "\t\n\v\f\r "
 
 
 def _default_endpoint() -> str:
@@ -143,41 +157,72 @@ class AgentFeedbackOptions:
     sender: Callable[[str, dict[str, str], bytes], None] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class TelemetryDiagnostics:
+    queue_overflow_drops: int = 0
+    shutdown_undelivered: int = 0
+
+
 class _TelemetryQueue:
     def __init__(self, options: AgentFeedbackOptions):
         self.options = options
-        self.events: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=options.max_queue_size)
+        self.events: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=max(1, options.max_queue_size))
         self.stop = threading.Event()
         self.thread: threading.Thread | None = None
         self._condition = threading.Condition()
         self._flush_lock = threading.Lock()
         self._in_flight = 0
+        self._in_flight_events = 0
+        self._in_flight_claimed = False
         self._delivery_failed = False
         self._warned_delivery_failure = False
         self._shutdown_deadline: float | None = None
         self._worker_done = False
+        self._queue_overflow_drops = 0
+        self._shutdown_undelivered = 0
+        self._overflow_episode = False
+
+    def diagnostics(self) -> TelemetryDiagnostics:
+        with self._condition:
+            return TelemetryDiagnostics(self._queue_overflow_drops, self._shutdown_undelivered)
 
     def push(self, event: dict[str, Any]) -> None:
+        warn_overflow = False
         with self._condition:
             if self.stop.is_set():
                 return
             try:
                 self.events.put_nowait(event)
+                self._overflow_episode = False
             except queue.Full:
                 try:
                     self.events.get_nowait()
                 except queue.Empty:
-                    pass
+                    return
+                self._queue_overflow_drops += 1
+                if not self._overflow_episode:
+                    warn_overflow = True
+                    self._overflow_episode = True
                 try:
                     self.events.put_nowait(event)
                 except queue.Full:
+                    self._queue_overflow_drops += 1
                     return
             if self.thread is None:
                 self.thread = threading.Thread(
                     target=self._run, name="agent-feedback", daemon=True
                 )
-                self.thread.start()
+                try:
+                    self.thread.start()
+                except Exception:
+                    self.thread = None
+                    raise
             self._condition.notify_all()
+        if warn_overflow:
+            logger.warning(
+                "[agent-feedback] Telemetry queue capacity was exceeded; telemetry was "
+                "discarded and product responses were not affected."
+            )
 
     def _run(self) -> None:
         try:
@@ -208,6 +253,8 @@ class _TelemetryQueue:
                 if not batch:
                     return True
                 self._in_flight += 1
+                self._in_flight_events += len(batch)
+                self._in_flight_claimed = False
                 self._condition.notify_all()
 
             delivered = False
@@ -235,7 +282,7 @@ class _TelemetryQueue:
                             request = urllib.request.Request(
                                 url, data=body, headers=headers, method="POST"
                             )
-                            with urllib.request.urlopen(request, timeout=timeout) as response:
+                            with _NO_REDIRECT_OPENER.open(request, timeout=timeout) as response:
                                 receipt = json.loads(response.read())
                             if (
                                 not isinstance(receipt, dict)
@@ -243,6 +290,10 @@ class _TelemetryQueue:
                                 or receipt.get("dropped") != 0
                             ):
                                 raise RuntimeError("telemetry batch was not fully accepted")
+                        with self._condition:
+                            deadline = self._shutdown_deadline
+                        if deadline is not None and time.monotonic() >= deadline:
+                            return False
                         delivered = True
                         return True
                     except urllib.error.HTTPError as error:
@@ -263,17 +314,33 @@ class _TelemetryQueue:
                             self.stop.wait(delay)
                 return False
             finally:
+                warn_delivery_failure = False
                 with self._condition:
                     self._in_flight -= 1
+                    self._in_flight_events -= len(batch)
+                    deadline_expired = (
+                        self._shutdown_deadline is not None
+                        and time.monotonic() >= self._shutdown_deadline
+                    )
+                    if deadline_expired and not self._in_flight_claimed:
+                        self._shutdown_undelivered += len(batch)
+                        self._in_flight_claimed = True
+                        delivered = False
                     if not delivered:
                         self._delivery_failed = True
+                        if self._shutdown_deadline is not None and not self._in_flight_claimed:
+                            self._shutdown_undelivered += len(batch)
+                    self._in_flight_claimed = False
+                    if not delivered:
                         if not self._warned_delivery_failure:
-                            logger.warning(
-                                "[agent-feedback] Telemetry delivery failed after bounded "
-                                "retries; product responses were not affected."
-                            )
+                            warn_delivery_failure = True
                             self._warned_delivery_failure = True
                     self._condition.notify_all()
+                if warn_delivery_failure:
+                    logger.warning(
+                        "[agent-feedback] Telemetry delivery failed after bounded "
+                        "retries; product responses were not affected."
+                    )
 
     def shutdown(self) -> bool:
         """Flush remaining telemetry. Returns False if any batch was lost."""
@@ -283,17 +350,34 @@ class _TelemetryQueue:
             self.stop.set()
             self._condition.notify_all()
             while True:
+                remaining = self._shutdown_deadline - time.monotonic()
+                if remaining <= 0:
+                    self._delivery_failed = True
+                    # Deadline semantics are ownership based: anything still
+                    # owned now is undelivered, even if a custom sender returns
+                    # successfully after this call.
+                    self._claim_shutdown_loss_locked(include_in_flight=True)
+                    return False
                 pending = not self.events.empty()
                 if not pending and self._in_flight == 0:
                     return not self._delivery_failed
                 if pending and (self.thread is None or self._worker_done):
                     self._delivery_failed = True
-                    return False
-                remaining = self._shutdown_deadline - time.monotonic()
-                if remaining <= 0:
-                    self._delivery_failed = True
+                    self._claim_shutdown_loss_locked(include_in_flight=True)
                     return False
                 self._condition.wait(remaining)
+
+    def _claim_shutdown_loss_locked(self, *, include_in_flight: bool) -> None:
+        """Drain/claim each event once. Caller holds ``_condition``."""
+        while True:
+            try:
+                self.events.get_nowait()
+            except queue.Empty:
+                break
+            self._shutdown_undelivered += 1
+        if include_in_flight and self._in_flight_events and not self._in_flight_claimed:
+            self._shutdown_undelivered += self._in_flight_events
+            self._in_flight_claimed = True
 
 
 class AgentFeedback:
@@ -540,7 +624,9 @@ class AgentFeedback:
                 headers={"authorization": f"Bearer {self.options.api_key}", "content-type": "application/json", "user-agent": "agent-feedback-python/0.4.0"},
                 method="POST",
             )
-            with urllib.request.urlopen(request, timeout=self.options.consent_timeout) as response:
+            with _NO_REDIRECT_OPENER.open(
+                request, timeout=self.options.consent_timeout
+            ) as response:
                 payload = json.loads(response.read())
                 state = payload.get("state")
                 revision = payload.get("revision")
@@ -676,9 +762,114 @@ class AgentFeedback:
             event["runtimeHintSource"] = "http"
         self.telemetry.push(event)
 
+    def record_interaction(
+        self,
+        operation: str,
+        outcome: str,
+        *,
+        account_ref: str | None = None,
+        user_ref: str | None = None,
+        anonymous_ref: str | None = None,
+        customer_ref: str | None = None,
+        session_ref: str | None = None,
+        runtime_hint: str | None = None,
+    ) -> None:
+        """Record one completed MCP product-tool interaction.
+
+        This deliberately constrained API is not a generic raw-event recorder.
+        IDs, completion time, sequence, status, classification, and sources are
+        owned by the SDK.
+        """
+        if not self.enabled or self.telemetry.stop.is_set():
+            return
+        self._validate_mcp_interaction(operation, outcome)
+        try:
+            self._record_mcp_interaction(
+                operation,
+                outcome,
+                account_ref=account_ref,
+                user_ref=user_ref,
+                anonymous_ref=anonymous_ref,
+                customer_ref=customer_ref,
+                session_ref=session_ref,
+                runtime_hint=runtime_hint,
+            )
+        except Exception:
+            return
+
+    @staticmethod
+    def _validate_mcp_interaction(operation: str, outcome: str) -> None:
+        if not isinstance(operation, str) or not _MCP_OPERATION.fullmatch(operation) or "://" in operation:
+            raise ValueError("invalid MCP operation")
+        if not isinstance(outcome, str) or outcome not in {"success", "error"}:
+            raise ValueError("invalid MCP outcome")
+
+    def _record_mcp_interaction(
+        self,
+        operation: str,
+        outcome: str,
+        *,
+        duration_ms: int | None = None,
+        completed_at: datetime | None = None,
+        **references: str | None,
+    ) -> None:
+        """Adapter-only projection, additionally accepting measured completion data."""
+        if not self.enabled or self.telemetry.stop.is_set():
+            return
+        self._validate_mcp_interaction(operation, outcome)
+
+        retained: dict[str, str] = {}
+        for source, wire_name in (
+            ("account_ref", "accountRef"), ("user_ref", "userRef"),
+            ("anonymous_ref", "anonymousRef"), ("customer_ref", "customerRef"),
+            ("session_ref", "sessionRef"),
+        ):
+            raw = references.get(source)
+            value = raw.strip(_ASCII_EDGE_WHITESPACE) if isinstance(raw, str) else ""
+            if _MCP_REFERENCE.fullmatch(value):
+                retained[wire_name] = value
+        customer = retained.get("customerRef")
+        if customer and (retained.get("accountRef") or retained.get("userRef")) and retained.get("accountRef") != customer:
+            retained.pop("customerRef", None)
+        hint_raw = references.get("runtime_hint")
+        hint = hint_raw.strip(_ASCII_EDGE_WHITESPACE) if isinstance(hint_raw, str) else ""
+        # Encoding rejects lone surrogates, which are not valid Python Unicode text on the wire.
+        try:
+            hint.encode("utf-8")
+        except UnicodeEncodeError:
+            hint = ""
+        if len(hint) > 200:
+            hint = ""
+
+        with self._sequence_lock:
+            self._sequence += 1
+            sequence = self._sequence
+        event: dict[str, Any] = {
+            "interactionId": str(uuid.uuid4()), "sequence": sequence, "surface": "mcp",
+            "operation": operation, "statusCode": 200 if outcome == "success" else 500,
+            "classification": "confirmed", "confirmationMethod": "mcp",
+            "occurredAt": _iso(completed_at or datetime.now(timezone.utc)), **retained,
+        }
+        if "sessionRef" in event:
+            event["sessionSource"] = "mcp"
+        if hint:
+            event.update(runtimeHint=hint, runtimeHintSource="mcp")
+        if duration_ms is not None:
+            event["durationMs"] = max(0, int(duration_ms))
+        self.telemetry.push(event)
+
+    def flush(self) -> bool:
+        """Attempt delivery of at most one batch of 50 queued events."""
+        return self.telemetry.flush()
+
     def shutdown(self) -> bool:
         """Flush pending telemetry. Returns False when a flush terminally failed."""
         return self.telemetry.shutdown()
+
+    @property
+    def diagnostics(self) -> TelemetryDiagnostics:
+        """Return a content-free, immutable snapshot of telemetry queue loss."""
+        return self.telemetry.diagnostics()
 
 
 def encoded_envelope(envelope: Mapping[str, Any]) -> str:

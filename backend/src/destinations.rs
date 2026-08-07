@@ -1269,6 +1269,7 @@ async fn deliver_postgres_batch_inner(
 
 fn http_client() -> Result<reqwest::Client, DataDestinationError> {
     reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(StdDuration::from_secs(30))
         .user_agent("epode-data-destination/1")
         .build()
@@ -1609,6 +1610,63 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn http_delivery_rejects_redirects_without_forwarding_records() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        use axum::{Router, http::StatusCode, routing::post};
+
+        let sink_hits = Arc::new(AtomicUsize::new(0));
+        let sink_hits_for_route = Arc::clone(&sink_hits);
+        let app = Router::new()
+            .route(
+                "/collector",
+                post(|| async {
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        [(reqwest::header::LOCATION, "/sink")],
+                    )
+                }),
+            )
+            .route(
+                "/sink",
+                post(move || {
+                    let sink_hits = Arc::clone(&sink_hits_for_route);
+                    async move {
+                        sink_hits.fetch_add(1, Ordering::SeqCst);
+                        StatusCode::ACCEPTED
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("redirect test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("redirect test listener should have an address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("redirect test server should run");
+        });
+        let config = json!({ "url": format!("http://{address}/collector") });
+        let batch = [ExportRecord {
+            id: Uuid::new_v4(),
+            cursor_at: Utc::now(),
+            record: json!({ "value": "private" }),
+        }];
+
+        let error = deliver_http_batch(&config, None, STREAM_INTERACTIONS, &batch)
+            .await
+            .expect_err("redirect should be rejected");
+        assert!(error.to_string().contains("HTTP 307"));
+        assert_eq!(sink_hits.load(Ordering::SeqCst), 0);
+        server.abort();
     }
 
     #[test]

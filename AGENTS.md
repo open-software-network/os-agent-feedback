@@ -2,9 +2,11 @@
 
 ## Project
 
-Agent Feedback: structured product feedback from customer agents. Rust backend
-(`backend/`) serving a vanilla-JS dashboard (`backend/public/`), SDKs (`sdk/`),
-and the public protocol (`protocol/v1/`).
+Epode: agent experience graphs, permissioned customer context, and outcome
+measurement through customer agents. Rust backend (`backend/`) serving a
+vanilla-JS dashboard (`backend/public/`), SDKs (`sdk/`), the public protocol
+(`protocol/v1/`), and the Fieldnote reference product
+(`examples/agent-experience-commerce/`).
 
 ## OS Platform (shared brain)
 

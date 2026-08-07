@@ -180,6 +180,23 @@ behavioral similarity. A request may co-supply `anonymousRef` and a verified ref
 deterministic progressive link. These fields must never be copied into capabilities, response envelopes,
 or report bodies.
 
+A product may link previously unowned session activity to a first-party browser only after its own server
+observes a human navigation through a product-generated link carrying that session reference. Report that
+event as an `http_html` interaction with `customerLinkSource: "product_link_click"`, the stable
+`anonymousRef` from the product's first-party cookie, and the original `sessionRef`. Optional
+`requestObservation` values such as IP address, user-agent, language, platform, and referrer origin are
+retained only as traits. They never identify a customer and cannot claim a session on their own.
+
+An experience-graph hop may attach an optional `experience` object describing the hop in aggregate-safe
+terms: the graph `stage`, which need dimensions were expressed or explicitly unknown (dimension keys only,
+never customer values), decision quality (`exactMatchCount`, `nearMissCount`, per-item
+`violatedHardConstraints` with bounded requested/actual strings, and zero-match `counterfactuals` with
+numeric deltas), and search attribution (`searchId`, numeric `resultPosition`). An optional `channel`
+marks which surface of the same graph the hop traversed: `"faceted_html"` for the faceted HTML-link
+storefront and `"native_graph"` for the tokened JSON graph paths. These fields power lost-demand,
+drop-off, rank-position, journey-funnel, and channel insight aggregations. They are decision evidence
+about the merchant's own catalog and the stated need shape — never free text from the customer or agent.
+
 ### Completed MCP interaction contract
 
 SDKs that support customer-owned MCP integrations expose an idiomatic, framework-neutral operation for
