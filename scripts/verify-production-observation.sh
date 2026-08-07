@@ -52,31 +52,42 @@ sample=0
 probe() {
   local name="$1"
   local url="$2"
-  local result status latency
+  local expected_redirect="${3:-}"
+  local result status latency redirect_url
 
   result="$({
     curl --silent --show-error --max-time 20 \
       --output /dev/null \
-      --write-out '%{http_code} %{time_total}' \
+      --write-out $'%{http_code}\t%{time_total}\t%{redirect_url}' \
       "$url"
   } 2>/dev/null || true)"
-  read -r status latency <<<"$result"
-  if [[ "$status" != "200" || -z "${latency:-}" ]]; then
+  IFS=$'\t' read -r status latency redirect_url <<<"$result"
+  if [[ -z "${latency:-}" ]]; then
     echo "$name probe failed: ${status:-no HTTP response}." >&2
     return 1
+  fi
+  if [[ "$status" != "200" ]]; then
+    if [[ -z "$expected_redirect" || "$status" != "307" || "$redirect_url" != "$expected_redirect" ]]; then
+      echo "$name probe failed: HTTP ${status:-no response}, redirect ${redirect_url:-none}." >&2
+      return 1
+    fi
   fi
   if ! awk -v observed="$latency" -v maximum="$max_latency_seconds" 'BEGIN { exit !(observed <= maximum) }'; then
     echo "$name probe exceeded ${max_latency_seconds}s: ${latency}s." >&2
     return 1
   fi
-  echo "$name probe returned HTTP 200 in ${latency}s."
+  if [[ "$status" == "200" ]]; then
+    echo "$name probe returned HTTP 200 in ${latency}s."
+  else
+    echo "$name probe returned the expected HTTP 307 sign-in redirect in ${latency}s."
+  fi
 }
 
 while true; do
   sample="$((sample + 1))"
   sample_ok=true
   probe "API health" "$api_origin/api/health" || sample_ok=false
-  probe "Web root" "$web_origin/" || sample_ok=false
+  probe "Web root" "$web_origin/" "$web_origin/auth/signin" || sample_ok=false
 
   if [[ "$sample_ok" == "true" ]]; then
     consecutive_failures=0
