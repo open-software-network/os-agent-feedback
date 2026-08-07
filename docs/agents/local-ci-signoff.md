@@ -49,7 +49,7 @@ Backend checks use Rust 1.95 and SDK checks use the SDK's 1.88 MSRV. Install
 both through rustup so local CI cannot drift with the machine's default Rust:
 
 ```sh
-rustup toolchain install 1.95 --profile minimal --component clippy,rustfmt
+rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt
 rustup toolchain install 1.88 --profile minimal --component clippy,rustfmt
 ```
 
