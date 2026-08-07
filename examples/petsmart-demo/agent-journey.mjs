@@ -4,7 +4,8 @@
  * Plays the full PetSmart demo journey against a running petsmart-demo server:
  *
  *   1. A shopping agent (ChatGPT/Claude) crawls the storefront and receives
- *      the experience graph instead of HTML.
+ *      the faceted agent storefront — plain HTML whose links ARE the
+ *      experience graph, plus the structured JSON negotiation entry.
  *   2. It negotiates the household's needs: two cats and a dog, one of them
  *      strongly food-motivated, with a target budget.
  *   3. The graph ranks the SmartTag RFID Multi-Pet Feeder as the only exact
@@ -84,11 +85,11 @@ function cookiesFrom(response) {
     .join("; ");
 }
 
-step(`Agent crawls ${base}/ and receives the experience graph`);
+step(`Agent crawls ${base}/ and receives the faceted agent storefront`);
 const guideResponse = await fetch(`${base}/`, { headers: { "user-agent": AGENT_UA } });
 const guide = await guideResponse.text();
 const negotiateUrl = guide.match(/feeder: (\S+\/agent-negotiate\/j-[a-z0-9-]+\/feeder)/i)?.[1];
-if (!negotiateUrl) fail("The agent guide did not include a feeder negotiation URL");
+if (!negotiateUrl) fail("The agent storefront did not include a feeder negotiation URL");
 console.log(`  entry: ${negotiateUrl}`);
 
 step("Agent negotiates the household's needs through merchant-supplied edges");

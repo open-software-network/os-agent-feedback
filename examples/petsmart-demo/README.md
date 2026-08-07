@@ -3,9 +3,16 @@
 A PetSmart-branded storefront that demonstrates the full Epode loop on real
 increased-AI-traffic terms:
 
-1. **Crawl** — ChatGPT/Claude fetches the storefront URL and receives a
-   machine-readable experience graph instead of HTML (humans keep the normal
-   storefront at the same URL).
+1. **Crawl** — ChatGPT/Claude fetches the storefront URL and receives the
+   faceted agent storefront: plain HTML whose links ARE the experience graph.
+   The full catalog with prices sits at the root; "shop by situation" anchors
+   carry the need dimensions as ordinary query parameters
+   (`/feeders?pets=…&motivation=…&budget=…&journey=…`), and live stock +
+   member pricing appear only on those situation pages — the value asymmetry
+   that earns the need-carrying second fetch. API-capable agents can instead
+   walk the structured JSON graph at `/agent-negotiate/…` (humans keep the
+   normal storefront at the same URL, with the same situation links for
+   cloud-browser assistants).
 2. **Trait capture** — the agent expresses the household's needs through
    merchant-supplied edges: *two cats and a dog, one strongly food-motivated,
    $200 target budget*.
