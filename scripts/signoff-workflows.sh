@@ -12,6 +12,7 @@ signoff_require_command shellcheck "Install it with: brew install shellcheck"
 actionlint -color
 shellcheck \
   scripts/railway-deploy-image.sh \
+  scripts/verify-production-observation.sh \
   scripts/verify-image-artifact-ledger.sh \
   scripts/verify-ci-signoffs.sh \
   scripts/verify-public-integration-surface.sh \

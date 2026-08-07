@@ -29,6 +29,13 @@ database recovery:
 - Create GitHub environments named `v2-canary`, `production`, and
   `sdk-release`. Require production and SDK-release reviewers. Restrict who
   can approve and deploy, and protect `sdk/*/v*` tags.
+- Protect `main` with a repository or organization ruleset that requires the
+  eight local `signoff/*` statuses documented in
+  [`local-ci-signoff.md`](./local-ci-signoff.md), blocks force pushes and
+  deletion, and requires changes to arrive through a pull request. The release
+  workflows independently verify the same exact-commit attestations, while
+  branch rules prevent an unsigned main commit from becoming a release
+  candidate in the first place.
 - Add an environment-scoped `RAILWAY_TOKEN` secret and `RAILWAY_PROJECT_ID`
   variable to `v2-canary` and `production`. The Railway token must be limited
   to the Epode project.
@@ -63,6 +70,10 @@ database recovery:
 - Configure the npm, PyPI, and crates.io trusted publishers described in
   `sdk/RELEASE.md`. The `sdk-release` environment approval is the review gate
   for the exact uploaded release candidate.
+- On the Grafana service, set the secret `EPODE_ALERT_SLACK_WEBHOOK_URL`, then
+  send a test through the provisioned **Epode production Slack** contact point
+  and verify that the on-call recipient receives it. Alert rules and thresholds
+  are versioned in `observability/grafana/provisioning/alerting/`.
 - For SDK releases, create the annotated `sdk/release/vX.Y.Z` marker first,
   then push each annotated package tag in its own `git push` command. Never
   push all four package tags together: GitHub suppresses tag-push workflow
@@ -107,13 +118,48 @@ refs and digests are both the last successfully attested canary pair and the
 images currently active in `v2-canary`. It then captures the currently serving
 production pair as a verified recovery point and deploys API followed by web.
 Production GHCR tags move only after both Railway deployments report the
-planned digests and the production health and OAuth-start smoke checks pass.
+planned digests, the production health and OAuth-start smoke checks pass, and a
+five-minute observation window sees no two consecutive availability or latency
+failures from the public API and web origins. The default observation samples
+every 30 seconds and treats a response slower than five seconds as failed.
+Protected production variables may override the duration, interval, failure
+threshold, and latency ceiling with `PRODUCTION_OBSERVATION_SECONDS`,
+`PRODUCTION_OBSERVATION_INTERVAL_SECONDS`,
+`PRODUCTION_OBSERVATION_FAILURE_THRESHOLD`, and
+`PRODUCTION_OBSERVATION_MAX_LATENCY_SECONDS`.
 
-If either deployment, public smoke, or production-tag move fails, the workflow
-attempts both service restorations independently. Tag movement also restores
-both prior production tags before failing. A manual cancellation or external
-Railway mutation can still interrupt this recovery path; inspect both service
-deployment IDs, digests, and tags before retrying.
+If either deployment, public smoke, observation window, or production-tag move
+fails, the workflow attempts both service restorations independently. Tag
+movement also restores both prior production tags before failing. A manual
+cancellation or external Railway mutation can still interrupt this recovery
+path; inspect both service deployment IDs, digests, and tags before retrying.
+
+## Alert response
+
+Grafana evaluates the versioned production rules every minute and sends firing
+and resolved notifications to the provisioned Slack contact point. On a firing
+notification:
+
+1. Acknowledge it in the operations channel and note the first firing time,
+   service label, and most recent production workflow run.
+2. Check whether `Promote or rollback production` is still running. During its
+   observation window, two consecutive public probe failures automatically
+   restore the captured API/web pair before production tags move; let that
+   compensation finish unless a service restoration itself reports failure.
+3. Compare the active Railway deployment IDs, immutable SHA refs, and digests
+   for both services with the last successful workflow summary. Never infer a
+   complete release from only one service or from a floating tag.
+4. If a completed release introduced the regression, run `Promote or rollback
+   production` with `operation=rollback`, the prior API and web SHAs,
+   `confirm_rollback=true`, and a concise reason. Watch the health smoke and
+   observation window through completion.
+5. If telemetry is missing but the public product is healthy, repair the OTLP
+   path or observability service instead of rolling back unrelated application
+   code. Confirm both missing-telemetry rules return to normal and that Slack
+   receives the resolved notification.
+
+An image rollback never reverses SQL migrations. Follow the database recovery
+rules below whenever the alert correlates with a schema change.
 
 ## Additive database expansion
 

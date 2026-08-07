@@ -39,7 +39,7 @@ if changed '^(backend/|Makefile$)'; then
   needs_backend=true
 fi
 
-if changed '^(package\.json$|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|biome\.json$|Makefile$|tests/|backend/|sdk/|protocol/|docs/|scripts/hosted-artifact-ledger\.json$|scripts/verify-image-artifact-ledger\.sh$|scripts/verify-public-integration-surface\.sh$)'; then
+if changed '^(package\.json$|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|biome\.json$|Makefile$|tests/|backend/|observability/|sdk/|protocol/|docs/|scripts/hosted-artifact-ledger\.json$|scripts/verify-image-artifact-ledger\.sh$|scripts/verify-production-observation\.sh$|scripts/verify-public-integration-surface\.sh$)'; then
   needs_node=true
 fi
 
@@ -67,7 +67,7 @@ if changed '^(package\.json$|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|Makefile$|do
   needs_docs=true
 fi
 
-if changed '^(\.github/workflows/|scripts/railway-deploy-image\.sh$|scripts/verify-migration-ledger\.sh$|scripts/verify-ci-signoffs\.sh$|scripts/verify-public-integration-surface\.sh$|scripts/verify-image-artifact-ledger\.sh$|scripts/local-ci\.sh$|scripts/signoff-)'; then
+if changed '^(\.github/workflows/|scripts/railway-deploy-image\.sh$|scripts/verify-migration-ledger\.sh$|scripts/verify-ci-signoffs\.sh$|scripts/verify-production-observation\.sh$|scripts/verify-public-integration-surface\.sh$|scripts/verify-image-artifact-ledger\.sh$|scripts/local-ci\.sh$|scripts/signoff-)'; then
   needs_workflows=true
 fi
 

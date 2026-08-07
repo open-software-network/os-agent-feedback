@@ -108,11 +108,11 @@ signoff_install_experience_examples() {
     --ignore-scripts \
     --no-audit \
     --no-fund
-  pnpm \
-    --dir examples/petsmart-demo \
-    install \
-    --frozen-lockfile \
-    --ignore-workspace
+  npm ci \
+    --prefix examples/petsmart-demo \
+    --ignore-scripts \
+    --no-audit \
+    --no-fund
 }
 
 # Local PostgreSQL for the backend isolation tests and the disposable customer
