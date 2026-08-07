@@ -83,11 +83,13 @@ export const feederCatalog = {
           token: "motivation-all-balanced",
           value: "all_balanced",
           meaning: "Every pet eats its own portion at mealtime",
+          strength: "hard",
         },
         {
           token: "motivation-grazers",
           value: "grazers",
           meaning: "Pets graze slowly through the day",
+          strength: "hard",
         },
       ],
     },
@@ -97,7 +99,7 @@ export const feederCatalog = {
       question: "What budget value and strength are known for this purchase?",
       whyItMatters: "A hard ceiling excludes feeders; a target permits an explicit tradeoff.",
       anchorMeaning: "A budget ceiling or target is known",
-      choices: [50, 100, 150, 200, 250].flatMap((amount) => [
+      choices: [50, 90, 100, 150, 175, 200, 250].flatMap((amount) => [
         {
           token: `budget-hard-${amount}`,
           value: String(amount),

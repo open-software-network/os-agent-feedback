@@ -42,6 +42,9 @@ test("a product link click separates first-party identity from request traits", 
       method: "GET",
       userAgent: "Mozilla/5.0 Browser",
     },
+    experience: {
+      needState: { expressedDimensions: ["budget", "pets"] },
+    },
   });
   assert.equal(details.surface, "http_html");
   assert.equal(details.customerLinkSource, "product_link_click");
@@ -51,6 +54,9 @@ test("a product link click separates first-party identity from request traits", 
     clientIp: "203.0.113.10",
     method: "GET",
     userAgent: "Mozilla/5.0 Browser",
+  });
+  assert.deepEqual(details.experience, {
+    needState: { expressedDimensions: ["budget", "pets"] },
   });
 });
 
@@ -242,6 +248,25 @@ const overBudgetGraph = createExperienceGraph({
       price: { amount: 250, currency: "USD" },
     },
   ],
+});
+
+test("budget dimensions preserve bounded exact-dollar tokens outside the published choices", () => {
+  const parsed = overBudgetGraph.parseNeedTokens(["budget-hard-175"]);
+  assert.deepEqual(parsed.invalidTokens, []);
+  assert.equal(parsed.state.values.budget?.value, "175");
+  assert.equal(parsed.state.values.budget?.strength, "hard");
+
+  const decision = overBudgetGraph.buildDecision({
+    origin,
+    journeyId,
+    tokens: ["budget-hard-175"],
+    searchId: "search-exact-budget",
+  });
+  assert.equal(decision.exactMatchCount, 1);
+  assert.equal(decision.exactMatches?.[0]?.itemId, "everyday-chair");
+
+  const invalid = overBudgetGraph.parseNeedTokens(["budget-hard-1000001", "budget-hard-unbounded"]);
+  assert.deepEqual(invalid.invalidTokens, ["budget-hard-1000001", "budget-hard-unbounded"]);
 });
 
 test("experienceTelemetryForNode maps decision quality into the aggregate-safe payload", async () => {

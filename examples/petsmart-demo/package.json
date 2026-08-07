@@ -6,7 +6,7 @@
     "start": "node server.mjs",
     "journey": "node agent-journey.mjs",
     "provision": "node provision-fields.mjs",
-    "test": "node --test ../../tests/petsmart-demo-e2e.mjs"
+    "test": "node --test ../../tests/petsmart-demo-e2e.test.mjs"
   },
   "dependencies": {
     "@epode/node": "file:../../sdk/node",

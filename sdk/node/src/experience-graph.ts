@@ -303,6 +303,7 @@ export interface ParsedDomainNeed<State> {
 
 const TOKEN_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const JOURNEY_RE = /^j-[a-z0-9-]+$/i;
+const MAX_DYNAMIC_BUDGET = 1_000_000;
 
 function snake(value: string): string {
   return value
@@ -338,6 +339,23 @@ function choiceByToken(
     }
     const choice = dimension.choices.find((entry) => entry.token === token);
     if (choice) return { dimension, choice };
+    if (dimension.kind === "budget") {
+      const dynamic = token.match(new RegExp(`^${snake(dimension.key)}-(hard|target)-([0-9]+)$`));
+      const amount = dynamic ? Number(dynamic[2]) : Number.NaN;
+      if (dynamic && Number.isSafeInteger(amount) && amount <= MAX_DYNAMIC_BUDGET) {
+        const strength = dynamic[1] as "hard" | "target";
+        return {
+          dimension,
+          choice: {
+            token,
+            value: String(amount),
+            meaning:
+              strength === "hard" ? `$${amount} absolute maximum` : `$${amount} preferred target`,
+            strength,
+          },
+        };
+      }
+    }
   }
   return undefined;
 }
@@ -1368,7 +1386,6 @@ export function experienceTelemetryForNode(
     counterfactuals?: Array<RecordedCounterfactual & { deltaUsd?: number }>;
     searchAttribution?: { searchId?: unknown; resultPosition?: unknown } | null;
   };
-
   if (typeof source.stage === "string" && source.stage) {
     experience.stage = boundedText(source.stage, 40);
   }
@@ -1496,6 +1513,7 @@ export function productLinkClickTelemetryDetails(input: {
   statusCode?: number;
   durationMs?: number;
   runtimeHint?: string;
+  experience?: ExperienceTelemetry;
 }) {
   return {
     surface: "http_html" as const,
@@ -1510,6 +1528,7 @@ export function productLinkClickTelemetryDetails(input: {
     runtimeHintSource: input.runtimeHint ? ("http" as const) : undefined,
     sessionRef: input.sessionRef.slice(0, 160),
     sessionSource: "customer" as const,
+    experience: input.experience,
   };
 }
 

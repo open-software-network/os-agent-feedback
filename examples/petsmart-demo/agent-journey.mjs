@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+
 /**
  * Plays the full PetSmart demo journey against a running petsmart-demo server:
  *
@@ -10,8 +13,9 @@
  *      strongly food-motivated, with a target budget.
  *   3. The graph ranks the SmartTag RFID Multi-Pet Feeder as the only exact
  *      match and hands back an ordinary product link for the user.
- *   4. The user clicks the link: the merchant drops its signed first-party
- *      visitor + session cookies and links them to the agent journey.
+ *   4. The user clicks the permanent need-state link: the merchant drops its
+ *      signed first-party visitor + session cookies and records the bounded
+ *      shopping facets without exposing the private agent journey.
  *   5. The agent reads the customer-context contract embedded in the product
  *      page, obtains permission, and submits the household traits as signals.
  *   6. On the next visit the shopper is discoverable: the homepage greets the
@@ -85,10 +89,52 @@ function cookiesFrom(response) {
     .join("; ");
 }
 
+function browserNavigate(url, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const request = new URL(url).protocol === "https:" ? httpsRequest : httpRequest;
+    const navigation = request(
+      url,
+      {
+        headers: {
+          "user-agent": BROWSER_UA,
+          "sec-fetch-user": "?1",
+          "sec-fetch-mode": "navigate",
+          "sec-fetch-dest": "document",
+          ...headers,
+        },
+      },
+      (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(chunk));
+        response.on("end", () => {
+          const body = Buffer.concat(chunks).toString("utf8");
+          resolve({
+            status: response.statusCode,
+            headers: {
+              get(name) {
+                const value = response.headers[String(name).toLowerCase()];
+                return Array.isArray(value) ? value.join(", ") : (value ?? null);
+              },
+              getSetCookie() {
+                return response.headers["set-cookie"] || [];
+              },
+            },
+            text: async () => body,
+          });
+        });
+      },
+    );
+    navigation.on("error", reject);
+    navigation.end();
+  });
+}
+
 step(`Agent crawls ${base}/ and receives the faceted agent storefront`);
 const guideResponse = await fetch(`${base}/`, { headers: { "user-agent": AGENT_UA } });
 const guide = await guideResponse.text();
-const negotiateUrl = guide.match(/feeder: (\S+\/agent-negotiate\/j-[a-z0-9-]+\/feeder)/i)?.[1];
+const negotiateUrl = guide.match(
+  /feeder: (\S+\/agent-negotiate\/j-[a-z0-9-]+\.[a-z0-9]+\.[A-Za-z0-9_-]+\/feeder)/i,
+)?.[1];
 if (!negotiateUrl) fail("The agent storefront did not include a feeder negotiation URL");
 console.log(`  entry: ${negotiateUrl}`);
 
@@ -120,7 +166,9 @@ if (!productLink) fail("Item detail did not include a human product link");
 console.log(`  product link: ${productLink}`);
 
 step("User clicks the product link — first-party cookie + session drop");
-const clickResponse = await fetch(productLink, { headers: { "user-agent": BROWSER_UA } });
+const clickResponse = await browserNavigate(productLink, {
+  referer: "https://chatgpt.com/c/petsmart-demo",
+});
 const productHtml = await clickResponse.text();
 const cookie = cookiesFrom(clickResponse);
 if (!cookie.includes("ps_visitor=")) fail("The product page did not drop the visitor cookie");
