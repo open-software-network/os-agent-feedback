@@ -42,6 +42,9 @@ test("a product link click separates first-party identity from request traits", 
       method: "GET",
       userAgent: "Mozilla/5.0 Browser",
     },
+    experience: {
+      needState: { expressedDimensions: ["budget", "pets"] },
+    },
   });
   assert.equal(details.surface, "http_html");
   assert.equal(details.customerLinkSource, "product_link_click");
@@ -51,6 +54,9 @@ test("a product link click separates first-party identity from request traits", 
     clientIp: "203.0.113.10",
     method: "GET",
     userAgent: "Mozilla/5.0 Browser",
+  });
+  assert.deepEqual(details.experience, {
+    needState: { expressedDimensions: ["budget", "pets"] },
   });
 });
 

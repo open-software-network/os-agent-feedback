@@ -1368,7 +1368,6 @@ export function experienceTelemetryForNode(
     counterfactuals?: Array<RecordedCounterfactual & { deltaUsd?: number }>;
     searchAttribution?: { searchId?: unknown; resultPosition?: unknown } | null;
   };
-
   if (typeof source.stage === "string" && source.stage) {
     experience.stage = boundedText(source.stage, 40);
   }
@@ -1496,6 +1495,7 @@ export function productLinkClickTelemetryDetails(input: {
   statusCode?: number;
   durationMs?: number;
   runtimeHint?: string;
+  experience?: ExperienceTelemetry;
 }) {
   return {
     surface: "http_html" as const,
@@ -1510,6 +1510,7 @@ export function productLinkClickTelemetryDetails(input: {
     runtimeHintSource: input.runtimeHint ? ("http" as const) : undefined,
     sessionRef: input.sessionRef.slice(0, 160),
     sessionSource: "customer" as const,
+    experience: input.experience,
   };
 }
 
