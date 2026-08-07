@@ -33,13 +33,46 @@ test("production observation accepts a continuously healthy API and web pair", a
   const api = await listen((request, response) => {
     response.writeHead(request.url === "/api/health" ? 200 : 404).end();
   });
-  const web = await listen((_request, response) => response.writeHead(200).end("ok"));
+  const web = await listen((request, response) => {
+    if (request.url === "/") {
+      response.writeHead(307, { location: "/auth/signin" }).end();
+      return;
+    }
+    response.writeHead(request.url === "/auth/signin" ? 200 : 404).end("ok");
+  });
   try {
     const { stdout } = await execFileAsync("bash", [script, api.origin, web.origin], {
       env: observationEnv,
       timeout: 5_000,
     });
     assert.match(stdout, /Production observation passed for 1s/);
+    assert.match(stdout, /Web root probe returned HTTP 200 .* after 1 redirect/);
+  } finally {
+    await Promise.all([api.close(), web.close()]);
+  }
+});
+
+test("production observation trips when the web redirect never becomes healthy", async () => {
+  const api = await listen((request, response) => {
+    response.writeHead(request.url === "/api/health" ? 200 : 404).end();
+  });
+  const web = await listen((_request, response) => {
+    response.writeHead(307, { location: "/" }).end();
+  });
+  try {
+    await assert.rejects(
+      execFileAsync("bash", [script, api.origin, web.origin], {
+        env: { ...observationEnv, EPODE_OBSERVATION_SECONDS: "10" },
+        timeout: 5_000,
+      }),
+      (error) => {
+        assert.match(
+          `${error.stdout}\n${error.stderr}`,
+          /circuit breaker tripped after 2 consecutive failed samples/,
+        );
+        return true;
+      },
+    );
   } finally {
     await Promise.all([api.close(), web.close()]);
   }

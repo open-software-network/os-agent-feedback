@@ -52,31 +52,44 @@ sample=0
 probe() {
   local name="$1"
   local url="$2"
-  local result status latency
+  local redirect_origin="${3:-}"
+  local result status latency redirect_count effective_url
+  local -a curl_args=(
+    --silent
+    --show-error
+    --max-time 20
+    --output /dev/null
+    --write-out '%{http_code} %{time_total} %{num_redirects} %{url_effective}'
+  )
+
+  if [[ -n "$redirect_origin" ]]; then
+    curl_args+=(--location --max-redirs 5)
+  fi
 
   result="$({
-    curl --silent --show-error --max-time 20 \
-      --output /dev/null \
-      --write-out '%{http_code} %{time_total}' \
-      "$url"
+    curl "${curl_args[@]}" "$url"
   } 2>/dev/null || true)"
-  read -r status latency <<<"$result"
+  read -r status latency redirect_count effective_url <<<"$result"
   if [[ "$status" != "200" || -z "${latency:-}" ]]; then
     echo "$name probe failed: ${status:-no HTTP response}." >&2
+    return 1
+  fi
+  if [[ -n "$redirect_origin" && "$effective_url" != "$redirect_origin" && "$effective_url" != "$redirect_origin/"* ]]; then
+    echo "$name probe left the expected origin: ${effective_url:-unknown URL}." >&2
     return 1
   fi
   if ! awk -v observed="$latency" -v maximum="$max_latency_seconds" 'BEGIN { exit !(observed <= maximum) }'; then
     echo "$name probe exceeded ${max_latency_seconds}s: ${latency}s." >&2
     return 1
   fi
-  echo "$name probe returned HTTP 200 in ${latency}s."
+  echo "$name probe returned HTTP 200 in ${latency}s after ${redirect_count:-0} redirect(s)."
 }
 
 while true; do
   sample="$((sample + 1))"
   sample_ok=true
   probe "API health" "$api_origin/api/health" || sample_ok=false
-  probe "Web root" "$web_origin/" || sample_ok=false
+  probe "Web root" "$web_origin/" "$web_origin" || sample_ok=false
 
   if [[ "$sample_ok" == "true" ]]; then
     consecutive_failures=0
