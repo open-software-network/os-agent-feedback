@@ -962,7 +962,7 @@ function storefrontHtml({
        <summary>For AI shopping assistants</summary>
        <p>Composable ranked-results URL:</p>
        <p><code>${origin}/feeders?pets=&lt;one_cat|multiple_cats|one_dog|multiple_dogs|cats_and_dog&gt;&amp;motivation=&lt;one_food_motivated|all_balanced|grazers&gt;&amp;budget=&lt;2-5 digit USD amount&gt;&amp;budget_kind=&lt;hard|target&gt;&amp;priority=&lt;functional_fit|price|connectivity&gt;&amp;journey=${capability}</code></p>
-       <p>Every need parameter is optional. A hard budget is a maximum; a target budget is a preference. The same <code>journey</code> value belongs on every request for one shopping errand so its steps stay connected.</p>
+       <p>Every need parameter is optional. A hard budget is a maximum; a target budget is a preference. Requests that reuse one <code>journey</code> value stay one errand.</p>
      </details>
      <p class="treats">Treats™ members earn points on every purchase. ·
        <a rel="alternate" type="application/json" href="/agent-experience.json">Catalog data (JSON)</a></p>`,
@@ -989,7 +989,7 @@ function productHtml(item) {
   );
 }
 
-export function createApp() {
+export function createApp({ customer: suppliedCustomer } = {}) {
   const app = express();
   app.disable("x-powered-by");
   app.use(express.json());
@@ -1026,25 +1026,28 @@ export function createApp() {
     next();
   });
 
-  const customer = process.env.EPODE_API_KEY
-    ? epode({
-        apiKey: process.env.EPODE_API_KEY,
-        endpoint: process.env.EPODE_API_URL,
-        include: [
-          "/product/*",
-          "/p/**",
-          "/shop/automatic-feeders/**/product/*",
-          "/s/*/product/*",
-          "/c/*/product/*",
-        ],
-        shouldRequestHtml: (request) => !isIndexer(request),
-        purpose: "product_personalization",
-        identify: (request) =>
-          request.visitorId ? { anonymousRef: request.visitorId } : {},
-        sessionRef: (request) => request.sessionId,
-        runtimeHint: (request) => runtimeHintFor(request),
-      })
-    : null;
+  const customer =
+    suppliedCustomer !== undefined
+      ? suppliedCustomer
+      : process.env.EPODE_API_KEY
+        ? epode({
+            apiKey: process.env.EPODE_API_KEY,
+            endpoint: process.env.EPODE_API_URL,
+            include: [
+              "/product/*",
+              "/p/**",
+              "/shop/automatic-feeders/**/product/*",
+              "/s/*/product/*",
+              "/c/*/product/*",
+            ],
+            shouldRequestHtml: (request) => !isIndexer(request),
+            purpose: "product_personalization",
+            identify: (request) =>
+              request.visitorId ? { anonymousRef: request.visitorId } : {},
+            sessionRef: (request) => request.sessionId,
+            runtimeHint: (request) => runtimeHintFor(request),
+          })
+        : null;
   if (customer) app.use(customer);
 
   const decisions = new Map();
@@ -1796,8 +1799,8 @@ export function createApp() {
   return app;
 }
 
-export function startServer(port = PORT) {
-  const app = createApp();
+export function startServer(port = PORT, options = {}) {
+  const app = createApp(options);
   const server = createServer(app);
   return new Promise((resolve) => {
     server.listen(port, "127.0.0.1", () => {
