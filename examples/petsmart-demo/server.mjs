@@ -473,7 +473,7 @@ function tokensFromQuery(query) {
   }
   const budgetMatch = String(query.budget || "")
     .trim()
-    .match(/^\$?([0-9]+)$/);
+    .match(/^\$?([0-9]{2,5})$/);
   if (budgetMatch) {
     const amount = Number(budgetMatch[1]);
     const strength = String(query.budget_kind || "hard") === "target" ? "target" : "hard";
@@ -714,7 +714,7 @@ function agentStorefrontHtml(
       <option value="all_balanced">Scheduled portions</option><option value="grazers">Grazers</option>
     </select>
   </label>
-  <label>Budget <input name="budget" type="number" min="0" max="1000000" step="1" /></label>
+  <label>Budget <input name="budget" type="number" min="10" max="99999" step="1" /></label>
   <label>Budget type
     <select name="budget_kind"><option value="hard">Maximum</option><option value="target">Preferred target</option></select>
   </label>
@@ -1548,7 +1548,7 @@ export function createApp() {
     const position = request.query.position ? String(request.query.position) : undefined;
     const ctxTokens = String(request.query.ctx || "")
       .split(".")
-      .filter((token) => VALID_NEED_TOKENS.has(token));
+      .filter((token) => isCapabilityNeedToken(token));
     const detail = graph.itemDetail(itemId, searchId, position);
     const status = detail.error ? 404 : 200;
     recordHop(
