@@ -56,6 +56,9 @@ reach them through private DNS.
 Grafana service variables:
 
 - `GF_SECURITY_ADMIN_PASSWORD` — required secret for the initial admin user.
+- `EPODE_ALERT_SLACK_WEBHOOK_URL` — required secret Slack incoming-webhook URL
+  for the provisioned production contact point. Keep it in Railway; never put it
+  in a repository file or workflow input.
 - `GF_USERS_ALLOW_SIGN_UP=false`
 - `GF_ANALYTICS_REPORTING_ENABLED=false`
 
@@ -86,11 +89,29 @@ What you get once connected:
 
 ## Alerting
 
-Grafana alerting is provisioned-ready: add a contact point (Slack webhook or
-email) in the Grafana UI, then alert rules against Prometheus (error rate,
-p95 latency per route) and Loki (e.g. `level=warn` bursts from the data
-destination or code-match workers). Alert rule state persists in the Grafana
-volume.
+Grafana provisions the production Slack contact point and four versioned rules
+from `grafana/provisioning/alerting/epode-production.yaml`:
+
+- API or web request telemetry missing for ten minutes (critical after a
+  two-minute pending period). The API Railway health check and the web
+  container health check provide continuous low-cardinality request samples,
+  so silence also detects a broken OTLP path.
+- At least five HTTP 5xx responses with a five-minute error rate above 5%
+  (critical after five minutes).
+- HTTP p95 latency above two seconds with at least twenty requests in five
+  minutes (warning after five minutes).
+
+The rules query only `deployment_environment_name="production"`. Prometheus
+promotes that bounded OTLP resource attribute onto application series in
+`prometheus/prometheus.yml`; without that promotion, the missing-telemetry
+rules intentionally fire.
+
+After deploying or restarting Grafana, open **Alerts & IRM → Contact points**,
+select **Epode production Slack**, and send a test notification. Confirm it is
+visible to the person responsible for production before enabling OTLP export
+on the applications. Then open **Alert rules → Epode production** and verify
+all four rules evaluate without a datasource error. Provisioned resources are
+changed through this repository, not edited in the Grafana UI.
 
 ## Operations notes
 

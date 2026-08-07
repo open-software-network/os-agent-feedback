@@ -44,6 +44,7 @@ jobs:
               - "Makefile"
               - "tests/**"
               - "backend/**"
+              - "observability/**"
               - "sdk/**"
               - "protocol/**"
               - "docs/**"
@@ -111,6 +112,7 @@ jobs:
             workflows:
               - ".github/workflows/**"
               - "scripts/railway-deploy-image.sh"
+              - "scripts/verify-production-observation.sh"
               - "scripts/verify-migration-ledger.sh"
               - "scripts/verify-public-integration-surface.sh"
 
@@ -440,6 +442,7 @@ jobs:
         run: >-
           shellcheck
           scripts/railway-deploy-image.sh
+          scripts/verify-production-observation.sh
           scripts/verify-image-artifact-ledger.sh
           scripts/verify-public-integration-surface.sh
 
