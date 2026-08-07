@@ -303,7 +303,6 @@ export interface ParsedDomainNeed<State> {
 
 const TOKEN_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const JOURNEY_RE = /^j-[a-z0-9-]+$/i;
-const MAX_DYNAMIC_BUDGET = 1_000_000;
 
 function snake(value: string): string {
   return value
@@ -340,9 +339,11 @@ function choiceByToken(
     const choice = dimension.choices.find((entry) => entry.token === token);
     if (choice) return { dimension, choice };
     if (dimension.kind === "budget") {
-      const dynamic = token.match(new RegExp(`^${snake(dimension.key)}-(hard|target)-([0-9]+)$`));
+      const dynamic = token.match(
+        new RegExp(`^${snake(dimension.key)}-(hard|target)-([0-9]{2,5})$`),
+      );
       const amount = dynamic ? Number(dynamic[2]) : Number.NaN;
-      if (dynamic && Number.isSafeInteger(amount) && amount <= MAX_DYNAMIC_BUDGET) {
+      if (dynamic && Number.isSafeInteger(amount)) {
         const strength = dynamic[1] as "hard" | "target";
         return {
           dimension,

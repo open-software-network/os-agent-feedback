@@ -644,18 +644,21 @@ test("petsmart demo telemetry: hops carry experience payloads, vendor hints, and
       base,
       choicePath(base, node, "motivation", "one_food_motivated"),
     ));
-    ({ body: node } = await fetchJson(base, choicePath(base, node, "budget", "200", "target")));
+    const suggestedBudgetPath = choicePath(base, node, "budget", "200", "target");
+    const exactBudgetPath = suggestedBudgetPath.replace(/budget-target-200$/, "budget-target-137");
+    ({ body: node } = await fetchJson(base, exactBudgetPath));
+    assert.equal(node.needState.values.budget.value, "137");
     assert.ok(node.resultsUrl);
 
     const { body: decision } = await fetchJson(base, node.resultsUrl.replace(base, ""));
     assert.equal(decision.exactMatchCount, 1);
-    const { body: detail } = await fetchJson(
-      base,
-      decision.exactMatches[0].detailUrl.replace(base, ""),
-    );
+    const detailUrl = new URL(decision.exactMatches[0].detailUrl);
+    assert.match(detailUrl.searchParams.get("ctx"), /(?:^|\.)budget-target-137(?:\.|$)/);
+    const { body: detail } = await fetchJson(base, detailUrl.toString().replace(base, ""));
     const productLink = detail.humanProductLink?.url;
     assert.ok(productLink, "item detail must include the human product link");
     assert.match(productLink, /\/c\/[^/]+\/product\/smarttag-rfid-multi-pet-feeder/);
+    assert.match(productLink, /budget-target-137/);
     const journeyId = decision.journeyId;
     assert.equal(new URL(productLink).searchParams.get("journey"), journeyId);
 
@@ -910,28 +913,37 @@ test("petsmart demo preserves arbitrary exact-dollar hard and target budgets", a
   const base = `http://127.0.0.1:${started.port}`;
   try {
     const hard = await fetch(
-      `${base}/feeders?pets=cats_and_dog&motivation=one_food_motivated&budget=175`,
+      `${base}/feeders?pets=cats_and_dog&motivation=one_food_motivated&budget=137`,
       { headers: { "user-agent": "ChatGPT-User/1.0" } },
     );
     const hardHtml = await hard.text();
     assert.match(hardHtml, /Exact matches \(0\)/);
     assert.match(hardHtml, /No eligible recommendation under the active filters/);
     assert.match(hardHtml, /SmartTag RFID Multi-Pet Feeder/);
-    assert.match(hardHtml, /budget: needs 175, this is 189\.99/);
-    assert.match(hardHtml, /\/c\/[^"/]*budget-hard-175[^"/]*\/product\/smarttag/);
+    assert.match(hardHtml, /budget: needs 137, this is 189\.99/);
+    assert.match(hardHtml, /\/c\/[^"/]*budget-hard-137[^"/]*\/product\/smarttag/);
     assert.match(
       hardHtml,
-      /data-filter-change="budget" href="[^"?]+\/feeders\?pets=cats_and_dog&motivation=one_food_motivated&budget=190&journey=[^"]+"/,
+      /data-filter-change="budget" href="[^"?]+\/feeders\?pets=cats_and_dog&motivation=one_food_motivated&budget=140&journey=[^"]+"/,
     );
 
     const target = await fetch(
-      `${base}/feeders?pets=cats_and_dog&motivation=one_food_motivated&budget=175&budget_kind=target`,
+      `${base}/feeders?pets=cats_and_dog&motivation=one_food_motivated&budget=137&budget_kind=target`,
       { headers: { "user-agent": "ChatGPT-User/1.0" } },
     );
     const targetHtml = await target.text();
     assert.doesNotMatch(targetHtml, /Exact matches \(0\)/);
     assert.match(targetHtml, /SmartTag RFID Multi-Pet Feeder/);
-    assert.match(targetHtml, /\/c\/[^"/]*budget-target-175[^"/]*\/product\/smarttag/);
+    assert.match(targetHtml, /\/c\/[^"/]*budget-target-137[^"/]*\/product\/smarttag/);
+
+    for (const rejectedBudget of ["9", "100000"]) {
+      const rejected = await fetch(
+        `${base}/feeders?pets=cats_and_dog&motivation=one_food_motivated&budget=${rejectedBudget}`,
+      );
+      const rejectedHtml = await rejected.text();
+      assert.doesNotMatch(rejectedHtml, new RegExp(`budget-(?:hard|target)-${rejectedBudget}`));
+      assert.doesNotMatch(rejectedHtml, new RegExp(`budget: needs ${rejectedBudget}`));
+    }
 
     const named = await fetch(`${base}/s/cats-and-dog-one-food-obsessed-under-175`);
     const namedHtml = await named.text();
