@@ -120,7 +120,7 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
 
   try {
     // Humans and crawlers get the PetSmart storefront, never agent JSON.
-    for (const ua of [BROWSER_UA, "Googlebot/2.1", "GPTBot/1.0"]) {
+    for (const ua of [BROWSER_UA, "Googlebot/2.1", "GPTBot/1.0", "UnknownFetcher/1.0"]) {
       const home = await fetch(`${base}/`, { headers: { "user-agent": ua } });
       assert.equal(home.status, 200);
       assert.match(home.headers.get("content-type") ?? "", /text\/html/);
@@ -196,6 +196,13 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
       /href="[^"]+\/product\/smarttag-rfid-multi-pet-feeder\?journey=w-[A-Za-z0-9_-]{22}"/,
     );
     assert.doesNotMatch(guide, /Agent clients|When you recommend|you must/i);
+
+    const kimiHome = await fetch(`${base}/`, { headers: { "user-agent": "KimiBot/1.0" } });
+    const kimiGuide = await kimiHome.text();
+    assertOneListingJourney(kimiGuide, base, "Kimi root");
+    assert.match(kimiGuide, /agent-negotiate/);
+    assert.match(kimiGuide, /\$189\.99/);
+
     // The structured JSON negotiation graph stays for API-capable agents.
     const negotiateUrl = guide.match(
       /feeder: (http:\/\/127\.0\.0\.1:\d+\/agent-negotiate\/w-[A-Za-z0-9_-]{22}\/feeder)/,
@@ -598,7 +605,8 @@ test("request diagnostics bound headers and redact journey capabilities and quer
       /href="(http:\/\/127\.0\.0\.1:\d+\/shop\/automatic-feeders\/w-[A-Za-z0-9_-]{22}\/multiple-cats-food-stealing-under-200)"/,
     )?.[1];
     assert.ok(situationUrl);
-    await fetch(`${situationUrl}?email=private%40example.com`, {
+    const queryCapability = new URL(situationUrl).pathname.split("/")[3];
+    await fetch(`${situationUrl}?email=private%40example.com&journey=${queryCapability}`, {
       headers: { "user-agent": `Google ${"x".repeat(300)}` },
     });
   } finally {
@@ -621,7 +629,9 @@ test("request diagnostics bound headers and redact journey capabilities and quer
     situationEntry.path,
     "/shop/automatic-feeders/:journey/multiple-cats-food-stealing-under-200",
   );
+  assert.equal(situationEntry.query, "?email=%3Avalue&journey=%3Ajourney");
   assert.doesNotMatch(JSON.stringify(situationEntry), /private|j-[a-f0-9-]+\./);
+  assert.doesNotMatch(JSON.stringify(situationEntry), /w-[A-Za-z0-9_-]{22}/);
   assert.equal(situationEntry.userAgent.length, 160);
 });
 

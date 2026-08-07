@@ -3,7 +3,11 @@ import { createServer } from "node:http";
 
 import express from "express";
 
-import { AgentFeedbackRuntime } from "@epode/node";
+import {
+  AgentFeedbackRuntime,
+  boundedUserAgentLogFields,
+  classifyUserAgent,
+} from "@epode/node";
 import { epode } from "@epode/node/express";
 import {
   experienceTelemetryDetails,
@@ -18,27 +22,15 @@ import { requiredCookieSecret } from "./cookie-secret.js";
 import { provisionPetFields } from "./provision-fields.mjs";
 
 const PORT = Number(process.env.PORT || 4320);
-const AGENT_UA =
-  /claude-user|anthropic-ai|chatgpt-user|perplexity-user|cohere-ai|gemini-agent|meta-externalfetcher|^google$/i;
-const INDEXER_UA = /meta-webindexer|facebookexternalhit/i;
 const RUNTIME_HINT = "petsmart-demo/1.0";
 // Agent JSON hops carry no request observation, so the runtime hint is the
-// only vendor evidence the backend's agent-mix insight can classify. Append
-// the matched agent family (mirroring AGENT_UA) to the base hint.
-const AGENT_VENDOR_HINTS = [
-  [/claude-user|anthropic-ai/i, "claude-user"],
-  [/chatgpt-user/i, "chatgpt-user"],
-  [/perplexity-user/i, "perplexity-user"],
-  [/cohere-ai/i, "cohere-ai"],
-  [/gemini-agent/i, "gemini-agent"],
-  [/^google$/i, "gemini-user"],
-  [/meta-externalfetcher/i, "meta-ai-user"],
-];
+// only vendor evidence the backend's agent-mix insight can classify.
 
 function runtimeHintFor(request) {
-  const userAgent = request?.get("user-agent") || "";
-  const vendor = AGENT_VENDOR_HINTS.find(([pattern]) => pattern.test(userAgent));
-  return vendor ? `${RUNTIME_HINT} ${vendor[1]}` : RUNTIME_HINT;
+  const classification = classifyUserAgent(request?.get("user-agent"));
+  return classification.kind === "routable_agent"
+    ? `${RUNTIME_HINT} ${classification.vendorFamily}`
+    : RUNTIME_HINT;
 }
 const HERO_ITEM_ID = "smarttag-rfid-multi-pet-feeder";
 
@@ -353,11 +345,11 @@ function text(response, status, body, contentType = "text/plain; charset=utf-8")
 }
 
 function isAgent(request) {
-  return AGENT_UA.test(request.get("user-agent") || "");
+  return classifyUserAgent(request.get("user-agent")).surface === "agent";
 }
 
 function isIndexer(request) {
-  return INDEXER_UA.test(request.get("user-agent") || "");
+  return classifyUserAgent(request.get("user-agent")).kind === "indexer";
 }
 
 function isUserActivatedDocumentNavigation(request) {
@@ -404,6 +396,19 @@ function redactedRequestPath(request) {
     .replace(/^\/c\/[^/]+/, "/c/:need")
     .replace(/^\/p\/[^/]+/, "/p/:journey")
     .slice(0, 256);
+}
+
+function redactedRequestQuery(request) {
+  const queryStart = request.originalUrl.indexOf("?");
+  if (queryStart === -1) return "";
+  const redacted = new URLSearchParams();
+  for (const [key] of new URLSearchParams(request.originalUrl.slice(queryStart + 1))) {
+    const normalizedKey = key.toLowerCase();
+    const placeholder = normalizedKey === "journey" ? ":journey" : ":value";
+    redacted.append(key, placeholder);
+  }
+  const query = redacted.toString();
+  return query ? `?${query}` : "";
 }
 
 function originFor(request) {
@@ -1087,12 +1092,17 @@ export function createApp({ customer: suppliedCustomer } = {}) {
   if (process.env.PETSMART_REQUEST_LOG === "1") {
     app.use((request, _response, next) => {
       const boundedHeader = (name, limit = 160) => (request.get(name) || "").slice(0, limit);
+      const { userAgent, query } = boundedUserAgentLogFields({
+        userAgent: request.get("user-agent"),
+        redactedQuery: redactedRequestQuery(request),
+      });
       console.log(
         JSON.stringify({
           at: new Date().toISOString(),
           method: request.method,
           path: redactedRequestPath(request),
-          userAgent: boundedHeader("user-agent"),
+          query,
+          userAgent,
           accept: boundedHeader("accept"),
           secFetchUser: boundedHeader("sec-fetch-user", 8),
           secFetchMode: boundedHeader("sec-fetch-mode", 16),

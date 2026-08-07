@@ -6,6 +6,24 @@ exact context used.
 
 The customer does not install Epode, create an Epode account, or receive a company product key.
 
+## User-Agent surface policy
+
+`classifyUserAgent` implements a two-class routing policy: documented fetch-time agent UAs use the agent
+surface; indexers, browsers, and unclassified UAs use the human surface. Routable classifications also expose a
+bounded vendor family for runtime hints. `ROUTABLE_AGENT_UA_ROSTER` and `INDEXER_UA_ROSTER` expose the exact
+case-insensitive roster.
+
+Grok, DeepSeek, and MS Copilot Actions are deliberately served the need-disclosing human surface because they
+do not present a stable, published fetch-time identity. Do not guess from browser-shaped UAs, IP ranges, timing,
+or fingerprints: request observations are not identity.
+
+```ts
+import { classifyUserAgent } from "@epode/node";
+
+const policy = classifyUserAgent(request.headers["user-agent"]);
+const route = policy.surface === "agent" ? serveAgentSurface : serveHumanSurface;
+```
+
 ## Agent experience graph
 
 ```ts
