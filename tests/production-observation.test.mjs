@@ -45,6 +45,52 @@ test("production observation accepts a continuously healthy API and web pair", a
   }
 });
 
+test("production observation accepts the canonical web sign-in redirect", async () => {
+  const api = await listen((request, response) => {
+    response.writeHead(request.url === "/api/health" ? 200 : 404).end();
+  });
+  const web = await listen((_request, response) => {
+    response.writeHead(307, { location: "/auth/signin" }).end();
+  });
+  try {
+    const { stdout } = await execFileAsync("bash", [script, api.origin, web.origin], {
+      env: observationEnv,
+      timeout: 5_000,
+    });
+    assert.match(stdout, /expected HTTP 307 sign-in redirect/);
+    assert.match(stdout, /Production observation passed for 1s/);
+  } finally {
+    await Promise.all([api.close(), web.close()]);
+  }
+});
+
+test("production observation rejects a web redirect outside the sign-in path", async () => {
+  const api = await listen((request, response) => {
+    response.writeHead(request.url === "/api/health" ? 200 : 404).end();
+  });
+  const web = await listen((_request, response) => {
+    response.writeHead(307, { location: "/unexpected" }).end();
+  });
+  try {
+    await assert.rejects(
+      execFileAsync("bash", [script, api.origin, web.origin], {
+        env: { ...observationEnv, EPODE_OBSERVATION_SECONDS: "10" },
+        timeout: 5_000,
+      }),
+      (error) => {
+        assert.match(
+          `${error.stdout}\n${error.stderr}`,
+          /circuit breaker tripped after 2 consecutive failed samples/,
+        );
+        assert.match(`${error.stdout}\n${error.stderr}`, /redirect .*\/unexpected/);
+        return true;
+      },
+    );
+  } finally {
+    await Promise.all([api.close(), web.close()]);
+  }
+});
+
 test("production observation trips after consecutive availability failures", async () => {
   const api = await listen((_request, response) => response.writeHead(503).end());
   const web = await listen((_request, response) => response.writeHead(200).end("ok"));

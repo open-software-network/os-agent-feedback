@@ -122,6 +122,9 @@ planned digests, the production health and OAuth-start smoke checks pass, and a
 five-minute observation window sees no two consecutive availability or latency
 failures from the public API and web origins. The default observation samples
 every 30 seconds and treats a response slower than five seconds as failed.
+The web-root probe accepts HTTP 200 or the application's exact HTTP 307 redirect
+to the same-origin `/auth/signin` path. Other redirects remain failures so a
+misrouted host cannot pass the observation window.
 Protected production variables may override the duration, interval, failure
 threshold, and latency ceiling with `PRODUCTION_OBSERVATION_SECONDS`,
 `PRODUCTION_OBSERVATION_INTERVAL_SECONDS`,
