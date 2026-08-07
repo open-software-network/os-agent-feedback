@@ -14,8 +14,12 @@ on:
           - verify-production
           - apply-production
       target_sha:
-        description: Protected-main commit that adds exactly one migration.
+        description: Protected-main commit carrying the migration and current CI signoffs.
         required: true
+        type: string
+      migration_sha:
+        description: Optional protected-main commit that originally added the migration; defaults to target_sha.
+        required: false
         type: string
       verification_state:
         description: For verification, require the database immediately before or at the migration.
@@ -70,6 +74,7 @@ jobs:
     env:
       OPERATION: ${{ inputs.operation }}
       TARGET_SHA: ${{ inputs.target_sha }}
+      MIGRATION_SHA: ${{ inputs.migration_sha }}
       BACKUP_REFERENCE: ${{ inputs.backup_reference }}
       BACKUP_VERIFIED_AT: ${{ inputs.backup_verified_at }}
       BACKUP_RESTORE_TEST_REFERENCE: ${{ inputs.backup_restore_test_reference }}
@@ -100,11 +105,21 @@ jobs:
         id: review
         run: |
           set -euo pipefail
+          migration_sha="${MIGRATION_SHA:-$TARGET_SHA}"
+          if [[ ! "$migration_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::migration_sha must be an exact 40-character commit when provided."
+            exit 1
+          fi
+          git fetch --no-tags origin "$migration_sha"
+          if ! git merge-base --is-ancestor "$migration_sha" "$TARGET_SHA"; then
+            echo "::error::migration_sha must be an ancestor of the signed target_sha."
+            exit 1
+          fi
           mapfile -t migration_changes < <(
-            git diff --name-status "${TARGET_SHA}^1" "$TARGET_SHA" -- backend/migrations
+            git diff --name-status "${migration_sha}^1" "$migration_sha" -- backend/migrations
           )
           if [[ "${#migration_changes[@]}" -ne 1 ]]; then
-            echo "::error::target_sha must add exactly one migration and may not modify earlier migrations."
+            echo "::error::migration_sha must add exactly one migration and may not modify earlier migrations."
             exit 1
           fi
           read -r change migration_path extra <<< "${migration_changes[0]}"
@@ -119,6 +134,7 @@ jobs:
           migration_sha256="$(sha256sum "$migration_path" | awk '{print $1}')"
           {
             echo "target_sha=$TARGET_SHA"
+            echo "migration_sha=$migration_sha"
             echo "migration_path=$migration_path"
             echo "migration_sha256=$migration_sha256"
             echo "migration_version=$migration_version"
@@ -171,6 +187,7 @@ jobs:
             echo "### Additive migration plan"
             echo "- **Operation:** \`${{ inputs.operation }}\`"
             echo "- **Revision:** \`${{ steps.review.outputs.target_sha }}\`"
+            echo "- **Migration origin:** \`${{ steps.review.outputs.migration_sha }}\`"
             echo "- **Migration:** \`${{ steps.review.outputs.migration_path }}\`"
             echo "- **Version:** \`${{ steps.review.outputs.expected_previous_version }} -> ${{ steps.review.outputs.migration_version }}\`"
             echo "- **SHA-256:** \`${{ steps.review.outputs.migration_sha256 }}\`"
