@@ -1286,10 +1286,18 @@ function cryptoRandomId(): string {
 }
 
 /**
+ * Which surface of the same experience graph a hop traversed: the faceted
+ * HTML-link storefront that chat-mode assistants follow, or the tokened
+ * native JSON graph that API-capable agents walk.
+ */
+export type ExperienceChannel = "faceted_html" | "native_graph";
+
+/**
  * Aggregate-safe hop evidence carried on telemetry events. Dimension keys and
  * decision-quality numbers only — never free-text customer or agent values.
  */
 export interface ExperienceTelemetry {
+  channel?: ExperienceChannel;
   stage?: string;
   needState?: {
     expressedDimensions?: string[];
@@ -1330,13 +1338,27 @@ function boundedCount(value: unknown): number | undefined {
   return Math.min(value, EXPERIENCE_COUNT_LIMIT);
 }
 
+const EXPERIENCE_CHANNELS: readonly ExperienceChannel[] = ["faceted_html", "native_graph"];
+
 /**
  * Derive the aggregate-safe experience payload from a built graph node. Accepts
  * negotiation, decision, item, and product-node shapes from both the token and
- * programmable-domain builders; unrecognized shapes yield undefined.
+ * programmable-domain builders; unrecognized shapes yield undefined unless a
+ * `channel` option marks the hop. Pass `channel: "faceted_html"` for hops the
+ * agent reached through faceted HTML links and `channel: "native_graph"` for
+ * tokened JSON graph paths.
  */
-export function experienceTelemetryForNode(node: unknown): ExperienceTelemetry | undefined {
-  if (typeof node !== "object" || node === null) return undefined;
+export function experienceTelemetryForNode(
+  node: unknown,
+  options?: { channel?: ExperienceChannel },
+): ExperienceTelemetry | undefined {
+  const experience: ExperienceTelemetry = {};
+  if (options?.channel && EXPERIENCE_CHANNELS.includes(options.channel)) {
+    experience.channel = options.channel;
+  }
+  if (typeof node !== "object" || node === null) {
+    return Object.keys(experience).length ? experience : undefined;
+  }
   const source = node as {
     stage?: unknown;
     needState?: NeedState;
@@ -1346,7 +1368,6 @@ export function experienceTelemetryForNode(node: unknown): ExperienceTelemetry |
     counterfactuals?: Array<RecordedCounterfactual & { deltaUsd?: number }>;
     searchAttribution?: { searchId?: unknown; resultPosition?: unknown } | null;
   };
-  const experience: ExperienceTelemetry = {};
 
   if (typeof source.stage === "string" && source.stage) {
     experience.stage = boundedText(source.stage, 40);

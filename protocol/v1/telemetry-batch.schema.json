@@ -88,6 +88,7 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
+              "channel": { "enum": ["faceted_html", "native_graph"] },
               "stage": {
                 "enum": [
                   "decision_input_required",

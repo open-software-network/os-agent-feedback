@@ -358,6 +358,11 @@ test("petsmart demo telemetry: hops carry experience payloads, vendor hints, and
     assert.equal(item.experience.search.resultPosition, 1);
     assert.ok(item.experience.search.searchId);
 
+    // Tokened JSON graph hops declare the native channel.
+    for (const event of [negotiation, decide, item]) {
+      assert.equal(event.experience.channel, "native_graph");
+    }
+
     // Agent JSON hops append the matched agent family to the runtime hint so
     // the backend's agent-mix insight can classify vendor traffic.
     for (const event of [negotiation, decide, item]) {
@@ -452,6 +457,8 @@ test("petsmart demo faceted telemetry: /feeders records the parsed need dims", a
       ]);
       assert.equal(hop.experience.stage, "decision_support");
       assert.equal(hop.experience.decision.exactMatchCount, 2);
+      // Faceted HTML-link traversals declare the faceted channel.
+      assert.equal(hop.experience.channel, "faceted_html");
       assert.equal(hop.runtimeHint, "petsmart-demo/1.0 chatgpt-user");
     }
   } finally {
@@ -526,6 +533,7 @@ test("petsmart demo faceted gating: only request-carried journeys reach telemetr
       "motivation",
       "pets",
     ]);
+    assert.equal(hop.experience.channel, "faceted_html");
   } finally {
     await started.close();
     await collector.close();

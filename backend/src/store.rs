@@ -53,15 +53,16 @@ use crate::{
         FeedbackOperationSummary, FeedbackReportItem, FeedbackReportsPage, FeedbackReportsResponse,
         FeedbackSummary, FeedbackSurfaceSummary, FeedbackWindow, GithubIssueLink, HandoffInsights,
         InsightCount, Insights, InteractionTelemetryInput, JourneyEdgeInsight, JourneyFlowInsights,
-        LostDemandInsights, MergeReportGroupsResponse, PersonalizationDecision,
-        PersonalizationDecisionInput, PersonalizationDecisionResponse, PersonalizationOutcome,
-        PersonalizationOutcomeInput, PersonalizationOutcomeResponse, PolicyInput, Product,
-        ProductActivationMilestones, ProductAuth, ProductEnvironment, ProductFeedbackReport,
-        ProductFeedbackReportInput, ProductFeedbackReportWithInteraction, ProductGithubRepo,
-        ProductGithubRepoInput, ProductInteraction, ProductReportGroup, ProductSession,
-        SignalOutcomeInsight, TeamInvitation, TeamMember, TelemetryBatchInput,
-        TelemetryBatchResult, UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput,
-        Workspace, WorkspaceMembership,
+        JourneyFunnelInsights, LostDemandInsights, MergeReportGroupsResponse,
+        OffGraphAttemptInsights, PersonalizationDecision, PersonalizationDecisionInput,
+        PersonalizationDecisionResponse, PersonalizationOutcome, PersonalizationOutcomeInput,
+        PersonalizationOutcomeResponse, PolicyInput, Product, ProductActivationMilestones,
+        ProductAuth, ProductEnvironment, ProductFeedbackReport, ProductFeedbackReportInput,
+        ProductFeedbackReportWithInteraction, ProductGithubRepo, ProductGithubRepoInput,
+        ProductInteraction, ProductReportGroup, ProductSession, SignalOutcomeInsight,
+        TeamInvitation, TeamMember, TelemetryBatchInput, TelemetryBatchResult, TrafficClassInsight,
+        UpdateFeedbackWorkflowInput, UpdateNameInput, UpdateTeamMemberInput, Workspace,
+        WorkspaceMembership,
     },
     os_accounts::OsUser,
     security::{
@@ -5392,6 +5393,13 @@ pub(crate) async fn purge_expired_product_data(
     clippy::cast_precision_loss,
     reason = "bounded dashboard percentages and integer-backed duration percentiles are intentionally rounded to whole-number metrics"
 )]
+/// Unverified vendor evidence naming a known assistant family, applied
+/// case-insensitively to runtime hints and observed user-agents. Mirrors the
+/// AGENT MIX vendor classifier and the reference integrations' vendor-hint
+/// suffixes (for example `petsmart-demo/1.0 chatgpt-user`).
+const AGENT_EVIDENCE_PATTERN: &str =
+    "(claude|anthropic|chatgpt|openai|gpt-|perplexity|gemini|google-extended|cohere|copilot)";
+
 async fn dashboard_insights(
     pool: &PgPool,
     environment_id: Option<Uuid>,
@@ -5819,6 +5827,166 @@ async fn dashboard_insights(
         .fetch_all(pool)
         .await?,
     );
+    // Discovery→following funnel over agent-evidenced sessions. A hop counts
+    // as agent evidence when its runtime hint or observed user-agent names a
+    // known assistant family, or when it is a server-recorded JSON graph hop
+    // (the reference integrations record every graph fetch as `http_json` on
+    // an `/agent-…` operation). "Root/guide" is the graph's front door — the
+    // `/` root and the `/agent-guide` storefront hop the examples record —
+    // so entering the graph means a tokened fetch past that door: any hop
+    // carrying an `experience` payload, or any `/agent-…` operation beyond
+    // the guide. Stages are monotonic: each stage requires all prior stages.
+    let journey_funnel_counts = sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
+        r"WITH hop AS (
+          SELECT i.session_id, i.surface, i.operation, i.experience, i.customer_link_source,
+            COALESCE(i.runtime_hint, '') AS hint,
+            COALESCE(observation.user_agent, '') AS user_agent
+          FROM interactions_v2 i
+          LEFT JOIN customer_request_observations observation
+            ON observation.interaction_id = i.id
+          WHERE i.environment_id = $1 AND i.occurred_at >= $2 AND i.session_id IS NOT NULL
+        ),
+        journey AS (
+          SELECT session_id,
+            BOOL_OR(hint ~* $3 OR user_agent ~* $3
+              OR (surface = 'http_json' AND operation LIKE '/agent-%')) AS agent_evidenced,
+            BOOL_OR(experience IS NOT NULL
+              OR (operation LIKE '/agent-%' AND operation NOT IN ('/', '/agent-guide')))
+              AS entered_graph,
+            BOOL_OR(jsonb_array_length(COALESCE(
+                experience -> 'needState' -> 'expressedDimensions', '[]'::jsonb)) > 0
+              OR jsonb_array_length(COALESCE(
+                experience -> 'needState' -> 'unknownDimensions', '[]'::jsonb)) > 0)
+              AS expressed_needs,
+            BOOL_OR(experience ? 'decision' OR experience ->> 'stage' = 'decision_support')
+              AS reached_decision,
+            BOOL_OR(customer_link_source = 'product_link_click') AS handoff_followed
+          FROM hop GROUP BY session_id
+        )
+        SELECT COUNT(*),
+          COUNT(*) FILTER (WHERE entered_graph),
+          COUNT(*) FILTER (WHERE entered_graph AND expressed_needs),
+          COUNT(*) FILTER (WHERE entered_graph AND expressed_needs AND reached_decision),
+          COUNT(*) FILTER (WHERE entered_graph AND expressed_needs AND reached_decision
+            AND handoff_followed)
+        FROM journey WHERE agent_evidenced",
+    )
+    .bind(environment_id)
+    .bind(window_start)
+    .bind(AGENT_EVIDENCE_PATTERN)
+    .fetch_one(pool)
+    .await?;
+    // Behavioral traffic classes per session. `declared_agent` follows the
+    // journey-funnel evidence rule above. `suspected_cloud_agent` is the
+    // closest defensible heuristic for a cloud browser driven by an agent
+    // behind a human Chrome user-agent: no vendor evidence anywhere in the
+    // session, at least one HTML hop observed with a human browser UA, and
+    // the session's FIRST hop landing on a deep faceted/product operation
+    // rather than the human root. The available data cannot distinguish this
+    // from a human who opened an agent-composed link in a fresh browser
+    // session and whose agent's own hops were never recorded — both begin
+    // mid-graph with no prior human browsing hop — so this class is an
+    // honest upper bound labelled "suspected", never a verified count.
+    let traffic_classes = sqlx::query_as::<_, (String, i64, i64)>(
+        r"WITH hop AS (
+          SELECT i.session_id, i.surface, i.operation,
+            COALESCE(i.runtime_hint, '') AS hint,
+            COALESCE(observation.user_agent, '') AS user_agent,
+            ROW_NUMBER() OVER (PARTITION BY i.session_id
+              ORDER BY i.occurred_at, i.client_sequence NULLS LAST, i.id) AS hop_rank
+          FROM interactions_v2 i
+          LEFT JOIN customer_request_observations observation
+            ON observation.interaction_id = i.id
+          WHERE i.environment_id = $1 AND i.occurred_at >= $2 AND i.session_id IS NOT NULL
+        ),
+        session_class AS (
+          SELECT session_id, COUNT(*) AS interactions,
+            BOOL_OR(hint ~* $3 OR user_agent ~* $3
+              OR (surface = 'http_json' AND operation LIKE '/agent-%')) AS declared,
+            BOOL_OR(surface = 'http_html' AND user_agent ~* 'mozilla'
+              AND user_agent !~* $3) AS human_browser,
+            BOOL_OR(hop_rank = 1 AND surface = 'http_html' AND operation <> '/'
+              AND operation NOT LIKE '/agent-%') AS deep_html_entry
+          FROM hop GROUP BY session_id
+        )
+        SELECT class, sessions, interactions FROM (
+          SELECT CASE
+              WHEN declared THEN 'declared_agent'
+              WHEN human_browser AND deep_html_entry THEN 'suspected_cloud_agent'
+              ELSE 'human'
+            END AS class,
+            COUNT(*) AS sessions,
+            COALESCE(SUM(interactions), 0)::BIGINT AS interactions
+          FROM session_class GROUP BY 1
+        ) classes
+        ORDER BY CASE class
+            WHEN 'declared_agent' THEN 0
+            WHEN 'suspected_cloud_agent' THEN 1
+            ELSE 2
+          END",
+    )
+    .bind(environment_id)
+    .bind(window_start)
+    .bind(AGENT_EVIDENCE_PATTERN)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|(class, sessions, interactions)| TrafficClassInsight {
+        class,
+        sessions,
+        interactions,
+    })
+    .collect::<Vec<_>>();
+    // Channel mix over experience-bearing hops. Hops recorded by SDKs that
+    // predate the channel marker aggregate honestly as `unlabeled`.
+    let channels = insight_counts(
+        sqlx::query_as::<_, (String, i64)>(
+            r"SELECT COALESCE(experience ->> 'channel', 'unlabeled'), COUNT(*)
+            FROM interactions_v2
+            WHERE environment_id = $1 AND occurred_at >= $2 AND experience IS NOT NULL
+            GROUP BY 1 ORDER BY COUNT(*) DESC, 1 LIMIT 8",
+        )
+        .bind(environment_id)
+        .bind(window_start)
+        .fetch_all(pool)
+        .await?,
+    );
+    // Off-graph attempts: agent-evidenced hops that fell off the graph — any
+    // 404 (a fabricated URL, like a live Claude run inventing its own
+    // /agent-item path), plus 400/422 on graph operations (malformed tokens
+    // or premature decisions).
+    const OFF_GRAPH_CONDITION: &str = r"(COALESCE(i.runtime_hint, '') ~* $3
+        OR COALESCE(observation.user_agent, '') ~* $3
+        OR (i.surface = 'http_json' AND i.operation LIKE '/agent-%'))
+      AND (i.status_code = 404
+        OR (i.status_code IN (400, 422) AND i.operation LIKE '/agent-%'))";
+    let off_graph_attempts = sqlx::query_scalar::<_, i64>(&format!(
+        r"SELECT COUNT(*)
+        FROM interactions_v2 i
+        LEFT JOIN customer_request_observations observation
+          ON observation.interaction_id = i.id
+        WHERE i.environment_id = $1 AND i.occurred_at >= $2 AND {OFF_GRAPH_CONDITION}",
+    ))
+    .bind(environment_id)
+    .bind(window_start)
+    .bind(AGENT_EVIDENCE_PATTERN)
+    .fetch_one(pool)
+    .await?;
+    let off_graph_operations = insight_counts(
+        sqlx::query_as::<_, (String, i64)>(&format!(
+            r"SELECT i.operation, COUNT(*)
+            FROM interactions_v2 i
+            LEFT JOIN customer_request_observations observation
+              ON observation.interaction_id = i.id
+            WHERE i.environment_id = $1 AND i.occurred_at >= $2 AND {OFF_GRAPH_CONDITION}
+            GROUP BY i.operation ORDER BY COUNT(*) DESC, i.operation LIMIT 8",
+        ))
+        .bind(environment_id)
+        .bind(window_start)
+        .bind(AGENT_EVIDENCE_PATTERN)
+        .fetch_all(pool)
+        .await?,
+    );
     Ok(Insights {
         window_days: WINDOW_DAYS,
         comparison_days: COMPARISON_DAYS,
@@ -5885,6 +6053,25 @@ async fn dashboard_insights(
         rank_positions,
         unknown_dimensions,
         unanswered_questions,
+        journey_funnel: JourneyFunnelInsights {
+            arrived: journey_funnel_counts.0,
+            entered_graph: journey_funnel_counts.1,
+            expressed_needs: journey_funnel_counts.2,
+            reached_decision: journey_funnel_counts.3,
+            handoff_followed: journey_funnel_counts.4,
+            tokened_fetch_rate: if journey_funnel_counts.0 == 0 {
+                0
+            } else {
+                (journey_funnel_counts.1 as f64 / journey_funnel_counts.0 as f64 * 100.0).round()
+                    as i64
+            },
+        },
+        traffic_classes,
+        channels,
+        off_graph_attempts: OffGraphAttemptInsights {
+            attempts: off_graph_attempts,
+            operations: off_graph_operations,
+        },
     })
 }
 
@@ -7241,6 +7428,10 @@ const EXPERIENCE_STAGES: [&str; 8] = [
     "product",
 ];
 
+/// Which surface of the same experience graph a hop traversed: the faceted
+/// HTML-link storefront or the tokened native JSON graph.
+const EXPERIENCE_CHANNELS: [&str; 2] = ["faceted_html", "native_graph"];
+
 fn valid_experience_label(value: &str, max: usize) -> bool {
     // `:` admits namespaced dimensions like the SDK's `evidence:glare_control`.
     !value.is_empty()
@@ -7275,6 +7466,11 @@ fn validate_experience(input: Option<&ExperienceTelemetryInput>) -> Result<(), A
     let Some(experience) = input else {
         return Ok(());
     };
+    if let Some(channel) = experience.channel.as_deref()
+        && !EXPERIENCE_CHANNELS.contains(&channel)
+    {
+        return Err(ApiError::bad_request("Invalid experience channel"));
+    }
     if let Some(stage) = experience.stage.as_deref()
         && !EXPERIENCE_STAGES.contains(&stage)
     {
@@ -18076,6 +18272,7 @@ mod product_tests {
     #[test]
     fn experience_validation_accepts_all_sdk_emitted_shapes() {
         let payload = |stage: &str, dimension: &str| ExperienceTelemetryInput {
+            channel: None,
             stage: Some(stage.into()),
             need_state: None,
             decision: Some(ExperienceDecisionInput {
@@ -18103,6 +18300,15 @@ mod product_tests {
         }
         assert!(validate_experience(Some(&payload("bogus_stage", "budget"))).is_err());
         assert!(validate_experience(Some(&payload("item", "bad dimension"))).is_err());
+        // Both channel markers are accepted; anything else is rejected.
+        for channel in EXPERIENCE_CHANNELS {
+            let mut tagged = payload("item", "budget");
+            tagged.channel = Some(channel.into());
+            validate_experience(Some(&tagged)).expect("SDK-emitted channels must be accepted");
+        }
+        let mut invalid_channel = payload("item", "budget");
+        invalid_channel.channel = Some("carrier_pigeon".into());
+        assert!(validate_experience(Some(&invalid_channel)).is_err());
     }
 
     #[tokio::test]
@@ -18146,6 +18352,7 @@ mod product_tests {
                 "/agent-negotiate/lamp",
                 0,
                 Some(ExperienceTelemetryInput {
+                    channel: Some("native_graph".into()),
                     stage: Some("express_more_or_decide".into()),
                     need_state: Some(ExperienceNeedStateInput {
                         expressed_dimensions: Some(vec!["budget".into()]),
@@ -18160,6 +18367,7 @@ mod product_tests {
                 "/agent-decide/lamp",
                 1,
                 Some(ExperienceTelemetryInput {
+                    channel: Some("faceted_html".into()),
                     stage: Some("decision_support".into()),
                     need_state: Some(ExperienceNeedStateInput {
                         expressed_dimensions: Some(vec!["budget".into()]),
@@ -18201,6 +18409,7 @@ mod product_tests {
                 "/agent-item",
                 2,
                 Some(ExperienceTelemetryInput {
+                    channel: None,
                     stage: Some("item".into()),
                     need_state: None,
                     decision: None,
@@ -18239,6 +18448,7 @@ mod product_tests {
 
             let mut invalid = event("/agent-decide/lamp", 4, None);
             invalid.experience = Some(ExperienceTelemetryInput {
+                channel: None,
                 stage: Some("bogus_stage".into()),
                 need_state: None,
                 decision: None,
@@ -18449,6 +18659,280 @@ mod product_tests {
                 "unanswered questions should surface the declined budget question: {:?}",
                 insights.unanswered_questions
             );
+            anyhow::ensure!(
+                insights
+                    .channels
+                    .iter()
+                    .any(|row| row.name == "native_graph" && row.count == 1)
+                    && insights
+                        .channels
+                        .iter()
+                        .any(|row| row.name == "faceted_html" && row.count == 1)
+                    && insights
+                        .channels
+                        .iter()
+                        .any(|row| row.name == "unlabeled" && row.count == 1),
+                "channel-tagged hops should aggregate and untagged hops stay unlabeled: {:?}",
+                insights.channels
+            );
+            anyhow::ensure!(
+                insights.journey_funnel.arrived == 1
+                    && insights.journey_funnel.entered_graph == 1
+                    && insights.journey_funnel.expressed_needs == 1
+                    && insights.journey_funnel.reached_decision == 1
+                    && insights.journey_funnel.handoff_followed == 1
+                    && insights.journey_funnel.tokened_fetch_rate == 100,
+                "the full graph journey should fill every funnel stage: {:?}",
+                insights.journey_funnel
+            );
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace.id)
+            .execute(&pool)
+            .await?;
+        result
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn journey_reality_insights_classify_sessions_end_to_end() -> anyhow::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        let workspace = telemetry_test_workspace(&pool, "Journey reality e2e").await?;
+        let result = async {
+            let (_, auth) =
+                telemetry_test_product(&pool, &workspace, "Journey reality product").await?;
+            let base = Utc::now() - Duration::minutes(10);
+            let event = |session: &str, operation: &str, offset: i64, experience| {
+                InteractionTelemetryInput {
+                    interaction_id: Uuid::new_v4(),
+                    sequence: Some(offset + 1),
+                    surface: "http_json".into(),
+                    operation: operation.into(),
+                    status_code: Some(200),
+                    duration_ms: Some(12),
+                    customer_ref: None,
+                    account_ref: None,
+                    user_ref: None,
+                    anonymous_ref: None,
+                    customer_link_source: None,
+                    request_observation: None,
+                    classification: Some("unclassified".into()),
+                    confirmation_method: None,
+                    runtime_hint: Some("petsmart-demo/1.0 chatgpt-user".into()),
+                    runtime_hint_source: Some("http".into()),
+                    session_ref: Some(session.into()),
+                    session_source: Some("customer".into()),
+                    occurred_at: Some(base + Duration::seconds(offset)),
+                    experience,
+                }
+            };
+            let human_observation = || CustomerRequestObservationInput {
+                client_ip: Some("203.0.113.20".into()),
+                method: Some("GET".into()),
+                user_agent: Some(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/126.0.0.0".into(),
+                ),
+                accept_language: None,
+                referrer_origin: None,
+                sec_ch_ua: None,
+                sec_ch_ua_platform: None,
+                sec_ch_ua_mobile: None,
+            };
+
+            // Session A: an agent fetches the agent root and silently defects
+            // — the costliest failure mode live testing surfaced.
+            let arrived_only = event("j-arrive-only", "/agent-guide", 0, None);
+
+            // Session B: the full discovery→following funnel over the faceted
+            // storefront, ending in a human handoff click.
+            let full_guide = event("j-full-funnel", "/agent-guide", 10, None);
+            let full_decide = event(
+                "j-full-funnel",
+                "/agent-decide/feeder",
+                11,
+                Some(ExperienceTelemetryInput {
+                    channel: Some("faceted_html".into()),
+                    stage: Some("decision_support".into()),
+                    need_state: Some(ExperienceNeedStateInput {
+                        expressed_dimensions: Some(vec!["pets".into(), "budget".into()]),
+                        unknown_dimensions: None,
+                    }),
+                    decision: Some(ExperienceDecisionInput {
+                        exact_match_count: Some(2),
+                        near_miss_count: Some(3),
+                        violated_hard_constraints: None,
+                        counterfactuals: None,
+                    }),
+                    search: None,
+                }),
+            );
+            let mut full_click = event("j-full-funnel", "/product/:id", 12, None);
+            full_click.surface = "http_html".into();
+            full_click.customer_link_source = Some(CustomerLinkSource::ProductLinkClick);
+            full_click.anonymous_ref = Some("anon-full-funnel".into());
+            full_click.runtime_hint = Some("petsmart-demo/1.0".into());
+            full_click.request_observation = Some(human_observation());
+
+            // Session C: the cloud-agent shape — a human Chrome UA with no
+            // vendor evidence, entering the session on a deep journey-carrying
+            // product operation, never the human root.
+            let mut cloud_click = event("j-cloud-shape", "/product/:id", 20, None);
+            cloud_click.surface = "http_html".into();
+            cloud_click.customer_link_source = Some(CustomerLinkSource::ProductLinkClick);
+            cloud_click.anonymous_ref = Some("anon-cloud-shape".into());
+            cloud_click.runtime_hint = Some("petsmart-demo/1.0".into());
+            cloud_click.request_observation = Some(human_observation());
+            let mut cloud_context = event(
+                "j-cloud-shape",
+                "/product-context",
+                21,
+                Some(ExperienceTelemetryInput {
+                    channel: None,
+                    stage: None,
+                    need_state: Some(ExperienceNeedStateInput {
+                        expressed_dimensions: Some(vec!["pets".into()]),
+                        unknown_dimensions: None,
+                    }),
+                    decision: None,
+                    search: None,
+                }),
+            );
+            cloud_context.runtime_hint = Some("petsmart-demo/1.0".into());
+
+            // Session D: off-graph attempts — a fabricated /agent-item URL
+            // (the live Claude run's 404) and a premature 422 decide.
+            let mut fabricated_item = event("j-off-graph", "/agent-item", 30, None);
+            fabricated_item.status_code = Some(404);
+            fabricated_item.runtime_hint = Some("petsmart-demo/1.0 claude-user".into());
+            let mut premature_decide = event(
+                "j-off-graph",
+                "/agent-decide/feeder",
+                31,
+                Some(ExperienceTelemetryInput {
+                    channel: Some("native_graph".into()),
+                    stage: Some("decision_input_required".into()),
+                    need_state: None,
+                    decision: None,
+                    search: None,
+                }),
+            );
+            premature_decide.status_code = Some(422);
+            premature_decide.runtime_hint = Some("petsmart-demo/1.0 claude-user".into());
+
+            // Session E: a plain human browsing session on the root.
+            let mut human_root = event("pss-human-1", "/", 40, None);
+            human_root.surface = "http_html".into();
+            human_root.runtime_hint = None;
+            human_root.runtime_hint_source = None;
+            human_root.request_observation = Some(human_observation());
+
+            let accepted = ingest_telemetry_batch(
+                &pool,
+                &auth,
+                TelemetryBatchInput {
+                    events: vec![
+                        arrived_only,
+                        full_guide,
+                        full_decide,
+                        full_click,
+                        cloud_click,
+                        cloud_context,
+                        fabricated_item,
+                        premature_decide,
+                        human_root,
+                    ],
+                },
+            )
+            .await
+            .map_err(test_error)?;
+            anyhow::ensure!(accepted.accepted == 9 && accepted.dropped == 0);
+
+            let insights = dashboard_insights(&pool, Some(auth.environment.id), None)
+                .await
+                .map_err(test_error)?;
+
+            // Funnel: A, B, D arrived; B and D entered (D via its fabricated
+            // graph fetch); only B expressed needs, reached a decision, and
+            // was followed by a human.
+            anyhow::ensure!(
+                insights.journey_funnel.arrived == 3
+                    && insights.journey_funnel.entered_graph == 2
+                    && insights.journey_funnel.expressed_needs == 1
+                    && insights.journey_funnel.reached_decision == 1
+                    && insights.journey_funnel.handoff_followed == 1,
+                "funnel stages should be monotonic across the four agent sessions: {:?}",
+                insights.journey_funnel
+            );
+            anyhow::ensure!(
+                insights.journey_funnel.tokened_fetch_rate == 67,
+                "tokened-fetch rate should be round(2/3): {:?}",
+                insights.journey_funnel
+            );
+
+            // Traffic classes: declared first, then the suspected cloud
+            // browser, then the human root session.
+            anyhow::ensure!(
+                insights.traffic_classes.first().is_some_and(|row| {
+                    row.class == "declared_agent" && row.sessions == 3 && row.interactions == 6
+                }),
+                "declared agents should lead the class list: {:?}",
+                insights.traffic_classes
+            );
+            anyhow::ensure!(
+                insights.traffic_classes.iter().any(|row| {
+                    row.class == "suspected_cloud_agent"
+                        && row.sessions == 1
+                        && row.interactions == 2
+                }),
+                "the deep-entry human-UA session should be suspected: {:?}",
+                insights.traffic_classes
+            );
+            anyhow::ensure!(
+                insights
+                    .traffic_classes
+                    .iter()
+                    .any(|row| row.class == "human" && row.sessions == 1 && row.interactions == 1),
+                "the root browsing session should stay human: {:?}",
+                insights.traffic_classes
+            );
+
+            // Channels: one faceted hop, one native hop, one untagged hop.
+            for (channel, count) in [("faceted_html", 1), ("native_graph", 1), ("unlabeled", 1)] {
+                anyhow::ensure!(
+                    insights
+                        .channels
+                        .iter()
+                        .any(|row| row.name == channel && row.count == count),
+                    "channel mix should include {channel}: {:?}",
+                    insights.channels
+                );
+            }
+
+            // Off-graph attempts: the fabricated 404 and the premature 422.
+            anyhow::ensure!(
+                insights.off_graph_attempts.attempts == 2,
+                "both off-graph hops should count: {:?}",
+                insights.off_graph_attempts
+            );
+            for operation in ["/agent-item", "/agent-decide/feeder"] {
+                anyhow::ensure!(
+                    insights
+                        .off_graph_attempts
+                        .operations
+                        .iter()
+                        .any(|row| row.name == operation && row.count == 1),
+                    "off-graph operations should include {operation}: {:?}",
+                    insights.off_graph_attempts
+                );
+            }
             Ok::<(), anyhow::Error>(())
         }
         .await;

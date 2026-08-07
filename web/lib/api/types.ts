@@ -1867,6 +1867,7 @@ export interface components {
          *     decision-quality numbers only — never free-text customer or agent values.
          */
         ExperienceTelemetryInput: {
+            channel?: string | null;
             decision?: null | components["schemas"]["ExperienceDecisionInput"];
             needState?: null | components["schemas"]["ExperienceNeedStateInput"];
             search?: null | components["schemas"]["ExperienceSearchInput"];
@@ -2082,6 +2083,7 @@ export interface components {
         Insights: {
             agentVendors: components["schemas"]["AgentVendorInsight"][];
             blockingTopics: components["schemas"]["InsightCount"][];
+            channels: components["schemas"]["InsightCount"][];
             /** Format: int32 */
             comparisonDays: number;
             /** Format: int64 */
@@ -2098,7 +2100,9 @@ export interface components {
             handoff: components["schemas"]["HandoffInsights"];
             impacts: components["schemas"]["InsightCount"][];
             journeyFlow: components["schemas"]["JourneyFlowInsights"];
+            journeyFunnel: components["schemas"]["JourneyFunnelInsights"];
             lostDemand: components["schemas"]["LostDemandInsights"];
+            offGraphAttempts: components["schemas"]["OffGraphAttemptInsights"];
             /** Format: int64 */
             opportunities: number;
             /** Format: int64 */
@@ -2136,6 +2140,7 @@ export interface components {
             surfaces: components["schemas"]["InsightCount"][];
             topOperations: components["schemas"]["InsightCount"][];
             topics: components["schemas"]["InsightCount"][];
+            trafficClasses: components["schemas"]["TrafficClassInsight"][];
             unansweredQuestions: components["schemas"]["InsightCount"][];
             unknownDimensions: components["schemas"]["InsightCount"][];
             /** Format: int32 */
@@ -2185,6 +2190,44 @@ export interface components {
         JourneyFlowInsights: {
             edges: components["schemas"]["JourneyEdgeInsight"][];
             exitOperations: components["schemas"]["InsightCount"][];
+        };
+        /**
+         * @description Discovery→following funnel over agent-evidenced sessions. Stages are
+         *     monotonic: a session counts in a stage only if it counts in every prior
+         *     stage, so each step reads as "of those, how many went further".
+         */
+        JourneyFunnelInsights: {
+            /**
+             * Format: int64
+             * @description Sessions with at least one agent-evidenced hop in the window.
+             */
+            arrived: number;
+            /**
+             * Format: int64
+             * @description Of those, sessions with a tokened graph fetch beyond the root/guide.
+             */
+            enteredGraph: number;
+            /**
+             * Format: int64
+             * @description Of those, sessions where a hop expressed or admitted a need dimension.
+             */
+            expressedNeeds: number;
+            /**
+             * Format: int64
+             * @description Of those, sessions where a human followed a product link.
+             */
+            handoffFollowed: number;
+            /**
+             * Format: int64
+             * @description Of those, sessions that reached decision evidence.
+             */
+            reachedDecision: number;
+            /**
+             * Format: int64
+             * @description Integer percent of arrived sessions that entered the graph — whether
+             *     the store's value-gating earns the need-carrying second fetch.
+             */
+            tokenedFetchRate: number;
         };
         /**
          * @description What agents asked for and could not get: stated-demand aggregates from
@@ -2259,6 +2302,15 @@ export interface components {
             /** Format: int64 */
             sessionCount: number;
             truncated: boolean;
+        };
+        /**
+         * @description Agent-evidenced requests that fell off the graph: fabricated URLs (404)
+         *     and malformed or premature graph fetches (400/422 on graph operations).
+         */
+        OffGraphAttemptInsights: {
+            /** Format: int64 */
+            attempts: number;
+            operations: components["schemas"]["InsightCount"][];
         };
         /** @description Opaque JSON object whose fields depend on the MCP JSON-RPC method. */
         OpaqueJsonObject: Record<string, never>;
@@ -2594,6 +2646,14 @@ export interface components {
             config: components["schemas"]["DataDestinationConfigInput"];
             credentials?: null | components["schemas"]["DataDestinationCredentialsInput"];
             kind: string;
+        };
+        /** @description One behavioral traffic class with its session and interaction volume. */
+        TrafficClassInsight: {
+            class: string;
+            /** Format: int64 */
+            interactions: number;
+            /** Format: int64 */
+            sessions: number;
         };
         TransferredResponse: {
             transferred: boolean;

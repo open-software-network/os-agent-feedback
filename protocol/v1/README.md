@@ -191,9 +191,11 @@ An experience-graph hop may attach an optional `experience` object describing th
 terms: the graph `stage`, which need dimensions were expressed or explicitly unknown (dimension keys only,
 never customer values), decision quality (`exactMatchCount`, `nearMissCount`, per-item
 `violatedHardConstraints` with bounded requested/actual strings, and zero-match `counterfactuals` with
-numeric deltas), and search attribution (`searchId`, numeric `resultPosition`). These fields power
-lost-demand, drop-off, and rank-position insight aggregations. They are decision evidence about the
-merchant's own catalog and the stated need shape — never free text from the customer or agent.
+numeric deltas), and search attribution (`searchId`, numeric `resultPosition`). An optional `channel`
+marks which surface of the same graph the hop traversed: `"faceted_html"` for the faceted HTML-link
+storefront and `"native_graph"` for the tokened JSON graph paths. These fields power lost-demand,
+drop-off, rank-position, journey-funnel, and channel insight aggregations. They are decision evidence
+about the merchant's own catalog and the stated need shape — never free text from the customer or agent.
 
 ### Completed MCP interaction contract
 
