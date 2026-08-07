@@ -5,6 +5,7 @@ import express from "express";
 
 import {
   AgentFeedbackRuntime,
+  agentVendorFamilyForUserAgent,
   boundedUserAgentLogFields,
   classifyUserAgent,
 } from "@epode/node";
@@ -27,10 +28,8 @@ const RUNTIME_HINT = "petsmart-demo/1.0";
 // only vendor evidence the backend's agent-mix insight can classify.
 
 function runtimeHintFor(request) {
-  const classification = classifyUserAgent(request?.get("user-agent"));
-  return classification.kind === "routable_agent"
-    ? `${RUNTIME_HINT} ${classification.vendorFamily}`
-    : RUNTIME_HINT;
+  const vendorFamily = agentVendorFamilyForUserAgent(request?.get("user-agent"));
+  return vendorFamily ? `${RUNTIME_HINT} ${vendorFamily}` : RUNTIME_HINT;
 }
 const HERO_ITEM_ID = "smarttag-rfid-multi-pet-feeder";
 
@@ -398,14 +397,28 @@ function redactedRequestPath(request) {
     .slice(0, 256);
 }
 
+const LOGGABLE_QUERY_KEYS = new Set([
+  "pets",
+  "motivation",
+  "budget",
+  "budget_kind",
+  "priority",
+  "journey",
+  "ctx",
+  "item_id",
+  "search_id",
+  "position",
+]);
+
 function redactedRequestQuery(request) {
   const queryStart = request.originalUrl.indexOf("?");
   if (queryStart === -1) return "";
   const redacted = new URLSearchParams();
   for (const [key] of new URLSearchParams(request.originalUrl.slice(queryStart + 1))) {
     const normalizedKey = key.toLowerCase();
+    const loggedKey = LOGGABLE_QUERY_KEYS.has(normalizedKey) ? normalizedKey : ":key";
     const placeholder = normalizedKey === "journey" ? ":journey" : ":value";
-    redacted.append(key, placeholder);
+    redacted.append(loggedKey, placeholder);
   }
   const query = redacted.toString();
   return query ? `?${query}` : "";
