@@ -4,6 +4,7 @@ import { IconChevronGrabberVertical } from "central-icons/IconChevronGrabberVert
 import { IconFootsteps } from "central-icons/IconFootsteps";
 import { IconHome } from "central-icons/IconHome";
 import { IconPeople } from "central-icons/IconPeople";
+import { IconPointChart } from "central-icons/IconPointChart";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
 import type { ComponentType, CSSProperties, ReactNode } from "react";
 import { PageHeader } from "@/components/dashboard/page-header";
@@ -56,6 +57,11 @@ const navigation: Array<{
     view: "home",
     label: "Home",
     icon: IconHome,
+  },
+  {
+    view: "insights",
+    label: "Insights",
+    icon: IconPointChart,
   },
   {
     view: "sessions",
@@ -312,6 +318,7 @@ export function DashboardShell({
 }) {
   const shellTitle: Record<DashboardView, string> = {
     home: "Home",
+    insights: "Insights",
     customers: "Customers",
     feedback: "Report",
     sessions: "Sessions",
