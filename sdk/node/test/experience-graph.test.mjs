@@ -17,6 +17,8 @@ const graph = createExperienceGraph(createLightingExperienceCatalog());
 
 test("journey ids and need tokens are tightly validated", () => {
   assert.equal(isValidJourneyId(journeyId), true);
+  assert.equal(isValidJourneyId("w-0123456789_abcdefghijk"), true);
+  assert.equal(isValidJourneyId("w-0123456789_abcdefghij"), false);
   assert.equal(isValidJourneyId("journey_1"), false);
   const parsed = parseNeedTokens(graph.definition, [
     "consider-budget",
