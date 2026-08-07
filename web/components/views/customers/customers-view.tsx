@@ -669,15 +669,12 @@ function CustomerDetailContent({
             observed session activity yet.
           </p>
         )}
-        <div className="mt-5 flex items-center justify-between gap-3">
-          <h4 className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-            Request traits
-          </h4>
-          <Badge variant="secondary">Never identity</Badge>
-        </div>
+        <h4 className="mt-5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+          Visitor traits
+        </h4>
         <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-          Network addresses and client software are useful context, but Epode never uses them to
-          decide who this customer is.
+          Browser traits add context about the visitor&apos;s software, device, language, network,
+          and referring site.
         </p>
         {traits.length ? (
           <ol className="mt-3 divide-y border">
@@ -688,13 +685,13 @@ function CustomerDetailContent({
                 </p>
                 <p className="mt-1 break-words text-xs leading-5">{trait.value}</p>
                 <p className="mt-1 text-[11px] text-muted-foreground">
-                  Observed {relativeDate(trait.observedAt)}
+                  Last seen {relativeDate(trait.observedAt)}
                 </p>
               </li>
             ))}
           </ol>
         ) : (
-          <p className="mt-2 text-sm text-muted-foreground">No request traits observed yet.</p>
+          <p className="mt-2 text-sm text-muted-foreground">No visitor traits seen yet.</p>
         )}
       </section>
 
