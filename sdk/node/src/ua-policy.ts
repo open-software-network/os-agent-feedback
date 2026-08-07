@@ -4,6 +4,8 @@
  * Only documented fetch-time agent UAs route to the agent surface. Indexers,
  * browsers, unknown clients, and anonymous or masquerading agents such as
  * Grok, DeepSeek, and MS Copilot Actions route to the human surface by design.
+ * Indexer matching wins when a compound UA also contains a routable token;
+ * vendor-family observation remains independent of that routing precedence.
  * Never synthesize agent identity from UA resemblance, IP, timing, or other
  * heuristics.
  */
@@ -83,20 +85,29 @@ function matchesUserAgent(
   );
 }
 
+function normalizedUserAgent(userAgent: string | null | undefined): string {
+  return typeof userAgent === "string" ? userAgent.toLowerCase() : "";
+}
+
+function vendorFamilyForNormalizedUserAgent(userAgent: string): AgentVendorFamily | undefined {
+  return ROUTABLE_AGENT_UA_ROSTER.find((entry) => matchesUserAgent(userAgent, entry))?.vendorFamily;
+}
+
+/** Returns the observed agent vendor independently of surface-routing precedence. */
+export function agentVendorFamilyForUserAgent(
+  userAgent: string | null | undefined,
+): AgentVendorFamily | undefined {
+  return vendorFamilyForNormalizedUserAgent(normalizedUserAgent(userAgent));
+}
+
 export function classifyUserAgent(userAgent: string | null | undefined): UserAgentClassification {
-  const normalizedUserAgent = typeof userAgent === "string" ? userAgent.toLowerCase() : "";
-  const routable = ROUTABLE_AGENT_UA_ROSTER.find((entry) =>
-    matchesUserAgent(normalizedUserAgent, entry),
-  );
-  if (routable) {
-    return {
-      kind: "routable_agent",
-      surface: "agent",
-      vendorFamily: routable.vendorFamily,
-    };
-  }
-  if (INDEXER_UA_ROSTER.some((entry) => matchesUserAgent(normalizedUserAgent, entry))) {
+  const normalized = normalizedUserAgent(userAgent);
+  if (INDEXER_UA_ROSTER.some((entry) => matchesUserAgent(normalized, entry))) {
     return { kind: "indexer", surface: "human" };
+  }
+  const vendorFamily = vendorFamilyForNormalizedUserAgent(normalized);
+  if (vendorFamily) {
+    return { kind: "routable_agent", surface: "agent", vendorFamily };
   }
   return { kind: "unclassified", surface: "human" };
 }

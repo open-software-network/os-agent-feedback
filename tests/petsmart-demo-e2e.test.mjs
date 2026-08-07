@@ -606,9 +606,10 @@ test("request diagnostics bound headers and redact journey capabilities and quer
     )?.[1];
     assert.ok(situationUrl);
     const queryCapability = new URL(situationUrl).pathname.split("/")[3];
-    await fetch(`${situationUrl}?email=private%40example.com&journey=${queryCapability}`, {
-      headers: { "user-agent": `Google ${"x".repeat(300)}` },
-    });
+    await fetch(
+      `${situationUrl}?email=private%40example.com&journey=${queryCapability}&${queryCapability}=1`,
+      { headers: { "user-agent": `Google ${"x".repeat(300)}` } },
+    );
   } finally {
     await started.close();
     console.log = originalLog;
@@ -629,7 +630,7 @@ test("request diagnostics bound headers and redact journey capabilities and quer
     situationEntry.path,
     "/shop/automatic-feeders/:journey/multiple-cats-food-stealing-under-200",
   );
-  assert.equal(situationEntry.query, "?email=%3Avalue&journey=%3Ajourney");
+  assert.equal(situationEntry.query, "?%3Akey=%3Avalue&journey=%3Ajourney&%3Akey=%3Avalue");
   assert.doesNotMatch(JSON.stringify(situationEntry), /private|j-[a-f0-9-]+\./);
   assert.doesNotMatch(JSON.stringify(situationEntry), /w-[A-Za-z0-9_-]{22}/);
   assert.equal(situationEntry.userAgent.length, 160);

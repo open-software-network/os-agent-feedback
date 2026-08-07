@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  agentVendorFamilyForUserAgent,
   boundedUserAgentLogFields,
   classifyUserAgent,
   INDEXER_UA_ROSTER,
@@ -51,6 +52,7 @@ test("UA policy exports the accepted routable and indexer rosters", () => {
 
 test("documented fetch-time agents route to the agent surface with vendor families", () => {
   for (const [userAgent, vendorFamily] of routableCases) {
+    assert.equal(agentVendorFamilyForUserAgent(userAgent), vendorFamily);
     assert.deepEqual(classifyUserAgent(userAgent), {
       kind: "routable_agent",
       surface: "agent",
@@ -61,6 +63,19 @@ test("documented fetch-time agents route to the agent surface with vendor famili
       surface: "agent",
       vendorFamily,
     });
+  }
+});
+
+test("indexers win compound routing while vendor hints retain old independent matching", () => {
+  for (const [userAgent, vendorFamily] of [
+    ["facebookexternalhit/1.1 meta-externalfetcher/1.1", "meta-ai-user"],
+    ["meta-webindexer/1.1 chatgpt-user", "chatgpt-user"],
+  ]) {
+    assert.deepEqual(classifyUserAgent(userAgent), {
+      kind: "indexer",
+      surface: "human",
+    });
+    assert.equal(agentVendorFamilyForUserAgent(userAgent), vendorFamily);
   }
 });
 
