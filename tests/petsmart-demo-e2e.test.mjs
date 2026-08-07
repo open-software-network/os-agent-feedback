@@ -13,6 +13,7 @@ const { startServer } = await import("../examples/petsmart-demo/server.mjs");
 
 const AGENT_UA = "ChatGPT-User/1.0";
 const BROWSER_UA = "Mozilla/5.0";
+const COMPACT_RENDER_JOURNEY_RE = /^w-[A-Za-z0-9_-]{22}$/;
 const NAV_HEADERS = {
   "user-agent": BROWSER_UA,
   "sec-fetch-user": "?1",
@@ -108,6 +109,8 @@ function assertOneListingJourney(html, base, label) {
     `${label} has a clean listing URL: ${urls.find((url) => !listingJourney(url))}`,
   );
   assert.equal(new Set(journeys).size, 1, `${label} must use exactly one journey value per render`);
+  assert.match(journeys[0], COMPACT_RENDER_JOURNEY_RE, `${label} journey must be compact`);
+  assert.equal(journeys[0].length, 24, `${label} journey must have 24 visible characters`);
   return journeys[0];
 }
 
@@ -155,7 +158,7 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
     assert.equal(publicGraph.stage, "decision_input_required");
     assert.match(
       publicGraph.nextQuestion.choices[0].url,
-      /\/agent-negotiate\/j-[a-f0-9-]+\.[a-z0-9]+\.[A-Za-z0-9_-]+\/feeder\//,
+      /\/agent-negotiate\/w-[A-Za-z0-9_-]{22}\/feeder\//,
     );
 
     const secureLanding = await navigate(`${base}/s/multiple-cats-one-steals-food-under-200`, {
@@ -178,7 +181,7 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
     // journey capability. Other agents can keep the shorter signed paths.
     assert.match(
       guide,
-      /href="http:\/\/127\.0\.0\.1:\d+\/feeders\?pets=multiple_cats&motivation=one_food_motivated&budget=200&journey=j-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"/,
+      /href="http:\/\/127\.0\.0\.1:\d+\/feeders\?pets=multiple_cats&motivation=one_food_motivated&budget=200&journey=w-[A-Za-z0-9_-]{22}"/,
     );
     // Prices at root guarantee a correct one-fetch answer; stock lives only
     // behind the situation pages (the value asymmetry that earns the tokened
@@ -188,11 +191,14 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
     assert.ok(
       guide.indexOf("Start here — live availability by situation") < guide.indexOf("Full catalog"),
     );
-    assert.match(guide, /href="[^"]+\/product\/smarttag-rfid-multi-pet-feeder\?journey=j-[^"]+"/);
+    assert.match(
+      guide,
+      /href="[^"]+\/product\/smarttag-rfid-multi-pet-feeder\?journey=w-[A-Za-z0-9_-]{22}"/,
+    );
     assert.doesNotMatch(guide, /Agent clients|When you recommend|you must/i);
     // The structured JSON negotiation graph stays for API-capable agents.
     const negotiateUrl = guide.match(
-      /feeder: (http:\/\/127\.0\.0\.1:\d+\/agent-negotiate\/j-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\/feeder)/i,
+      /feeder: (http:\/\/127\.0\.0\.1:\d+\/agent-negotiate\/w-[A-Za-z0-9_-]{22}\/feeder)/,
     )?.[1];
     assert.ok(negotiateUrl, "the agent storefront must keep the JSON negotiation entry URL");
     const graphJourneyCapability = new URL(negotiateUrl).pathname.split("/")[2];
@@ -205,7 +211,7 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
     assertOneListingJourney(geminiGuide, base, "Gemini root");
     assert.match(
       geminiGuide,
-      /\/shop\/automatic-feeders\/j-[a-f0-9-]+\.[a-z0-9]+\.[A-Za-z0-9_-]+\/multiple-cats-food-stealing-under-200/,
+      /\/shop\/automatic-feeders\/w-[A-Za-z0-9_-]{22}\/multiple-cats-food-stealing-under-200/,
     );
     assert.match(geminiGuide, /Product names, exact fit evidence, live stock/);
     assert.doesNotMatch(geminiGuide, /\$189\.99/);
@@ -255,7 +261,7 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
     assertOneListingJourney(metaGuide, base, "Meta agent root");
     assert.match(
       metaGuide,
-      /\/shop\/automatic-feeders\/j-[a-f0-9-]+\.[a-z0-9]+\.[A-Za-z0-9_-]+\/multiple-cats-food-stealing-under-200/,
+      /\/shop\/automatic-feeders\/w-[A-Za-z0-9_-]{22}\/multiple-cats-food-stealing-under-200/,
     );
     assert.match(metaGuide, /agent-negotiate/);
 
@@ -377,9 +383,7 @@ test("petsmart demo e2e: gating and counterfactuals stay honest", async () => {
     const guide = await fetch(`${base}/`, { headers: { "user-agent": AGENT_UA } }).then((r) =>
       r.text(),
     );
-    const journeyCapability = guide.match(
-      /agent-negotiate\/(j-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})\/feeder/,
-    )?.[1];
+    const journeyCapability = guide.match(/agent-negotiate\/(w-[A-Za-z0-9_-]{22})\/feeder/)?.[1];
     assert.ok(journeyCapability, "the agent root must issue a journey before graph traversal");
 
     // Decisions without any decision input stay gated.
@@ -419,7 +423,7 @@ test("signed graph capabilities survive a restart or another server instance", a
       r.text(),
     );
     const negotiationPath = guide.match(
-      /feeder: http:\/\/127\.0\.0\.1:\d+(\/agent-negotiate\/j-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\/feeder)/i,
+      /feeder: http:\/\/127\.0\.0\.1:\d+(\/agent-negotiate\/w-[A-Za-z0-9_-]{22}\/feeder)/,
     )?.[1];
     assert.ok(negotiationPath, "the first instance must publish a signed graph entry");
 
@@ -440,7 +444,7 @@ test("compatibility lab isolates every page-shape method behind LOCAL_DEMO", asy
   try {
     const full = await fetch(`${base}/lab/full`).then((response) => response.text());
     assert.match(full, /Full catalog/);
-    assert.match(full, /\/shop\/automatic-feeders\/j-[^/]+\//);
+    assert.match(full, /\/shop\/automatic-feeders\/w-[A-Za-z0-9_-]{22}\//);
     assertOneListingJourney(full, base, "full compatibility lab");
 
     const linkFirst = await fetch(`${base}/lab/link-first`).then((response) => response.text());
@@ -474,7 +478,7 @@ test("compatibility lab isolates every page-shape method behind LOCAL_DEMO", asy
 
     const legacy = await fetch(`${base}/lab/legacy-query`).then((response) => response.text());
     assert.match(legacy, /\/feeders\?pets=multiple_cats&amp;motivation=one_food_motivated/);
-    assert.match(legacy, /journey=j-[^&"]+/);
+    assert.match(legacy, /journey=w-[A-Za-z0-9_-]{22}/);
     assertOneListingJourney(legacy, base, "legacy query compatibility lab");
 
     const stable = await fetch(`${base}/lab/stable-public`).then((response) => response.text());
@@ -491,15 +495,12 @@ test("compatibility lab isolates every page-shape method behind LOCAL_DEMO", asy
     assert.match(plainResponse.headers.get("content-type") || "", /text\/plain/);
     const plainText = await plainResponse.text();
     assert.match(plainText, /\/s\/multiple-cats-one-steals-food-under-200/);
-    assert.match(plainText, /[?&]journey=j-public-[^\s]+/);
+    assert.match(plainText, /[?&]journey=w-[A-Za-z0-9_-]{22}/);
 
     const graphResponse = await fetch(`${base}/lab/json-graph`);
     assert.match(graphResponse.headers.get("content-type") || "", /application\/json/);
     const graphNode = await graphResponse.json();
-    assert.match(
-      graphNode.nextQuestion.choices[0].url,
-      /\/agent-negotiate\/j-[a-f0-9-]+\.[a-z0-9]+\.[A-Za-z0-9_-]+\//,
-    );
+    assert.match(graphNode.nextQuestion.choices[0].url, /\/agent-negotiate\/w-[A-Za-z0-9_-]{22}\//);
   } finally {
     await started.close();
   }
@@ -537,7 +538,7 @@ test("request diagnostics bound headers and redact journey capabilities and quer
       headers: { "user-agent": "meta-externalfetcher/1.1" },
     }).then((r) => r.text());
     const situationUrl = guide.match(
-      /href="(http:\/\/127\.0\.0\.1:\d+\/shop\/automatic-feeders\/j-[^/]+\/multiple-cats-food-stealing-under-200)"/,
+      /href="(http:\/\/127\.0\.0\.1:\d+\/shop\/automatic-feeders\/w-[A-Za-z0-9_-]{22}\/multiple-cats-food-stealing-under-200)"/,
     )?.[1];
     assert.ok(situationUrl);
     await fetch(`${situationUrl}?email=private%40example.com`, {
@@ -633,7 +634,7 @@ test("petsmart demo telemetry: hops carry experience payloads, vendor hints, and
       r.text(),
     );
     const negotiateUrl = guide.match(
-      /feeder: (http:\/\/127\.0\.0\.1:\d+\/agent-negotiate\/j-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\/feeder)/i,
+      /feeder: (http:\/\/127\.0\.0\.1:\d+\/agent-negotiate\/w-[A-Za-z0-9_-]{22}\/feeder)/,
     )?.[1];
     assert.ok(negotiateUrl, "guide must include a feeder negotiation URL");
 
@@ -763,7 +764,7 @@ test("petsmart demo faceted telemetry: /feeders records the parsed need dims", a
     assert.match(root.headers.get("content-type") ?? "", /text\/html/);
     const storefront = await root.text();
     const situationUrl = storefront.match(
-      /href="(http:\/\/127\.0\.0\.1:\d+\/feeders\?pets=multiple_cats&motivation=one_food_motivated&budget=200&journey=j-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})"/,
+      /href="(http:\/\/127\.0\.0\.1:\d+\/feeders\?pets=multiple_cats&motivation=one_food_motivated&budget=200&journey=w-[A-Za-z0-9_-]{22})"/,
     )?.[1];
     assert.ok(situationUrl, "the storefront must anchor a tokened situation URL");
     const journeyCapability = new URL(situationUrl).searchParams.get("journey");
@@ -1141,7 +1142,7 @@ test("petsmart demo browse paths require user activation before starting a journ
       headers: { "user-agent": BROWSER_UA },
     }).then((response) => response.text());
     const humanRootJourney = assertOneListingJourney(humanRootHtml, base, "human root");
-    assert.match(humanRootJourney, /^j-public-/);
+    assert.match(humanRootJourney, COMPACT_RENDER_JOURNEY_RE);
     const humanRootProductUrl = listingUrls(humanRootHtml, base).find((url) =>
       url.pathname.startsWith("/product/"),
     );
@@ -1288,7 +1289,7 @@ test("petsmart demo faceted gating: only request-carried journeys reach telemetr
       headers: { "user-agent": "meta-externalfetcher/1.1" },
     }).then((r) => r.text());
     const signedSituation = guide.match(
-      /href="(http:\/\/127\.0\.0\.1:\d+\/shop\/automatic-feeders\/(j-[a-f0-9-]+)\.[a-z0-9]+\.[A-Za-z0-9_-]+\/multiple-cats-food-stealing-under-200)"/,
+      /href="(http:\/\/127\.0\.0\.1:\d+\/shop\/automatic-feeders\/(w-[A-Za-z0-9_-]{22})\/multiple-cats-food-stealing-under-200)"/,
     );
     assert.ok(signedSituation, "the agent guide must issue a signed situation path");
     const [, signedSituationUrl, journeyId] = signedSituation;

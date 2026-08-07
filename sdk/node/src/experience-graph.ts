@@ -303,6 +303,7 @@ export interface ParsedDomainNeed<State> {
 
 const TOKEN_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const JOURNEY_RE = /^j-[a-z0-9-]+$/i;
+const COMPACT_JOURNEY_RE = /^w-[A-Za-z0-9_-]{22}$/;
 
 function snake(value: string): string {
   return value
@@ -366,7 +367,7 @@ export function isValidNeedToken(token: string): boolean {
 }
 
 export function isValidJourneyId(journeyId: string): boolean {
-  return JOURNEY_RE.test(journeyId);
+  return JOURNEY_RE.test(journeyId) || COMPACT_JOURNEY_RE.test(journeyId);
 }
 
 export function parseNeedTokens(
@@ -862,7 +863,7 @@ export function buildDomainNegotiationNode<State>(
   tokens: string[],
 ) {
   if (!isValidJourneyId(journeyId)) {
-    throw new Error("journeyId must look like j-<id>");
+    throw new Error("journeyId must use a supported j- or w- form");
   }
   const parsed = parseDomainNeedTokens(domain, tokens);
   const domainForUrl = domain as AgentExperienceDomain<unknown>;
@@ -944,7 +945,7 @@ export function buildDomainDecisionNode<State>(
   searchId = cryptoRandomId(),
 ) {
   if (!isValidJourneyId(journeyId)) {
-    throw new Error("journeyId must look like j-<id>");
+    throw new Error("journeyId must use a supported j- or w- form");
   }
   const parsed = parseDomainNeedTokens(domain, tokens);
   const domainForUrl = domain as AgentExperienceDomain<unknown>;
@@ -1129,7 +1130,7 @@ export function createExperienceGraph(definition: ExperienceGraphDefinition) {
 
   function buildNegotiation(options: ExperienceGraphOptions): NegotiationNode {
     if (!isValidJourneyId(options.journeyId)) {
-      throw new Error("journeyId must look like j-<id>");
+      throw new Error("journeyId must use a supported j- or w- form");
     }
     const tokens = options.tokens ?? [];
     const paths = options.paths ?? {};
@@ -1183,7 +1184,7 @@ export function createExperienceGraph(definition: ExperienceGraphDefinition) {
 
   function buildDecision(options: ExperienceGraphOptions): DecisionNode {
     if (!isValidJourneyId(options.journeyId)) {
-      throw new Error("journeyId must look like j-<id>");
+      throw new Error("journeyId must use a supported j- or w- form");
     }
     const tokens = options.tokens ?? [];
     const paths = options.paths ?? {};

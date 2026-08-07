@@ -80,20 +80,13 @@ function verifiedCookie(cookie = "", name) {
 
 const JOURNEY_CAPABILITY_TTL_SECONDS = 24 * 60 * 60;
 const COMPACT_JOURNEY_EPOCH_MINUTE = Math.floor(Date.UTC(2020, 0, 1) / 60000);
+const COMPACT_JOURNEY_RE = /^w-[A-Za-z0-9_-]{22}$/;
+const COMPACT_JOURNEY_PAYLOAD_HEX_LENGTH = 16;
+const COMPACT_JOURNEY_MAC_HEX_LENGTH = 16;
+const COMPACT_JOURNEY_DOMAIN = "compact-journey";
+const COMPACT_PUBLIC_JOURNEY_DOMAIN = "compact-public-journey";
 
-function issueJourney() {
-  return `j-${randomUUID()}`;
-}
-
-function issuePublicJourney() {
-  return `j-public-${randomUUID()}`;
-}
-
-function isPublicJourney(journeyId) {
-  return String(journeyId || "").startsWith("j-public-");
-}
-
-function compactJourneyCapability() {
+function compactJourneyCapability({ publicProvenance = false } = {}) {
   const expiresAtMinute = Math.floor(
     (Date.now() + JOURNEY_CAPABILITY_TTL_SECONDS * 1000) / 60000,
   );
@@ -102,29 +95,49 @@ function compactJourneyCapability() {
     throw new Error("compact journey expiry is outside its representable range");
   }
   const payload = `${expiryOffset.toString(16).padStart(6, "0")}${randomBytes(5).toString("hex")}`;
+  const domain = publicProvenance ? COMPACT_PUBLIC_JOURNEY_DOMAIN : COMPACT_JOURNEY_DOMAIN;
   const signature = createHmac("sha256", cookieSecret)
-    .update(`compact-journey:${payload}`)
+    .update(`${domain}:${payload}`)
     .digest("hex")
-    .slice(0, 16);
-  const compact = `${payload}${signature}`;
-  return `j-${compact.slice(0, 8)}-${compact.slice(8, 12)}-${compact.slice(12, 16)}-${compact.slice(16, 20)}-${compact.slice(20)}`;
+    .slice(0, COMPACT_JOURNEY_MAC_HEX_LENGTH);
+  return `w-${Buffer.from(`${payload}${signature}`, "hex").toString("base64url")}`;
+}
+
+function issuePublicJourney() {
+  return compactJourneyCapability({ publicProvenance: true });
 }
 
 function verifiedCompactJourneyCapability(value = "") {
-  if (!/^j-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value)) {
-    return undefined;
-  }
-  const compact = value.slice(2).replaceAll("-", "").toLowerCase();
-  const payload = compact.slice(0, 16);
-  const signature = compact.slice(16);
+  if (!COMPACT_JOURNEY_RE.test(value)) return undefined;
+  const encoded = value.slice(2);
+  const packed = Buffer.from(encoded, "base64url");
+  if (packed.length !== 16 || packed.toString("base64url") !== encoded) return undefined;
+  const compact = packed.toString("hex");
+  const payload = compact.slice(0, COMPACT_JOURNEY_PAYLOAD_HEX_LENGTH);
+  const signature = compact.slice(COMPACT_JOURNEY_PAYLOAD_HEX_LENGTH);
   const expiryOffset = Number.parseInt(payload.slice(0, 6), 16);
   const expiresAtMinute = COMPACT_JOURNEY_EPOCH_MINUTE + expiryOffset;
   if (expiresAtMinute < Math.floor(Date.now() / 60000)) return undefined;
-  const expected = createHmac("sha256", cookieSecret)
-    .update(`compact-journey:${payload}`)
-    .digest("hex")
-    .slice(0, 16);
-  return safeSignatureEquals(signature, expected) ? value : undefined;
+  for (const [domain, publicProvenance] of [
+    [COMPACT_JOURNEY_DOMAIN, false],
+    [COMPACT_PUBLIC_JOURNEY_DOMAIN, true],
+  ]) {
+    const expected = createHmac("sha256", cookieSecret)
+      .update(`${domain}:${payload}`)
+      .digest("hex")
+      .slice(0, COMPACT_JOURNEY_MAC_HEX_LENGTH);
+    if (safeSignatureEquals(signature, expected)) {
+      return { capability: value, publicProvenance };
+    }
+  }
+  return undefined;
+}
+
+function isPublicJourney(journeyId) {
+  return (
+    String(journeyId || "").startsWith("j-public-") ||
+    verifiedCompactJourneyCapability(journeyId)?.publicProvenance === true
+  );
 }
 
 function journeyCapability(journeyId, expiresAt = Math.floor(Date.now() / 1000) + JOURNEY_CAPABILITY_TTL_SECONDS) {
@@ -138,7 +151,7 @@ function journeyCapability(journeyId, expiresAt = Math.floor(Date.now() / 1000) 
 
 function verifiedJourneyCapability(value = "") {
   const compact = verifiedCompactJourneyCapability(value);
-  if (compact) return compact;
+  if (compact) return compact.capability;
   const [journeyId, expiry, signature, ...extra] = String(value).split(".");
   if (extra.length || !isValidJourneyId(journeyId) || !/^[a-z0-9]+$/.test(expiry || "")) {
     return undefined;
@@ -1279,7 +1292,7 @@ export function createApp() {
 
   const serveJsonGraphEntry = (request, response) => {
     const started = performance.now();
-    const journeyId = issueJourney();
+    const journeyId = compactJourneyCapability();
     const capability = journeyCapability(journeyId);
     const node = graph.buildNegotiation({
       origin: originFor(request),
@@ -1342,11 +1355,13 @@ export function createApp() {
     }
     const origin = originFor(request);
     const method = String(request.params.method || "");
+    // Lab shapes keep production provenance classes: agent experiments use
+    // agent-domain capabilities; stable/human/plain renders use public-domain.
     if (method === "full") {
       return text(
         response,
         200,
-        agentStorefrontHtml(origin, issueJourney()),
+        agentStorefrontHtml(origin, compactJourneyCapability()),
         "text/html; charset=utf-8",
       );
     }
@@ -1354,7 +1369,7 @@ export function createApp() {
       return text(
         response,
         200,
-        agentStorefrontHtml(origin, issueJourney(), { catalogOnRoot: false }),
+        agentStorefrontHtml(origin, compactJourneyCapability(), { catalogOnRoot: false }),
         "text/html; charset=utf-8",
       );
     }
@@ -1362,7 +1377,7 @@ export function createApp() {
       return text(
         response,
         200,
-        agentStorefrontHtml(origin, issueJourney(), {
+        agentStorefrontHtml(origin, compactJourneyCapability(), {
           catalogOnRoot: false,
           situationLinkStyle: "faceted-query",
         }),
@@ -1373,7 +1388,7 @@ export function createApp() {
       return text(
         response,
         200,
-        agentStorefrontHtml(origin, issueJourney(), {
+        agentStorefrontHtml(origin, compactJourneyCapability(), {
           facetsFirst: true,
           situationLinkStyle: "faceted-query",
         }),
@@ -1384,7 +1399,7 @@ export function createApp() {
       return text(
         response,
         200,
-        legacyQueryStorefrontHtml(origin, issueJourney()),
+        legacyQueryStorefrontHtml(origin, compactJourneyCapability()),
         "text/html; charset=utf-8",
       );
     }
@@ -1463,7 +1478,7 @@ export function createApp() {
       // situation pages, which is what earns the need-carrying second hop.
       const userAgent = request.get("user-agent") || "";
       const chatgptQueryLinks = /chatgpt-user/i.test(userAgent);
-      const journeyId = chatgptQueryLinks ? compactJourneyCapability() : issueJourney();
+      const journeyId = compactJourneyCapability();
       recordHop(request, "/agent-guide", journeyId, 200, Math.round(performance.now() - started));
       response.setHeader("vary", "User-Agent");
       return text(
