@@ -235,10 +235,14 @@ function stockFor(itemId) {
   return (hash % 7) + 3;
 }
 
+// The journey is only embedded on the agent surface, where the same journey
+// id was already handed to the requesting agent. Human-page situation links
+// carry no journey: a per-render minted id would masquerade as an agent
+// handoff the moment anyone (or any crawler) clicked it.
 function feedersUrl(origin, journeyId, params = {}) {
   const url = new URL("/feeders", origin);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
-  url.searchParams.set("journey", journeyId);
+  if (journeyId) url.searchParams.set("journey", journeyId);
   return url.toString();
 }
 
@@ -510,8 +514,13 @@ export function createApp() {
     const origin = originFor(request);
     const query = normalizedQuery(request);
     const tokens = tokensFromQuery(query);
-    let journeyId = String(query.journey || "");
-    if (!isValidJourneyId(journeyId)) journeyId = `j-${randomUUID()}`;
+    // Telemetry may only link a journey the request actually carried. The
+    // render fallback below mints a fresh id for the page's own links, and
+    // that minted id must never masquerade as an agent handoff — otherwise
+    // every organic human or crawler view fabricates funnel evidence.
+    const carriedJourney = String(query.journey || "");
+    const journeyArrived = isValidJourneyId(carriedJourney);
+    const journeyId = journeyArrived ? carriedJourney : `j-${randomUUID()}`;
     const node = graph.buildDecision({
       origin,
       journeyId,
@@ -519,16 +528,19 @@ export function createApp() {
       searchId: randomUUID(),
       paths: { detailPath: `/agent-item/${journeyId}` },
     });
-    recordHop(
-      request,
-      node.operation || "/agent-decide/feeder",
-      journeyId,
-      200,
-      Math.round(performance.now() - started),
-      experienceTelemetryForNode(node),
-    );
+    const agentRequest = isAgent(request);
+    if (agentRequest || journeyArrived) {
+      recordHop(
+        request,
+        node.operation || "/agent-decide/feeder",
+        journeyId,
+        200,
+        Math.round(performance.now() - started),
+        experienceTelemetryForNode(node),
+      );
+    }
 
-    if (!isAgent(request)) {
+    if (!agentRequest) {
       if (!request.visitorId) {
         request.visitorId = `psv_${randomUUID()}`;
         response.append(
@@ -543,13 +555,18 @@ export function createApp() {
           `ps_session=${signedCookie("ps_session", request.sessionId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=1800`,
         );
       }
-      recordProductLinkClick(
-        request,
-        journeyId,
-        request.visitorId,
-        Math.round(performance.now() - started),
-        "/feeders",
-      );
+      // The handoff: a human opened an agent-composed situation link. Gated
+      // on the journey the request carried, mirroring /product below —
+      // journey-less organic visits record nothing.
+      if (journeyArrived) {
+        recordProductLinkClick(
+          request,
+          journeyId,
+          request.visitorId,
+          Math.round(performance.now() - started),
+          "/feeders",
+        );
+      }
     }
 
     if (node.error) {
@@ -606,7 +623,9 @@ export function createApp() {
         personalized,
         traits,
         decisionId,
-        situationLinks: situationListHtml(origin, `j-${randomUUID()}`),
+        // No journey on human-page links: /feeders mints its own render id
+        // and only request-carried journeys ever reach telemetry.
+        situationLinks: situationListHtml(origin, ""),
       }),
       "text/html; charset=utf-8",
     );

@@ -60,12 +60,12 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
       assert.match(html, /Anything for Pets/);
       assert.match(html, /data-personalized="false"/);
       // Work-mode cloud browsers browse the human storefront with a real
-      // Chrome UA, so the human page carries the same situation links.
+      // Chrome UA, so the human page carries the same situation links —
+      // without a journey: a per-render minted id would fabricate agent
+      // handoff evidence the moment anyone clicked it.
       assert.match(html, /Shop by situation/);
-      assert.match(
-        html,
-        /\/feeders\?pets=multiple_cats&motivation=one_food_motivated&budget=200&journey=j-/,
-      );
+      assert.match(html, /\/feeders\?pets=multiple_cats&motivation=one_food_motivated&budget=200/);
+      assert.doesNotMatch(html, /\/feeders\?[^"]*journey=/);
       assert.equal(setCookies(home).length, 0, "the homepage must not drop cookies");
     }
 
@@ -454,6 +454,78 @@ test("petsmart demo faceted telemetry: /feeders records the parsed need dims", a
       assert.equal(hop.experience.decision.exactMatchCount, 2);
       assert.equal(hop.runtimeHint, "petsmart-demo/1.0 chatgpt-user");
     }
+  } finally {
+    await started.close();
+    await collector.close();
+    delete process.env.EPODE_API_KEY;
+    delete process.env.EPODE_API_URL;
+  }
+});
+
+test("petsmart demo faceted gating: only request-carried journeys reach telemetry", async () => {
+  const collector = await startCollector();
+  process.env.EPODE_API_KEY =
+    "af_live_0123456789abcdef0123456789abcdef_secretsecretsecretsecretsecretse";
+  process.env.EPODE_API_URL = `http://127.0.0.1:${collector.port}`;
+  const gatedServer = await import("../examples/petsmart-demo/server.mjs?feeders-gate");
+  const started = await gatedServer.startServer(0);
+  const base = `http://127.0.0.1:${started.port}`;
+  const situation = "pets=multiple_cats&motivation=one_food_motivated&budget=200";
+
+  try {
+    // Organic journey-less visits — a human browsing, and a crawler the
+    // permissive robots.txt invites — must fabricate no telemetry at all.
+    for (const ua of [BROWSER_UA, "Googlebot/2.1"]) {
+      const organic = await fetch(`${base}/feeders?${situation}`, {
+        headers: { "user-agent": ua },
+      });
+      assert.equal(organic.status, 200);
+    }
+    // The organic human visit still gets the ordinary shop-page cookie drop.
+    const organicHuman = await fetch(`${base}/feeders?${situation}`, {
+      headers: { "user-agent": BROWSER_UA },
+    });
+    assert.ok(
+      setCookies(organicHuman).some((cookie) => cookie.startsWith("ps_visitor=")),
+      "the organic /feeders visit must still mint the visitor cookie",
+    );
+
+    // A human opening an agent-composed situation link IS the handoff.
+    const journeyId = `j-${randomUUID()}`;
+    const handoff = await fetch(`${base}/feeders?${situation}&journey=${journeyId}`, {
+      headers: { "user-agent": BROWSER_UA },
+    });
+    assert.equal(handoff.status, 200);
+
+    await waitForEvents(collector.batches, (seen) => {
+      return (
+        seen.some(
+          (event) =>
+            event.customerLinkSource === "product_link_click" && event.sessionRef === journeyId,
+        ) &&
+        seen.some(
+          (event) => event.operation === "/agent-decide/feeder" && event.sessionRef === journeyId,
+        )
+      );
+    });
+
+    const seen = collectedEvents(collector.batches);
+    // Every recorded event belongs to the carried journey: the three
+    // journey-less visits above recorded nothing.
+    assert.ok(
+      seen.every((event) => event.sessionRef === journeyId),
+      `journey-less visits must record nothing, saw ${JSON.stringify(seen.map((event) => [event.operation, event.sessionRef]))}`,
+    );
+    const clicks = seen.filter((event) => event.customerLinkSource === "product_link_click");
+    assert.equal(clicks.length, 1, "only the journey-carrying visit may record a click");
+    assert.equal(clicks[0].operation, "/feeders");
+    assert.match(clicks[0].anonymousRef, /^psv_/);
+    const hop = seen.find((event) => event.operation === "/agent-decide/feeder");
+    assert.deepEqual(hop.experience.needState.expressedDimensions.sort(), [
+      "budget",
+      "motivation",
+      "pets",
+    ]);
   } finally {
     await started.close();
     await collector.close();
