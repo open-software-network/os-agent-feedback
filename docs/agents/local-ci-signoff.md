@@ -45,6 +45,14 @@ pnpm, npm, Python, uv, Go, Docker Compose, PostgreSQL client tools,
 brew install actionlint shellcheck
 ```
 
+Backend checks use Rust 1.95 and SDK checks use the SDK's 1.88 MSRV. Install
+both through rustup so local CI cannot drift with the machine's default Rust:
+
+```sh
+rustup toolchain install 1.95 --profile minimal --component clippy,rustfmt
+rustup toolchain install 1.88 --profile minimal --component clippy,rustfmt
+```
+
 The backend and e2e suites start the repository's local PostgreSQL service
 when needed. Existing local environment files are preserved.
 

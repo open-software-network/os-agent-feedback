@@ -17,6 +17,17 @@ signoff_require_command() {
   fi
 }
 
+signoff_require_rust_toolchain() {
+  local version="$1"
+
+  signoff_require_command rustup "Install it from https://rustup.rs/."
+  if ! rustup run "$version" rustc --version >/dev/null 2>&1; then
+    echo "Rust ${version} is required. Install it with:" >&2
+    echo "  rustup toolchain install ${version} --profile minimal --component clippy,rustfmt" >&2
+    exit 1
+  fi
+}
+
 signoff_require_gh() {
   if ! command -v gh >/dev/null 2>&1; then
     echo "GitHub CLI is required. Install it from https://cli.github.com/." >&2
