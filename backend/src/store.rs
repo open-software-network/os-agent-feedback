@@ -12159,7 +12159,7 @@ pub(crate) async fn submit_enrichment_answer(
         .bind(request.product_id)
         .bind(request.customer_id)
         .bind(request.interaction_id)
-        .bind(format!("item:{}", index + 1))
+        .bind(&definition.key)
         .bind(&definition.signal_type)
         .bind(catalog_summary(definition, &item.value))
         .bind(serde_json::json!({
@@ -22871,9 +22871,9 @@ mod product_tests {
             anyhow::ensure!(search_answer.signals.len() == 1);
             anyhow::ensure!(search_answer.signals[0].summary == "Shopping occasion: gift");
             anyhow::ensure!(
-                sqlx::query_as::<_, (String, String, String)>(
+                sqlx::query_as::<_, (String, String, String, String)>(
                     "SELECT signal_type, attributes->>'enrichmentType',
-                      attributes->>'catalogVersion' FROM customer_signals
+                      attributes->>'catalogVersion', source_item_key FROM customer_signals
                     WHERE id = $1 AND workspace_id = $2",
                 )
                 .bind(search_answer.signals[0].signal_id)
@@ -22884,7 +22884,9 @@ mod product_tests {
                         "preference".to_owned(),
                         "customer_goal".to_owned(),
                         "product:v1".to_owned(),
-                    )
+                        "journey.occasion".to_owned(),
+                    ),
+                "context signals must carry the enrichment field key, not a positional item label"
             );
 
             // The closed custom catalog replaces the legacy global catalog.
