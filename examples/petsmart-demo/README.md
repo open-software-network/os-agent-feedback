@@ -58,6 +58,29 @@ increased-AI-traffic terms:
 
 ## Consumer chat behavior
 
+The reusable live-browser cases, scoring gates, cache controls, and
+platform-specific procedures live in
+[`experiments/consumer-chat-commerce`](../../experiments/consumer-chat-commerce/README.md).
+They require origin-side request evidence; a simulated runtime projection or
+an answer that merely claims to have browsed does not count.
+
+The August 7 scoped-intent retest fixed a real methodology and product-model
+error. “I have two cats and a dog” does not say whether one feeder must serve
+all three pets or only protect one cat's bowl. Those are now separate named
+situations and regression cases. In Claude Incognito, the precise shared-feeder
+case correctly returned zero eligible products under a hard $175 maximum,
+while the one-cat protection case selected the $169.99 SureFeed, verified 9
+nearby, and exposed its permanent merchant PDP. Grok Private independently
+preserved the zero-match decision and cited the permanent result page.
+
+Named private situation URLs now act as attribution hops: an agent fetch
+records the bounded need-state decision, then HTTP 302 resolves to the stable
+public `/s/...` result. A human opening the private source receives a signed
+journey-continuation cookie and lands on the same permanent result before any
+shopper identity is minted. Context-bearing PDPs render their active-filter
+eligibility explicitly, so a comparison-only near miss no longer looks like an
+ordinary recommendation page.
+
 The matched live matrix found a robust common baseline rather than one
 universal traversal winner: a hybrid full-catalog HTML root, signed private
 traversal links, stable public situation links, a composable custom-situation

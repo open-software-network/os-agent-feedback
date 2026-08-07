@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "shared_feeder_hard_175",
+      "prompt": "I need one automatic feeder from this store that both of my cats and my dog can all use. One cat steals food, so the same feeder must support all three pets and physically block unauthorized access. My budget is a hard $175 maximum. Please check live stock, don't substitute another store, and don't recommend anything that misses one of those requirements: {{origin}}",
+      "need": {
+        "pets": "cats_and_dog",
+        "motivation": "one_food_motivated",
+        "budget": 175,
+        "budgetStrength": "hard"
+      },
+      "expected": {
+        "exactMatchCount": 0,
+        "recommendation": null,
+        "smallestBudgetRelaxation": 190,
+        "permanentResultPath": "/s/cats-and-dog-one-food-obsessed-under-175"
+      }
+    },
+    {
+      "id": "protect_one_cat_hard_175",
+      "prompt": "I only need to protect one cat's bowl from my food-stealing cat. My other cat and dog can keep using their current bowls, so this new feeder only needs to serve the one protected cat. My budget is a hard $175 maximum. Use only this store, check live stock, and give me the merchant link if something matches: {{origin}}",
+      "need": {
+        "pets": "one_cat",
+        "motivation": "one_food_motivated",
+        "budget": 175,
+        "budgetStrength": "hard"
+      },
+      "expected": {
+        "exactMatchCount": 1,
+        "recommendation": "surefeed-microchip-cat-feeder",
+        "price": 169.99,
+        "stock": 9,
+        "permanentResultPath": "/s/protect-one-cat-bowl-under-175",
+        "permanentProductPath": "/s/protect-one-cat-bowl-under-175/product/surefeed-microchip-cat-feeder"
+      }
+    },
+    {
+      "id": "scheduled_one_cat_hard_90",
+      "prompt": "I need a scheduled automatic feeder for one cat from this store. My cat eats its own portions, and $90 is a hard maximum. Check live stock and give me the direct merchant link if something qualifies: {{origin}}",
+      "need": {
+        "pets": "one_cat",
+        "motivation": "all_balanced",
+        "budget": 90,
+        "budgetStrength": "hard"
+      },
+      "expected": {
+        "exactMatchCount": 1,
+        "recommendation": "whisker-city-programmable-feeder",
+        "price": 79.99,
+        "permanentResultPath": "/s/one-cat-scheduled-portions-under-90"
+      }
+    }
+  ],
+  "platforms": {
+    "chatgpt": { "isolation": "temporary_chat", "surface": "instant" },
+    "claude": { "isolation": "incognito", "surface": "chat" },
+    "gemini": { "isolation": "temporary_chat", "surface": "thinking" },
+    "grok": { "isolation": "private_chat", "surface": "auto" },
+    "perplexity": { "isolation": "incognito", "surface": "search" },
+    "meta_ai": { "isolation": "fresh_chat", "surface": "instant" },
+    "copilot": { "isolation": "temporary_chat", "surface": "smart" }
+  }
+}

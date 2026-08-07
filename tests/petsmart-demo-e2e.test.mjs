@@ -171,6 +171,27 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
     assert.match(claudeGuide, /\$189\.99/);
     assert.match(claudeGuide, /one-cat-scheduled-portions-under-90/);
     assert.doesNotMatch(claudeGuide, /href="[^"]+\/product\/smarttag-rfid-multi-pet-feeder/);
+    const claudeSharedFeederUrl = claudeGuide.match(
+      /href="(http:\/\/127\.0\.0\.1:\d+\/shop\/automatic-feeders\/j-[^"]+\/cats-and-dog-food-obsessed-under-175)"/,
+    )?.[1];
+    assert.ok(claudeSharedFeederUrl);
+    const claudeRedirect = await fetch(claudeSharedFeederUrl, {
+      headers: { "user-agent": "Claude-User/1.0" },
+      redirect: "manual",
+    });
+    assert.equal(claudeRedirect.status, 302);
+    assert.equal(
+      claudeRedirect.headers.get("location"),
+      `${base}/s/cats-and-dog-one-food-obsessed-under-175`,
+    );
+    const claudeFollowed = await fetch(claudeSharedFeederUrl, {
+      headers: { "user-agent": "Claude-User/1.0" },
+    });
+    assert.equal(claudeFollowed.url, `${base}/s/cats-and-dog-one-food-obsessed-under-175`);
+    assert.match(
+      await claudeFollowed.text(),
+      /No eligible recommendation under the active filters/,
+    );
 
     const metaHome = await fetch(`${base}/`, {
       headers: { "user-agent": "meta-externalfetcher/1.1" },
@@ -829,9 +850,14 @@ test("petsmart demo preserves arbitrary exact-dollar hard and target budgets", a
     );
     const hardHtml = await hard.text();
     assert.match(hardHtml, /Exact matches \(0\)/);
+    assert.match(hardHtml, /No eligible recommendation under the active filters/);
     assert.match(hardHtml, /SmartTag RFID Multi-Pet Feeder/);
     assert.match(hardHtml, /budget: needs 175, this is 189\.99/);
     assert.match(hardHtml, /\/c\/[^"/]*budget-hard-175[^"/]*\/product\/smarttag/);
+    assert.match(
+      hardHtml,
+      /data-filter-change="budget" href="[^"?]+\/feeders\?pets=cats_and_dog&motivation=one_food_motivated&budget=190"/,
+    );
 
     const target = await fetch(
       `${base}/feeders?pets=cats_and_dog&motivation=one_food_motivated&budget=175&budget_kind=target`,
@@ -845,7 +871,56 @@ test("petsmart demo preserves arbitrary exact-dollar hard and target budgets", a
     const named = await fetch(`${base}/s/cats-and-dog-one-food-obsessed-under-175`);
     const namedHtml = await named.text();
     assert.match(namedHtml, /Exact matches \(0\)/);
+    assert.match(namedHtml, /No eligible recommendation under the active filters/);
+    assert.match(namedHtml, /One feeder must serve both cats and the dog/);
+    assert.match(
+      namedHtml,
+      /<link rel="canonical" href="[^"/]+:\/\/[^"/]+\/s\/cats-and-dog-one-food-obsessed-under-175"/,
+    );
+    assert.match(namedHtml, /Permanent shopper link to this live result/);
     assert.match(namedHtml, /budget: needs 175, this is 189\.99/);
+    assert.match(
+      namedHtml,
+      /href="[^"/]+:\/\/[^"/]+\/s\/cats-and-dog-one-food-obsessed-under-190"/,
+    );
+    assert.match(namedHtml, /Does not match: SureFeed Microchip Cat Feeder/);
+
+    const ineligibleProduct = await fetch(
+      `${base}/s/cats-and-dog-one-food-obsessed-under-175/product/surefeed-microchip-cat-feeder`,
+    );
+    const ineligibleProductHtml = await ineligibleProduct.text();
+    assert.match(ineligibleProductHtml, /Does not match all active shopping filters/);
+    assert.match(
+      ineligibleProductHtml,
+      /pets: requires cats_and_dog, this product has one_cat, multiple_cats/,
+    );
+
+    const relaxed = await fetch(`${base}/s/cats-and-dog-one-food-obsessed-under-190`);
+    const relaxedHtml = await relaxed.text();
+    assert.match(relaxedHtml, /Exact matches \(1\)/);
+    assert.match(relaxedHtml, /SmartTag RFID Multi-Pet Feeder/);
+
+    const eligibleProduct = await fetch(
+      `${base}/s/cats-and-dog-one-food-obsessed-under-190/product/smarttag-rfid-multi-pet-feeder`,
+    );
+    const eligibleProductHtml = await eligibleProduct.text();
+    assert.match(eligibleProductHtml, /Matches every active shopping filter/);
+    assert.match(eligibleProductHtml, /4 in stock nearby/);
+
+    const protectedCat = await fetch(`${base}/s/protect-one-cat-bowl-under-175`);
+    const protectedCatHtml = await protectedCat.text();
+    assert.match(protectedCatHtml, /Only one cat's bowl needs protection/);
+    assert.match(protectedCatHtml, /Exact matches \(1\)/);
+    assert.match(protectedCatHtml, /SureFeed Microchip Cat Feeder/);
+    assert.match(
+      protectedCatHtml,
+      /\/s\/protect-one-cat-bowl-under-175\/product\/surefeed-microchip-cat-feeder/,
+    );
+
+    const protectedCatProduct = await fetch(
+      `${base}/s/protect-one-cat-bowl-under-175/product/surefeed-microchip-cat-feeder`,
+    );
+    assert.match(await protectedCatProduct.text(), /Matches every active shopping filter/);
 
     const targetSituation = await fetch(`${base}/s/multiple-cats-one-steals-food-target-150`);
     const targetSituationHtml = await targetSituation.text();
@@ -1103,6 +1178,16 @@ test("petsmart demo faceted gating: only request-carried journeys reach telemetr
     assert.ok(signedSituation, "the agent guide must issue a signed situation path");
     const [, signedSituationUrl, journeyId] = signedSituation;
 
+    const agentTraversal = await fetch(signedSituationUrl, {
+      headers: { "user-agent": "meta-externalfetcher/1.1" },
+    });
+    assert.equal(agentTraversal.status, 200);
+    assert.equal(
+      agentTraversal.url,
+      `${base}/s/multiple-cats-one-steals-food-under-200`,
+      "the private decision hop must resolve to the permanent result",
+    );
+
     assert.equal(
       (
         await fetch(
@@ -1113,17 +1198,29 @@ test("petsmart demo faceted gating: only request-carried journeys reach telemetr
       "unsigned journey path segments must be rejected",
     );
 
-    const situationClick = await navigate(signedSituationUrl);
-    assert.equal(situationClick.status, 200);
-    const situationHtml = await situationClick.text();
-    const cookies = setCookies(situationClick)
+    const signedClick = await navigate(signedSituationUrl);
+    assert.equal(signedClick.status, 302);
+    assert.equal(
+      signedClick.headers.get("location"),
+      `${base}/s/multiple-cats-one-steals-food-under-200`,
+    );
+    const continuationCookie = setCookies(signedClick)
       .map((entry) => entry.split(";")[0])
       .join("; ");
-    assert.match(cookies, /ps_journey=/);
+    assert.match(continuationCookie, /ps_journey=/);
+
+    const situationClick = await navigate(signedClick.headers.get("location"), {
+      cookie: continuationCookie,
+    });
+    assert.equal(situationClick.status, 200);
+    const situationHtml = await situationClick.text();
+    const cookies = [...setCookies(signedClick), ...setCookies(situationClick)]
+      .map((entry) => entry.split(";")[0])
+      .join("; ");
     const stableProductUrl = situationHtml.match(
       /href="(http:\/\/127\.0\.0\.1:\d+\/s\/multiple-cats-one-steals-food-under-200\/product\/[a-z0-9-]+)"/,
     )?.[1];
-    assert.ok(stableProductUrl, "the private agent page must emit a permanent shopper PDP");
+    assert.ok(stableProductUrl, "the permanent result page must emit a permanent shopper PDP");
     assert.doesNotMatch(stableProductUrl, /j-[a-f0-9-]+\./);
 
     const productClick = await navigate(stableProductUrl, { cookie: cookies });
@@ -1141,9 +1238,7 @@ test("petsmart demo faceted gating: only request-carried journeys reach telemetr
             event.customerLinkSource === "product_link_click" && event.sessionRef === journeyId,
         ) &&
         seen.some(
-          (event) =>
-            event.operation === "/shop/automatic-feeders/:journey/:situation" &&
-            event.sessionRef === journeyId,
+          (event) => event.operation === "/agent-decide/feeder" && event.sessionRef === journeyId,
         )
       );
     });
@@ -1163,7 +1258,7 @@ test("petsmart demo faceted gating: only request-carried journeys reach telemetr
     assert.equal(clicks[0].operation, "/s/:situation/product/:id");
     assert.match(clicks[0].anonymousRef, /^psv_/);
     const situationIntent = seen.find(
-      (event) => event.operation === "/shop/automatic-feeders/:journey/:situation",
+      (event) => event.operation === "/s/:situation" && event.sessionRef === journeyId,
     );
     assert.equal(situationIntent.customerLinkSource, undefined);
     assert.deepEqual(situationIntent.experience.needState.expressedDimensions.sort(), [
