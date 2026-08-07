@@ -48,7 +48,7 @@ test("telemetry rejects unbounded, personal, and unknown identity fields", () =>
   }
 });
 
-test("a product link click joins by first-party browser reference while request details stay traits", () => {
+test("a product link click joins by first-party browser reference while request details stay metadata", () => {
   const linked = {
     ...event,
     surface: "http_html",

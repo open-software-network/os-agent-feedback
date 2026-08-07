@@ -32,7 +32,7 @@ test("journey ids and need tokens are tightly validated", () => {
   assert.equal(parsed.state.values.color?.strength, "preference");
 });
 
-test("a product link click separates first-party identity from request traits", () => {
+test("a product link click separates first-party identity from request metadata", () => {
   const details = productLinkClickTelemetryDetails({
     operation: "/attributed-product-visit/petsmart",
     sessionRef: journeyId,

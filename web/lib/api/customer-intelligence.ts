@@ -202,6 +202,8 @@ export type ObservedCustomerFact = {
   kind: "constraint" | "preference" | "intent" | "context" | "unknown" | string;
   strength: string | null;
   status: "observed" | "unknown" | string;
+  scope: "customer" | "journey" | "item" | "session";
+  scopeRef: string | null;
   sessionCount: number;
   observationCount: number;
   firstObservedAt: string;

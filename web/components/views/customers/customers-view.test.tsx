@@ -30,7 +30,8 @@ describe("CustomersView", () => {
     expect(screen.queryByText(/Customers stay linked to their sessions/i)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Filters/ })).toBeVisible();
     expect(screen.queryByLabelText("Identity filter")).not.toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Traits" })).toBeVisible();
+    expect(screen.getByRole("columnheader", { name: "Context" })).toBeVisible();
+    expect(screen.queryByRole("columnheader", { name: "Traits" })).not.toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "Identity" })).not.toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "Type" })).not.toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "Sessions" })).toBeVisible();
@@ -79,11 +80,20 @@ describe("CustomersView", () => {
     expect(within(profile).getByRole("heading", { name: "What we've observed" })).toBeVisible();
     expect(within(profile).getByText("$4,000/month")).toBeVisible();
     expect(within(profile).getByText("Cat")).toBeVisible();
-    expect(within(profile).getByText(/session-scoped evidence/i)).toBeVisible();
-    expect(within(profile).getByText("Visitor traits")).toBeVisible();
-    expect(within(profile).getByText(/Browser traits add context/)).toBeVisible();
+    expect(
+      within(profile).getByText(/Scoped context never becomes a customer trait/i),
+    ).toBeVisible();
+    expect(within(profile).getByText("Customer traits")).toBeVisible();
+    expect(within(profile).getByText("Scoped context")).toBeVisible();
+    expect(within(profile).getByText("Customer-wide")).toBeVisible();
+    expect(within(profile).getByText("Journey · session-42")).toBeVisible();
+    expect(within(profile).getByText("Request metadata")).toBeVisible();
+    expect(
+      within(profile).getByText(/Browser and network details describe a request/),
+    ).toBeVisible();
     expect(within(profile).getAllByText(/Last seen/).length).toBeGreaterThan(0);
     expect(within(profile).queryByText("Never identity")).not.toBeInTheDocument();
+    expect(within(profile).queryByText("Visitor traits")).not.toBeInTheDocument();
     expect(within(profile).queryByText("Request traits")).not.toBeInTheDocument();
     expect(within(profile).getByText("Network address")).toBeVisible();
     expect(within(profile).getByText("Client software")).toBeVisible();
@@ -130,6 +140,38 @@ describe("CustomersView", () => {
     const profile = await screen.findByRole("region", { name: "What we've observed" });
     expect(within(profile).getAllByText("Apartments").length).toBeGreaterThan(0);
     expect(within(profile).getByText("PetSmart")).toBeVisible();
+  });
+
+  it("keeps item and session context out of customer traits", async () => {
+    const detail = customerDetailFixture();
+    detail.observedProfile.facts = [
+      {
+        ...detail.observedProfile.facts[0],
+        key: "lamps.budget",
+        domain: "lamps",
+        value: "$150",
+        scope: "item",
+        scopeRef: "task-lamp",
+      },
+      {
+        ...detail.observedProfile.facts[0],
+        key: "lamps.purpose",
+        domain: "lamps",
+        label: "Purpose",
+        value: "Reading",
+        scope: "session",
+        scopeRef: "session-99",
+      },
+    ];
+    renderCustomers(mockCustomers(detail), {
+      selectedCustomerId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+
+    const profile = await screen.findByRole("region", { name: "What we've observed" });
+    expect(within(profile).getByText("Item · task-lamp")).toBeVisible();
+    expect(within(profile).getByText("Session · session-99")).toBeVisible();
+    expect(within(profile).getByText("No customer-wide traits observed yet.")).toBeVisible();
+    expect(within(profile).queryByText("Customer-wide")).not.toBeInTheDocument();
   });
 
   it("opens the exact session from the full inspector row", async () => {

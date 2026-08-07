@@ -185,7 +185,7 @@ observes a human navigation through a product-generated link carrying that sessi
 event as an `http_html` interaction with `customerLinkSource: "product_link_click"`, the stable
 `anonymousRef` from the product's first-party cookie, and the original `sessionRef`. Optional
 `requestObservation` values such as IP address, user-agent, language, platform, and referrer origin are
-retained only as traits. They never identify a customer and cannot claim a session on their own.
+retained only as request metadata. They never identify a customer and cannot claim a session on their own.
 
 An experience-graph hop may attach an optional `experience` object describing the hop in aggregate-safe
 terms: the graph `stage`, which need dimensions were expressed or explicitly unknown (dimension keys only,

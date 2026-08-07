@@ -37,6 +37,7 @@ import {
   type CustomerSummary,
   fetchCustomerDetail,
   fetchCustomersPage,
+  type ObservedCustomerFact,
 } from "@/lib/api/customer-intelligence";
 import type { DashboardData } from "@/lib/api/dashboard";
 import { formatDate, relativeDate, titleCase } from "@/lib/dashboard/format";
@@ -236,7 +237,7 @@ export function CustomersView({
             <TableHeader className="sticky top-0 z-[1] bg-background">
               <TableRow className="hover:bg-background">
                 <TableHead className="h-9 w-[42%] pl-5 text-xs">Customer</TableHead>
-                <TableHead className="h-9 w-[22%] text-xs">Traits</TableHead>
+                <TableHead className="h-9 w-[22%] text-xs">Context</TableHead>
                 <TableHead className="h-9 w-[18%] text-xs">Sessions</TableHead>
                 <TableHead className="h-9 w-[18%] pr-5 text-right text-xs">Updated</TableHead>
               </TableRow>
@@ -494,8 +495,8 @@ function sessionActivity(operation: string | null) {
   return operation?.trim() || "No activity observed";
 }
 
-function observedTraits(detail: CustomerDetail) {
-  const traits = new Map<string, { label: string; value: string; observedAt: string }>();
+function observedRequestMetadata(detail: CustomerDetail) {
+  const metadata = new Map<string, { label: string; value: string; observedAt: string }>();
   for (const observation of detail.requestObservations) {
     const isAgent = /claude|anthropic|openai|chatgpt/i.test(observation.userAgent ?? "");
     const candidates = [
@@ -519,10 +520,12 @@ function observedTraits(detail: CustomerDetail) {
     for (const candidate of candidates) {
       if (!candidate) continue;
       const key = `${candidate.label}:${candidate.value}`;
-      if (!traits.has(key)) traits.set(key, { ...candidate, observedAt: observation.observedAt });
+      if (!metadata.has(key)) {
+        metadata.set(key, { ...candidate, observedAt: observation.observedAt });
+      }
     }
   }
-  return [...traits.values()].slice(0, 12);
+  return [...metadata.values()].slice(0, 12);
 }
 
 function observedFactKind(kind: string) {
@@ -538,6 +541,84 @@ function observedDomain(domain: string) {
   if (domain === "saas") return "SaaS";
   if (domain === "petsmart") return "PetSmart";
   return titleCase(domain);
+}
+
+function observedFactScope(fact: ObservedCustomerFact) {
+  switch (fact.scope) {
+    case "customer":
+      return "Customer-wide";
+    case "journey":
+      return fact.scopeRef ? `Journey · ${fact.scopeRef}` : "Journey";
+    case "item":
+      return fact.scopeRef ? `Item · ${fact.scopeRef}` : "Item";
+    default:
+      return fact.scopeRef ? `Session · ${fact.scopeRef}` : "Session";
+  }
+}
+
+function ObservedFactList({
+  facts,
+  showFactDomain,
+  openSession,
+}: {
+  facts: ObservedCustomerFact[];
+  showFactDomain: boolean;
+  openSession: (sessionId: string) => void;
+}) {
+  return (
+    <ol className="mt-3 space-y-2">
+      {facts.map((fact) => {
+        const latestEvidence = fact.evidence[0];
+        const content = (
+          <span className="block min-w-0 text-left">
+            <span className="flex flex-wrap items-center gap-1">
+              <Badge variant="outline">{observedFactScope(fact)}</Badge>
+              {showFactDomain ? (
+                <Badge variant="outline">{observedDomain(fact.domain)}</Badge>
+              ) : null}
+              <Badge variant="secondary">{observedFactKind(fact.kind)}</Badge>
+              {fact.strength ? (
+                <span className="text-[10px] text-muted-foreground">
+                  {titleCase(fact.strength)}
+                </span>
+              ) : null}
+            </span>
+            <span className="mt-2 block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              {fact.label}
+            </span>
+            <span className="mt-0.5 block text-sm leading-5">{fact.value}</span>
+            <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
+              Seen in {fact.sessionCount.toLocaleString()}{" "}
+              {fact.sessionCount === 1 ? "session" : "sessions"}
+              {fact.observationCount > fact.sessionCount
+                ? ` · ${fact.observationCount.toLocaleString()} activities`
+                : ""}
+              {` · ${relativeDate(fact.lastObservedAt)}`}
+            </span>
+          </span>
+        );
+        return (
+          <li
+            key={`${fact.scope}:${fact.scopeRef ?? "customer"}:${fact.key}:${fact.value}:${fact.strength ?? "none"}`}
+          >
+            {latestEvidence ? (
+              <Button
+                variant="ghost"
+                className="h-auto w-full justify-start rounded-md border bg-muted/20 p-3 font-normal whitespace-normal hover:bg-muted/40"
+                aria-label={`Open evidence for ${fact.label}: ${fact.value}`}
+                title={latestEvidence.operation}
+                onClick={() => openSession(latestEvidence.sessionId)}
+              >
+                {content}
+              </Button>
+            ) : (
+              <div className="border bg-muted/20 p-3">{content}</div>
+            )}
+          </li>
+        );
+      })}
+    </ol>
+  );
 }
 
 function CustomerDetailContent({
@@ -560,7 +641,9 @@ function CustomerDetailContent({
     lastObservedAt: null,
     facts: [],
   };
-  const traits = observedTraits(detail);
+  const requestMetadata = observedRequestMetadata(detail);
+  const customerTraits = observedProfile.facts.filter((fact) => fact.scope === "customer");
+  const scopedContext = observedProfile.facts.filter((fact) => fact.scope !== "customer");
   const factDomains = new Set(observedProfile.facts.map((fact) => fact.domain));
   const showFactDomain = factDomains.size > 1;
 
@@ -599,13 +682,12 @@ function CustomerDetailContent({
           </h3>
           <span className="text-[11px] text-muted-foreground">
             {observedProfile.facts.length.toLocaleString()}{" "}
-            {observedProfile.facts.length === 1 ? "fact" : "facts"}
+            {observedProfile.facts.length === 1 ? "observation" : "observations"}
           </span>
         </div>
         <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-          A live profile derived only from session activity Epode witnessed, plus request details
-          seen during linked sessions. Each value remains session-scoped evidence, not a claim that
-          it is permanently true.
+          Epode separates customer-wide traits from context that applies only to a journey, item, or
+          session. Scoped context never becomes a customer trait.
         </p>
         {observedProfile.truncated ? (
           <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
@@ -614,55 +696,52 @@ function CustomerDetailContent({
           </p>
         ) : null}
         {observedProfile.facts.length ? (
-          <ol className="mt-3 space-y-2">
-            {observedProfile.facts.map((fact) => {
-              const latestEvidence = fact.evidence[0];
-              const content = (
-                <span className="block min-w-0 text-left">
-                  <span className="flex flex-wrap items-center gap-1">
-                    {showFactDomain ? (
-                      <Badge variant="outline">{observedDomain(fact.domain)}</Badge>
-                    ) : null}
-                    <Badge variant="secondary">{observedFactKind(fact.kind)}</Badge>
-                    {fact.strength ? (
-                      <span className="text-[10px] text-muted-foreground">
-                        {titleCase(fact.strength)}
-                      </span>
-                    ) : null}
+          <>
+            <div className="mt-4 flex items-center justify-between gap-3">
+              <h4 className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                Customer traits
+              </h4>
+              <span className="text-[11px] text-muted-foreground">
+                {customerTraits.length.toLocaleString()}
+              </span>
+            </div>
+            <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+              Customer-wide context that can remain relevant across journeys, such as household
+              composition.
+            </p>
+            {customerTraits.length ? (
+              <ObservedFactList
+                facts={customerTraits}
+                showFactDomain={showFactDomain}
+                openSession={openSession}
+              />
+            ) : (
+              <p className="mt-2 text-sm text-muted-foreground">
+                No customer-wide traits observed yet.
+              </p>
+            )}
+            {scopedContext.length ? (
+              <>
+                <div className="mt-5 flex items-center justify-between gap-3">
+                  <h4 className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                    Scoped context
+                  </h4>
+                  <span className="text-[11px] text-muted-foreground">
+                    {scopedContext.length.toLocaleString()}
                   </span>
-                  <span className="mt-2 block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                    {fact.label}
-                  </span>
-                  <span className="mt-0.5 block text-sm leading-5">{fact.value}</span>
-                  <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
-                    Seen in {fact.sessionCount.toLocaleString()}{" "}
-                    {fact.sessionCount === 1 ? "session" : "sessions"}
-                    {fact.observationCount > fact.sessionCount
-                      ? ` · ${fact.observationCount.toLocaleString()} activities`
-                      : ""}
-                    {` · ${relativeDate(fact.lastObservedAt)}`}
-                  </span>
-                </span>
-              );
-              return (
-                <li key={`${fact.key}:${fact.value}:${fact.strength ?? "none"}`}>
-                  {latestEvidence ? (
-                    <Button
-                      variant="ghost"
-                      className="h-auto w-full justify-start rounded-md border bg-muted/20 p-3 font-normal whitespace-normal hover:bg-muted/40"
-                      aria-label={`Open evidence for ${fact.label}: ${fact.value}`}
-                      title={latestEvidence.operation}
-                      onClick={() => openSession(latestEvidence.sessionId)}
-                    >
-                      {content}
-                    </Button>
-                  ) : (
-                    <div className="border bg-muted/20 p-3">{content}</div>
-                  )}
-                </li>
-              );
-            })}
-          </ol>
+                </div>
+                <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                  Budgets, purposes, preferences, and constraints stay attached to the journey,
+                  item, or session where they were expressed.
+                </p>
+                <ObservedFactList
+                  facts={scopedContext}
+                  showFactDomain={showFactDomain}
+                  openSession={openSession}
+                />
+              </>
+            ) : null}
+          </>
         ) : (
           <p className="mt-3 text-sm text-muted-foreground">
             No needs, preferences, constraints, or customer context have been expressed in the
@@ -670,15 +749,15 @@ function CustomerDetailContent({
           </p>
         )}
         <h4 className="mt-5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-          Visitor traits
+          Request metadata
         </h4>
         <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-          Browser traits add context about the visitor&apos;s software, device, language, network,
-          and referring site.
+          Browser and network details describe a request, not the customer. Epode never uses them as
+          identity or promotes them to customer traits.
         </p>
-        {traits.length ? (
+        {requestMetadata.length ? (
           <ol className="mt-3 divide-y border">
-            {traits.map((trait) => (
+            {requestMetadata.map((trait) => (
               <li key={`${trait.label}:${trait.value}`} className="p-3">
                 <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                   {trait.label}
@@ -691,7 +770,7 @@ function CustomerDetailContent({
             ))}
           </ol>
         ) : (
-          <p className="mt-2 text-sm text-muted-foreground">No visitor traits seen yet.</p>
+          <p className="mt-2 text-sm text-muted-foreground">No request metadata observed yet.</p>
         )}
       </section>
 

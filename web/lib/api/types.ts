@@ -2279,6 +2279,8 @@ export interface components {
             lastObservedAt: string;
             /** Format: int64 */
             observationCount: number;
+            scope: components["schemas"]["ObservedCustomerFactScope"];
+            scopeRef: string | null;
             /** Format: int64 */
             sessionCount: number;
             status: string;
@@ -2293,6 +2295,8 @@ export interface components {
             sessionId: string;
             sessionRef: string;
         };
+        /** @enum {string} */
+        ObservedCustomerFactScope: "customer" | "journey" | "item" | "session";
         ObservedCustomerProfile: {
             /** Format: int64 */
             activityCount: number;
