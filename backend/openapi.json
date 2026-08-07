@@ -11426,6 +11426,12 @@
         "type": "object",
         "description": "Aggregate-safe experience-graph hop evidence. Dimension keys and\ndecision-quality numbers only — never free-text customer or agent values.",
         "properties": {
+          "channel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "decision": {
             "oneOf": [
               {
@@ -12209,7 +12215,11 @@
           "agentVendors",
           "rankPositions",
           "unknownDimensions",
-          "unansweredQuestions"
+          "unansweredQuestions",
+          "journeyFunnel",
+          "trafficClasses",
+          "channels",
+          "offGraphAttempts"
         ],
         "properties": {
           "agentVendors": {
@@ -12219,6 +12229,12 @@
             }
           },
           "blockingTopics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "channels": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/InsightCount"
@@ -12266,8 +12282,14 @@
           "journeyFlow": {
             "$ref": "#/components/schemas/JourneyFlowInsights"
           },
+          "journeyFunnel": {
+            "$ref": "#/components/schemas/JourneyFunnelInsights"
+          },
           "lostDemand": {
             "$ref": "#/components/schemas/LostDemandInsights"
+          },
+          "offGraphAttempts": {
+            "$ref": "#/components/schemas/OffGraphAttemptInsights"
           },
           "opportunities": {
             "type": "integer",
@@ -12367,6 +12389,12 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/InsightCount"
+            }
+          },
+          "trafficClasses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TrafficClassInsight"
             }
           },
           "unansweredQuestions": {
@@ -12592,6 +12620,50 @@
             "items": {
               "$ref": "#/components/schemas/InsightCount"
             }
+          }
+        }
+      },
+      "JourneyFunnelInsights": {
+        "type": "object",
+        "description": "Discovery→following funnel over agent-evidenced sessions. Stages are\nmonotonic: a session counts in a stage only if it counts in every prior\nstage, so each step reads as \"of those, how many went further\".",
+        "required": [
+          "arrived",
+          "enteredGraph",
+          "expressedNeeds",
+          "reachedDecision",
+          "handoffFollowed",
+          "tokenedFetchRate"
+        ],
+        "properties": {
+          "arrived": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sessions with at least one agent-evidenced hop in the window."
+          },
+          "enteredGraph": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, sessions with a tokened graph fetch beyond the root/guide."
+          },
+          "expressedNeeds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, sessions where a hop expressed or admitted a need dimension."
+          },
+          "handoffFollowed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, sessions where a human followed a product link."
+          },
+          "reachedDecision": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, sessions that reached decision evidence."
+          },
+          "tokenedFetchRate": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Integer percent of arrived sessions that entered the graph — whether\nthe store's value-gating earns the need-carrying second fetch."
           }
         }
       },
@@ -12857,6 +12929,26 @@
           },
           "truncated": {
             "type": "boolean"
+          }
+        }
+      },
+      "OffGraphAttemptInsights": {
+        "type": "object",
+        "description": "Agent-evidenced requests that fell off the graph: fabricated URLs (404)\nand malformed or premature graph fetches (400/422 on graph operations).",
+        "required": [
+          "attempts",
+          "operations"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "operations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InsightCount"
+            }
           }
         }
       },
@@ -14080,6 +14172,28 @@
           }
         },
         "additionalProperties": false
+      },
+      "TrafficClassInsight": {
+        "type": "object",
+        "description": "One behavioral traffic class with its session and interaction volume.",
+        "required": [
+          "class",
+          "sessions",
+          "interactions"
+        ],
+        "properties": {
+          "class": {
+            "type": "string"
+          },
+          "interactions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sessions": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
       },
       "TransferredResponse": {
         "type": "object",

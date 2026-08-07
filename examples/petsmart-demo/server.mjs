@@ -536,7 +536,7 @@ export function createApp() {
         journeyId,
         200,
         Math.round(performance.now() - started),
-        experienceTelemetryForNode(node),
+        experienceTelemetryForNode(node, { channel: "faceted_html" }),
       );
     }
 
@@ -659,7 +659,7 @@ export function createApp() {
         parsed.journeyId,
         200,
         Math.round(performance.now() - started),
-        experienceTelemetryForNode(node),
+        experienceTelemetryForNode(node, { channel: "native_graph" }),
       );
       return json(response, 200, node);
     } catch (error) {
@@ -692,7 +692,7 @@ export function createApp() {
         parsed.journeyId,
         status,
         Math.round(performance.now() - started),
-        experienceTelemetryForNode(node),
+        experienceTelemetryForNode(node, { channel: "native_graph" }),
       );
       return json(response, status, node);
     } catch (error) {
@@ -717,7 +717,7 @@ export function createApp() {
       journeyId,
       status,
       Math.round(performance.now() - started),
-      experienceTelemetryForNode(detail),
+      experienceTelemetryForNode(detail, { channel: "native_graph" }),
     );
     if (detail.error) return json(response, status, detail);
     const productUrl = new URL(`/product/${encodeURIComponent(itemId)}`, originFor(request));
@@ -764,7 +764,7 @@ export function createApp() {
               journeyId: carriedJourney,
               tokens: ctxTokens,
             });
-            experience = experienceTelemetryForNode(node);
+            experience = experienceTelemetryForNode(node, { channel: "faceted_html" });
           } catch {}
         }
         recordHop(
@@ -819,7 +819,7 @@ export function createApp() {
             carriedJourney,
             200,
             Math.round(performance.now() - started),
-            experienceTelemetryForNode(node),
+            experienceTelemetryForNode(node, { channel: "faceted_html" }),
           );
         } catch {}
       }

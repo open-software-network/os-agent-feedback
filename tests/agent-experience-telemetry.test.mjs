@@ -172,6 +172,11 @@ test("experience payloads flow from graph hops to schema-valid telemetry batches
     const fit = seen.find((event) => event.operation === "/agent-product/lamp/evaluate-fit");
     assert.equal(fit.statusCode, 422);
 
+    // Every tokened JSON graph hop declares the native channel.
+    for (const event of [negotiation, decision, item]) {
+      assert.equal(event.experience.channel, "native_graph");
+    }
+
     for (const event of seen) {
       assert.equal(event.sessionSource, "customer");
       assert.equal(event.classification, "unclassified");

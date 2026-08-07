@@ -46,7 +46,7 @@ describe("HomeView", () => {
       "Where journeys end",
       "From agent journey to human click",
       "Signals that drive outcomes",
-      "Traffic by assistant runtime",
+      "Traffic by class and assistant runtime",
       "Result position views",
       "What agents could not learn",
     ]) {
@@ -84,6 +84,41 @@ describe("HomeView", () => {
     expect(screen.getByText("commute")).toBeVisible();
   });
 
+  it("renders the journey-reality region: funnel, traffic classes, channels, and off-graph attempts", () => {
+    renderHome(dashboardFixture());
+
+    expect(screen.getByRole("heading", { name: "How agents actually shop" })).toBeVisible();
+    for (const label of [
+      "Arrived",
+      "Entered the graph",
+      "Expressed needs",
+      "Reached a decision",
+      "Handoff followed",
+    ]) {
+      expect(screen.getByText(label)).toBeVisible();
+    }
+    // The tokened-fetch rate is the headline: it measures whether the
+    // store's value-gating earns the need-carrying second fetch.
+    expect(screen.getByText("67%")).toBeVisible();
+    expect(screen.getByText(/Tokened-fetch rate/)).toBeVisible();
+
+    // Traffic classes lead the agent mix, human-labelled, class first.
+    expect(screen.getByText("Declared agent")).toBeVisible();
+    expect(screen.getByText("Suspected cloud agent")).toBeVisible();
+    expect(screen.getByText("Human")).toBeVisible();
+    expect(screen.getByText("4 sessions · 18 interactions")).toBeVisible();
+    expect(screen.getByText("Within declared agent traffic")).toBeVisible();
+    expect(screen.getByText(/A suspected cloud agent is a behavioral upper bound/)).toBeVisible();
+
+    // Channel names render verbatim as machine labels.
+    expect(screen.getByRole("heading", { name: "Faceted links vs native graph" })).toBeVisible();
+    expect(screen.getByText("faceted_html")).toBeVisible();
+    expect(screen.getByText("native_graph")).toBeVisible();
+
+    expect(screen.getByRole("heading", { name: "Where agents fell off the graph" })).toBeVisible();
+    expect(screen.getByText("/agent-item/self-invented")).toBeVisible();
+  });
+
   it("explains when data will appear for each absent insight group", () => {
     const data = dashboardFixture();
     const {
@@ -95,18 +130,25 @@ describe("HomeView", () => {
       rankPositions: _rankPositions,
       unknownDimensions: _unknownDimensions,
       unansweredQuestions: _unansweredQuestions,
+      journeyFunnel: _journeyFunnel,
+      trafficClasses: _trafficClasses,
+      channels: _channels,
+      offGraphAttempts: _offGraphAttempts,
       ...insights
     } = data.insights;
 
     renderHome({ ...data, insights: insights as DashboardData["insights"] });
 
     for (const heading of [
+      "How agents actually shop",
+      "Faceted links vs native graph",
+      "Where agents fell off the graph",
       "What agents asked for and could not get",
       "Where agents go next",
       "Where journeys end",
       "From agent journey to human click",
       "Signals that drive outcomes",
-      "Traffic by assistant runtime",
+      "Traffic by class and assistant runtime",
       "Result position views",
       "What agents could not learn",
     ]) {
@@ -121,13 +163,20 @@ describe("HomeView", () => {
       "No journey exits in the last 30 days.",
       "Landing pages appear when a proven session records a product link click.",
       "No personalization decisions cited customer signals yet.",
+      "Traffic classes appear when proven sessions are recorded.",
       "Runtime evidence has not named an assistant yet.",
       "No search-attributed item views yet.",
       "Agents answered every dimension they were asked.",
       "No declined or unanswerable context questions.",
+      "Channels appear when graph hops carry a channel-tagged experience payload.",
+      "No fabricated URLs or malformed graph fetches from agent traffic.",
     ]) {
       expect(screen.getByText(message)).toBeVisible();
     }
+
+    // The funnel renders zeroed with an explanation instead of disappearing.
+    expect(screen.getByText("0%")).toBeVisible();
+    expect(screen.getByText(/No agent-evidenced sessions in the last 30 days/)).toBeVisible();
   });
 
   it("routes to the core object screens", () => {

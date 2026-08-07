@@ -248,6 +248,27 @@ const dashboard = {
     ],
     unknownDimensions: [{ name: "commute", count: 2 }],
     unansweredQuestions: [{ name: "budget · declined", count: 1 }],
+    journeyFunnel: {
+      arrived: 6,
+      enteredGraph: 4,
+      expressedNeeds: 3,
+      reachedDecision: 2,
+      handoffFollowed: 1,
+      tokenedFetchRate: 67,
+    },
+    trafficClasses: [
+      { class: "declared_agent", sessions: 4, interactions: 18 },
+      { class: "suspected_cloud_agent", sessions: 1, interactions: 3 },
+      { class: "human", sessions: 2, interactions: 5 },
+    ],
+    channels: [
+      { name: "faceted_html", count: 5 },
+      { name: "native_graph", count: 3 },
+    ],
+    offGraphAttempts: {
+      attempts: 2,
+      operations: [{ name: "/agent-item/self-invented", count: 2 }],
+    },
   },
   listState: {
     interactionsTotal: 3,
@@ -867,6 +888,42 @@ test("the Home overview surfaces lost demand, journey flow, handoff, context ROI
   assert.match(page.innerHTML, /budget · declined/);
 });
 
+test("the Home overview surfaces the journey-reality funnel, traffic classes, channels, and off-graph attempts", async () => {
+  const { page } = await loadDashboard({ href: "https://app.epode.ai/" });
+  assert.match(page.innerHTML, /JOURNEY REALITY/);
+  assert.match(page.innerHTML, /How agents actually shop/);
+  const journeyFunnel =
+    page.innerHTML.match(
+      /<section class="funnel"><div><p class="eyebrow">JOURNEY REALITY<\/p>[\s\S]*?<\/section>/,
+    )?.[0] ?? "";
+  for (const label of [
+    "Arrived",
+    "Entered the graph",
+    "Expressed needs",
+    "Reached a decision",
+    "Handoff followed",
+  ]) {
+    assert.match(journeyFunnel, new RegExp(label));
+  }
+  // The tokened-fetch rate is called out on the funnel itself.
+  assert.match(journeyFunnel, /Tokened-fetch rate 67%/);
+  // Class first, vendor breakdown within declared agent traffic.
+  assert.match(page.innerHTML, /Traffic by class and assistant runtime/);
+  assert.match(page.innerHTML, /Declared agent/);
+  assert.match(page.innerHTML, /Suspected cloud agent/);
+  assert.match(page.innerHTML, /4 sessions · 18 interactions/);
+  assert.match(page.innerHTML, /Within declared agent traffic/);
+  assert.match(page.innerHTML, /behavioral upper bound/);
+  // Channel names stay raw machine labels.
+  assert.match(page.innerHTML, /CHANNELS/);
+  assert.match(page.innerHTML, /faceted_html/);
+  assert.match(page.innerHTML, /native_graph/);
+  assert.doesNotMatch(page.innerHTML, /Faceted_html/);
+  assert.match(page.innerHTML, /OFF-GRAPH ATTEMPTS/);
+  assert.match(page.innerHTML, /2 attempts/);
+  assert.match(page.innerHTML, /\/agent-item\/self-invented/);
+});
+
 test("proportion bars use CSP-safe data attributes instead of inline width styles", () => {
   assert.doesNotMatch(source, /style="width/);
   assert.match(source, /data-bar-width/);
@@ -889,6 +946,10 @@ test("the Home overview renders safe empty states when new insight groups are ab
         delete legacy.insights.rankPositions;
         delete legacy.insights.unknownDimensions;
         delete legacy.insights.unansweredQuestions;
+        delete legacy.insights.journeyFunnel;
+        delete legacy.insights.trafficClasses;
+        delete legacy.insights.channels;
+        delete legacy.insights.offGraphAttempts;
         return legacy;
       },
     }),
@@ -898,4 +959,15 @@ test("the Home overview renders safe empty states when new insight groups are ab
   assert.match(page.innerHTML, /Transitions appear when journeys carry a session reference\./);
   assert.match(page.innerHTML, /No personalization decisions cited customer signals yet\./);
   assert.match(page.innerHTML, /Runtime evidence has not named an assistant yet\./);
+  assert.match(page.innerHTML, /JOURNEY REALITY/);
+  assert.match(page.innerHTML, /Tokened-fetch rate 0%/);
+  assert.match(page.innerHTML, /Traffic classes appear when proven sessions are recorded\./);
+  assert.match(
+    page.innerHTML,
+    /Channels appear when graph hops carry a channel-tagged experience payload\./,
+  );
+  assert.match(
+    page.innerHTML,
+    /No fabricated URLs or malformed graph fetches from agent traffic\./,
+  );
 });

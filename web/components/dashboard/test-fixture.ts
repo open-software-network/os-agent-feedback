@@ -257,6 +257,27 @@ export function dashboardFixture(overrides: Partial<DashboardData> = {}): Dashbo
       ],
       unknownDimensions: [{ name: "commute", count: 2 }],
       unansweredQuestions: [{ name: "budget · declined", count: 1 }],
+      journeyFunnel: {
+        arrived: 6,
+        enteredGraph: 4,
+        expressedNeeds: 3,
+        reachedDecision: 2,
+        handoffFollowed: 1,
+        tokenedFetchRate: 67,
+      },
+      trafficClasses: [
+        { class: "declared_agent", sessions: 4, interactions: 18 },
+        { class: "suspected_cloud_agent", sessions: 1, interactions: 3 },
+        { class: "human", sessions: 2, interactions: 5 },
+      ],
+      channels: [
+        { name: "faceted_html", count: 5 },
+        { name: "native_graph", count: 3 },
+      ],
+      offGraphAttempts: {
+        attempts: 2,
+        operations: [{ name: "/agent-item/self-invented", count: 2 }],
+      },
     } as DashboardData["insights"] & {
       customerContextItems: number;
       customersWithContext: number;

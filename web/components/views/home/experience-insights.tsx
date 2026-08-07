@@ -15,10 +15,14 @@ type ExperienceInsightKey =
   | "agentVendors"
   | "rankPositions"
   | "unknownDimensions"
-  | "unansweredQuestions";
+  | "unansweredQuestions"
+  | "journeyFunnel"
+  | "trafficClasses"
+  | "channels"
+  | "offGraphAttempts";
 
 /**
- * The seven experience insight groups may be absent from older dashboard
+ * The experience insight groups may be absent from older dashboard
  * payloads, so every field is read with a safe fallback.
  */
 export type ExperienceInsightsData = Omit<Insights, ExperienceInsightKey> &
@@ -43,6 +47,20 @@ const emptyHandoff: Insights["handoff"] = {
   sessionsWithHandoff: 0,
 };
 
+const emptyJourneyFunnel: Insights["journeyFunnel"] = {
+  arrived: 0,
+  enteredGraph: 0,
+  expressedNeeds: 0,
+  handoffFollowed: 0,
+  reachedDecision: 0,
+  tokenedFetchRate: 0,
+};
+
+const emptyOffGraphAttempts: Insights["offGraphAttempts"] = {
+  attempts: 0,
+  operations: [],
+};
+
 const agentVendorLabels: Record<string, string> = {
   claude: "Claude",
   cohere: "Cohere",
@@ -55,6 +73,16 @@ const agentVendorLabels: Record<string, string> = {
 
 function agentVendorLabel(vendor: string): string {
   return agentVendorLabels[vendor] ?? vendor;
+}
+
+const trafficClassLabels: Record<string, string> = {
+  declared_agent: "Declared agent",
+  human: "Human",
+  suspected_cloud_agent: "Suspected cloud agent",
+};
+
+function trafficClassLabel(trafficClass: string): string {
+  return trafficClassLabels[trafficClass] ?? trafficClass;
 }
 
 function countNoun(count: number, noun: string): string {
@@ -70,6 +98,10 @@ export function ExperienceInsights({ insights }: { insights: ExperienceInsightsD
   const rankPositions = insights.rankPositions ?? [];
   const unknownDimensions = insights.unknownDimensions ?? [];
   const unansweredQuestions = insights.unansweredQuestions ?? [];
+  const journeyFunnel = insights.journeyFunnel ?? emptyJourneyFunnel;
+  const trafficClasses = insights.trafficClasses ?? [];
+  const channels = insights.channels ?? [];
+  const offGraphAttempts = insights.offGraphAttempts ?? emptyOffGraphAttempts;
 
   const zeroMatchShare = lostDemand.decisionInteractions
     ? `${Math.round((lostDemand.zeroMatchDecisions / lostDemand.decisionInteractions) * 100)}%`
@@ -89,6 +121,59 @@ export function ExperienceInsights({ insights }: { insights: ExperienceInsightsD
 
   return (
     <>
+      <InsightSection eyebrow="Journey reality" title="How agents actually shop">
+        <FunnelSteps
+          steps={[
+            { value: journeyFunnel.arrived.toLocaleString(), label: "Arrived" },
+            { value: journeyFunnel.enteredGraph.toLocaleString(), label: "Entered the graph" },
+            { value: journeyFunnel.expressedNeeds.toLocaleString(), label: "Expressed needs" },
+            {
+              value: journeyFunnel.reachedDecision.toLocaleString(),
+              label: "Reached a decision",
+            },
+            {
+              value: journeyFunnel.handoffFollowed.toLocaleString(),
+              label: "Handoff followed",
+            },
+          ]}
+        />
+        <div className="border bg-muted/20 p-3">
+          <p className="text-xl font-medium">{journeyFunnel.tokenedFetchRate}%</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Tokened-fetch rate — of agent sessions that arrived, how many made a tokened graph
+            fetch. An agent that arrives but never enters silently defects to a competitor.
+          </p>
+        </div>
+        {journeyFunnel.arrived === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No agent-evidenced sessions in the last 30 days. The funnel fills as assistants fetch
+            the agent storefront and follow tokened graph links.
+          </p>
+        ) : null}
+      </InsightSection>
+
+      <div className="grid gap-5 lg:grid-cols-2">
+        <InsightSection eyebrow="Channels" title="Faceted links vs native graph">
+          <CountList
+            mono
+            rows={channels}
+            emptyMessage="Channels appear when graph hops carry a channel-tagged experience payload."
+          />
+        </InsightSection>
+        <InsightSection eyebrow="Off-graph attempts" title="Where agents fell off the graph">
+          <p className="text-xl font-medium">{offGraphAttempts.attempts.toLocaleString()}</p>
+          <CountList
+            mono
+            rows={offGraphAttempts.operations}
+            emptyMessage="No fabricated URLs or malformed graph fetches from agent traffic."
+          />
+          <p className="text-[11px] leading-4 text-muted-foreground">
+            Agent-evidenced 404s plus 400/422 responses on graph operations — fabricated URLs and
+            malformed or premature graph fetches.
+          </p>
+        </InsightSection>
+      </div>
+
       <InsightSection eyebrow="Lost demand" title="What agents asked for and could not get">
         <FunnelSteps
           steps={[
@@ -192,32 +277,58 @@ export function ExperienceInsights({ insights }: { insights: ExperienceInsightsD
             </p>
           )}
         </InsightSection>
-        <InsightSection eyebrow="Agent mix" title="Traffic by assistant runtime">
-          {agentVendors.length ? (
+        <InsightSection eyebrow="Agent mix" title="Traffic by class and assistant runtime">
+          {trafficClasses.length ? (
             <ul className="divide-y">
-              {agentVendors.map((row) => (
+              {trafficClasses.map((row) => (
                 <li
-                  key={row.vendor}
+                  key={row.class}
                   className="flex items-baseline justify-between gap-3 py-2 first:pt-0 last:pb-0"
                 >
                   <span className="min-w-0 break-words text-sm font-medium">
-                    {agentVendorLabel(row.vendor)}
+                    {trafficClassLabel(row.class)}
                   </span>
                   <span className="shrink-0 text-[11px] text-muted-foreground">
-                    {countNoun(row.interactions, "interaction")} ·{" "}
-                    {countNoun(row.sessions, "session")}
+                    {countNoun(row.sessions, "session")} ·{" "}
+                    {countNoun(row.interactions, "interaction")}
                   </span>
                 </li>
               ))}
             </ul>
           ) : (
             <p className="text-sm text-muted-foreground">
-              Runtime evidence has not named an assistant yet.
+              Traffic classes appear when proven sessions are recorded.
             </p>
           )}
+          <BreakdownColumn title="Within declared agent traffic">
+            {agentVendors.length ? (
+              <ul className="divide-y">
+                {agentVendors.map((row) => (
+                  <li
+                    key={row.vendor}
+                    className="flex items-baseline justify-between gap-3 py-2 first:pt-0 last:pb-0"
+                  >
+                    <span className="min-w-0 break-words text-sm">
+                      {agentVendorLabel(row.vendor)}
+                    </span>
+                    <span className="shrink-0 text-[11px] text-muted-foreground">
+                      {countNoun(row.interactions, "interaction")} ·{" "}
+                      {countNoun(row.sessions, "session")}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                Runtime evidence has not named an assistant yet.
+              </p>
+            )}
+          </BreakdownColumn>
           <p className="text-[11px] leading-4 text-muted-foreground">
             <span className="font-medium text-foreground">Unverified evidence.</span> Runtime hints
-            and user-agent values are unverified observations, never identity.
+            and user-agent values are unverified observations, never identity. A suspected cloud
+            agent is a behavioral upper bound — a human opening an agent-composed link looks the
+            same at its first hop.
           </p>
         </InsightSection>
       </div>

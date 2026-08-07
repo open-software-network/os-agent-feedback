@@ -294,6 +294,37 @@ test("experienceTelemetryForNode keeps only numeric search positions", async () 
   assert.equal(experienceTelemetryForNode({}), undefined);
 });
 
+test("experienceTelemetryForNode marks the traversal channel when the caller declares it", async () => {
+  const { experienceTelemetryForNode } = await import("../dist/experience-graph.js");
+  const node = overBudgetGraph.buildDecision({
+    origin,
+    journeyId,
+    tokens: ["budget-hard-100"],
+    searchId: "search-channel",
+  });
+  assert.equal(
+    experienceTelemetryForNode(node, { channel: "faceted_html" }).channel,
+    "faceted_html",
+  );
+  assert.equal(
+    experienceTelemetryForNode(node, { channel: "native_graph" }).channel,
+    "native_graph",
+  );
+  // Without the option the payload stays channel-free for older callers.
+  assert.equal(experienceTelemetryForNode(node).channel, undefined);
+  // A channel-only payload still records the hop's traversal surface, even
+  // when the node itself carries no aggregate-safe evidence (guide and
+  // error terminals).
+  assert.deepEqual(experienceTelemetryForNode({}, { channel: "native_graph" }), {
+    channel: "native_graph",
+  });
+  assert.deepEqual(experienceTelemetryForNode(null, { channel: "faceted_html" }), {
+    channel: "faceted_html",
+  });
+  // Unknown channel values are dropped rather than forwarded to the wire.
+  assert.equal(experienceTelemetryForNode({}, { channel: "carrier_pigeon" }), undefined);
+});
+
 test("experience payloads ride telemetry events end to end", async () => {
   const batches = [];
   const runtime = new AgentFeedbackRuntime({

@@ -720,6 +720,8 @@ pub(crate) enum CustomerLinkSource {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ExperienceTelemetryInput {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stage: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub need_state: Option<ExperienceNeedStateInput>,
@@ -1668,6 +1670,45 @@ pub(crate) struct AgentVendorInsight {
     pub sessions: i64,
 }
 
+/// Discovery→following funnel over agent-evidenced sessions. Stages are
+/// monotonic: a session counts in a stage only if it counts in every prior
+/// stage, so each step reads as "of those, how many went further".
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JourneyFunnelInsights {
+    /// Sessions with at least one agent-evidenced hop in the window.
+    pub arrived: i64,
+    /// Of those, sessions with a tokened graph fetch beyond the root/guide.
+    pub entered_graph: i64,
+    /// Of those, sessions where a hop expressed or admitted a need dimension.
+    pub expressed_needs: i64,
+    /// Of those, sessions that reached decision evidence.
+    pub reached_decision: i64,
+    /// Of those, sessions where a human followed a product link.
+    pub handoff_followed: i64,
+    /// Integer percent of arrived sessions that entered the graph — whether
+    /// the store's value-gating earns the need-carrying second fetch.
+    pub tokened_fetch_rate: i64,
+}
+
+/// One behavioral traffic class with its session and interaction volume.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TrafficClassInsight {
+    pub class: String,
+    pub sessions: i64,
+    pub interactions: i64,
+}
+
+/// Agent-evidenced requests that fell off the graph: fabricated URLs (404)
+/// and malformed or premature graph fetches (400/422 on graph operations).
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OffGraphAttemptInsights {
+    pub attempts: i64,
+    pub operations: Vec<InsightCount>,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Insights {
@@ -1710,6 +1751,10 @@ pub(crate) struct Insights {
     pub rank_positions: Vec<InsightCount>,
     pub unknown_dimensions: Vec<InsightCount>,
     pub unanswered_questions: Vec<InsightCount>,
+    pub journey_funnel: JourneyFunnelInsights,
+    pub traffic_classes: Vec<TrafficClassInsight>,
+    pub channels: Vec<InsightCount>,
+    pub off_graph_attempts: OffGraphAttemptInsights,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
