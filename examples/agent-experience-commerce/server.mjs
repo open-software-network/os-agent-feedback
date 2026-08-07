@@ -20,6 +20,23 @@ import {
 const PORT = Number(process.env.PORT || 4311);
 const AGENT_UA =
   /claude-user|anthropic-ai|chatgpt-user|perplexity-user|cohere-ai|gemini-agent/i;
+const RUNTIME_HINT = "agent-experience-commerce/1.0";
+// Agent JSON hops carry no request observation, so the runtime hint is the
+// only vendor evidence the backend's agent-mix insight can classify. Append
+// the matched agent family (mirroring AGENT_UA) to the base hint.
+const AGENT_VENDOR_HINTS = [
+  [/claude-user|anthropic-ai/i, "claude-user"],
+  [/chatgpt-user/i, "chatgpt-user"],
+  [/perplexity-user/i, "perplexity-user"],
+  [/cohere-ai/i, "cohere-ai"],
+  [/gemini-agent/i, "gemini-agent"],
+];
+
+function runtimeHintFor(request) {
+  const userAgent = request?.get("user-agent") || "";
+  const vendor = AGENT_VENDOR_HINTS.find(([pattern]) => pattern.test(userAgent));
+  return vendor ? `${RUNTIME_HINT} ${vendor[1]}` : RUNTIME_HINT;
+}
 
 const graph = createExperienceGraph(lightingCatalog);
 
@@ -35,7 +52,7 @@ const runtime = process.env.EPODE_API_KEY
         "/agent-item",
         "/",
       ],
-      runtimeHint: () => "agent-experience-commerce/1.0",
+      runtimeHint: (request) => runtimeHintFor(request),
     })
   : null;
 
@@ -65,7 +82,7 @@ function originFor(request) {
   return `${proto}://${host}`;
 }
 
-function recordHop(operation, journeyId, statusCode, durationMs, experience) {
+function recordHop(request, operation, journeyId, statusCode, durationMs, experience) {
   if (!runtime) return;
   try {
     const prepared = runtime.prepare();
@@ -76,7 +93,7 @@ function recordHop(operation, journeyId, statusCode, durationMs, experience) {
         journeyId,
         statusCode,
         durationMs,
-        runtimeHint: "agent-experience-commerce/1.0",
+        runtimeHint: runtimeHintFor(request),
         experience,
       }),
     );
@@ -119,7 +136,7 @@ export function createApp() {
     if (isAgent(request)) {
       const journeyId = `j-${randomUUID()}`;
       const guide = graph.buildGuide(origin, journeyId);
-      recordHop("/agent-guide", journeyId, 200, Math.round(performance.now() - started));
+      recordHop(request, "/agent-guide", journeyId, 200, Math.round(performance.now() - started));
       response.setHeader("vary", "User-Agent");
       return text(response, 200, guide);
     }
@@ -173,6 +190,7 @@ export function createApp() {
         tokens: parsed.tokens,
       });
       recordHop(
+        request,
         node.operation,
         parsed.journeyId,
         200,
@@ -204,6 +222,7 @@ export function createApp() {
       });
       const status = node.error ? 422 : 200;
       recordHop(
+        request,
         node.operation,
         parsed.journeyId,
         status,
@@ -249,6 +268,7 @@ export function createApp() {
       }
       const status = node.error === "alternatives_not_applicable" ? 409 : node.error ? 422 : 200;
       recordHop(
+        request,
         node.operation,
         parsed.journeyId,
         status,
@@ -270,6 +290,7 @@ export function createApp() {
     const status = detail.error ? 404 : 200;
     const journeyId = searchId ? `j-search-${searchId.slice(0, 8)}` : `j-item-${itemId || "unknown"}`;
     recordHop(
+      request,
       detail.operation || "/agent-item",
       journeyId,
       status,

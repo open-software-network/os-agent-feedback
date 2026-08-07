@@ -175,6 +175,11 @@ test("experience payloads flow from graph hops to schema-valid telemetry batches
     for (const event of seen) {
       assert.equal(event.sessionSource, "customer");
       assert.equal(event.classification, "unclassified");
+      assert.equal(
+        event.runtimeHint,
+        "agent-experience-commerce/1.0 claude-user",
+        "agent hops must append the matched agent family to the runtime hint",
+      );
     }
   } finally {
     await started.close();

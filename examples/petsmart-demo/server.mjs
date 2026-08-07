@@ -7,6 +7,7 @@ import { AgentFeedbackRuntime } from "@epode/node";
 import { epode } from "@epode/node/express";
 import {
   experienceTelemetryDetails,
+  experienceTelemetryForNode,
   isValidJourneyId,
   productLinkClickTelemetryDetails,
 } from "@epode/node/experience-graph";
@@ -19,6 +20,23 @@ import { provisionPetFields } from "./provision-fields.mjs";
 const PORT = Number(process.env.PORT || 4320);
 const AGENT_UA =
   /claude-user|anthropic-ai|chatgpt-user|perplexity-user|cohere-ai|gemini-agent/i;
+const RUNTIME_HINT = "petsmart-demo/1.0";
+// Agent JSON hops carry no request observation, so the runtime hint is the
+// only vendor evidence the backend's agent-mix insight can classify. Append
+// the matched agent family (mirroring AGENT_UA) to the base hint.
+const AGENT_VENDOR_HINTS = [
+  [/claude-user|anthropic-ai/i, "claude-user"],
+  [/chatgpt-user/i, "chatgpt-user"],
+  [/perplexity-user/i, "perplexity-user"],
+  [/cohere-ai/i, "cohere-ai"],
+  [/gemini-agent/i, "gemini-agent"],
+];
+
+function runtimeHintFor(request) {
+  const userAgent = request?.get("user-agent") || "";
+  const vendor = AGENT_VENDOR_HINTS.find(([pattern]) => pattern.test(userAgent));
+  return vendor ? `${RUNTIME_HINT} ${vendor[1]}` : RUNTIME_HINT;
+}
 const HERO_ITEM_ID = "smarttag-rfid-multi-pet-feeder";
 
 const cookieSecret = requiredCookieSecret();
@@ -55,11 +73,11 @@ const runtime = process.env.EPODE_API_KEY
       endpoint: process.env.EPODE_API_URL || process.env.AGENT_FEEDBACK_URL,
       feedbackMode: process.env.AGENT_FEEDBACK_MODE || "never_ask",
       include: ["/agent-negotiate/**", "/agent-decide/**", "/agent-item/**", "/product/**", "/"],
-      runtimeHint: () => "petsmart-demo/1.0",
+      runtimeHint: (request) => runtimeHintFor(request),
     })
   : null;
 
-function recordHop(operation, journeyId, statusCode, durationMs) {
+function recordHop(request, operation, journeyId, statusCode, durationMs, experience) {
   if (!runtime) return;
   try {
     const prepared = runtime.prepare();
@@ -70,7 +88,8 @@ function recordHop(operation, journeyId, statusCode, durationMs) {
         journeyId,
         statusCode,
         durationMs,
-        runtimeHint: "petsmart-demo/1.0",
+        runtimeHint: runtimeHintFor(request),
+        experience,
       }),
     );
     void runtime.flush().catch(() => {});
@@ -86,7 +105,9 @@ function recordProductLinkClick(request, journeyId, visitorId, durationMs) {
     runtime.record(
       prepared,
       productLinkClickTelemetryDetails({
-        operation: "/product/feeder",
+        // Keep the link-click operation identical to the product page route's
+        // normalized operation so one human click lands under one name.
+        operation: "/product/:id",
         sessionRef: journeyId,
         anonymousRef: visitorId,
         requestObservation: automaticRequestObservation(
@@ -96,7 +117,7 @@ function recordProductLinkClick(request, journeyId, visitorId, durationMs) {
         ),
         statusCode: 200,
         durationMs,
-        runtimeHint: "petsmart-demo/1.0",
+        runtimeHint: runtimeHintFor(request),
       }),
     );
     void runtime.flush().catch(() => {});
@@ -274,7 +295,7 @@ export function createApp() {
         identify: (request) =>
           request.visitorId ? { anonymousRef: request.visitorId } : {},
         sessionRef: (request) => request.sessionId,
-        runtimeHint: () => "petsmart-demo/1.0",
+        runtimeHint: (request) => runtimeHintFor(request),
       })
     : null;
   if (customer) app.use(customer);
@@ -291,7 +312,7 @@ export function createApp() {
     if (isAgent(request)) {
       const journeyId = `j-${randomUUID()}`;
       const guide = graph.buildGuide(origin, journeyId);
-      recordHop("/agent-guide", journeyId, 200, Math.round(performance.now() - started));
+      recordHop(request, "/agent-guide", journeyId, 200, Math.round(performance.now() - started));
       response.setHeader("vary", "User-Agent");
       return text(response, 200, guide);
     }
@@ -352,7 +373,14 @@ export function createApp() {
         journeyId: parsed.journeyId,
         tokens: parsed.tokens,
       });
-      recordHop(node.operation, parsed.journeyId, 200, Math.round(performance.now() - started));
+      recordHop(
+        request,
+        node.operation,
+        parsed.journeyId,
+        200,
+        Math.round(performance.now() - started),
+        experienceTelemetryForNode(node),
+      );
       return json(response, 200, node);
     } catch (error) {
       return json(response, 400, { error: "invalid_negotiation", message: String(error) });
@@ -378,7 +406,14 @@ export function createApp() {
         paths: { detailPath: `/agent-item/${parsed.journeyId}` },
       });
       const status = node.error ? 422 : 200;
-      recordHop(node.operation, parsed.journeyId, status, Math.round(performance.now() - started));
+      recordHop(
+        request,
+        node.operation,
+        parsed.journeyId,
+        status,
+        Math.round(performance.now() - started),
+        experienceTelemetryForNode(node),
+      );
       return json(response, status, node);
     } catch (error) {
       return json(response, 400, { error: "invalid_decision", message: String(error) });
@@ -396,7 +431,14 @@ export function createApp() {
     const position = request.query.position ? String(request.query.position) : undefined;
     const detail = graph.itemDetail(itemId, searchId, position);
     const status = detail.error ? 404 : 200;
-    recordHop(detail.operation || "/agent-item", journeyId, status, Math.round(performance.now() - started));
+    recordHop(
+      request,
+      detail.operation || "/agent-item",
+      journeyId,
+      status,
+      Math.round(performance.now() - started),
+      experienceTelemetryForNode(detail),
+    );
     if (detail.error) return json(response, status, detail);
     const productUrl = new URL(`/product/${encodeURIComponent(itemId)}`, originFor(request));
     productUrl.searchParams.set("journey", journeyId);
@@ -411,9 +453,11 @@ export function createApp() {
     });
   });
 
-  app.get("/product/:itemId", (request, response) => {
+  // The ":id" param name keeps the middleware-recorded operation
+  // ("/product/:id") identical to the link-click telemetry operation.
+  app.get("/product/:id", (request, response) => {
     const started = performance.now();
-    const item = catalogItem(String(request.params.itemId || ""));
+    const item = catalogItem(String(request.params.id || ""));
     if (!item) {
       return text(response, 404, pageShell(`Not found | ${BRAND}`, "<p>Product not found.</p>"), "text/html; charset=utf-8");
     }
