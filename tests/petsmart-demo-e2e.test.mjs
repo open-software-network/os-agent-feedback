@@ -960,13 +960,14 @@ test("petsmart demo preserves arbitrary exact-dollar hard and target budgets", a
     assert.match(targetHtml, /SmartTag RFID Multi-Pet Feeder/);
     assert.match(targetHtml, /\/c\/[^"/]*budget-target-137[^"/]*\/product\/smarttag/);
 
-    for (const rejectedBudget of ["9", "100000"]) {
+    for (const rejectedBudget of ["9", "010", "100000"]) {
       const rejected = await fetch(
         `${base}/feeders?pets=cats_and_dog&motivation=one_food_motivated&budget=${rejectedBudget}`,
       );
       const rejectedHtml = await rejected.text();
-      assert.doesNotMatch(rejectedHtml, new RegExp(`budget-(?:hard|target)-${rejectedBudget}`));
-      assert.doesNotMatch(rejectedHtml, new RegExp(`budget: needs ${rejectedBudget}`));
+      const coercedBudget = String(Number(rejectedBudget));
+      assert.doesNotMatch(rejectedHtml, new RegExp(`budget-(?:hard|target)-${coercedBudget}`));
+      assert.doesNotMatch(rejectedHtml, new RegExp(`budget: needs ${coercedBudget}`));
     }
 
     const named = await fetch(`${base}/s/cats-and-dog-one-food-obsessed-under-175`);
@@ -1121,7 +1122,7 @@ test("petsmart demo browse paths require user activation before starting a journ
     );
     assert.ok(humanRootProductUrl);
     await navigate(humanRootProductUrl);
-    const humanRootJourneyId = humanRootJourney.split(".")[0];
+    const humanRootJourneyId = humanRootJourney;
     await waitForEvents(collector.batches, (events) =>
       events.some(
         (event) => event.operation === "/product/:id" && event.sessionRef === humanRootJourneyId,

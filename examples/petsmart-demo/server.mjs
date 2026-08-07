@@ -484,13 +484,12 @@ function tokensFromQuery(query) {
       CHOICE_INDEX.get(`motivation=${motivation}:hard`) || CHOICE_INDEX.get(`motivation=${motivation}:`);
     if (token) tokens.push(token);
   }
-  const budgetMatch = String(query.budget || "")
+  const budgetDigits = String(query.budget || "")
     .trim()
-    .match(/^\$?([0-9]{2,5})$/);
-  if (budgetMatch) {
-    const amount = Number(budgetMatch[1]);
+    .match(/^\$?([1-9][0-9]{1,4})$/)?.[1];
+  if (budgetDigits) {
     const strength = String(query.budget_kind || "hard") === "target" ? "target" : "hard";
-    const token = `budget-${strength}-${amount}`;
+    const token = `budget-${strength}-${budgetDigits}`;
     const parsed = graph.parseNeedTokens([token]);
     if (parsed.invalidTokens.length === 0 && parsed.state.expressions.length === 1) {
       tokens.push(token);
