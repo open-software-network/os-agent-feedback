@@ -232,24 +232,18 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
     assert.match(claudeGuide, /one-cat-scheduled-portions-under-90/);
     assert.doesNotMatch(claudeGuide, /href="[^"]+\/product\/smarttag-rfid-multi-pet-feeder/);
     const claudeSharedFeederUrl = claudeGuide.match(
-      /href="(http:\/\/127\.0\.0\.1:\d+\/shop\/automatic-feeders\/j-[^"]+\/cats-and-dog-food-obsessed-under-175)"/,
+      /href="(http:\/\/127\.0\.0\.1:\d+\/shop\/automatic-feeders\/w-[A-Za-z0-9_-]{22}\/cats-and-dog-food-obsessed-under-175)"/,
     )?.[1];
     assert.ok(claudeSharedFeederUrl);
     const claudeCapability = new URL(claudeSharedFeederUrl).pathname.split("/")[3];
-    const claudePermanentUrl = new URL(
-      "/s/cats-and-dog-one-food-obsessed-under-175",
-      base,
-    );
+    const claudePermanentUrl = new URL("/s/cats-and-dog-one-food-obsessed-under-175", base);
     claudePermanentUrl.searchParams.set("journey", claudeCapability);
     const claudeRedirect = await fetch(claudeSharedFeederUrl, {
       headers: { "user-agent": "Claude-User/1.0" },
       redirect: "manual",
     });
     assert.equal(claudeRedirect.status, 302);
-    assert.equal(
-      claudeRedirect.headers.get("location"),
-      claudePermanentUrl.toString(),
-    );
+    assert.equal(claudeRedirect.headers.get("location"), claudePermanentUrl.toString());
     const claudeFollowed = await fetch(claudeSharedFeederUrl, {
       headers: { "user-agent": "Claude-User/1.0" },
     });
@@ -1368,10 +1362,7 @@ test("petsmart demo faceted gating: only request-carried journeys reach telemetr
       headers: { "user-agent": "meta-externalfetcher/1.1" },
     });
     assert.equal(agentTraversal.status, 200);
-    const permanentSituationUrl = new URL(
-      "/s/multiple-cats-one-steals-food-under-200",
-      base,
-    );
+    const permanentSituationUrl = new URL("/s/multiple-cats-one-steals-food-under-200", base);
     permanentSituationUrl.searchParams.set("journey", signedCapability);
     assert.equal(
       agentTraversal.url,
@@ -1391,10 +1382,7 @@ test("petsmart demo faceted gating: only request-carried journeys reach telemetr
 
     const signedClick = await navigate(signedSituationUrl);
     assert.equal(signedClick.status, 302);
-    assert.equal(
-      signedClick.headers.get("location"),
-      permanentSituationUrl.toString(),
-    );
+    assert.equal(signedClick.headers.get("location"), permanentSituationUrl.toString());
     const continuationCookie = setCookies(signedClick)
       .map((entry) => entry.split(";")[0])
       .join("; ");
