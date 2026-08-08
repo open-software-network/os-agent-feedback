@@ -17,6 +17,8 @@ const graph = createExperienceGraph(createLightingExperienceCatalog());
 
 test("journey ids and need tokens are tightly validated", () => {
   assert.equal(isValidJourneyId(journeyId), true);
+  assert.equal(isValidJourneyId("w-0123456789_abcdefghijk"), true);
+  assert.equal(isValidJourneyId("w-0123456789_abcdefghij"), false);
   assert.equal(isValidJourneyId("journey_1"), false);
   const parsed = parseNeedTokens(graph.definition, [
     "consider-budget",
@@ -251,22 +253,30 @@ const overBudgetGraph = createExperienceGraph({
 });
 
 test("budget dimensions preserve bounded exact-dollar tokens outside the published choices", () => {
-  const parsed = overBudgetGraph.parseNeedTokens(["budget-hard-175"]);
+  const parsed = overBudgetGraph.parseNeedTokens(["budget-hard-137"]);
   assert.deepEqual(parsed.invalidTokens, []);
-  assert.equal(parsed.state.values.budget?.value, "175");
+  assert.equal(parsed.state.values.budget?.value, "137");
   assert.equal(parsed.state.values.budget?.strength, "hard");
 
   const decision = overBudgetGraph.buildDecision({
     origin,
     journeyId,
-    tokens: ["budget-hard-175"],
+    tokens: ["budget-hard-137"],
     searchId: "search-exact-budget",
   });
-  assert.equal(decision.exactMatchCount, 1);
-  assert.equal(decision.exactMatches?.[0]?.itemId, "everyday-chair");
+  assert.equal(decision.exactMatchCount, 0);
+  assert.equal(decision.nearMisses?.[0]?.itemId, "everyday-chair");
 
-  const invalid = overBudgetGraph.parseNeedTokens(["budget-hard-1000001", "budget-hard-unbounded"]);
-  assert.deepEqual(invalid.invalidTokens, ["budget-hard-1000001", "budget-hard-unbounded"]);
+  const invalid = overBudgetGraph.parseNeedTokens([
+    "budget-hard-9",
+    "budget-hard-100000",
+    "budget-hard-unbounded",
+  ]);
+  assert.deepEqual(invalid.invalidTokens, [
+    "budget-hard-9",
+    "budget-hard-100000",
+    "budget-hard-unbounded",
+  ]);
 });
 
 test("experienceTelemetryForNode maps decision quality into the aggregate-safe payload", async () => {

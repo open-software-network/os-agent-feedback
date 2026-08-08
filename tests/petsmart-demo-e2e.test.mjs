@@ -13,6 +13,7 @@ const { startServer } = await import("../examples/petsmart-demo/server.mjs");
 
 const AGENT_UA = "ChatGPT-User/1.0";
 const BROWSER_UA = "Mozilla/5.0";
+const COMPACT_RENDER_JOURNEY_RE = /^w-[A-Za-z0-9_-]{22}$/;
 const NAV_HEADERS = {
   "user-agent": BROWSER_UA,
   "sec-fetch-user": "?1",
@@ -77,13 +78,49 @@ function setCookies(response) {
     : [response.headers.get("set-cookie") || ""].filter(Boolean);
 }
 
+function listingUrls(html, base) {
+  return [...html.matchAll(/href="([^"]+)"/g)]
+    .map((match) => new URL(match[1].replaceAll("&amp;", "&"), base))
+    .filter(({ pathname }) =>
+      [
+        /^\/feeders$/,
+        /^\/shop\/automatic-feeders\/[^/]+\/[^/]+(?:\/product\/[^/]+)?$/,
+        /^\/s\/[^/]+(?:\/product\/[^/]+)?$/,
+        /^\/c\/[^/]+\/product\/[^/]+$/,
+        /^\/p\/[^/]+\/[^/]+$/,
+        /^\/product\/[^/]+$/,
+      ].some((pattern) => pattern.test(pathname)),
+    );
+}
+
+function listingJourney(url) {
+  const queryJourney = url.searchParams.get("journey");
+  if (queryJourney) return queryJourney;
+  const pathJourney = url.pathname.match(/^\/(?:shop\/automatic-feeders|p)\/([^/]+)/)?.[1];
+  return pathJourney ? decodeURIComponent(pathJourney) : undefined;
+}
+
+function assertOneListingJourney(html, base, label) {
+  const urls = listingUrls(html, base);
+  assert.ok(urls.length > 0, `${label} must expose listing links`);
+  const journeys = urls.map((url) => listingJourney(url));
+  assert.ok(
+    journeys.every(Boolean),
+    `${label} has a clean listing URL: ${urls.find((url) => !listingJourney(url))}`,
+  );
+  assert.equal(new Set(journeys).size, 1, `${label} must use exactly one journey value per render`);
+  assert.match(journeys[0], COMPACT_RENDER_JOURNEY_RE, `${label} journey must be compact`);
+  assert.equal(journeys[0].length, 24, `${label} journey must have 24 visible characters`);
+  return journeys[0];
+}
+
 test("petsmart demo e2e: crawl → negotiate traits → decide → click → cookie drop", async () => {
   const started = await startServer(0);
   const base = `http://127.0.0.1:${started.port}`;
 
   try {
     // Humans and crawlers get the PetSmart storefront, never agent JSON.
-    for (const ua of [BROWSER_UA, "Googlebot/2.1", "GPTBot/1.0"]) {
+    for (const ua of [BROWSER_UA, "Googlebot/2.1", "GPTBot/1.0", "UnknownFetcher/1.0"]) {
       const home = await fetch(`${base}/`, { headers: { "user-agent": ua } });
       assert.equal(home.status, 200);
       assert.match(home.headers.get("content-type") ?? "", /text\/html/);
@@ -93,13 +130,22 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
       assert.match(html, /Anything for Pets/);
       assert.match(html, /data-personalized="false"/);
       // Work-mode cloud browsers browse the human storefront with a real
-      // Chrome UA, so the human page carries the same situation links —
-      // without a journey: a per-render minted id would fabricate agent
-      // handoff evidence the moment anyone clicked it.
+      // Chrome UA, so the human page carries the same situation links and one
+      // public-provenance signed journey through every listing edge.
       assert.match(html, /Shop by situation/);
       assert.match(html, /\/s\/multiple-cats-one-steals-food-under-200/);
       assert.match(html, /href="\/agent-experience\.json"/);
-      assert.doesNotMatch(html, /\/shop\/automatic-feeders\/j-[a-f0-9-]+\//);
+      assert.doesNotMatch(html, /\/shop\/automatic-feeders\//);
+      const renderJourney = assertOneListingJourney(html, base, `human root for ${ua}`);
+      assert.match(
+        html,
+        /<details class="treats assistant-note">\s*<summary>For AI shopping assistants<\/summary>/,
+      );
+      assert.doesNotMatch(html, /<details[^>]*\bopen\b/);
+      assert.match(html, /budget=&lt;2-5 digit USD amount&gt;/);
+      assert.match(html, /budget_kind=&lt;hard\|target&gt;/);
+      assert.match(html, /Requests that reuse one <code>journey<\/code> value stay one errand/);
+      assert.ok(html.includes(`journey=${renderJourney}`));
       assert.equal(setCookies(home).length, 0, "the homepage must not drop cookies");
     }
 
@@ -112,7 +158,7 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
     assert.equal(publicGraph.stage, "decision_input_required");
     assert.match(
       publicGraph.nextQuestion.choices[0].url,
-      /\/agent-negotiate\/j-[a-f0-9-]+\.[a-z0-9]+\.[A-Za-z0-9_-]+\/feeder\//,
+      /\/agent-negotiate\/w-[A-Za-z0-9_-]{22}\/feeder\//,
     );
 
     const secureLanding = await navigate(`${base}/s/multiple-cats-one-steals-food-under-200`, {
@@ -129,12 +175,13 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
     assert.equal(agentHome.status, 200);
     assert.match(agentHome.headers.get("content-type") ?? "", /text\/html/);
     const guide = await agentHome.text();
+    assertOneListingJourney(guide, base, "ChatGPT root");
     // ChatGPT gets the exact faceted-query grammar proven in PR #119: the
     // anchor itself exposes the need dimensions while carrying a signed
     // journey capability. Other agents can keep the shorter signed paths.
     assert.match(
       guide,
-      /href="http:\/\/127\.0\.0\.1:\d+\/feeders\?pets=multiple_cats&motivation=one_food_motivated&budget=200&journey=j-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"/,
+      /href="http:\/\/127\.0\.0\.1:\d+\/feeders\?pets=multiple_cats&motivation=one_food_motivated&budget=200&journey=w-[A-Za-z0-9_-]{22}"/,
     );
     // Prices at root guarantee a correct one-fetch answer; stock lives only
     // behind the situation pages (the value asymmetry that earns the tokened
@@ -144,22 +191,34 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
     assert.ok(
       guide.indexOf("Start here — live availability by situation") < guide.indexOf("Full catalog"),
     );
-    assert.match(guide, /href="[^"]+\/product\/smarttag-rfid-multi-pet-feeder\?journey=j-[^"]+"/);
+    assert.match(
+      guide,
+      /href="[^"]+\/product\/smarttag-rfid-multi-pet-feeder\?journey=w-[A-Za-z0-9_-]{22}"/,
+    );
     assert.doesNotMatch(guide, /Agent clients|When you recommend|you must/i);
+
+    const kimiHome = await fetch(`${base}/`, { headers: { "user-agent": "KimiBot/1.0" } });
+    const kimiGuide = await kimiHome.text();
+    assertOneListingJourney(kimiGuide, base, "Kimi root");
+    assert.match(kimiGuide, /agent-negotiate/);
+    assert.match(kimiGuide, /\$189\.99/);
+
     // The structured JSON negotiation graph stays for API-capable agents.
     const negotiateUrl = guide.match(
-      /feeder: (http:\/\/127\.0\.0\.1:\d+\/agent-negotiate\/j-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\/feeder)/i,
+      /feeder: (http:\/\/127\.0\.0\.1:\d+\/agent-negotiate\/w-[A-Za-z0-9_-]{22}\/feeder)/,
     )?.[1];
     assert.ok(negotiateUrl, "the agent storefront must keep the JSON negotiation entry URL");
+    const graphJourneyCapability = new URL(negotiateUrl).pathname.split("/")[2];
 
     // Gemini's live user-triggered fetcher sends the literal UA "Google".
     // It gets the same journey-carrying anchors, but product details stay
     // behind the exact-situation page so it cannot stop after one fetch.
     const geminiHome = await fetch(`${base}/`, { headers: { "user-agent": "Google" } });
     const geminiGuide = await geminiHome.text();
+    assertOneListingJourney(geminiGuide, base, "Gemini root");
     assert.match(
       geminiGuide,
-      /\/shop\/automatic-feeders\/j-[a-f0-9-]+\.[a-z0-9]+\.[A-Za-z0-9_-]+\/multiple-cats-food-stealing-under-200/,
+      /\/shop\/automatic-feeders\/w-[A-Za-z0-9_-]{22}\/multiple-cats-food-stealing-under-200/,
     );
     assert.match(geminiGuide, /Product names, exact fit evidence, live stock/);
     assert.doesNotMatch(geminiGuide, /\$189\.99/);
@@ -168,38 +227,42 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
       headers: { "user-agent": "Claude-User/1.0" },
     });
     const claudeGuide = await claudeHome.text();
+    assertOneListingJourney(claudeGuide, base, "Claude root");
     assert.match(claudeGuide, /\$189\.99/);
     assert.match(claudeGuide, /one-cat-scheduled-portions-under-90/);
     assert.doesNotMatch(claudeGuide, /href="[^"]+\/product\/smarttag-rfid-multi-pet-feeder/);
     const claudeSharedFeederUrl = claudeGuide.match(
-      /href="(http:\/\/127\.0\.0\.1:\d+\/shop\/automatic-feeders\/j-[^"]+\/cats-and-dog-food-obsessed-under-175)"/,
+      /href="(http:\/\/127\.0\.0\.1:\d+\/shop\/automatic-feeders\/w-[A-Za-z0-9_-]{22}\/cats-and-dog-food-obsessed-under-175)"/,
     )?.[1];
     assert.ok(claudeSharedFeederUrl);
+    const claudeCapability = new URL(claudeSharedFeederUrl).pathname.split("/")[3];
+    const claudePermanentUrl = new URL("/s/cats-and-dog-one-food-obsessed-under-175", base);
+    claudePermanentUrl.searchParams.set("journey", claudeCapability);
     const claudeRedirect = await fetch(claudeSharedFeederUrl, {
       headers: { "user-agent": "Claude-User/1.0" },
       redirect: "manual",
     });
     assert.equal(claudeRedirect.status, 302);
-    assert.equal(
-      claudeRedirect.headers.get("location"),
-      `${base}/s/cats-and-dog-one-food-obsessed-under-175`,
-    );
+    assert.equal(claudeRedirect.headers.get("location"), claudePermanentUrl.toString());
     const claudeFollowed = await fetch(claudeSharedFeederUrl, {
       headers: { "user-agent": "Claude-User/1.0" },
     });
-    assert.equal(claudeFollowed.url, `${base}/s/cats-and-dog-one-food-obsessed-under-175`);
-    assert.match(
-      await claudeFollowed.text(),
-      /No eligible recommendation under the active filters/,
+    assert.equal(claudeFollowed.url, claudePermanentUrl.toString());
+    const claudeFollowedHtml = await claudeFollowed.text();
+    assert.match(claudeFollowedHtml, /No eligible recommendation under the active filters/);
+    assert.equal(
+      assertOneListingJourney(claudeFollowedHtml, base, "Claude permanent result"),
+      claudeCapability,
     );
 
     const metaHome = await fetch(`${base}/`, {
       headers: { "user-agent": "meta-externalfetcher/1.1" },
     });
     const metaGuide = await metaHome.text();
+    assertOneListingJourney(metaGuide, base, "Meta agent root");
     assert.match(
       metaGuide,
-      /\/shop\/automatic-feeders\/j-[a-f0-9-]+\.[a-z0-9]+\.[A-Za-z0-9_-]+\/multiple-cats-food-stealing-under-200/,
+      /\/shop\/automatic-feeders\/w-[A-Za-z0-9_-]{22}\/multiple-cats-food-stealing-under-200/,
     );
     assert.match(metaGuide, /agent-negotiate/);
 
@@ -210,8 +273,9 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
       },
     });
     const metaIndexerGuide = await metaIndexerHome.text();
+    assertOneListingJourney(metaIndexerGuide, base, "Meta indexer root");
     assert.match(metaIndexerGuide, /\/s\/multiple-cats-one-steals-food-under-200/);
-    assert.doesNotMatch(metaIndexerGuide, /\/shop\/automatic-feeders\/j-/);
+    assert.doesNotMatch(metaIndexerGuide, /\/shop\/automatic-feeders\//);
     assert.doesNotMatch(metaIndexerGuide, /agent-negotiate/);
     assert.match(metaIndexerGuide, /\$189\.99/);
 
@@ -255,11 +319,10 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
       productLink,
       /\/c\/[^/]+\.[A-Za-z0-9_-]+\/product\/smarttag-rfid-multi-pet-feeder/,
     );
-    assert.doesNotMatch(productLink, /\/p\/|j-[a-f0-9-]+/);
     assert.equal(
-      new URL(productLink).search,
-      "",
-      "the permanent shopper link must not retain a per-search correlation ID",
+      new URL(productLink).searchParams.get("journey"),
+      graphJourneyCapability,
+      "the shopper PDP must retain the render journey",
     );
 
     const tamperedNeedLink = new URL(productLink);
@@ -313,6 +376,63 @@ test("petsmart demo e2e: crawl → negotiate traits → decide → click → coo
   }
 });
 
+test("personalized hero retains the render journey on its PDP edge", async () => {
+  const calls = { context: 0, personalization: 0 };
+  const customer = (_request, _response, next) => next();
+  customer.context = {
+    get: async ({ anonymousRef, purpose }) => {
+      calls.context += 1;
+      assert.match(anonymousRef, /^psv_/);
+      assert.equal(purpose, "product_personalization");
+      return {
+        available: true,
+        retrievalId: "ctx-personalized-hero",
+        items: [
+          {
+            key: "pet.household_mix",
+            value: "multiple_cats",
+            signalId: "signal-household",
+          },
+          {
+            key: "pet.food_motivation",
+            value: "one_food_motivated",
+            signalId: "signal-motivation",
+          },
+        ],
+      };
+    },
+  };
+  customer.personalization = {
+    decide: async ({ contextRetrievalId, signalIds, variant }) => {
+      calls.personalization += 1;
+      assert.equal(contextRetrievalId, "ctx-personalized-hero");
+      assert.deepEqual(signalIds, ["signal-household", "signal-motivation"]);
+      assert.equal(variant, "pet-household-hero-v1");
+      return { recorded: true, decision: { id: "decision-personalized-hero" } };
+    },
+  };
+  customer.outcomes = { track: async () => ({ recorded: true }) };
+
+  const started = await startServer(0, { customer });
+  const base = `http://127.0.0.1:${started.port}`;
+  try {
+    const home = await navigate(`${base}/`, {
+      referer: "https://chatgpt.com/c/personalized-hero-test",
+    });
+    assert.equal(home.status, 200);
+    const html = await home.text();
+    assert.match(html, /data-personalized="true"/);
+    assert.match(html, /data-decision-id="decision-personalized-hero"/);
+    const renderJourney = assertOneListingJourney(html, base, "personalized human root");
+    const heroProductUrl = html.match(/<a href="([^"]+)">Meet the SmartTag RFID Feeder<\/a>/)?.[1];
+    assert.ok(heroProductUrl, "personalized hero must expose its PDP edge");
+    assert.equal(listingJourney(new URL(heroProductUrl, base)), renderJourney);
+    assert.deepEqual(calls, { context: 1, personalization: 1 });
+  } finally {
+    await started.close();
+  }
+});
+
 test("petsmart demo e2e: gating and counterfactuals stay honest", async () => {
   const started = await startServer(0);
   const base = `http://127.0.0.1:${started.port}`;
@@ -321,9 +441,7 @@ test("petsmart demo e2e: gating and counterfactuals stay honest", async () => {
     const guide = await fetch(`${base}/`, { headers: { "user-agent": AGENT_UA } }).then((r) =>
       r.text(),
     );
-    const journeyCapability = guide.match(
-      /agent-negotiate\/(j-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})\/feeder/,
-    )?.[1];
+    const journeyCapability = guide.match(/agent-negotiate\/(w-[A-Za-z0-9_-]{22})\/feeder/)?.[1];
     assert.ok(journeyCapability, "the agent root must issue a journey before graph traversal");
 
     // Decisions without any decision input stay gated.
@@ -363,7 +481,7 @@ test("signed graph capabilities survive a restart or another server instance", a
       r.text(),
     );
     const negotiationPath = guide.match(
-      /feeder: http:\/\/127\.0\.0\.1:\d+(\/agent-negotiate\/j-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\/feeder)/i,
+      /feeder: http:\/\/127\.0\.0\.1:\d+(\/agent-negotiate\/w-[A-Za-z0-9_-]{22}\/feeder)/,
     )?.[1];
     assert.ok(negotiationPath, "the first instance must publish a signed graph entry");
 
@@ -384,11 +502,13 @@ test("compatibility lab isolates every page-shape method behind LOCAL_DEMO", asy
   try {
     const full = await fetch(`${base}/lab/full`).then((response) => response.text());
     assert.match(full, /Full catalog/);
-    assert.match(full, /\/shop\/automatic-feeders\/j-[^/]+\//);
+    assert.match(full, /\/shop\/automatic-feeders\/w-[A-Za-z0-9_-]{22}\//);
+    assertOneListingJourney(full, base, "full compatibility lab");
 
     const linkFirst = await fetch(`${base}/lab/link-first`).then((response) => response.text());
     assert.match(linkFirst, /Product names, exact fit evidence, live stock/);
     assert.doesNotMatch(linkFirst, /\$189\.99/);
+    assertOneListingJourney(linkFirst, base, "link-first compatibility lab");
 
     const linkFirstQuery = await fetch(`${base}/lab/link-first-query`).then((response) =>
       response.text(),
@@ -398,6 +518,7 @@ test("compatibility lab isolates every page-shape method behind LOCAL_DEMO", asy
       linkFirstQuery,
       /\/feeders\?pets=multiple_cats&motivation=one_food_motivated&budget=90&journey=/,
     );
+    assertOneListingJourney(linkFirstQuery, base, "link-first query compatibility lab");
 
     const facetsFirstQuery = await fetch(`${base}/lab/facets-first-query`).then((response) =>
       response.text(),
@@ -411,30 +532,33 @@ test("compatibility lab isolates every page-shape method behind LOCAL_DEMO", asy
       facetsFirstQuery,
       /\/feeders\?pets=multiple_cats&motivation=one_food_motivated&budget=90&journey=/,
     );
+    assertOneListingJourney(facetsFirstQuery, base, "facets-first compatibility lab");
 
     const legacy = await fetch(`${base}/lab/legacy-query`).then((response) => response.text());
     assert.match(legacy, /\/feeders\?pets=multiple_cats&amp;motivation=one_food_motivated/);
-    assert.match(legacy, /journey=j-[^&"]+/);
+    assert.match(legacy, /journey=w-[A-Za-z0-9_-]{22}/);
+    assertOneListingJourney(legacy, base, "legacy query compatibility lab");
 
     const stable = await fetch(`${base}/lab/stable-public`).then((response) => response.text());
     assert.match(stable, /\/s\/multiple-cats-one-steals-food-under-200/);
-    assert.doesNotMatch(stable, /\/shop\/automatic-feeders\/j-/);
+    assert.doesNotMatch(stable, /\/shop\/automatic-feeders\//);
+    assertOneListingJourney(stable, base, "stable public compatibility lab");
 
     const human = await fetch(`${base}/lab/human`).then((response) => response.text());
     assert.match(human, /data-personalized="false"/);
     assert.match(human, /Shop by situation/);
+    assertOneListingJourney(human, base, "human compatibility lab");
 
     const plainResponse = await fetch(`${base}/lab/plain-text`);
     assert.match(plainResponse.headers.get("content-type") || "", /text\/plain/);
-    assert.match(await plainResponse.text(), /\/s\/multiple-cats-one-steals-food-under-200/);
+    const plainText = await plainResponse.text();
+    assert.match(plainText, /\/s\/multiple-cats-one-steals-food-under-200/);
+    assert.match(plainText, /[?&]journey=w-[A-Za-z0-9_-]{22}/);
 
     const graphResponse = await fetch(`${base}/lab/json-graph`);
     assert.match(graphResponse.headers.get("content-type") || "", /application\/json/);
     const graphNode = await graphResponse.json();
-    assert.match(
-      graphNode.nextQuestion.choices[0].url,
-      /\/agent-negotiate\/j-[a-f0-9-]+\.[a-z0-9]+\.[A-Za-z0-9_-]+\//,
-    );
+    assert.match(graphNode.nextQuestion.choices[0].url, /\/agent-negotiate\/w-[A-Za-z0-9_-]{22}\//);
   } finally {
     await started.close();
   }
@@ -472,12 +596,14 @@ test("request diagnostics bound headers and redact journey capabilities and quer
       headers: { "user-agent": "meta-externalfetcher/1.1" },
     }).then((r) => r.text());
     const situationUrl = guide.match(
-      /href="(http:\/\/127\.0\.0\.1:\d+\/shop\/automatic-feeders\/j-[^/]+\/multiple-cats-food-stealing-under-200)"/,
+      /href="(http:\/\/127\.0\.0\.1:\d+\/shop\/automatic-feeders\/w-[A-Za-z0-9_-]{22}\/multiple-cats-food-stealing-under-200)"/,
     )?.[1];
     assert.ok(situationUrl);
-    await fetch(`${situationUrl}?email=private%40example.com`, {
-      headers: { "user-agent": `Google ${"x".repeat(300)}` },
-    });
+    const queryCapability = new URL(situationUrl).pathname.split("/")[3];
+    await fetch(
+      `${situationUrl}?email=private%40example.com&journey=${queryCapability}&${queryCapability}=1`,
+      { headers: { "user-agent": `Google ${"x".repeat(300)}` } },
+    );
   } finally {
     await started.close();
     console.log = originalLog;
@@ -498,7 +624,9 @@ test("request diagnostics bound headers and redact journey capabilities and quer
     situationEntry.path,
     "/shop/automatic-feeders/:journey/multiple-cats-food-stealing-under-200",
   );
+  assert.equal(situationEntry.query, "?%3Akey=%3Avalue&journey=%3Ajourney&%3Akey=%3Avalue");
   assert.doesNotMatch(JSON.stringify(situationEntry), /private|j-[a-f0-9-]+\./);
+  assert.doesNotMatch(JSON.stringify(situationEntry), /w-[A-Za-z0-9_-]{22}/);
   assert.equal(situationEntry.userAgent.length, 160);
 });
 
@@ -568,7 +696,7 @@ test("petsmart demo telemetry: hops carry experience payloads, vendor hints, and
       r.text(),
     );
     const negotiateUrl = guide.match(
-      /feeder: (http:\/\/127\.0\.0\.1:\d+\/agent-negotiate\/j-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\/feeder)/i,
+      /feeder: (http:\/\/127\.0\.0\.1:\d+\/agent-negotiate\/w-[A-Za-z0-9_-]{22}\/feeder)/,
     )?.[1];
     assert.ok(negotiateUrl, "guide must include a feeder negotiation URL");
 
@@ -579,19 +707,23 @@ test("petsmart demo telemetry: hops carry experience payloads, vendor hints, and
       base,
       choicePath(base, node, "motivation", "one_food_motivated"),
     ));
-    ({ body: node } = await fetchJson(base, choicePath(base, node, "budget", "200", "target")));
+    const suggestedBudgetPath = choicePath(base, node, "budget", "200", "target");
+    const exactBudgetPath = suggestedBudgetPath.replace(/budget-target-200$/, "budget-target-137");
+    ({ body: node } = await fetchJson(base, exactBudgetPath));
+    assert.equal(node.needState.values.budget.value, "137");
     assert.ok(node.resultsUrl);
 
     const { body: decision } = await fetchJson(base, node.resultsUrl.replace(base, ""));
     assert.equal(decision.exactMatchCount, 1);
-    const { body: detail } = await fetchJson(
-      base,
-      decision.exactMatches[0].detailUrl.replace(base, ""),
-    );
+    const detailUrl = new URL(decision.exactMatches[0].detailUrl);
+    assert.match(detailUrl.searchParams.get("ctx"), /(?:^|\.)budget-target-137(?:\.|$)/);
+    const { body: detail } = await fetchJson(base, detailUrl.toString().replace(base, ""));
     const productLink = detail.humanProductLink?.url;
     assert.ok(productLink, "item detail must include the human product link");
     assert.match(productLink, /\/c\/[^/]+\/product\/smarttag-rfid-multi-pet-feeder/);
+    assert.match(productLink, /budget-target-137/);
     const journeyId = decision.journeyId;
+    assert.equal(new URL(productLink).searchParams.get("journey"), journeyId);
 
     const click = await navigate(productLink, {
       referer: "https://chatgpt.com/c/live-shopping-test",
@@ -658,12 +790,11 @@ test("petsmart demo telemetry: hops carry experience payloads, vendor hints, and
     }
 
     // The human handoff lands under the same normalized operation as the
-    // durable need-state product page — never a hardcoded item alias. The
-    // click starts a first-party session rather than persisting the private
-    // agent journey in a shopper-visible URL.
+    // durable need-state product page — never a hardcoded item alias — while
+    // retaining the signed render journey from the agent surface.
     const handoff = seen.find((event) => event.customerLinkSource === "product_link_click");
     assert.equal(handoff.operation, "/c/:need/product/:id");
-    assert.notEqual(handoff.sessionRef, journeyId);
+    assert.equal(handoff.sessionRef, journeyId);
     assert.match(handoff.anonymousRef, /^psv_/);
     assert.equal(handoff.runtimeHint, "petsmart-demo/1.0 chatgpt-referrer");
     assert.deepEqual(handoff.experience.needState.expressedDimensions.sort(), [
@@ -695,7 +826,7 @@ test("petsmart demo faceted telemetry: /feeders records the parsed need dims", a
     assert.match(root.headers.get("content-type") ?? "", /text\/html/);
     const storefront = await root.text();
     const situationUrl = storefront.match(
-      /href="(http:\/\/127\.0\.0\.1:\d+\/feeders\?pets=multiple_cats&motivation=one_food_motivated&budget=200&journey=j-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})"/,
+      /href="(http:\/\/127\.0\.0\.1:\d+\/feeders\?pets=multiple_cats&motivation=one_food_motivated&budget=200&journey=w-[A-Za-z0-9_-]{22})"/,
     )?.[1];
     assert.ok(situationUrl, "the storefront must anchor a tokened situation URL");
     const journeyCapability = new URL(situationUrl).searchParams.get("journey");
@@ -709,15 +840,15 @@ test("petsmart demo faceted telemetry: /feeders records the parsed need dims", a
     assert.match(plainHtml, /in stock nearby/);
     assert.doesNotMatch(storefront, /in stock/i);
     assert.match(plainHtml, /Exact matches \(2\)/);
-    // The private agent hop records the journey; its shopper-facing PDP links
-    // are permanent signed-need URLs with no expiring session token.
+    // The private agent hop and every shopper-facing PDP retain the same
+    // signed journey; signed need facets remain the durable context carrier.
     assert.match(
       plainHtml,
       /\/c\/pets-multiple-cats\.motivation-one-food-motivated\.budget-hard-200\.[A-Za-z0-9_-]+\/product\/[a-z0-9-]+/,
     );
-    assert.doesNotMatch(
-      plainHtml,
-      new RegExp(`${journeyCapability.replaceAll(".", "\\.")}/product`),
+    assert.equal(
+      assertOneListingJourney(plainHtml, base, "ChatGPT faceted results"),
+      journeyCapability,
     );
 
     const tampered = new URL(situationUrl);
@@ -845,28 +976,38 @@ test("petsmart demo preserves arbitrary exact-dollar hard and target budgets", a
   const base = `http://127.0.0.1:${started.port}`;
   try {
     const hard = await fetch(
-      `${base}/feeders?pets=cats_and_dog&motivation=one_food_motivated&budget=175`,
+      `${base}/feeders?pets=cats_and_dog&motivation=one_food_motivated&budget=137`,
       { headers: { "user-agent": "ChatGPT-User/1.0" } },
     );
     const hardHtml = await hard.text();
     assert.match(hardHtml, /Exact matches \(0\)/);
     assert.match(hardHtml, /No eligible recommendation under the active filters/);
     assert.match(hardHtml, /SmartTag RFID Multi-Pet Feeder/);
-    assert.match(hardHtml, /budget: needs 175, this is 189\.99/);
-    assert.match(hardHtml, /\/c\/[^"/]*budget-hard-175[^"/]*\/product\/smarttag/);
+    assert.match(hardHtml, /budget: needs 137, this is 189\.99/);
+    assert.match(hardHtml, /\/c\/[^"/]*budget-hard-137[^"/]*\/product\/smarttag/);
     assert.match(
       hardHtml,
-      /data-filter-change="budget" href="[^"?]+\/feeders\?pets=cats_and_dog&motivation=one_food_motivated&budget=190"/,
+      /data-filter-change="budget" href="[^"?]+\/feeders\?pets=cats_and_dog&motivation=one_food_motivated&budget=140&journey=[^"]+"/,
     );
 
     const target = await fetch(
-      `${base}/feeders?pets=cats_and_dog&motivation=one_food_motivated&budget=175&budget_kind=target`,
+      `${base}/feeders?pets=cats_and_dog&motivation=one_food_motivated&budget=137&budget_kind=target`,
       { headers: { "user-agent": "ChatGPT-User/1.0" } },
     );
     const targetHtml = await target.text();
     assert.doesNotMatch(targetHtml, /Exact matches \(0\)/);
     assert.match(targetHtml, /SmartTag RFID Multi-Pet Feeder/);
-    assert.match(targetHtml, /\/c\/[^"/]*budget-target-175[^"/]*\/product\/smarttag/);
+    assert.match(targetHtml, /\/c\/[^"/]*budget-target-137[^"/]*\/product\/smarttag/);
+
+    for (const rejectedBudget of ["9", "010", "100000"]) {
+      const rejected = await fetch(
+        `${base}/feeders?pets=cats_and_dog&motivation=one_food_motivated&budget=${rejectedBudget}`,
+      );
+      const rejectedHtml = await rejected.text();
+      const coercedBudget = String(Number(rejectedBudget));
+      assert.doesNotMatch(rejectedHtml, new RegExp(`budget-(?:hard|target)-${coercedBudget}`));
+      assert.doesNotMatch(rejectedHtml, new RegExp(`budget: needs ${coercedBudget}`));
+    }
 
     const named = await fetch(`${base}/s/cats-and-dog-one-food-obsessed-under-175`);
     const namedHtml = await named.text();
@@ -875,13 +1016,14 @@ test("petsmart demo preserves arbitrary exact-dollar hard and target budgets", a
     assert.match(namedHtml, /One feeder must serve both cats and the dog/);
     assert.match(
       namedHtml,
-      /<link rel="canonical" href="[^"/]+:\/\/[^"/]+\/s\/cats-and-dog-one-food-obsessed-under-175"/,
+      /<link rel="canonical" href="[^"/]+:\/\/[^"/]+\/s\/cats-and-dog-one-food-obsessed-under-175\?journey=[^"]+"/,
     );
+    assertOneListingJourney(namedHtml, base, "named situation results");
     assert.match(namedHtml, /Permanent shopper link to this live result/);
     assert.match(namedHtml, /budget: needs 175, this is 189\.99/);
     assert.match(
       namedHtml,
-      /href="[^"/]+:\/\/[^"/]+\/s\/cats-and-dog-one-food-obsessed-under-190"/,
+      /href="[^"/]+:\/\/[^"/]+\/s\/cats-and-dog-one-food-obsessed-under-190\?journey=[^"]+"/,
     );
     assert.match(namedHtml, /Does not match: SureFeed Microchip Cat Feeder/);
 
@@ -992,6 +1134,17 @@ test("petsmart demo browse paths require user activation before starting a journ
       referer: "https://grok.com/c/live-shopping-test",
     });
     assert.equal(chatClick.status, 200);
+    const chatLandingHtml = await chatClick.text();
+    const publicSituationJourney = assertOneListingJourney(
+      chatLandingHtml,
+      base,
+      "public situation results",
+    );
+    const browseProductUrl = listingUrls(chatLandingHtml, base).find((url) =>
+      url.pathname.endsWith("/product/surefeed-microchip-cat-feeder"),
+    );
+    assert.ok(browseProductUrl, "public situation results must list journey-bearing PDPs");
+    assert.equal(listingJourney(browseProductUrl), publicSituationJourney);
     const chatCookie = setCookies(chatClick)
       .map((entry) => entry.split(";")[0])
       .join("; ");
@@ -1006,8 +1159,7 @@ test("petsmart demo browse paths require user activation before starting a journ
     )[1];
     assert.equal(chatIntent.runtimeHint, "petsmart-demo/1.0 grok-referrer");
 
-    const browseProductPath = `${browsePath}/product/surefeed-microchip-cat-feeder`;
-    const productPreview = await fetch(base + browseProductPath, {
+    const productPreview = await fetch(browseProductUrl, {
       headers: { "user-agent": BROWSER_UA },
     });
     assert.equal(productPreview.status, 200);
@@ -1017,7 +1169,7 @@ test("petsmart demo browse paths require user activation before starting a journ
       "a PDP preview must not mint shopper identity",
     );
 
-    const productClick = await navigate(base + browseProductPath, { cookie: chatCookie });
+    const productClick = await navigate(browseProductUrl, { cookie: chatCookie });
     assert.equal(productClick.status, 200);
     const productHtml = await productClick.text();
     assert.match(
@@ -1049,6 +1201,31 @@ test("petsmart demo browse paths require user activation before starting a journ
     ]);
     assert.equal(productClicks[0].experience.decision?.violatedHardConstraints, undefined);
 
+    const humanRootHtml = await fetch(`${base}/`, {
+      headers: { "user-agent": BROWSER_UA },
+    }).then((response) => response.text());
+    const humanRootJourney = assertOneListingJourney(humanRootHtml, base, "human root");
+    assert.match(humanRootJourney, COMPACT_RENDER_JOURNEY_RE);
+    const humanRootProductUrl = listingUrls(humanRootHtml, base).find((url) =>
+      url.pathname.startsWith("/product/"),
+    );
+    assert.ok(humanRootProductUrl);
+    await navigate(humanRootProductUrl);
+    const humanRootJourneyId = humanRootJourney;
+    await waitForEvents(collector.batches, (events) =>
+      events.some(
+        (event) => event.operation === "/product/:id" && event.sessionRef === humanRootJourneyId,
+      ),
+    );
+    const humanRootIntent = collectedEvents(collector.batches).find(
+      (event) => event.operation === "/product/:id" && event.sessionRef === humanRootJourneyId,
+    );
+    assert.equal(
+      humanRootIntent.customerLinkSource,
+      undefined,
+      "a signed public-render journey must not claim AI attribution by itself",
+    );
+
     const directProduct = await navigate(`${base}/product/smarttag-rfid-multi-pet-feeder`, {
       referer: "https://meta.ai/c/live-shopping-test",
     });
@@ -1075,7 +1252,9 @@ test("petsmart demo browse paths require user activation before starting a journ
     });
     assert.equal(customPreview.status, 200);
     assert.equal(setCookies(customPreview).length, 0);
-    assert.match(await customPreview.text(), /\/c\/[^/]+\/product\/surefeed-microchip-cat-feeder/);
+    const customPreviewHtml = await customPreview.text();
+    assert.match(customPreviewHtml, /\/c\/[^/]+\/product\/surefeed-microchip-cat-feeder/);
+    assertOneListingJourney(customPreviewHtml, base, "custom faceted results");
 
     const customClick = await navigate(base + customPath, {
       referer: "https://grok.com/c/custom-shopping-test",
@@ -1156,7 +1335,7 @@ test("petsmart demo faceted gating: only request-carried journeys reach telemetr
     });
     const indexerHtml = await indexer.text();
     assert.match(indexerHtml, /\/s\/multiple-cats-one-steals-food-under-200/);
-    assert.doesNotMatch(indexerHtml, /\/shop\/automatic-feeders\/j-/);
+    assert.doesNotMatch(indexerHtml, /\/shop\/automatic-feeders\//);
     assert.doesNotMatch(indexerHtml, /<meta name="epode-customer-context"/);
     await new Promise((resolve) => setTimeout(resolve, 100));
     const organicEvents = collectedEvents(collector.batches);
@@ -1173,18 +1352,21 @@ test("petsmart demo faceted gating: only request-carried journeys reach telemetr
       headers: { "user-agent": "meta-externalfetcher/1.1" },
     }).then((r) => r.text());
     const signedSituation = guide.match(
-      /href="(http:\/\/127\.0\.0\.1:\d+\/shop\/automatic-feeders\/(j-[a-f0-9-]+)\.[a-z0-9]+\.[A-Za-z0-9_-]+\/multiple-cats-food-stealing-under-200)"/,
+      /href="(http:\/\/127\.0\.0\.1:\d+\/shop\/automatic-feeders\/(w-[A-Za-z0-9_-]{22})\/multiple-cats-food-stealing-under-200)"/,
     );
     assert.ok(signedSituation, "the agent guide must issue a signed situation path");
     const [, signedSituationUrl, journeyId] = signedSituation;
+    const signedCapability = new URL(signedSituationUrl).pathname.split("/")[3];
 
     const agentTraversal = await fetch(signedSituationUrl, {
       headers: { "user-agent": "meta-externalfetcher/1.1" },
     });
     assert.equal(agentTraversal.status, 200);
+    const permanentSituationUrl = new URL("/s/multiple-cats-one-steals-food-under-200", base);
+    permanentSituationUrl.searchParams.set("journey", signedCapability);
     assert.equal(
       agentTraversal.url,
-      `${base}/s/multiple-cats-one-steals-food-under-200`,
+      permanentSituationUrl.toString(),
       "the private decision hop must resolve to the permanent result",
     );
 
@@ -1200,10 +1382,7 @@ test("petsmart demo faceted gating: only request-carried journeys reach telemetr
 
     const signedClick = await navigate(signedSituationUrl);
     assert.equal(signedClick.status, 302);
-    assert.equal(
-      signedClick.headers.get("location"),
-      `${base}/s/multiple-cats-one-steals-food-under-200`,
-    );
+    assert.equal(signedClick.headers.get("location"), permanentSituationUrl.toString());
     const continuationCookie = setCookies(signedClick)
       .map((entry) => entry.split(";")[0])
       .join("; ");
@@ -1214,14 +1393,18 @@ test("petsmart demo faceted gating: only request-carried journeys reach telemetr
     });
     assert.equal(situationClick.status, 200);
     const situationHtml = await situationClick.text();
+    assert.equal(
+      assertOneListingJourney(situationHtml, base, "signed-path situation results"),
+      signedCapability,
+    );
     const cookies = [...setCookies(signedClick), ...setCookies(situationClick)]
       .map((entry) => entry.split(";")[0])
       .join("; ");
-    const stableProductUrl = situationHtml.match(
-      /href="(http:\/\/127\.0\.0\.1:\d+\/s\/multiple-cats-one-steals-food-under-200\/product\/[a-z0-9-]+)"/,
-    )?.[1];
-    assert.ok(stableProductUrl, "the permanent result page must emit a permanent shopper PDP");
-    assert.doesNotMatch(stableProductUrl, /j-[a-f0-9-]+\./);
+    const stableProductUrl = listingUrls(situationHtml, base).find((url) =>
+      url.pathname.startsWith("/s/multiple-cats-one-steals-food-under-200/product/"),
+    );
+    assert.ok(stableProductUrl, "the permanent result page must emit a shopper PDP");
+    assert.equal(listingJourney(stableProductUrl), signedCapability);
 
     const productClick = await navigate(stableProductUrl, { cookie: cookies });
     assert.equal(productClick.status, 200);

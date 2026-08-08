@@ -3,7 +3,12 @@ import { createServer } from "node:http";
 
 import express from "express";
 
-import { AgentFeedbackRuntime } from "@epode/node";
+import {
+  AgentFeedbackRuntime,
+  agentVendorFamilyForUserAgent,
+  boundedUserAgentLogFields,
+  classifyUserAgent,
+} from "@epode/node";
 import { epode } from "@epode/node/express";
 import {
   experienceTelemetryDetails,
@@ -18,27 +23,13 @@ import { requiredCookieSecret } from "./cookie-secret.js";
 import { provisionPetFields } from "./provision-fields.mjs";
 
 const PORT = Number(process.env.PORT || 4320);
-const AGENT_UA =
-  /claude-user|anthropic-ai|chatgpt-user|perplexity-user|cohere-ai|gemini-agent|meta-externalfetcher|^google$/i;
-const INDEXER_UA = /meta-webindexer|facebookexternalhit/i;
 const RUNTIME_HINT = "petsmart-demo/1.0";
 // Agent JSON hops carry no request observation, so the runtime hint is the
-// only vendor evidence the backend's agent-mix insight can classify. Append
-// the matched agent family (mirroring AGENT_UA) to the base hint.
-const AGENT_VENDOR_HINTS = [
-  [/claude-user|anthropic-ai/i, "claude-user"],
-  [/chatgpt-user/i, "chatgpt-user"],
-  [/perplexity-user/i, "perplexity-user"],
-  [/cohere-ai/i, "cohere-ai"],
-  [/gemini-agent/i, "gemini-agent"],
-  [/^google$/i, "gemini-user"],
-  [/meta-externalfetcher/i, "meta-ai-user"],
-];
+// only vendor evidence the backend's agent-mix insight can classify.
 
 function runtimeHintFor(request) {
-  const userAgent = request?.get("user-agent") || "";
-  const vendor = AGENT_VENDOR_HINTS.find(([pattern]) => pattern.test(userAgent));
-  return vendor ? `${RUNTIME_HINT} ${vendor[1]}` : RUNTIME_HINT;
+  const vendorFamily = agentVendorFamilyForUserAgent(request?.get("user-agent"));
+  return vendorFamily ? `${RUNTIME_HINT} ${vendorFamily}` : RUNTIME_HINT;
 }
 const HERO_ITEM_ID = "smarttag-rfid-multi-pet-feeder";
 
@@ -80,12 +71,13 @@ function verifiedCookie(cookie = "", name) {
 
 const JOURNEY_CAPABILITY_TTL_SECONDS = 24 * 60 * 60;
 const COMPACT_JOURNEY_EPOCH_MINUTE = Math.floor(Date.UTC(2020, 0, 1) / 60000);
+const COMPACT_JOURNEY_RE = /^w-[A-Za-z0-9_-]{22}$/;
+const COMPACT_JOURNEY_PAYLOAD_HEX_LENGTH = 16;
+const COMPACT_JOURNEY_MAC_HEX_LENGTH = 16;
+const COMPACT_JOURNEY_DOMAIN = "compact-journey";
+const COMPACT_PUBLIC_JOURNEY_DOMAIN = "compact-public-journey";
 
-function issueJourney() {
-  return `j-${randomUUID()}`;
-}
-
-function compactJourneyCapability() {
+function compactJourneyCapability({ publicProvenance = false } = {}) {
   const expiresAtMinute = Math.floor(
     (Date.now() + JOURNEY_CAPABILITY_TTL_SECONDS * 1000) / 60000,
   );
@@ -94,29 +86,49 @@ function compactJourneyCapability() {
     throw new Error("compact journey expiry is outside its representable range");
   }
   const payload = `${expiryOffset.toString(16).padStart(6, "0")}${randomBytes(5).toString("hex")}`;
+  const domain = publicProvenance ? COMPACT_PUBLIC_JOURNEY_DOMAIN : COMPACT_JOURNEY_DOMAIN;
   const signature = createHmac("sha256", cookieSecret)
-    .update(`compact-journey:${payload}`)
+    .update(`${domain}:${payload}`)
     .digest("hex")
-    .slice(0, 16);
-  const compact = `${payload}${signature}`;
-  return `j-${compact.slice(0, 8)}-${compact.slice(8, 12)}-${compact.slice(12, 16)}-${compact.slice(16, 20)}-${compact.slice(20)}`;
+    .slice(0, COMPACT_JOURNEY_MAC_HEX_LENGTH);
+  return `w-${Buffer.from(`${payload}${signature}`, "hex").toString("base64url")}`;
+}
+
+function issuePublicJourney() {
+  return compactJourneyCapability({ publicProvenance: true });
 }
 
 function verifiedCompactJourneyCapability(value = "") {
-  if (!/^j-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value)) {
-    return undefined;
-  }
-  const compact = value.slice(2).replaceAll("-", "").toLowerCase();
-  const payload = compact.slice(0, 16);
-  const signature = compact.slice(16);
+  if (!COMPACT_JOURNEY_RE.test(value)) return undefined;
+  const encoded = value.slice(2);
+  const packed = Buffer.from(encoded, "base64url");
+  if (packed.length !== 16 || packed.toString("base64url") !== encoded) return undefined;
+  const compact = packed.toString("hex");
+  const payload = compact.slice(0, COMPACT_JOURNEY_PAYLOAD_HEX_LENGTH);
+  const signature = compact.slice(COMPACT_JOURNEY_PAYLOAD_HEX_LENGTH);
   const expiryOffset = Number.parseInt(payload.slice(0, 6), 16);
   const expiresAtMinute = COMPACT_JOURNEY_EPOCH_MINUTE + expiryOffset;
   if (expiresAtMinute < Math.floor(Date.now() / 60000)) return undefined;
-  const expected = createHmac("sha256", cookieSecret)
-    .update(`compact-journey:${payload}`)
-    .digest("hex")
-    .slice(0, 16);
-  return safeSignatureEquals(signature, expected) ? value : undefined;
+  for (const [domain, publicProvenance] of [
+    [COMPACT_JOURNEY_DOMAIN, false],
+    [COMPACT_PUBLIC_JOURNEY_DOMAIN, true],
+  ]) {
+    const expected = createHmac("sha256", cookieSecret)
+      .update(`${domain}:${payload}`)
+      .digest("hex")
+      .slice(0, COMPACT_JOURNEY_MAC_HEX_LENGTH);
+    if (safeSignatureEquals(signature, expected)) {
+      return { capability: value, publicProvenance };
+    }
+  }
+  return undefined;
+}
+
+function isPublicJourney(journeyId) {
+  return (
+    String(journeyId || "").startsWith("j-public-") ||
+    verifiedCompactJourneyCapability(journeyId)?.publicProvenance === true
+  );
 }
 
 function journeyCapability(journeyId, expiresAt = Math.floor(Date.now() / 1000) + JOURNEY_CAPABILITY_TTL_SECONDS) {
@@ -130,7 +142,7 @@ function journeyCapability(journeyId, expiresAt = Math.floor(Date.now() / 1000) 
 
 function verifiedJourneyCapability(value = "") {
   const compact = verifiedCompactJourneyCapability(value);
-  if (compact) return compact;
+  if (compact) return compact.capability;
   const [journeyId, expiry, signature, ...extra] = String(value).split(".");
   if (extra.length || !isValidJourneyId(journeyId) || !/^[a-z0-9]+$/.test(expiry || "")) {
     return undefined;
@@ -332,11 +344,11 @@ function text(response, status, body, contentType = "text/plain; charset=utf-8")
 }
 
 function isAgent(request) {
-  return AGENT_UA.test(request.get("user-agent") || "");
+  return classifyUserAgent(request.get("user-agent")).surface === "agent";
 }
 
 function isIndexer(request) {
-  return INDEXER_UA.test(request.get("user-agent") || "");
+  return classifyUserAgent(request.get("user-agent")).kind === "indexer";
 }
 
 function isUserActivatedDocumentNavigation(request) {
@@ -383,6 +395,33 @@ function redactedRequestPath(request) {
     .replace(/^\/c\/[^/]+/, "/c/:need")
     .replace(/^\/p\/[^/]+/, "/p/:journey")
     .slice(0, 256);
+}
+
+const LOGGABLE_QUERY_KEYS = new Set([
+  "pets",
+  "motivation",
+  "budget",
+  "budget_kind",
+  "priority",
+  "journey",
+  "ctx",
+  "item_id",
+  "search_id",
+  "position",
+]);
+
+function redactedRequestQuery(request) {
+  const queryStart = request.originalUrl.indexOf("?");
+  if (queryStart === -1) return "";
+  const redacted = new URLSearchParams();
+  for (const [key] of new URLSearchParams(request.originalUrl.slice(queryStart + 1))) {
+    const normalizedKey = key.toLowerCase();
+    const loggedKey = LOGGABLE_QUERY_KEYS.has(normalizedKey) ? normalizedKey : ":key";
+    const placeholder = normalizedKey === "journey" ? ":journey" : ":value";
+    redacted.append(loggedKey, placeholder);
+  }
+  const query = redacted.toString();
+  return query ? `?${query}` : "";
 }
 
 function originFor(request) {
@@ -463,13 +502,12 @@ function tokensFromQuery(query) {
       CHOICE_INDEX.get(`motivation=${motivation}:hard`) || CHOICE_INDEX.get(`motivation=${motivation}:`);
     if (token) tokens.push(token);
   }
-  const budgetMatch = String(query.budget || "")
+  const budgetDigits = String(query.budget || "")
     .trim()
-    .match(/^\$?([0-9]+)$/);
-  if (budgetMatch) {
-    const amount = Number(budgetMatch[1]);
+    .match(/^\$?([1-9][0-9]{1,4})$/)?.[1];
+  if (budgetDigits) {
     const strength = String(query.budget_kind || "hard") === "target" ? "target" : "hard";
-    const token = `budget-${strength}-${amount}`;
+    const token = `budget-${strength}-${budgetDigits}`;
     const parsed = graph.parseNeedTokens([token]);
     if (parsed.invalidTokens.length === 0 && parsed.state.expressions.length === 1) {
       tokens.push(token);
@@ -529,29 +567,34 @@ function stockFor(itemId) {
   return (hash % 7) + 3;
 }
 
-// The journey is only embedded on the agent surface, where the same journey
-// id was already handed to the requesting agent. Public situation pages use
-// the literal `browse` marker so product links retain their need state without
-// inventing an agent journey. The eventual user-activated request mints it.
+// Every listing render carries one signed journey through its product links.
+// Public-render journey ids remain distinguishable after verification so the
+// capability correlates the errand without itself claiming AI attribution.
 function productUrlFor(
   origin,
   itemId,
-  journeyId,
+  capability,
   ctxTokens,
   situationSlug,
   publicSituationSlug,
 ) {
+  let url;
   if (publicSituationSlug) {
-    return new URL(
+    url = new URL(
       `/s/${publicSituationSlug}/product/${encodeURIComponent(itemId)}`,
       origin,
-    ).toString();
+    );
+  } else {
+    const need = needCapability(ctxTokens || []);
+    url = new URL(
+      need
+        ? `/c/${need}/product/${encodeURIComponent(itemId)}`
+        : `/product/${encodeURIComponent(itemId)}`,
+      origin,
+    );
   }
-  const need = needCapability(ctxTokens || []);
-  if (need) {
-    return new URL(`/c/${need}/product/${encodeURIComponent(itemId)}`, origin).toString();
-  }
-  return new URL(`/product/${encodeURIComponent(itemId)}`, origin).toString();
+  url.searchParams.set("journey", capability);
+  return url.toString();
 }
 
 const SITUATIONS = [
@@ -636,16 +679,17 @@ const PUBLIC_SITUATION_BY_SLUG = new Map(
   SITUATIONS.map((situation) => [situation.publicSlug, situation]),
 );
 
-function situationUrl(origin, journeyId, situation) {
-  const journey = journeyId || "browse";
+function situationUrl(origin, capability, situation) {
   return new URL(
-    `/shop/automatic-feeders/${encodeURIComponent(journey)}/${situation.slug}`,
+    `/shop/automatic-feeders/${encodeURIComponent(capability)}/${situation.slug}`,
     origin,
   ).toString();
 }
 
-function publicSituationUrl(origin, situation) {
-  return new URL(`/s/${situation.publicSlug}`, origin).toString();
+function publicSituationUrl(origin, capability, situation) {
+  const url = new URL(`/s/${situation.publicSlug}`, origin);
+  url.searchParams.set("journey", capability);
+  return url.toString();
 }
 
 function facetedSituationUrl(origin, capability, situation) {
@@ -657,11 +701,10 @@ function facetedSituationUrl(origin, capability, situation) {
   return url.toString();
 }
 
-function situationListHtml(origin, journeyId, { linkStyle = "signed-path" } = {}) {
-  const capability = journeyId ? journeyCapability(journeyId) : undefined;
+function situationListHtml(origin, capability, { linkStyle = "signed-path" } = {}) {
   return SITUATIONS.map((situation) => {
-    const publicLink = publicSituationUrl(origin, situation);
-    if (!capability) {
+    const publicLink = publicSituationUrl(origin, capability, situation);
+    if (linkStyle === "public") {
       return `<li><a href="${publicLink}">${situation.label} — live stock + exact matches</a></li>`;
     }
     if (linkStyle === "faceted-query") {
@@ -676,9 +719,9 @@ function situationListHtml(origin, journeyId, { linkStyle = "signed-path" } = {}
   }).join("\n");
 }
 
-function agentProductUrl(origin, journeyId, itemId, { carryJourney = false } = {}) {
+function agentProductUrl(origin, capability, itemId) {
   const url = new URL(`/product/${encodeURIComponent(itemId)}`, origin);
-  if (carryJourney && journeyId) url.searchParams.set("journey", journeyCapability(journeyId));
+  url.searchParams.set("journey", capability);
   return url.toString();
 }
 
@@ -692,12 +735,13 @@ function agentStorefrontHtml(
     catalogOnRoot = true,
     catalogProductLinks = true,
     facetsFirst = false,
+    includeNegotiation = true,
     situationLinkStyle = "signed-path",
   } = {},
 ) {
   const chatgptFacetedStorefront = situationLinkStyle === "faceted-query";
-  const capability = journeyId ? journeyCapability(journeyId) : undefined;
-  const negotiationUrl = capability
+  const capability = journeyCapability(journeyId);
+  const negotiationUrl = includeNegotiation
     ? `${origin}/agent-negotiate/${capability}/feeder`
     : undefined;
   const customFilterForm = `<h2>Build your own filter</h2>
@@ -715,11 +759,11 @@ function agentStorefrontHtml(
       <option value="all_balanced">Scheduled portions</option><option value="grazers">Grazers</option>
     </select>
   </label>
-  <label>Budget <input name="budget" type="number" min="0" max="1000000" step="1" /></label>
+  <label>Budget <input name="budget" type="number" min="10" max="99999" step="1" /></label>
   <label>Budget type
     <select name="budget_kind"><option value="hard">Maximum</option><option value="target">Preferred target</option></select>
   </label>
-  ${capability ? `<input name="journey" type="hidden" value="${capability}" />` : ""}
+  <input name="journey" type="hidden" value="${capability}" />
   <button type="submit">See live matches</button>
 </form>`;
   const catalog = catalogOnRoot
@@ -731,7 +775,7 @@ ${feederCatalog.items
     (item) => `<tr>
   <td>${
     catalogProductLinks
-      ? `<a href="${agentProductUrl(origin, journeyId, item.id, { carryJourney: chatgptFacetedStorefront })}">${item.title}</a>`
+      ? `<a href="${agentProductUrl(origin, capability, item.id)}">${item.title}</a>`
       : item.title
   }</td>
   <td>${item.brand}</td>
@@ -750,7 +794,7 @@ on the situation pages below so a recommendation cannot rely on stale or generic
 catalog product pages do not show live inventory. Each situation page ranks the catalog for that
 exact setup, separating exact matches (with live stock counts) from near misses with evidence.</p>
 <ul>
-${situationListHtml(origin, journeyId, { linkStyle: situationLinkStyle })}
+${situationListHtml(origin, capability, { linkStyle: situationLinkStyle })}
 </ul>`;
   const primarySections = facetsFirst
     ? `${situationSection}\n\n${catalog}`
@@ -801,18 +845,18 @@ linked situation page.</p>
 </html>`;
 }
 
-function plainTextStorefront(origin) {
+function plainTextStorefront(origin, capability) {
   const situation = PUBLIC_SITUATION_BY_SLUG.get("multiple-cats-one-steals-food-under-200");
   return `PetSmart automatic feeder compatibility lab.
 For two cats where one steals the other's food under $200, open this live situation URL:
-${publicSituationUrl(origin, situation)}
+${publicSituationUrl(origin, capability, situation)}
 Product names, exact fit evidence, current price, and stock are available only there.
 `;
 }
 
 function feedersHtml(
   origin,
-  journeyId,
+  capability,
   decision,
   tokens,
   situationSlug,
@@ -829,7 +873,7 @@ function feedersHtml(
             const violations = (match.violatedHardConstraints || [])
               .map((violation) => `${violation.dimension}: needs ${violation.requested ?? "?"}, this is ${violation.actual ?? "different"}`)
               .join("; ");
-            return `<li data-recommendation-eligible="${eligible}"><a href="${productUrlFor(origin, match.itemId, journeyId, tokens, situationSlug, publicSituationSlug)}">${eligible ? match.title : `Does not match: ${match.title}`}</a> — $${item ? item.price.amount.toFixed(2) : ""} — ${stockFor(match.itemId)} in stock nearby${violations ? `<br><strong>Not eligible under the active filters.</strong> <small>Near miss: ${violations}</small>` : ""}</li>`;
+            return `<li data-recommendation-eligible="${eligible}"><a href="${productUrlFor(origin, match.itemId, capability, tokens, situationSlug, publicSituationSlug)}">${eligible ? match.title : `Does not match: ${match.title}`}</a> — $${item ? item.price.amount.toFixed(2) : ""} — ${stockFor(match.itemId)} in stock nearby${violations ? `<br><strong>Not eligible under the active filters.</strong> <small>Near miss: ${violations}</small>` : ""}</li>`;
           })
           .join("\n") +
         "</ol>"
@@ -856,7 +900,7 @@ function feedersHtml(
             Number(situation.params.budget) === relaxedBudget,
         );
         const relaxedUrl = relaxedSituation
-          ? publicSituationUrl(origin, relaxedSituation)
+          ? publicSituationUrl(origin, capability, relaxedSituation)
           : (() => {
               const url = new URL("/feeders", origin);
               for (const token of tokens) {
@@ -871,6 +915,7 @@ function feedersHtml(
                 }
               }
               url.searchParams.set("budget", String(relaxedBudget));
+              url.searchParams.set("journey", capability);
               return url.toString();
             })();
         budgetAction = `<p><strong>Smallest one-filter change:</strong> raise the maximum from $${requested.toFixed(0)} to $${relaxedBudget}. <a data-filter-change="budget" href="${relaxedUrl}">See the live eligible result at the $${relaxedBudget} maximum</a>.</p>`;
@@ -883,7 +928,7 @@ ${budgetAction}
 </section>`;
   }
   const permanentResultUrl = activeSituation
-    ? publicSituationUrl(origin, activeSituation)
+    ? publicSituationUrl(origin, capability, activeSituation)
     : undefined;
   return `<!doctype html>
 <html lang="en">
@@ -964,7 +1009,14 @@ function traitSummary(items) {
   return { mix, motivation };
 }
 
-function storefrontHtml({ personalized, traits, decisionId, situationLinks = "" }) {
+function storefrontHtml({
+  origin,
+  capability,
+  personalized,
+  traits,
+  decisionId,
+  situationLinks = "",
+}) {
   const hero = personalized
     ? `<section class="hero" data-personalized="true"${decisionId ? ` data-decision-id="${decisionId}"` : ""}>
         <h2>Welcome back${traits.mix ? ` — picked for ${traits.mix}` : ""}</h2>
@@ -973,7 +1025,7 @@ function storefrontHtml({ personalized, traits, decisionId, situationLinks = "" 
             ? `Households with ${traits.motivation} love the SmartTag RFID Multi-Pet Feeder: every pet gets its own portions, and the locking lid stops food stealing.`
             : "Based on your household, we think you'll love the SmartTag RFID Multi-Pet Feeder."
         }</p>
-        <a href="/product/${HERO_ITEM_ID}">Meet the SmartTag RFID Feeder</a>
+        <a href="${agentProductUrl(origin, capability, HERO_ITEM_ID)}">Meet the SmartTag RFID Feeder</a>
       </section>`
     : `<section class="hero" data-personalized="false">
         <h2>Feeders &amp; waterers for every pet</h2>
@@ -985,7 +1037,7 @@ function storefrontHtml({ personalized, traits, decisionId, situationLinks = "" 
         <span class="brand">${item.brand}</span>
         <strong>${item.title}</strong>
         <span class="price">$${item.price.amount.toFixed(2)}</span>
-        <a href="/product/${item.id}">View details</a>
+        <a href="${agentProductUrl(origin, capability, item.id)}">View details</a>
       </article>`,
     )
     .join("");
@@ -995,6 +1047,12 @@ function storefrontHtml({ personalized, traits, decisionId, situationLinks = "" 
      <section class="treats"><strong>Shop by situation — live stock and ranked matches:</strong>
        <ul>${situationLinks}</ul>
      </section>
+     <details class="treats assistant-note">
+       <summary>For AI shopping assistants</summary>
+       <p>Composable ranked-results URL:</p>
+       <p><code>${origin}/feeders?pets=&lt;one_cat|multiple_cats|one_dog|multiple_dogs|cats_and_dog&gt;&amp;motivation=&lt;one_food_motivated|all_balanced|grazers&gt;&amp;budget=&lt;2-5 digit USD amount&gt;&amp;budget_kind=&lt;hard|target&gt;&amp;priority=&lt;functional_fit|price|connectivity&gt;&amp;journey=${capability}</code></p>
+       <p>Every need parameter is optional. A hard budget is a maximum; a target budget is a preference. Requests that reuse one <code>journey</code> value stay one errand.</p>
+     </details>
      <p class="treats">Treats™ members earn points on every purchase. ·
        <a rel="alternate" type="application/json" href="/agent-experience.json">Catalog data (JSON)</a></p>`,
   );
@@ -1038,7 +1096,7 @@ function productHtml(item, fitContext) {
   );
 }
 
-export function createApp() {
+export function createApp({ customer: suppliedCustomer } = {}) {
   const app = express();
   app.disable("x-powered-by");
   app.use(express.json());
@@ -1047,12 +1105,17 @@ export function createApp() {
   if (process.env.PETSMART_REQUEST_LOG === "1") {
     app.use((request, _response, next) => {
       const boundedHeader = (name, limit = 160) => (request.get(name) || "").slice(0, limit);
+      const { userAgent, query } = boundedUserAgentLogFields({
+        userAgent: request.get("user-agent"),
+        redactedQuery: redactedRequestQuery(request),
+      });
       console.log(
         JSON.stringify({
           at: new Date().toISOString(),
           method: request.method,
           path: redactedRequestPath(request),
-          userAgent: boundedHeader("user-agent"),
+          query,
+          userAgent,
           accept: boundedHeader("accept"),
           secFetchUser: boundedHeader("sec-fetch-user", 8),
           secFetchMode: boundedHeader("sec-fetch-mode", 16),
@@ -1075,25 +1138,28 @@ export function createApp() {
     next();
   });
 
-  const customer = process.env.EPODE_API_KEY
-    ? epode({
-        apiKey: process.env.EPODE_API_KEY,
-        endpoint: process.env.EPODE_API_URL,
-        include: [
-          "/product/*",
-          "/p/**",
-          "/shop/automatic-feeders/**/product/*",
-          "/s/*/product/*",
-          "/c/*/product/*",
-        ],
-        shouldRequestHtml: (request) => !isIndexer(request),
-        purpose: "product_personalization",
-        identify: (request) =>
-          request.visitorId ? { anonymousRef: request.visitorId } : {},
-        sessionRef: (request) => request.sessionId,
-        runtimeHint: (request) => runtimeHintFor(request),
-      })
-    : null;
+  const customer =
+    suppliedCustomer !== undefined
+      ? suppliedCustomer
+      : process.env.EPODE_API_KEY
+        ? epode({
+            apiKey: process.env.EPODE_API_KEY,
+            endpoint: process.env.EPODE_API_URL,
+            include: [
+              "/product/*",
+              "/p/**",
+              "/shop/automatic-feeders/**/product/*",
+              "/s/*/product/*",
+              "/c/*/product/*",
+            ],
+            shouldRequestHtml: (request) => !isIndexer(request),
+            purpose: "product_personalization",
+            identify: (request) =>
+              request.visitorId ? { anonymousRef: request.visitorId } : {},
+            sessionRef: (request) => request.sessionId,
+            runtimeHint: (request) => runtimeHintFor(request),
+          })
+        : null;
   if (customer) app.use(customer);
 
   const decisions = new Map();
@@ -1113,9 +1179,12 @@ export function createApp() {
   const serveFeeders = (request, response) => {
     const started = performance.now();
     const origin = originFor(request);
-    const query = request.situationQuery || normalizedQuery(request);
+    const normalized = normalizedQuery(request);
+    const query = request.situationQuery || normalized;
     const tokens = tokensFromQuery(query);
-    const carriedCapability = String(request.situationCapability || query.journey || "");
+    const carriedCapability = String(
+      request.situationCapability || normalized.journey || query.journey || "",
+    );
     const verifiedJourneyId =
       request.verifiedJourneyId || verifiedJourneyCapability(carriedCapability);
     const userActivatedNavigation = isUserActivatedDocumentNavigation(request);
@@ -1126,7 +1195,10 @@ export function createApp() {
         ? request.journeyContext
         : undefined;
     const journeyId =
-      verifiedJourneyId || matchingContext?.journeyId || `j-${randomUUID()}`;
+      verifiedJourneyId || matchingContext?.journeyId || issuePublicJourney();
+    const renderCapability = verifiedJourneyId
+      ? carriedCapability
+      : journeyCapability(journeyId);
     const publicCustomSituation =
       !carriedCapability && !request.situationPublic && tokens.length > 0;
     const node = graph.buildDecision({
@@ -1161,7 +1233,11 @@ export function createApp() {
       response.setHeader("cache-control", "no-store");
       return response.redirect(
         302,
-        publicSituationUrl(origin, PUBLIC_SITUATION_BY_SLUG.get(request.situationPublicSlug)),
+        publicSituationUrl(
+          origin,
+          renderCapability,
+          PUBLIC_SITUATION_BY_SLUG.get(request.situationPublicSlug),
+        ),
       );
     }
 
@@ -1182,14 +1258,14 @@ export function createApp() {
       }
       // `Sec-Fetch-User` proves only a browser activation, not AI origin. A
       // situation landing is therefore first-party intent, never a product
-      // handoff. Signed agent links and recognized chat referrers are carried
+      // handoff. Journey provenance and recognized chat referrers are carried
       // forward in a signed cookie so a later PDP click can be attributed.
       if (
         (verifiedJourneyId || request.situationBrowse || publicCustomSituation) &&
         userActivatedNavigation
       ) {
         const referrerSource = chatReferrerSource(request);
-        const source = verifiedJourneyId
+        const source = verifiedJourneyId && !isPublicJourney(verifiedJourneyId)
           ? "agent"
           : referrerSource
             ? `chat-${referrerSource}`
@@ -1216,7 +1292,11 @@ export function createApp() {
       return text(
         response,
         200,
-        agentStorefrontHtml(origin, verifiedJourneyId ? journeyId : undefined),
+        agentStorefrontHtml(origin, journeyId, {
+          includeNegotiation: Boolean(
+            verifiedJourneyId && !isPublicJourney(verifiedJourneyId),
+          ),
+        }),
         "text/html; charset=utf-8",
       );
     }
@@ -1225,11 +1305,7 @@ export function createApp() {
       200,
       feedersHtml(
         origin,
-        verifiedJourneyId
-          ? carriedCapability
-          : request.situationBrowse
-            ? "browse"
-            : undefined,
+        renderCapability,
         node,
         tokens,
         request.situationSlug,
@@ -1241,7 +1317,7 @@ export function createApp() {
 
   const serveJsonGraphEntry = (request, response) => {
     const started = performance.now();
-    const journeyId = issueJourney();
+    const journeyId = compactJourneyCapability();
     const capability = journeyCapability(journeyId);
     const node = graph.buildNegotiation({
       origin: originFor(request),
@@ -1304,11 +1380,13 @@ export function createApp() {
     }
     const origin = originFor(request);
     const method = String(request.params.method || "");
+    // Lab shapes keep production provenance classes: agent experiments use
+    // agent-domain capabilities; stable/human/plain renders use public-domain.
     if (method === "full") {
       return text(
         response,
         200,
-        agentStorefrontHtml(origin, issueJourney()),
+        agentStorefrontHtml(origin, compactJourneyCapability()),
         "text/html; charset=utf-8",
       );
     }
@@ -1316,7 +1394,7 @@ export function createApp() {
       return text(
         response,
         200,
-        agentStorefrontHtml(origin, issueJourney(), { catalogOnRoot: false }),
+        agentStorefrontHtml(origin, compactJourneyCapability(), { catalogOnRoot: false }),
         "text/html; charset=utf-8",
       );
     }
@@ -1324,7 +1402,7 @@ export function createApp() {
       return text(
         response,
         200,
-        agentStorefrontHtml(origin, issueJourney(), {
+        agentStorefrontHtml(origin, compactJourneyCapability(), {
           catalogOnRoot: false,
           situationLinkStyle: "faceted-query",
         }),
@@ -1335,7 +1413,7 @@ export function createApp() {
       return text(
         response,
         200,
-        agentStorefrontHtml(origin, issueJourney(), {
+        agentStorefrontHtml(origin, compactJourneyCapability(), {
           facetsFirst: true,
           situationLinkStyle: "faceted-query",
         }),
@@ -1346,7 +1424,7 @@ export function createApp() {
       return text(
         response,
         200,
-        legacyQueryStorefrontHtml(origin, issueJourney()),
+        legacyQueryStorefrontHtml(origin, compactJourneyCapability()),
         "text/html; charset=utf-8",
       );
     }
@@ -1354,24 +1432,34 @@ export function createApp() {
       return text(
         response,
         200,
-        agentStorefrontHtml(origin, undefined),
+        agentStorefrontHtml(origin, issuePublicJourney(), {
+          includeNegotiation: false,
+          situationLinkStyle: "public",
+        }),
         "text/html; charset=utf-8",
       );
     }
     if (method === "human") {
+      const capability = journeyCapability(issuePublicJourney());
       return text(
         response,
         200,
         storefrontHtml({
+          origin,
+          capability,
           personalized: false,
           traits: {},
-          situationLinks: situationListHtml(origin, ""),
+          situationLinks: situationListHtml(origin, capability, { linkStyle: "public" }),
         }),
         "text/html; charset=utf-8",
       );
     }
     if (method === "plain-text") {
-      return text(response, 200, plainTextStorefront(origin));
+      return text(
+        response,
+        200,
+        plainTextStorefront(origin, journeyCapability(issuePublicJourney())),
+      );
     }
     if (method === "json-graph") {
       return serveJsonGraphEntry(request, response);
@@ -1400,7 +1488,10 @@ export function createApp() {
       return text(
         response,
         200,
-        agentStorefrontHtml(origin, undefined),
+        agentStorefrontHtml(origin, issuePublicJourney(), {
+          includeNegotiation: false,
+          situationLinkStyle: "public",
+        }),
         "text/html; charset=utf-8",
       );
     }
@@ -1412,7 +1503,7 @@ export function createApp() {
       // situation pages, which is what earns the need-carrying second hop.
       const userAgent = request.get("user-agent") || "";
       const chatgptQueryLinks = /chatgpt-user/i.test(userAgent);
-      const journeyId = chatgptQueryLinks ? compactJourneyCapability() : issueJourney();
+      const journeyId = compactJourneyCapability();
       recordHop(request, "/agent-guide", journeyId, 200, Math.round(performance.now() - started));
       response.setHeader("vary", "User-Agent");
       return text(
@@ -1443,6 +1534,9 @@ export function createApp() {
       );
     }
 
+    const renderJourneyId = issuePublicJourney();
+    const renderCapability = journeyCapability(renderJourneyId);
+
     // Some chat products answer from the one-fetch catalog and link only the
     // storefront. A real answer click is still useful first-party intent, but
     // only a recognized chat Referer plus browser activation may label it as
@@ -1465,7 +1559,7 @@ export function createApp() {
       }
       recordFirstPartyIntent(
         request,
-        issueJourney(),
+        renderJourneyId,
         request.visitorId,
         Math.round(performance.now() - started),
         "/",
@@ -1504,12 +1598,12 @@ export function createApp() {
       response,
       200,
       storefrontHtml({
+        origin,
+        capability: renderCapability,
         personalized,
         traits,
         decisionId,
-        // No journey on human-page links: /feeders mints its own render id
-        // and only request-carried journeys ever reach telemetry.
-        situationLinks: situationListHtml(origin, ""),
+        situationLinks: situationListHtml(origin, renderCapability, { linkStyle: "public" }),
       }),
       "text/html; charset=utf-8",
     );
@@ -1606,7 +1700,7 @@ export function createApp() {
     const position = request.query.position ? String(request.query.position) : undefined;
     const ctxTokens = String(request.query.ctx || "")
       .split(".")
-      .filter((token) => VALID_NEED_TOKENS.has(token));
+      .filter((token) => isCapabilityNeedToken(token));
     const detail = graph.itemDetail(itemId, searchId, position);
     const status = detail.error ? 404 : 200;
     recordHop(
@@ -1625,11 +1719,12 @@ export function createApp() {
         : `/product/${encodeURIComponent(itemId)}`,
       originFor(request),
     );
+    productUrl.searchParams.set("journey", capability);
     return json(response, status, {
       ...rewriteJourneyUrls(detail, journeyId, capability),
       humanProductLink: {
         description:
-          "Share this permanent product page with the user. Its signed need facets contain no identity and do not expire.",
+          "This product page carries permanent signed need facets and the current signed journey; neither contains account identity.",
         url: productUrl.toString(),
       },
     });
@@ -1726,9 +1821,9 @@ export function createApp() {
       );
     }
 
-    // A signed capability proves an agent-issued path. A public product path
-    // is attributed to AI only when its external chat referrer (or the signed
-    // first-party continuation cookie from the situation page) says so.
+    // Non-public signed journeys prove an agent-issued path. Public-render
+    // journeys need a recognized chat referrer or signed continuation cookie
+    // for AI attribution; the capability alone is only correlation.
     const referrerSource = chatReferrerSource(request);
     if (
       (verifiedJourneyId || request.productBrowse || referrerSource) &&
@@ -1745,10 +1840,10 @@ export function createApp() {
           experience = handoffExperienceForNode(node);
         } catch {}
       }
-      const source = verifiedJourneyId
-        ? "agent"
-        : referrerSource
-          ? `chat-${referrerSource}`
+      const source = referrerSource
+        ? `chat-${referrerSource}`
+        : verifiedJourneyId && !isPublicJourney(verifiedJourneyId)
+          ? "agent"
           : matchingContext?.source || "unattributed";
       if (request.productSituation) {
         response.append(
@@ -1857,8 +1952,8 @@ export function createApp() {
   return app;
 }
 
-export function startServer(port = PORT) {
-  const app = createApp();
+export function startServer(port = PORT, options = {}) {
+  const app = createApp(options);
   const server = createServer(app);
   return new Promise((resolve) => {
     server.listen(port, "127.0.0.1", () => {
